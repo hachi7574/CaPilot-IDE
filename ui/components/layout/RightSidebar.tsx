@@ -501,6 +501,12 @@ function FilesPanel() {
               className="dir"
               style={{ paddingLeft: depth * 14 }}
               onClick={() => toggleDir(path)}
+              draggable
+              onDragStart={(ev) => {
+                ev.dataTransfer.setData("text/plain", path);
+                ev.dataTransfer.effectAllowed = "copy";
+              }}
+              title={path}
             >
               {open ? "▾" : "▸"} 📁 {e.name}
             </div>
@@ -516,6 +522,11 @@ function FilesPanel() {
           style={{ paddingLeft: depth * 14 }}
           onClick={() => openFile(path, e.name)}
           title={path}
+          draggable
+          onDragStart={(ev) => {
+            ev.dataTransfer.setData("text/plain", path);
+            ev.dataTransfer.effectAllowed = "copy";
+          }}
         >
           {icon} {e.name}
         </div>

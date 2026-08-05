@@ -260,9 +260,20 @@ export function Composer() {
         dropHandledRef.current = true;
         dragDepthRef.current = 0;
         setDragHover(false);
+      } else {
+        // Application-internal drag (e.g. a file tree row): the source's
+        // onDragStart stored the full path in text/plain. Consume it so the
+        // drop inserts @path instead of the browser's default text selection.
+        const textPath = e.dataTransfer.getData("text/plain");
+        if (textPath && textPath.trim() && !textPath.includes("\n")) {
+          appendPaths([textPath.trim()]);
+          dropHandledRef.current = true;
+          dragDepthRef.current = 0;
+          setDragHover(false);
+        }
       }
-      // No `.path` → leave dragDepthRef/dropHandledRef untouched so the Tauri
-      // drag-drop event (which fires next) can still detect the composer.
+      // No path at all → leave dragDepthRef/dropHandledRef untouched so the
+      // Tauri drag-drop event (which fires next) can still detect the composer.
     },
     [appendPaths]
   );
