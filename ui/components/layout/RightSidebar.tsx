@@ -8,6 +8,12 @@ type RightTab = "overview" | "files" | "git";
 export function RightSidebar() {
   const [activeTab, setActiveTab] = useState<RightTab>("overview");
   const [reportCollapsed, setReportCollapsed] = useState(false);
+  // Re-render periodically so the report's relative timestamp stays fresh.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setTick((x) => x + 1), 10000);
+    return () => clearInterval(t);
+  }, []);
   const reports = useStore((s) => s.reports);
   const latest = reports[0];
   const rightWidth = useStore((s) => s.rightWidth);
@@ -75,13 +81,13 @@ export function RightSidebar() {
           {!reportCollapsed && (
             <div className="report-body">
               <div className="report-time">
-                {latest ? fmtTs(latest.ts) : "—"}
+                {latest ? fmtRelTime(latest.ts) : "—"}
               </div>
               <div className="report-quote">
-                {latest ? latest.summary : "Waiting for agent activity…"}
+                {latest ? `"${latest.summary}"` : "Waiting for agent activity…"}
               </div>
               <div className="report-meta">
-                Task: {latest ? `worker ${latest.worker}` : "—"}
+                Task: {latest ? latest.worker : "—"}
                 <br />
                 Status: {latest ? latest.level : "Idle"}
               </div>
@@ -97,9 +103,16 @@ export function RightSidebar() {
   );
 }
 
-function fmtTs(ms: number): string {
-  const d = new Date(ms);
-  return d.toLocaleTimeString();
+/** Relative timestamp, e.g. "20s ago" / "3m ago" (matches the preview). */
+function fmtRelTime(ms: number): string {
+  const diff = Math.max(0, Date.now() - ms);
+  const s = Math.floor(diff / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
 }
 
 /** Root directory for the file tree / git panel (active agent's cwd). */
@@ -122,68 +135,26 @@ function useProjectRoot(): string {
 
 function OverviewDashboard() {
   const esp = useStore((s) => s.espStatus);
-  const workerInfos = useStore((s) => s.workerInfos);
-  const smartReturn = useStore((s) => s.smartReturn);
   const agents = useStore((s) => s.agents);
   const agentResources = useStore((s) => s.agentResources);
-  const activeTabId = useStore((s) => s.activeTabId);
-  const tabs = useStore((s) => s.tabs);
 
-  const busyCount = workerInfos.filter((w) => w.status === "busy").length;
-  const activeTab = tabs.find((t) => t.id === activeTabId);
-  const activeAgentId = activeTab?.agentId ?? null;
-
-  // Per-agent resource snapshots merged from the backend `resource://sample`
-  // event (fields confirmed: cpu_pct + mem_bytes — see store.applyResourceSample).
+  // Aggregate per-agent resource snapshots (resource://sample) as a proxy for
+  // the computer's CPU/MEM; fall back to "—" when no agents are running.
   const resList = [...agents.values()]
     .map((a) => ({ a, res: agentResources.get(a.id) }))
     .filter((e): e is { a: AgentInfo; res: ResourcePoint } => e.res !== undefined);
-  const memMax = Math.max(1, ...resList.map((e) => e.res.mem_bytes));
   const totalCpu = resList.reduce((s, e) => s + e.res.cpu_pct, 0);
   const totalMem = resList.reduce((s, e) => s + e.res.mem_bytes, 0);
-  const resSummary = resList.length
-    ? `📈 ${resList.length} 个 agent · CPU ${fmtCpu(totalCpu)} · MEM ${fmtMem(totalMem)}`
-    : "📈 暂无运行数据";
+  const hasRes = resList.length > 0;
+  const cpuDisplay = hasRes ? fmtCpu(totalCpu) : "—";
+  const memDisplay = hasRes ? fmtMem(totalMem) : "—";
 
-  const toggleSmartReturn = async () => {
-    const { setSmartReturn } = await import("../../state/orchestration");
-    setSmartReturn(!smartReturn);
-  };
+  const espKind =
+    esp.kind === "ble" ? "🔵BLE" : esp.kind === "wifi" ? "📶WiFi" : esp.kind === "usb" ? "🔌USB" : "";
+  const espSummary = `🔌 ${esp.connected ? (esp.name ?? "ESP") : "Not connected"}${espKind ? ` · ${espKind}` : ""}${esp.battery_pct != null ? ` · 🔋${esp.battery_pct}%` : ""}`;
 
   return (
     <div className="tab-panel" id="tab-overview">
-      <CollapsibleSection
-        title="🤖 Worker 编排"
-        summary={`${workerInfos.length} workers · ${busyCount} busy · 智能返回${smartReturn ? " 开" : " 关"}`}
-      >
-        {workerInfos.length === 0 && (
-          <div className="ov-row">
-            <span className="ov-label">没有 worker</span>
-            <span className="ov-value">—</span>
-          </div>
-        )}
-        {workerInfos.map((w) => (
-          <div className="ov-row" key={w.id}>
-            <span className="ov-label" style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
-              {w.title || w.id.slice(0, 6)}
-            </span>
-            <span className="ov-value">
-              {w.status === "busy" ? "🟠 busy" : w.status === "offline" ? "⚫ offline" : "🟢 idle"}
-            </span>
-          </div>
-        ))}
-        <div className="ov-divider" />
-        <div
-          className="ov-row"
-          style={{ cursor: "pointer" }}
-          onClick={toggleSmartReturn}
-          title="智能返回分级开关"
-        >
-          <span className="ov-label">智能返回</span>
-          <span className="ov-value">{smartReturn ? "✅ 开" : "⬜ 关"}</span>
-        </div>
-      </CollapsibleSection>
-
       {/* Runtime */}
       <CollapsibleSection title="📊 Runtime" summary="📊 Runtime 0/1M Tokens · 缓存—">
         <div className="ov-row">
@@ -290,11 +261,11 @@ function OverviewDashboard() {
         </div>
         <div className="ov-row">
           <span className="ov-label">CPU</span>
-          <span className="ov-value">—</span>
+          <span className="ov-value">{cpuDisplay}</span>
         </div>
         <div className="ov-row">
           <span className="ov-label">Memory</span>
-          <span className="ov-value">—</span>
+          <span className="ov-value">{memDisplay}</span>
         </div>
         <div className="ov-row">
           <span className="ov-label">GPU</span>
@@ -310,56 +281,8 @@ function OverviewDashboard() {
         </div>
       </CollapsibleSection>
 
-      {/* Resource monitor — per-agent CPU/MEM (uses store data + fmtCpu/fmtMem) */}
-      <CollapsibleSection title="📈 资源监视" summary={resSummary}>
-        {resList.length === 0 ? (
-          <div className="ov-row">
-            <span className="ov-label">暂无 agent 资源数据</span>
-            <span className="ov-value">—</span>
-          </div>
-        ) : (
-          resList.map(({ a, res }) => {
-            const isActive = a.id === activeAgentId;
-            const cpuW = Math.max(0, Math.min(100, res.cpu_pct));
-            const memW = Math.max(0, Math.min(100, Math.round((res.mem_bytes / memMax) * 100)));
-            return (
-              <div className={`ovx-res${isActive ? " active" : ""}`} key={a.id}>
-                <div className="ovx-res-head">
-                  <span className="ov-label" style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
-                    {isActive ? "▶ " : ""}
-                    {a.title || a.id.slice(0, 6)}
-                  </span>
-                  <span className="ov-value">
-                    {fmtCpu(res.cpu_pct)} · {fmtMem(res.mem_bytes)}
-                  </span>
-                </div>
-                <div className="ovx-res-bars">
-                  <div className="ovx-res-bar">
-                    <div
-                      className="ov-bar-fill pu"
-                      style={{ width: `${cpuW}%` }}
-                      title={`CPU ${fmtCpu(res.cpu_pct)}`}
-                    />
-                  </div>
-                  <div className="ovx-res-bar">
-                    <div
-                      className="ov-bar-fill ai"
-                      style={{ width: `${memW}%` }}
-                      title={`MEM ${fmtMem(res.mem_bytes)}`}
-                    />
-                  </div>
-                </div>
-              </div>
-            );
-          })
-        )}
-      </CollapsibleSection>
-
       {/* ESP */}
-      <CollapsibleSection
-        title="🔌 ESP Device Status"
-        summary={`🔌 ${esp.connected ? (esp.name ?? "ESP") : "Not connected"}${esp.kind ? ` · ${esp.kind.toUpperCase()}` : ""}${esp.battery_pct != null ? ` · 🔋${esp.battery_pct}%` : ""}`}
-      >
+      <CollapsibleSection title="🔌 ESP Device Status" summary={espSummary}>
         <div className="ov-esp-status">
           <span
             className="ov-esp-dot"
@@ -449,6 +372,15 @@ interface FsEntry {
 }
 
 const SKIP_DIRS = new Set([".git", "node_modules", "target", ".claude", "dist", "build"]);
+
+/** web/html files → warn (.file-web), config files → success (.rtx-file-conf). */
+function fileClass(name: string): { cls: string; icon: string } {
+  const isWeb = name === "index.html" || /\.html?$/.test(name);
+  const isConf = name === "tauri.conf.json" || /\.(conf|config)\.json$/.test(name);
+  if (isWeb) return { cls: "file file-web", icon: "🌐" };
+  if (isConf) return { cls: "file rtx-file-conf", icon: "📄" };
+  return { cls: "file", icon: "📄" };
+}
 
 function FilesPanel() {
   const root = useProjectRoot();
@@ -542,15 +474,16 @@ function FilesPanel() {
           </div>
         );
       }
+      const { cls, icon } = fileClass(e.name);
       return (
         <div
           key={path}
-          className="file"
+          className={cls}
           style={{ paddingLeft: depth * 14 }}
           onClick={() => openFile(path, e.name)}
           title={path}
         >
-          📄 {e.name}
+          {icon} {e.name}
         </div>
       );
     });
@@ -558,9 +491,6 @@ function FilesPanel() {
 
   return (
     <div className="tab-panel" id="tab-files" style={{ padding: "8px 0" }}>
-      <div style={{ padding: "0 12px 8px", fontSize: 11, color: "var(--muted)", fontFamily: "var(--mono)" }}>
-        {root}
-      </div>
       <div className="files-search" style={{ padding: "0 12px 8px" }}>
         <input
           type="text"
@@ -688,16 +618,8 @@ function GitPanel() {
 
   return (
     <div className="tab-panel" id="tab-git" style={{ padding: 12 }}>
-      <div className="git-title">
-        {branch ? `⎇ ${branch}` : "Changes"} · {projName}
-      </div>
-      <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
-        <span className="act-btn" onClick={() => refresh()}>
-          ↻ 刷新
-        </span>
-        <span className={`act-btn${busy ? " active" : ""}`} onClick={stageAll}>
-          Stage All
-        </span>
+      <div className="git-title" title={branch ? `⎇ ${branch}` : undefined}>
+        Changes · {projName}
       </div>
       {error && (
         <div style={{ fontSize: 11, color: "var(--warn)", marginBottom: 8 }}>{error}</div>
@@ -740,7 +662,7 @@ function GitPanel() {
           );
         })}
       </div>
-      <div className="git-commit" style={{ marginTop: 12, display: "flex", gap: 6 }}>
+      <div className="git-commit" style={{ marginTop: 12 }}>
         <input
           type="text"
           placeholder="Commit message…"
@@ -748,7 +670,7 @@ function GitPanel() {
           onChange={(e) => setMsg(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && commit()}
           style={{
-            flex: 1,
+            width: "100%",
             background: "var(--bg3)",
             border: "1px solid var(--rule2)",
             color: "var(--ink)",
@@ -756,19 +678,24 @@ function GitPanel() {
             fontSize: 12,
             padding: "6px 8px",
             outline: "none",
-            minWidth: 0,
           }}
         />
-        <span className="act-btn accent" onClick={commit}>
+      </div>
+      <div className="git-actions">
+        <span className={`act-btn${busy ? " active" : ""}`} onClick={stageAll}>
+          Stage All
+        </span>
+        <span className="act-btn" onClick={commit}>
           Commit
         </span>
-      </div>
-      <div className="git-actions" style={{ marginTop: 8 }}>
         <span className="act-btn" onClick={pull}>
           Pull
         </span>
         <span className="act-btn" onClick={push}>
           Push
+        </span>
+        <span className="act-btn" onClick={refresh} title="刷新">
+          ↻
         </span>
       </div>
     </div>

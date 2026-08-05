@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { useStore, AgentInfo } from "../../state/store";
@@ -30,6 +30,9 @@ export function LeftSidebar() {
   const tabs = useStore((s) => s.tabs);
   const activeTabId = useStore((s) => s.activeTabId);
   const masterAgentId = useStore((s) => s.masterAgentId);
+  const projects = useStore((s) => s.projects);
+  const setProjects = useStore((s) => s.setProjects);
+  const addProject = useStore((s) => s.addProject);
   const setActiveTab = useStore((s) => s.setActiveTab);
   const addTab = useStore((s) => s.addTab);
 
@@ -38,8 +41,19 @@ export function LeftSidebar() {
   const [collapsedProjs, setCollapsedProjs] = useState<Set<string>>(new Set());
   const [ctx, setCtx] = useState<CtxState | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [nprojOpen, setNprojOpen] = useState(false);
+  const [nprojError, setNprojError] = useState<string | null>(null);
   const leftWidth = useStore((s) => s.leftWidth);
   const setLeftWidth = useStore((s) => s.setLeftWidth);
+
+  // On mount, pull the on-disk workspace list so empty projects render too.
+  useEffect(() => {
+    invoke<string[]>("list_projects")
+      .then((names) => {
+        if (Array.isArray(names) && names.length) setProjects(names);
+      })
+      .catch(console.error);
+  }, [setProjects]);
 
   // Close the context menu on outside click / Escape.
   useEffect(() => {
@@ -119,26 +133,58 @@ export function LeftSidebar() {
     window.addEventListener("mouseup", onUp);
   };
 
-  // Group agents by workspace project.
-  const projects = new Map<string, { cwd: string; agents: { id: string; title: string }[] }>();
+  // Group agents by workspace project (keyed by project name → first cwd + agents).
+  const agentsByProject = new Map<
+    string,
+    { cwd: string; agents: { id: string; title: string }[] }
+  >();
   agents.forEach((a, id) => {
     const projName = projectOf(a.cwd);
-    if (!projects.has(projName)) {
-      projects.set(projName, { cwd: a.cwd, agents: [] });
+    if (!agentsByProject.has(projName)) {
+      agentsByProject.set(projName, { cwd: a.cwd, agents: [] });
     }
-    projects.get(projName)!.agents.push({
+    agentsByProject.get(projName)!.agents.push({
       id,
       title: a.title || `agent-${id.slice(0, 4)}`,
     });
   });
 
+  // The tree is DRIVEN BY the store's project list (which includes empty
+  // projects). Any project that only exists via an agent's cwd — e.g. before
+  // `list_projects` resolves on mount — is merged in so nothing regresses.
+  const projectNames = [...projects];
+  for (const name of agentsByProject.keys()) {
+    if (!projectNames.includes(name)) projectNames.push(name);
+  }
+
   // [☰] collapses / expands ALL project groups (sidebar stays visible).
-  const projectNames = [...projects.keys()];
   const allCollapsed =
     projectNames.length > 0 && projectNames.every((n) => collapsedProjs.has(n));
   const toggleAllProjects = () => {
     if (projectNames.length === 0) return;
     setCollapsedProjs(allCollapsed ? new Set() : new Set(projectNames));
+  };
+
+  // [📁+] create a new workspace project and surface it in the tree.
+  const handleCreateProject = async (name: string): Promise<string | null> => {
+    const trimmed = name.trim();
+    if (!trimmed) return "请输入项目名称";
+    try {
+      const created = await invoke<string>("create_project", { name: trimmed });
+      addProject(created);
+      // Default-new projects are expanded.
+      setCollapsedProjs((prev) => {
+        const next = new Set(prev);
+        next.delete(created);
+        return next;
+      });
+      setFocusedProj((cur) => (cur === created ? cur : created));
+      setNprojError(null);
+      return null;
+    } catch (e) {
+      setNprojError(String(e));
+      return String(e);
+    }
   };
 
   return (
@@ -154,8 +200,8 @@ export function LeftSidebar() {
 
             {/* Zone 2: Op bar */}
             <div className="sidebar-actions">
-              <span className="sidebar-btn active" title="全部显示">
-                👁
+              <span className="sidebar-btn" onClick={() => setSettingsOpen(true)} title="设置">
+                ⚙
               </span>
               <span
                 className={`sidebar-btn${allCollapsed ? " active" : ""}`}
@@ -164,11 +210,8 @@ export function LeftSidebar() {
               >
                 ☰
               </span>
-              <span className="sidebar-btn" title="新建项目">
+              <span className="sidebar-btn" onClick={() => setNprojOpen(true)} title="新建项目">
                 📁+
-              </span>
-              <span className="sidebar-btn" onClick={() => setSettingsOpen(true)} title="设置">
-                ⚙
               </span>
             </div>
 
@@ -204,72 +247,73 @@ export function LeftSidebar() {
                 </div>
               </div>
 
-              {/* Dynamic projects from agents */}
+              {/* Dynamic projects (driven by store.projects, includes empties) */}
               {(() => {
-                if (projects.size === 0) {
-                  return (
-                    <div className="proj">
-                      <div className="proj-header">
-                        <span className="pj-icon">📁</span>
-                        <span className="pj-name">No projects</span>
-                        <span className="pj-arrow">▲</span>
-                      </div>
-                    </div>
-                  );
+                if (projectNames.length === 0) {
+                  return <div className="nproj-empty-row">暂无项目</div>;
                 }
 
-                return [...projects.entries()].map(([name, proj]) => (
-                  <div
-                    key={name}
-                    className={`proj${collapsedProjs.has(name) ? " collapsed" : ""}${focusedProj === name ? " focused" : ""}`}
-                  >
+                return projectNames.map((name) => {
+                  const proj = agentsByProject.get(name);
+                  const projAgents = proj?.agents ?? [];
+                  const projCwd = proj?.cwd;
+                  return (
                     <div
-                      className="proj-header"
-                      onClick={() => toggleProj(name)}
-                      onDoubleClick={() => focusProject(name)}
-                      onContextMenu={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        setCtx({
-                          x: e.clientX,
-                          y: e.clientY,
-                          project: name,
-                          cwd: proj.cwd,
-                        });
-                      }}
+                      key={name}
+                      className={`proj${collapsedProjs.has(name) ? " collapsed" : ""}${focusedProj === name ? " focused" : ""}`}
                     >
-                      <span className="pj-icon">📁</span>
-                      <span className="pj-name">{name}</span>
-                      <span className="pj-arrow">▲</span>
-                    </div>
-                    {proj.agents.map((a) => (
                       <div
-                        key={a.id}
-                        className={`terminal-item${activeTabId === a.id ? " active" : ""}`}
-                        onClick={() => openAgentTab(a.id)}
+                        className="proj-header"
+                        onClick={() => toggleProj(name)}
+                        onDoubleClick={() => focusProject(name)}
                         onContextMenu={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
-                          setCtx({ x: e.clientX, y: e.clientY, agentId: a.id });
+                          setCtx({
+                            x: e.clientX,
+                            y: e.clientY,
+                            project: name,
+                            cwd: projCwd,
+                          });
                         }}
                       >
-                        <span className="tm-icon">🤖</span>
-                        <span className="tm-name">{a.title}</span>
-                        <span className="tm-time">—</span>
-                        <button
-                          className="tm-close"
-                          title="关闭并终止"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            closeAgentAction(a.id);
-                          }}
-                        >
-                          ×
-                        </button>
+                        <span className="pj-icon">📁</span>
+                        <span className="pj-name">{name}</span>
+                        <span className="pj-arrow">▲</span>
                       </div>
-                    ))}
-                  </div>
-                ));
+                      {projAgents.length === 0 ? (
+                        <div className="nproj-empty-row">（空）· 右键新建终端</div>
+                      ) : (
+                        projAgents.map((a) => (
+                          <div
+                            key={a.id}
+                            className={`terminal-item${activeTabId === a.id ? " active" : ""}`}
+                            onClick={() => openAgentTab(a.id)}
+                            onContextMenu={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              setCtx({ x: e.clientX, y: e.clientY, agentId: a.id });
+                            }}
+                          >
+                            <span className="tm-icon">🤖</span>
+                            <span className="tm-name">{a.title}</span>
+                            <span className="tm-time">—</span>
+                            <button
+                              className="tm-close"
+                              title="关闭并终止"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                closeAgentAction(a.id);
+                              }}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  );
+                });
               })()}
             </div>
           </>
@@ -278,10 +322,81 @@ export function LeftSidebar() {
 
       {ctx && <ContextMenu ctx={ctx} onClose={() => setCtx(null)} />}
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
+      {nprojOpen && (
+        <NewProjectModal
+          error={nprojError}
+          onClose={() => {
+            setNprojOpen(false);
+            setNprojError(null);
+          }}
+          onCreate={handleCreateProject}
+        />
+      )}
 
       {/* Resize handle */}
       <div className="resize-handle" id="resize-left" onMouseDown={startLeftResize} />
     </>
+  );
+}
+
+/* ── New-project modal ────────────────────────────────────────── */
+
+function NewProjectModal({
+  error,
+  onClose,
+  onCreate,
+}: {
+  error: string | null;
+  onClose: () => void;
+  onCreate: (name: string) => Promise<string | null>;
+}) {
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  const submit = async () => {
+    const trimmed = name.trim();
+    if (!trimmed || busy) return;
+    setBusy(true);
+    const err = await onCreate(trimmed);
+    setBusy(false);
+    if (!err) setName("");
+  };
+
+  return (
+    <div className="nproj-overlay" onClick={onClose}>
+      <div className="nproj-card" onClick={(e) => e.stopPropagation()}>
+        <div className="nproj-title">📁+ 新建项目</div>
+        <input
+          ref={inputRef}
+          className="nproj-input"
+          placeholder="项目名称（如 my-project）"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") submit();
+            if (e.key === "Escape") onClose();
+          }}
+        />
+        {error && <div className="nproj-error">{error}</div>}
+        <div className="nproj-actions">
+          <button className="nproj-btn" onClick={onClose}>
+            取消
+          </button>
+          <button
+            className="nproj-btn primary"
+            onClick={submit}
+            disabled={busy || !name.trim()}
+          >
+            {busy ? "创建中…" : "创建"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -301,21 +416,23 @@ function ContextMenu({ ctx, onClose }: { ctx: CtxState; onClose: () => void }) {
         <div
           className="ctx-item"
           onClick={() => {
-            spawnAgent("standalone");
+            spawnAgent("standalone", ctx.project);
             onClose();
           }}
         >
           🖥 新建终端
         </div>
-        <div
-          className="ctx-item"
-          onClick={() => {
-            if (ctx.cwd) openPath(ctx.cwd).catch(console.error);
-            onClose();
-          }}
-        >
-          📁 在文件管理器中显示
-        </div>
+        {ctx.cwd && (
+          <div
+            className="ctx-item"
+            onClick={() => {
+              if (ctx.cwd) openPath(ctx.cwd).catch(console.error);
+              onClose();
+            }}
+          >
+            📁 在文件管理器中显示
+          </div>
+        )}
         <div className="ctx-sep" />
         <div className="ctx-item" onClick={onClose}>
           ✏ 重命名项目（待开发）

@@ -6,14 +6,15 @@ const DEFAULT_PROJECT = "default";
 
 /** Spawn a brand-new agent session and register it in the store. */
 export async function spawnAgent(
-  role: "master" | "worker" | "standalone"
+  role: "master" | "worker" | "standalone",
+  project?: string
 ): Promise<string> {
   const s = useStore.getState();
   const { channel, flush } = createBufferedChannel();
   const info = (await invoke("agent_spawn", {
     runtime: DEFAULT_RUNTIME,
     role,
-    project: DEFAULT_PROJECT,
+    project: project ?? DEFAULT_PROJECT,
     resumeKey: null,
     model: s.selectedModel,
     speed: s.speed,

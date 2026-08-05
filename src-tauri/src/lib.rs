@@ -433,6 +433,46 @@ async fn workspace_root(
     Ok(project_dir(persistence.project()).to_string_lossy().to_string())
 }
 
+/// Create a new workspace project: validates the name, then initialises
+/// `~/CaPilot/workspaces/<name>/{context, agents}` (+ git init). Returns the
+/// project name on success.
+#[tauri::command]
+fn create_project(name: String) -> Result<String, String> {
+    sanitize_project(&name)?;
+    ensure_project(&name).map_err(|e| format!("Failed to init workspace: {}", e))?;
+    Ok(name)
+}
+
+/// List all workspace project names under `~/CaPilot/workspaces/` (directories
+/// only, hidden entries excluded). Powers the sidebar's project tree so empty
+/// projects show up too.
+#[tauri::command]
+fn list_projects() -> Result<Vec<String>, String> {
+    let root = persistence::workspace_root();
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(&root)
+        .map_err(|e| format!("Failed to read workspaces dir: {}", e))?
+    {
+        let entry = entry.map_err(|e| format!("Failed to read workspace entry: {}", e))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("Failed to read entry type: {}", e))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        names.push(name);
+    }
+    names.sort();
+    Ok(names)
+}
+
 #[tauri::command]
 async fn sessions_delete(
     pty: tauri::State<'_, Arc<PtyManager>>,
@@ -867,6 +907,8 @@ pub fn run() {
             sessions_list,
             sessions_delete,
             workspace_root,
+            create_project,
+            list_projects,
             worker_status,
             smart_return_set,
             smart_return_get,

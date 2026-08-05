@@ -1030,3 +1030,92 @@ body::after {
   color: var(--muted);
 }
 
+/* ── New-project modal + empty-project row (nproj-*) ───────────── */
+
+.nproj-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.nproj-card {
+  width: 340px;
+  max-width: 90vw;
+  background: var(--bg2);
+  border: 2px solid var(--rule2);
+  box-shadow: var(--shadow-hard), 0 8px 30px rgba(0, 0, 0, 0.45);
+  padding: 18px 18px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.nproj-title {
+  font-family: var(--pixel-body);
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--brand);
+  letter-spacing: 1px;
+}
+
+.nproj-input {
+  background: var(--bg);
+  border: 1px solid var(--rule2);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 13px;
+  padding: 8px 10px;
+  outline: none;
+}
+.nproj-input:focus { border-color: var(--brand); }
+
+.nproj-error {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--danger);
+}
+
+.nproj-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.nproj-btn {
+  font-family: var(--pixel);
+  font-size: 10px;
+  letter-spacing: 1px;
+  padding: 6px 14px;
+  color: var(--muted);
+  border: 1px solid var(--rule2);
+  background: var(--bg3);
+  cursor: pointer;
+  text-transform: uppercase;
+  transition: all .2s var(--ease-apple);
+}
+.nproj-btn:hover { border-color: var(--brand); color: var(--brand); }
+.nproj-btn.primary {
+  border-color: var(--brand);
+  color: var(--brand);
+  background: rgba(139, 92, 246, 0.06);
+}
+.nproj-btn.primary:disabled { opacity: 0.5; cursor: default; }
+
+/* Muted placeholder row inside a project with no agents yet. */
+.nproj-empty-row {
+  padding: 5px 10px 5px 26px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  font-style: italic;
+}
+.proj.collapsed .nproj-empty-row { display: none; }
+
+/* rtx — RightSidebar alignment to CaPilot-IDE-Preview (#rightbar) */
+/* Files tree: config files (tauri.conf.json / *.conf.json) in success color. */
+.files-tree .rtx-file-conf { color: var(--success); }
+

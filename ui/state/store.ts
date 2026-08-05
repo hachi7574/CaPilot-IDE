@@ -173,6 +173,9 @@ interface AppState {
   // terminal input) despite being a worker.
   workerUnlockId: string | null;
 
+  // Projects (workspace dirs under ~/CaPilot/workspaces/<name>)
+  projects: string[];
+
   // Sidebars
   leftSidebarOpen: boolean;
   rightSidebarOpen: boolean;
@@ -225,6 +228,8 @@ interface AppState {
   toggleRightSidebar: () => void;
   setLeftWidth: (width: number) => void;
   setRightWidth: (width: number) => void;
+  setProjects: (projects: string[]) => void;
+  addProject: (name: string) => void;
   setEspStatus: (status: Partial<EspStatus>) => void;
   setEspConnecting: (connecting: boolean) => void;
   applyResourceSample: (resources: AgentResource[]) => void;
@@ -284,6 +289,7 @@ export const useStore = create<AppState>((set, get) => ({
   espConnecting: false,
   agentResources: new Map(),
   resourceHistory: new Map(),
+  projects: [],
   onboarded: loadOnboarded(),
 
   addAgent: (info, channel) =>
@@ -507,6 +513,14 @@ export const useStore = create<AppState>((set, get) => ({
   toggleRightSidebar: () => set((s) => ({ rightSidebarOpen: !s.rightSidebarOpen })),
   setLeftWidth: (width) => set({ leftWidth: width }),
   setRightWidth: (width) => set({ rightWidth: width }),
+
+  setProjects: (projects) => set({ projects }),
+
+  addProject: (name) =>
+    set((s) => {
+      if (s.projects.includes(name)) return {};
+      return { projects: [...s.projects, name] };
+    }),
 
   setEspStatus: (status) =>
     set((s) => ({ espStatus: { ...s.espStatus, ...status } })),
