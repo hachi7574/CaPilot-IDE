@@ -80,6 +80,19 @@ export interface EspStatus {
   last_seen_ms: number | null;
 }
 
+/** One agent's resource snapshot from `resource://sample` (DevPlan §10). */
+export interface AgentResource {
+  agent_id: string;
+  cpu_pct: number;
+  mem_bytes: number;
+}
+
+/** A buffered CPU/MEM history point (for the sparkline curve). */
+export interface ResourcePoint {
+  cpu_pct: number;
+  mem_bytes: number;
+}
+
 // ── Helpers ─────────────────────────────────────────────────────
 
 /** Max buffered bytes per agent before XTermPanel attaches. */
@@ -170,6 +183,13 @@ interface AppState {
   espStatus: EspStatus;
   espConnecting: boolean;
 
+  // Resource monitor (DevPlan §10)
+  agentResources: Map<string, ResourcePoint>;
+  resourceHistory: Map<string, ResourcePoint[]>;
+
+  // Onboarding
+  onboarded: boolean;
+
   // Actions
   addAgent: (info: AgentInfo, channel: Channel<number[]> | null) => void;
   removeAgent: (id: string) => void;
@@ -207,6 +227,19 @@ interface AppState {
   setRightWidth: (width: number) => void;
   setEspStatus: (status: Partial<EspStatus>) => void;
   setEspConnecting: (connecting: boolean) => void;
+  applyResourceSample: (resources: AgentResource[]) => void;
+  setResourceHistory: (agentId: string, points: ResourcePoint[]) => void;
+  setOnboarded: (onboarded: boolean) => void;
+}
+
+/** Persisted preference: has the user completed first-run onboarding? */
+const ONBOARDED_KEY = "capilot.onboarded";
+function loadOnboarded(): boolean {
+  try {
+    return localStorage.getItem(ONBOARDED_KEY) === "1";
+  } catch {
+    return false;
+  }
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -249,6 +282,9 @@ export const useStore = create<AppState>((set, get) => ({
     last_seen_ms: null,
   },
   espConnecting: false,
+  agentResources: new Map(),
+  resourceHistory: new Map(),
+  onboarded: loadOnboarded(),
 
   addAgent: (info, channel) =>
     set((s) => {
@@ -267,7 +303,11 @@ export const useStore = create<AppState>((set, get) => ({
       channels.delete(id);
       const outputs = new Map(s.agentOutputs);
       outputs.delete(id);
-      return { agents, agentChannels: channels, agentOutputs: outputs };
+      const resources = new Map(s.agentResources);
+      resources.delete(id);
+      const history = new Map(s.resourceHistory);
+      history.delete(id);
+      return { agents, agentChannels: channels, agentOutputs: outputs, agentResources: resources, resourceHistory: history };
     }),
 
   updateAgentStatus: (id, status) =>
@@ -459,4 +499,34 @@ export const useStore = create<AppState>((set, get) => ({
     set((s) => ({ espStatus: { ...s.espStatus, ...status } })),
 
   setEspConnecting: (connecting) => set({ espConnecting: connecting }),
+
+  applyResourceSample: (resources) =>
+    set((s) => {
+      if (resources.length === 0) return {};
+      const agentResources = new Map(s.agentResources);
+      const resourceHistory = new Map(s.resourceHistory);
+      for (const r of resources) {
+        const point: ResourcePoint = { cpu_pct: r.cpu_pct, mem_bytes: r.mem_bytes };
+        agentResources.set(r.agent_id, point);
+        const prev = resourceHistory.get(r.agent_id) || [];
+        resourceHistory.set(r.agent_id, [...prev.slice(-59), point]);
+      }
+      return { agentResources, resourceHistory };
+    }),
+
+  setResourceHistory: (agentId, points) =>
+    set((s) => {
+      const resourceHistory = new Map(s.resourceHistory);
+      resourceHistory.set(agentId, points.slice(-60));
+      return { resourceHistory };
+    }),
+
+  setOnboarded: (onboarded) => {
+    try {
+      localStorage.setItem(ONBOARDED_KEY, onboarded ? "1" : "0");
+    } catch {
+      // ignore storage errors
+    }
+    set({ onboarded });
+  },
 }));

@@ -186,6 +186,17 @@ impl PtyManager {
         self.children.lock().unwrap().contains_key(agent_id)
     }
 
+    /// Snapshot of live agent PIDs — `(agent_id, pid)`. Used by the resource
+    /// monitor (§10) to sample whole process trees per agent.
+    pub fn pids(&self) -> Vec<(String, u32)> {
+        self.children
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, c)| (id.clone(), c.pid))
+            .collect()
+    }
+
     /// Number of live PTY sessions (for diagnostics).
     #[allow(dead_code)]
     pub fn live_count(&self) -> usize {

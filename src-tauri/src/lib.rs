@@ -2,6 +2,7 @@ mod agent_runtime;
 pub mod esp;
 mod orchestration;
 mod persistence;
+mod resource;
 
 use agent_runtime::adapter::{AgentRole, AgentSession, AgentInfo, PermissionMode, Speed};
 use agent_runtime::pty::PtyManager;
@@ -13,6 +14,8 @@ use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::ipc::Channel;
+use tauri::Manager;
+use tauri_plugin_notification::NotificationExt;
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -474,13 +477,35 @@ async fn fs_read(path: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn fs_write(path: String, content: String) -> Result<(), String> {
-    let resolved = std::path::Path::new(&path)
-        .canonicalize()
-        .unwrap_or_else(|_| std::path::PathBuf::from(&path));
     let home = std::env::var("HOME").map_err(|e| format!("HOME not set: {}", e))?;
-    if !resolved.starts_with(&home) {
+    let home_path = std::path::Path::new(&home);
+
+    let raw = std::path::Path::new(&path);
+    // Canonicalize the PARENT (which must exist) to resolve any symlinks in the
+    // path, then re-join the file name. This prevents symlink traversal when the
+    // target file doesn't exist yet (canonicalize() of the full path would fail
+    // and a raw fallback could write through a $HOME/... -> /etc symlink).
+    let parent = raw
+        .parent()
+        .ok_or_else(|| "Invalid path: no parent directory".to_string())?;
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|e| format!("Invalid path: {}", e))?;
+    if !canonical_parent.starts_with(home_path) {
         return Err("Path escapes allowed directories".to_string());
     }
+    let file_name = raw
+        .file_name()
+        .ok_or_else(|| "Invalid path: no file name".to_string())?;
+    let resolved = canonical_parent.join(file_name);
+
+    // If the target already exists, double-check the canonical path stays in HOME.
+    if let Ok(canon) = resolved.canonicalize() {
+        if !canon.starts_with(home_path) {
+            return Err("Path escapes allowed directories".to_string());
+        }
+    }
+
     std::fs::write(&resolved, &content).map_err(|e| format!("Failed to write file: {}", e))
 }
 
@@ -670,6 +695,20 @@ mod tests {
     }
 }
 
+// ── Notification command ────────────────────────────────────────
+
+/// Show a system notification (worker done / ESP drop / report ready).
+/// The frontend `notify()` helper gates this on the 系统通知 toggle.
+#[tauri::command]
+fn notify(app: tauri::AppHandle, title: String, body: String) -> Result<(), String> {
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|e| e.to_string())
+}
+
 // ── ESP commands ────────────────────────────────────────────────
 
 #[tauri::command]
@@ -699,6 +738,17 @@ async fn esp_send(
     state.send_command(payload.as_bytes()).await.map_err(|e| e.to_string())
 }
 
+// ── Resource monitor commands ──────────────────────────────────
+
+/// Buffered per-agent CPU/MEM history (oldest → newest) for the curve overlay.
+#[tauri::command]
+fn resource_history(
+    monitor: tauri::State<'_, Arc<resource::ResourceMonitor>>,
+    agent_id: String,
+) -> Vec<resource::HistoryPoint> {
+    monitor.history(&agent_id)
+}
+
 // ── App entry point ─────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -709,6 +759,7 @@ pub fn run() {
     );
     let dispatcher = Arc::new(Dispatcher::new(pty.clone(), persistence.clone()));
     dispatcher.refresh_workers();
+    let resource = Arc::new(resource::ResourceMonitor::new());
     // Install the `capilot` PATH shim (best-effort).
     match orchestration::shim::install_shim() {
         Ok(p) => log::info!("capilot shim installed at {}", p.display()),
@@ -723,10 +774,12 @@ pub fn run() {
         .plugin(tauri_plugin_log::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {}))
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(pty)
         .manage(persistence)
         .manage(dispatcher.clone())
         .manage(EspManager::new())
+        .manage(resource)
         .invoke_handler(tauri::generate_handler![
             agent_spawn,
             agent_resume,
@@ -754,14 +807,21 @@ pub fn run() {
             git_diff,
             git_pull,
             git_push,
+            notify,
             esp_connect,
             esp_disconnect,
             esp_status,
             esp_send,
+            resource_history,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
-            dispatcher.start(handle);
+            dispatcher.start(handle.clone());
+            // Resource sampler: every 1 s, sample each agent's process tree and
+            // emit `resource://sample` (DevPlan §10).
+            let pty = app.state::<Arc<PtyManager>>().inner().clone();
+            let resource = app.state::<Arc<resource::ResourceMonitor>>().inner().clone();
+            resource::start_sampler(pty, resource, handle);
             Ok(())
         })
         .run(tauri::generate_context!())

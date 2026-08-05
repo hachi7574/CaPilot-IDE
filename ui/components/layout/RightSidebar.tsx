@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useStore } from "../../state/store";
+import { fmtMem } from "../../state/resource";
 
 type RightTab = "overview" | "files" | "git";
 
@@ -123,8 +124,19 @@ function OverviewDashboard() {
   const esp = useStore((s) => s.espStatus);
   const workerInfos = useStore((s) => s.workerInfos);
   const smartReturn = useStore((s) => s.smartReturn);
+  const agents = useStore((s) => s.agents);
+  const agentResources = useStore((s) => s.agentResources);
+  const resourceHistory = useStore((s) => s.resourceHistory);
+  const activeTabId = useStore((s) => s.activeTabId);
+  const tabs = useStore((s) => s.tabs);
 
   const busyCount = workerInfos.filter((w) => w.status === "busy").length;
+  const activeTab = tabs.find((t) => t.id === activeTabId);
+  const activeAgentId = activeTab?.agentId ?? null;
+  const activeRes = activeAgentId ? agentResources.get(activeAgentId) : undefined;
+  const activeHist = activeAgentId ? resourceHistory.get(activeAgentId) || [] : [];
+  const cpuMax = Math.max(10, ...activeHist.map((p) => p.cpu_pct));
+  const memMax = Math.max(1, ...activeHist.map((p) => p.mem_bytes));
 
   const toggleSmartReturn = async () => {
     const { setSmartReturn } = await import("../../state/orchestration");
@@ -163,6 +175,60 @@ function OverviewDashboard() {
           <span className="ov-label">智能返回</span>
           <span className="ov-value">{smartReturn ? "✅ 开" : "⬜ 关"}</span>
         </div>
+      </CollapsibleSection>
+
+      {/* Resource monitor */}
+      <CollapsibleSection
+        title="📈 资源监视"
+        summary={`📈 ${activeRes ? `CPU ${Math.round(activeRes.cpu_pct)}% · MEM ${fmtMem(activeRes.mem_bytes)}` : "无活动 agent"}`}
+      >
+        {activeRes ? (
+          <>
+            <div className="ov-row">
+              <span className="ov-label">CPU</span>
+              <span className="ov-value">{Math.round(activeRes.cpu_pct)}%</span>
+            </div>
+            <div className="ov-bar-row">
+              <div className="ov-bar">
+                <div
+                  className="ov-bar-fill pu"
+                  style={{ width: `${Math.min(100, (activeRes.cpu_pct / cpuMax) * 100)}%` }}
+                />
+              </div>
+            </div>
+            <div className="ov-row">
+              <span className="ov-label">Memory</span>
+              <span className="ov-value">{fmtMem(activeRes.mem_bytes)}</span>
+            </div>
+            <div className="ov-bar-row">
+              <div className="ov-bar">
+                <div
+                  className="ov-bar-fill ai"
+                  style={{ width: `${Math.min(100, (activeRes.mem_bytes / memMax) * 100)}%` }}
+                />
+              </div>
+            </div>
+            <div className="ov-divider" />
+            {[...agents.values()].map((a) => {
+              const r = agentResources.get(a.id);
+              return (
+                <div className="ov-row" key={a.id}>
+                  <span className="ov-label" style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {a.title || a.id.slice(0, 6)}
+                  </span>
+                  <span className="ov-value">
+                    {r ? `${Math.round(r.cpu_pct)}% · ${fmtMem(r.mem_bytes)}` : "—"}
+                  </span>
+                </div>
+              );
+            })}
+          </>
+        ) : (
+          <div className="ov-row">
+            <span className="ov-label">没有运行中的 agent</span>
+            <span className="ov-value">—</span>
+          </div>
+        )}
       </CollapsibleSection>
 
       {/* Runtime */}

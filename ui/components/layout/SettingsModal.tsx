@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useStore } from "../../state/store";
 import { connectEsp, disconnectEsp } from "../../state/esp";
 import { setSmartReturn } from "../../state/orchestration";
@@ -6,12 +7,36 @@ interface SettingsModalProps {
   onClose: () => void;
 }
 
+/** Persisted preference: system notifications on/off (default on). */
+const NOTIFICATIONS_KEY = "capilot.notifications";
+
+const APP_VERSION = "0.1.0";
+
 export function SettingsModal({ onClose }: SettingsModalProps) {
   const runtimes = useStore((s) => s.runtimes);
   const espStatus = useStore((s) => s.espStatus);
   const espConnecting = useStore((s) => s.espConnecting);
   const smartReturn = useStore((s) => s.smartReturn);
   const setSmartReturnState = useStore((s) => s.setSmartReturn);
+  const setOnboarded = useStore((s) => s.setOnboarded);
+
+  const [notifEnabled, setNotifEnabled] = useState(() => {
+    try {
+      return localStorage.getItem(NOTIFICATIONS_KEY) !== "0";
+    } catch {
+      return true;
+    }
+  });
+
+  const toggleNotifications = () => {
+    const next = !notifEnabled;
+    setNotifEnabled(next);
+    try {
+      localStorage.setItem(NOTIFICATIONS_KEY, next ? "1" : "0");
+    } catch {
+      // ignore storage errors
+    }
+  };
 
   const toggleSmart = async () => {
     const next = !smartReturn;
@@ -26,6 +51,11 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
       const err = await connectEsp();
       if (err) console.error("ESP connect failed:", err);
     }
+  };
+
+  const reShowOnboarding = () => {
+    setOnboarded(false);
+    onClose();
   };
 
   return (
@@ -136,6 +166,68 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             >
               {smartReturn ? "开" : "关"}
             </button>
+          </div>
+        </div>
+
+        {/* Notifications */}
+        <div className="modal-section" style={{ marginBottom: 20 }}>
+          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: 10, color: "var(--muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
+            通知
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: 12 }}>
+            <span style={{ color: "var(--ink2)" }}>系统通知（Worker 完成 / ESP 断连）</span>
+            <button
+              onClick={toggleNotifications}
+              style={{
+                fontFamily: "var(--pixel)",
+                fontSize: 10,
+                padding: "4px 10px",
+                border: `1px solid ${notifEnabled ? "var(--success)" : "var(--rule2)"}`,
+                color: notifEnabled ? "var(--success)" : "var(--muted)",
+                background: notifEnabled ? "rgba(74,222,128,.08)" : "transparent",
+                cursor: "pointer",
+              }}
+            >
+              {notifEnabled ? "开" : "关"}
+            </button>
+          </div>
+        </div>
+
+        {/* First-run onboarding */}
+        <div className="modal-section" style={{ marginBottom: 20 }}>
+          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: 10, color: "var(--muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
+            首次引导
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: 12 }}>
+            <span style={{ color: "var(--ink2)" }}>重新显示引导流程</span>
+            <button
+              onClick={reShowOnboarding}
+              className="modal-btn"
+              style={{
+                fontFamily: "var(--pixel)",
+                fontSize: 10,
+                padding: "5px 12px",
+                border: "1px solid var(--brand)",
+                color: "var(--brand)",
+                background: "transparent",
+                cursor: "pointer",
+              }}
+            >
+              重新显示
+            </button>
+          </div>
+        </div>
+
+        {/* About */}
+        <div className="modal-section">
+          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: 10, color: "var(--muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
+            关于
+          </div>
+          <div style={{ fontSize: 12, color: "var(--ink2)" }}>
+            CaPilot IDE <span style={{ fontFamily: "var(--mono)", color: "var(--muted)" }}>v{APP_VERSION}</span>
+          </div>
+          <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4, fontFamily: "var(--mono)" }}>
+            AI Agent Orchestration Workbench · Master/Worker
           </div>
         </div>
       </div>
