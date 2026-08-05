@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CaPilot IDE — 预览</title>
+<style>
+/* ===== TOKENS ===== */
+:root {
+  --bg: #07090F; --bg2: #0D1117; --bg3: #161B22; --bg4: #1E2530;
+  --ink: #E8ECF1; --ink2: #C9D1D9; --muted: #7D8590;
+  --rule: #21262D; --rule2: #30363D;
+  --brand: #8B5CF6; --brand-dim: #5B21B6;
+  --primary: #A78BFA; --primary-dim: #6D28D9;
+  --ai: #C4B5FD; --ai-dim: #6D28D9;
+  --success: #4ADE80; --warn: #FACC15; --danger: #F87171;
+  --pixel: 'Silkscreen', monospace;
+  --pixel-body: 'PixelifySans', sans-serif;
+  --body: 'Tektur', system-ui, sans-serif;
+  --mono: 'JetBrainsMono', ui-monospace, monospace;
+  --ease-apple: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --shadow-hard: 4px 4px 0 rgba(0, 0, 0, 0.4);
+  --left-width: 248px;
+  --right-width: 340px;
+  --topbar-h: 40px;
+}
+@font-face { font-family: 'Silkscreen'; src: url('./_shared/fonts/Silkscreen-Regular.ttf') format('truetype'); }
+@font-face { font-family: 'PixelifySans'; src: url('./_shared/fonts/PixelifySans-Medium.ttf') format('truetype'); }
+@font-face { font-family: 'Tektur'; src: url('./_shared/fonts/Tektur-Regular.ttf') format('truetype'); font-weight: 400; }
+@font-face { font-family: 'Tektur'; src: url('./_shared/fonts/Tektur-Medium.ttf') format('truetype'); font-weight: 500; }
+@font-face { font-family: 'JetBrainsMono'; src: url('./_shared/fonts/JetBrainsMono-Regular.ttf') format('truetype'); }
+@font-face { font-family: 'JetBrainsMono'; src: url('./_shared/fonts/JetBrainsMono-Bold.ttf') format('truetype'); font-weight: 700; }
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: var(--bg); color: var(--ink); font-family: var(--body);
+  font-size: 14px; line-height: 1.6; overflow: hidden; height: 100vh; user-select: none;
+}
+body::before {
+  content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 9999;
+  background: repeating-linear-gradient(0deg, transparent 0px, transparent 2px, rgba(0,0,0,.06) 2px, rgba(0,0,0,.06) 4px);
+}
+body::after {
+  content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 9998;
+  background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,.35) 100%);
+}
+
+#app { display: flex; flex-direction: column; height: 100vh; position: relative; z-index: 1; }
+
+/* MAIN */
+#main { display: flex; flex: 1; overflow: hidden; }
+
+/* LEFT SIDEBAR (3 zones) */
+#leftbar { width: var(--left-width); min-width: 180px; background: var(--bg2); border-right: 2px solid var(--rule); display: flex; flex-direction: column; flex-shrink: 0; overflow: hidden; }
+/* Zone 1 — Brand */
+#leftbar .brand { height: var(--topbar-h); display: flex; align-items: center; padding: 0 14px; font-family: var(--pixel-body); font-size: 18px; font-weight: 700; color: var(--brand); letter-spacing: 1px; text-shadow: 0 0 20px rgba(139,92,246,.3); border-bottom: 2px solid var(--rule); cursor: default; }
+/* Zone 2 — Operation bar (4 buttons centered, no frame) */
+#leftbar .opbar { display: flex; align-items: center; justify-content: space-evenly; padding: 6px 4px; border-bottom: 2px solid var(--rule); }
+#leftbar .opbar .btn-icon { width: 36px; height: 28px; display: flex; align-items: center; justify-content: center; font-family: var(--pixel); font-size: 15px; color: var(--muted); cursor: pointer; transition: all .2s var(--ease-apple); }
+#leftbar .opbar .btn-icon:hover { color: var(--brand); transform: translateY(-1px); }
+#leftbar .opbar .btn-icon.active { color: var(--brand); }
+/* Zone 3 — Project tree */
+#leftbar .tree { flex: 1; overflow-y: auto; padding: 2px 0; }
+#leftbar .tree::-webkit-scrollbar { width: 4px; }
+#leftbar .tree::-webkit-scrollbar-thumb { background: var(--rule2); }
+
+/* Master (collapsible, always first) */
+#leftbar .master-pinned { border-bottom: 2px solid var(--rule); }
+#leftbar .master-pinned .master-header { display: flex; align-items: center; gap: 6px; padding: 7px 10px; font-family: var(--mono); font-size: 12px; color: var(--ai); cursor: pointer; transition: background .2s var(--ease-apple); }
+#leftbar .master-pinned .master-header:hover { background: var(--bg3); }
+#leftbar .master-pinned .master-header .m-icon { font-size: 14px; }
+#leftbar .master-pinned .master-header .m-name { flex: 1; font-weight: 700; }
+#leftbar .master-pinned .master-header .m-arrow { font-family: var(--pixel); font-size: 10px; color: var(--muted); transition: transform .2s var(--ease-apple); }
+#leftbar .master-pinned.collapsed .master-header .m-arrow { transform: rotate(-90deg); }
+#leftbar .master-pinned.collapsed .terminal-item { display: none; }
+
+/* Project */
+#leftbar .proj { border-bottom: 1px solid var(--rule); }
+#leftbar .proj-header { display: flex; align-items: center; gap: 6px; padding: 7px 10px; cursor: pointer; font-family: var(--mono); font-size: 12px; color: var(--primary); transition: background .2s var(--ease-apple); }
+#leftbar .proj-header:hover { background: var(--bg3); }
+#leftbar .proj-header .pj-icon { font-size: 14px; }
+#leftbar .proj-header .pj-name { flex: 1; font-weight: 700; }
+#leftbar .proj-header .pj-arrow { font-family: var(--pixel); font-size: 10px; color: var(--muted); transition: transform .2s var(--ease-apple); }
+#leftbar .proj.collapsed .proj-header .pj-arrow { transform: rotate(-90deg); }
+#leftbar .proj.collapsed .terminal-item { display: none; }
+#leftbar .proj.focused .proj-header { background: rgba(139,92,246,.1); border-left: 3px solid var(--brand); }
+#leftbar .proj.focused { background: rgba(139,92,246,.04); }
+
+/* Terminal items */
+#leftbar .terminal-item { display: flex; align-items: center; gap: 6px; padding: 5px 10px 5px 22px; cursor: pointer; font-family: var(--mono); font-size: 11px; color: var(--ink2); transition: all .2s var(--ease-apple); border-left: 2px solid transparent; }
+#leftbar .terminal-item:hover { background: var(--bg3); color: var(--ink); }
+#leftbar .terminal-item.active { border-left-color: var(--brand); background: rgba(139,92,246,.06); color: var(--ink); }
+#leftbar .terminal-item .tm-icon { font-size: 13px; width: 18px; text-align: center; flex-shrink: 0; }
+#leftbar .terminal-item .tm-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#leftbar .terminal-item .tm-time { font-family: var(--mono); font-size: 10px; color: var(--muted); flex-shrink: 0; }
+
+/* MAIN AREA */
+#center { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+
+/* Layer 1 — Tab bar */
+#tabbar { height: var(--topbar-h); background: var(--bg2); border-bottom: 2px solid var(--rule); display: flex; align-items: center; padding: 0 6px; gap: 2px; flex-shrink: 0; overflow-x: auto; }
+#tabbar::-webkit-scrollbar { height: 2px; }
+#tabbar::-webkit-scrollbar-thumb { background: var(--rule2); }
+#tabbar .tab-btn-icon { width: 28px; height: 26px; display: flex; align-items: center; justify-content: center; font-family: var(--pixel); font-size: 14px; color: var(--muted); cursor: pointer; flex-shrink: 0; transition: color .2s var(--ease-apple); }
+#tabbar .tab-btn-icon:hover { color: var(--brand); }
+#tabbar .tab-item { display: flex; align-items: center; gap: 5px; padding: 5px 14px; height: 26px; flex-shrink: 0; font-family: var(--mono); font-size: 12px; color: var(--ink2); background: var(--bg3); border: 1px solid var(--rule2); cursor: pointer; transition: all .2s var(--ease-apple); }
+#tabbar .tab-item:hover { border-color: var(--brand); color: var(--ink); }
+#tabbar .tab-item.active { background: var(--bg); border-color: var(--brand); color: var(--ink); border-bottom-color: transparent; }
+#tabbar .tab-item .tab-dot { width: 7px; height: 7px; flex-shrink: 0; }
+#tabbar .tab-dot.running { background: var(--primary); animation: pulse-dot 1.5s var(--ease-apple) infinite; }
+#tabbar .tab-dot.done { background: var(--success); }
+#tabbar .tab-dot.idle { background: var(--muted); }
+#tabbar .tab-runtime { font-family: var(--pixel); font-size: 8px; color: var(--brand); letter-spacing: 1px; }
+@keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+
+/* Layer 2 — Content */
+#content-area { flex: 1; display: flex; overflow: hidden; background: var(--bg); }
+#content-area .panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--rule); min-width: 0; }
+#content-area .panel:last-child { border-right: none; }
+#content-area .panel-header { height: 24px; background: var(--bg2); border-bottom: 1px solid var(--rule); display: flex; align-items: center; padding: 0 10px; font-family: var(--pixel); font-size: 9px; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; flex-shrink: 0; }
+.panel-terminal { flex: 1; background: #05070D; padding: 10px 14px; overflow-y: auto; font-family: var(--mono); font-size: 13px; line-height: 1.7; color: var(--ink2); }
+.panel-terminal::-webkit-scrollbar { width: 4px; }
+.panel-terminal::-webkit-scrollbar-thumb { background: var(--rule2); }
+.panel-terminal .pr { color: var(--success); }
+.panel-terminal .cm { color: var(--ink); }
+.panel-terminal .ot { color: var(--ink2); }
+.panel-terminal .ot-dim { color: var(--muted); }
+.panel-terminal .hl { color: var(--brand); }
+.panel-terminal .ai { color: var(--ai); }
+
+/* Layer 3 — Input */
+#input-area { border-top: 2px solid var(--rule); background: var(--bg2); flex-shrink: 0; display: flex; flex-direction: column; }
+#input-area .composer-target { display: flex; align-items: center; gap: 8px; padding: 6px 14px; border-bottom: 1px solid var(--rule); font-family: var(--pixel); font-size: 10px; color: var(--primary); letter-spacing: 1px; text-transform: uppercase; }
+#input-area .composer-input { padding: 8px 14px; font-family: var(--mono); font-size: 13px; color: var(--ink); background: transparent; border: none; outline: none; width: 100%; }
+#input-area .composer-input::placeholder { color: var(--muted); }
+#input-area .composer-actions { display: flex; align-items: center; gap: 4px; padding: 4px 10px 6px; flex-wrap: wrap; }
+#input-area .act-btn { font-family: var(--pixel); font-size: 10px; letter-spacing: 1px; padding: 4px 10px; color: var(--muted); border: 1px solid var(--rule2); background: var(--bg3); cursor: pointer; text-transform: uppercase; transition: all .2s var(--ease-apple); }
+#input-area .act-btn:hover { border-color: var(--brand); color: var(--brand); }
+#input-area .act-btn.accent { border-color: var(--brand); color: var(--brand); background: rgba(139,92,246,.06); }
+#input-area .act-sep { width: 1px; height: 16px; background: var(--rule); margin: 0 4px; }
+#input-area .act-mode-group { display: flex; gap: 0; border: 1px solid var(--rule2); margin-left: auto; }
+#input-area .act-mode-btn { font-family: var(--pixel); font-size: 9px; letter-spacing: 1px; padding: 4px 10px; color: var(--muted); background: transparent; border: none; cursor: pointer; text-transform: uppercase; transition: all .2s var(--ease-apple); }
+#input-area .act-mode-btn:hover { color: var(--ink); }
+#input-area .act-mode-btn.active { background: var(--brand); color: #F5F3FF; }
+#input-area .collapse-btn { font-family: var(--pixel); font-size: 14px; color: var(--muted); cursor: pointer; margin-left: 8px; transition: color .2s var(--ease-apple); }
+#input-area .collapse-btn:hover { color: var(--brand); }
+
+/* RIGHT SIDEBAR */
+#rightbar { width: var(--right-width); min-width: 260px; background: var(--bg2); border-left: 2px solid var(--rule); display: flex; flex-direction: column; flex-shrink: 0; overflow: hidden; }
+#right-tabs-header { display: flex; height: var(--topbar-h); border-bottom: 2px solid var(--rule); flex-shrink: 0; }
+#right-tabs-header .rtab { flex: 1; text-align: center; padding: 10px 4px; font-family: var(--pixel); font-size: 10px; letter-spacing: 1px; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; transition: all .2s var(--ease-apple); text-transform: uppercase; }
+#right-tabs-header .rtab:hover { color: var(--ink2); }
+#right-tabs-header .rtab.active { color: var(--brand); border-bottom-color: var(--brand); }
+#right-tab-content { flex: 1; overflow-y: auto; border-bottom: 2px solid var(--rule); }
+#right-tab-content::-webkit-scrollbar { width: 4px; }
+#right-tab-content::-webkit-scrollbar-thumb { background: var(--rule2); }
+#right-report { flex-shrink: 0; background: var(--bg2); max-height: 42%; overflow-y: auto; }
+#right-report::-webkit-scrollbar { width: 4px; }
+#right-report::-webkit-scrollbar-thumb { background: var(--rule2); }
+#right-report .report-header { display: flex; align-items: center; padding: 8px 14px; font-family: var(--pixel); font-size: 10px; color: var(--ai); letter-spacing: 1px; text-transform: uppercase; cursor: pointer; border-bottom: 1px solid var(--rule); transition: background .2s var(--ease-apple); }
+#right-report .report-header:hover { background: var(--bg3); }
+#right-report .report-header .report-toggle { margin-left: auto; font-size: 14px; color: var(--muted); }
+#right-report .report-body { padding: 10px 14px; font-size: 13px; }
+#right-report .report-time { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+#right-report .report-quote { color: var(--ai); font-style: italic; margin-bottom: 8px; line-height: 1.6; }
+#right-report .report-meta { font-family: var(--mono); font-size: 11px; color: var(--muted); line-height: 1.7; }
+#right-report .report-actions { display: flex; gap: 6px; margin-top: 10px; }
+#right-report .report-actions .rbtn { font-family: var(--pixel); font-size: 9px; letter-spacing: 1px; padding: 5px 10px; color: var(--ai); border: 1px solid var(--ai-dim); background: rgba(196,181,253,.04); cursor: pointer; text-transform: uppercase; transition: all .2s var(--ease-apple); }
+#right-report .report-actions .rbtn:hover { background: rgba(196,181,253,.1); }
+
+/* Dashboard */
+.ov-section { border-bottom: 1px solid var(--rule); }
+.ov-section-header { display: flex; align-items: center; padding: 7px 12px; font-family: var(--pixel); font-size: 10px; color: var(--ink2); letter-spacing: 1px; text-transform: uppercase; cursor: pointer; transition: background .2s var(--ease-apple); }
+.ov-section-header:hover { background: var(--bg3); }
+.ov-section-header .ov-toggle { margin-left: auto; color: var(--muted); font-size: 12px; }
+.ov-section-body { padding: 8px 12px 10px; }
+.ov-section.collapsed .ov-section-body { display: none; }
+.ov-section.collapsed .ov-summary { display: block; padding: 5px 12px; font-size: 12px; color: var(--muted); }
+.ov-summary { display: none; }
+.ov-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; }
+.ov-label { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.ov-value { font-family: var(--mono); font-size: 11px; color: var(--ink2); }
+.ov-value.gr { color: var(--success); }
+.ov-value.pu { color: var(--primary); }
+.ov-bar-row { margin: 5px 0; }
+.ov-bar-label { font-family: var(--mono); font-size: 10px; color: var(--muted); margin-bottom: 3px; }
+.ov-bar { height: 7px; background: var(--bg3); border: 1px solid var(--rule); }
+.ov-bar-fill { height: 100%; transition: width .6s var(--ease-apple); }
+.ov-bar-fill.gr { background: var(--success); }
+.ov-bar-fill.pu { background: var(--brand); }
+.ov-bar-fill.ye { background: var(--warn); }
+.ov-bar-fill.ai { background: var(--ai); }
+.ov-bar-stats { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10px; color: var(--muted); margin-top: 3px; }
+.ov-divider { border-top: 1px solid var(--rule); margin: 6px 0; }
+.ov-usage-item { margin: 7px 0; }
+.ov-usage-label { font-family: var(--mono); font-size: 11px; color: var(--ink2); margin-bottom: 3px; }
+.ov-usage-stats { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10px; color: var(--muted); margin-top: 3px; }
+.ov-esp-status { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.ov-esp-dot { width: 8px; height: 8px; background: var(--success); border: 1px solid var(--success); }
+.ov-esp-name { font-family: var(--mono); font-size: 11px; color: var(--ink2); }
+.ov-esp-conn { font-family: var(--pixel); font-size: 9px; color: var(--primary); letter-spacing: 1px; text-transform: uppercase; padding: 2px 8px; border: 1px solid var(--primary-dim); background: rgba(139,92,246,.06); }
+
+/* STATUS BAR */
+#statusbar { height: 28px; background: var(--bg2); border-top: 2px solid var(--rule); display: flex; align-items: center; padding: 0 14px; gap: 16px; flex-shrink: 0; }
+#statusbar .sb-item { font-family: var(--pixel); font-size: 9px; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; display: flex; align-items: center; gap: 4px; }
+#statusbar .sb-dot { width: 6px; height: 6px; }
+#statusbar .sb-dot.bt { background: var(--primary); }
+#statusbar .sb-sep { width: 1px; height: 12px; background: var(--rule); }
+#statusbar .sb-battery { color: var(--success); }
+#statusbar .sb-spacer { flex: 1; }
+#statusbar .sb-mode { color: var(--ai); }
+
+/* Resize */
+.resize-handle { width: 4px; cursor: col-resize; background: transparent; flex-shrink: 0; transition: background .2s; position: relative; z-index: 10; }
+.resize-handle:hover, .resize-handle.active { background: var(--brand); }
+
+/* Project focus indicator in tab bar */
+#tabbar .tab-proj-badge { font-family: var(--pixel); font-size: 7px; color: var(--primary); letter-spacing: 1px; margin-left: 2px; padding: 1px 5px; border: 1px solid var(--primary-dim); background: rgba(139,92,246,.08); }
+</style>
+</head>
+<body>
+<div id="app">
+
+<div id="main">
+
+  <!-- LEFT SIDEBAR -->
+  <div id="leftbar">
+    <div class="brand">CaPilot</div>
+    <div class="opbar">
+      <span class="btn-icon active" title="全部显示">👁</span>
+      <span class="btn-icon" title="全部收起/展开">☰</span>
+      <span class="btn-icon" title="新建项目">📁+</span>
+      <span class="btn-icon" title="设置">⚙</span>
+    </div>
+    <div class="tree">
+      <!-- Master (collapsible, always first) -->
+      <div class="master-pinned" id="master-pinned">
+        <div class="master-header" onclick="toggleGroup('master-pinned')">
+          <span class="m-icon">⭐</span><span class="m-name">Master 会话</span><span class="m-arrow">▲</span>
+        </div>
+        <div class="terminal-item" data-project="master" onclick="selectTerminal(this,'master')"><span class="tm-icon">✅</span><span class="tm-name">IDE搭建讨论</span><span class="tm-time">3小时</span></div>
+        <div class="terminal-item" data-project="master" onclick="selectTerminal(this,'master')"><span class="tm-icon">🔄</span><span class="tm-name">BLE调试</span><span class="tm-time">20分钟</span></div>
+      </div>
+      <!-- Project: CaPilot -->
+      <div class="proj focused" id="proj-capilot">
+        <div class="proj-header" ondblclick="focusProject('proj-capilot')" onclick="toggleGroup('proj-capilot')">
+          <span class="pj-icon">📁</span><span class="pj-name">CaPilot</span><span class="pj-arrow">▲</span>
+        </div>
+        <div class="terminal-item active" data-project="capilot" onclick="selectTerminal(this,'capilot')"><span class="tm-icon">🤖</span><span class="tm-name">worker-1</span><span class="tm-time">5分钟</span></div>
+      </div>
+      <!-- Project: Global -->
+      <div class="proj" id="proj-global">
+        <div class="proj-header" ondblclick="focusProject('proj-global')" onclick="toggleGroup('proj-global')">
+          <span class="pj-icon">📁</span><span class="pj-name">Global</span><span class="pj-arrow">▲</span>
+        </div>
+        <div class="terminal-item" data-project="global" onclick="selectTerminal(this,'global')"><span class="tm-icon">🔄</span><span class="tm-name">hi</span><span class="tm-time">1小时</span></div>
+        <div class="terminal-item" data-project="global" onclick="selectTerminal(this,'global')"><span class="tm-icon">💤</span><span class="tm-name">临时终端</span><span class="tm-time">4小时</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="resize-handle" id="resize-left"></div>
+
+  <!-- CENTER -->
+  <div id="center">
+    <!-- Tab bar with [☰] and project filter -->
+    <div id="tabbar" data-project="capilot">
+      <span class="tab-btn-icon" title="折叠侧栏" onclick="toggleLeftbar()">☰</span>
+      <span class="tab-proj-badge">CaPilot</span>
+      <div class="tab-item active" data-project="capilot">
+        <span class="tab-dot running"></span><span>🤖worker-1</span><span class="tab-runtime">claude</span>
+      </div>
+      <span class="tab-btn-icon" title="新建终端" style="margin-left:4px;">+</span>
+    </div>
+    <div id="content-area">
+      <div class="panel">
+        <div class="panel-header">PANEL · worker-1 (claude)</div>
+        <div class="panel-terminal">
+          <div><span class="ot-dim">~/CaPilot/workspaces/CaPilot/agents/worker-1</span></div>
+          <div><span class="pr">$</span> <span class="cm">claude --resume</span></div>
+          <div style="margin-top:6px;"><span class="ot-dim">Resuming session #a7f3…</span></div>
+          <div style="margin-top:8px;"><span class="ai">正在调试 BLE NUS 连接…</span></div>
+          <div style="margin-top:6px;"><span class="ot">✓ btleplug 扫描到 ESP32-C6 (AA:BB:CC:DD:EE:FF)</span></div>
+          <div style="margin-top:4px;"><span class="ot">✓ NUS Service UUID 匹配，正在订阅特征值…</span></div>
+          <div style="margin-top:4px;"><span class="ot-dim">⏳ 等待 BLE 数据通道确认…</span></div>
+        </div>
+      </div>
+    </div>
+    <div id="input-area">
+      <div class="composer-target"><span class="target-arrow">→</span> agent: worker-1</div>
+      <input class="composer-input" placeholder="发消息…（/ 命令 · @ 文件 · ! 终端 · 拖入文件）" value="继续调试 BLE 数据通道">
+      <div class="composer-actions">
+        <span class="act-btn">+ 文件/引用</span><span class="act-btn">模型 ↑</span><span class="act-btn">速度: auto</span>
+        <span class="act-sep"></span><span class="act-btn accent">🤖worker 开</span>
+        <span class="act-sep"></span>
+        <span class="act-mode-group">
+          <span class="act-mode-btn">Ask</span><span class="act-mode-btn active">Auto</span><span class="act-mode-btn">Yolo</span>
+        </span>
+        <span class="collapse-btn">▼</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="resize-handle" id="resize-right"></div>
+
+  <!-- RIGHT SIDEBAR -->
+  <div id="rightbar">
+    <div id="right-tabs-header">
+      <div class="rtab active" data-tab="overview">∿ 概览</div>
+      <div class="rtab" data-tab="files">📄 文件</div>
+      <div class="rtab" data-tab="git">⚒ Git</div>
+    </div>
+    <div id="right-tab-content">
+      <div class="tab-panel" id="tab-overview">
+        <div class="ov-section"><div class="ov-section-header" onclick="this.parentElement.classList.toggle('collapsed')">📊 Runtime <span class="ov-toggle">▼</span></div><div class="ov-summary">📊 Runtime 42k/1M Tokens · 缓存79.5%</div><div class="ov-section-body"><div class="ov-row"><span class="ov-label">上下文窗口</span><span class="ov-value gr">🟢 充足</span></div><div class="ov-row"><span class="ov-label">已用 / 上限</span><span class="ov-value">42,134 / 1,000,000</span></div><div class="ov-bar-row"><div class="ov-bar"><div class="ov-bar-fill pu" style="width:4.2%"></div></div><div class="ov-bar-stats"><span>已用 42k</span><span>距压缩 757k</span></div></div><div class="ov-divider"></div><div class="ov-row"><span class="ov-label">缓存命中率</span><span class="ov-value pu">79.54%</span></div><div class="ov-row"><span class="ov-label">运行时间</span><span class="ov-value">20m22s</span></div><div class="ov-row"><span class="ov-label">请求次数</span><span class="ov-value">18</span></div><div class="ov-row"><span class="ov-label">累计 Tokens</span><span class="ov-value">568,822</span></div></div></div>
+        <div class="ov-section"><div class="ov-section-header" onclick="this.parentElement.classList.toggle('collapsed')">用量分析 <span class="ov-toggle">▼</span></div><div class="ov-summary">用量分析 主模型28% · 子代理72%</div><div class="ov-section-body"><div class="ov-usage-item"><div class="ov-usage-label">主模型</div><div class="ov-bar"><div class="ov-bar-fill pu" style="width:28%"></div></div><div class="ov-usage-stats"><span>157,278 Tokens</span><span>28%</span><span>Cache 82.39%</span></div></div><div class="ov-usage-item"><div class="ov-usage-label">子代理</div><div class="ov-bar"><div class="ov-bar-fill ai" style="width:72%"></div></div><div class="ov-usage-stats"><span>411,544 Tokens</span><span>72%</span><span>Cache 78.44%</span></div></div></div></div>
+        <div class="ov-section"><div class="ov-section-header" onclick="this.parentElement.classList.toggle('collapsed')">剩余用量 <span class="ov-toggle">▼</span></div><div class="ov-summary">剩余用量 5h 72% · 周56% · 月82%</div><div class="ov-section-body"><div class="ov-bar-row"><div class="ov-bar-label">⏱ 5小时窗口</div><div class="ov-bar"><div class="ov-bar-fill gr" style="width:72%"></div></div><div class="ov-bar-stats"><span></span><span>剩余 72%</span></div></div><div class="ov-bar-row"><div class="ov-bar-label">📅 周额度</div><div class="ov-bar"><div class="ov-bar-fill ye" style="width:56%"></div></div><div class="ov-bar-stats"><span></span><span>剩余 56%</span></div></div><div class="ov-bar-row"><div class="ov-bar-label">🗓 月额度</div><div class="ov-bar"><div class="ov-bar-fill gr" style="width:82%"></div></div><div class="ov-bar-stats"><span></span><span>剩余 82%</span></div></div></div></div>
+        <div class="ov-section"><div class="ov-section-header" onclick="this.parentElement.classList.toggle('collapsed')">💻 Computer Status <span class="ov-toggle">▼</span></div><div class="ov-summary">💻 🟢 Online · CPU35%</div><div class="ov-section-body"><div class="ov-row"><span class="ov-label">状态</span><span class="ov-value gr">🟢 Online</span></div><div class="ov-row"><span class="ov-label">CPU</span><span class="ov-value">35%</span></div><div class="ov-row"><span class="ov-label">Memory</span><span class="ov-value">12.4GB / 32GB</span></div><div class="ov-row"><span class="ov-label">GPU</span><span class="ov-value">42%</span></div><div class="ov-row"><span class="ov-label">Disk</span><span class="ov-value">68%</span></div><div class="ov-row"><span class="ov-label">Network</span><span class="ov-value">↑12Mbps ↓85Mbps</span></div></div></div>
+        <div class="ov-section"><div class="ov-section-header" onclick="this.parentElement.classList.toggle('collapsed')">🔌 ESP Device Status <span class="ov-toggle">▼</span></div><div class="ov-summary">🔌 ESP32-C6 · 🔵BLE · 🔋78%</div><div class="ov-section-body"><div class="ov-esp-status"><span class="ov-esp-dot"></span><span class="ov-esp-name">ESP32-C6</span></div><div class="ov-row"><span class="ov-label">Connection</span><span class="ov-esp-conn">🔵 Bluetooth</span></div><div class="ov-bar-row"><div class="ov-bar-label">🔋 Battery 78%</div><div class="ov-bar"><div class="ov-bar-fill gr" style="width:78%"></div></div></div><div class="ov-row"><span class="ov-label">Temperature</span><span class="ov-value">42℃</span></div><div class="ov-row"><span class="ov-label">Signal</span><span class="ov-value">-55dBm</span></div><div class="ov-row"><span class="ov-label">Firmware</span><span class="ov-value">v1.2.0</span></div></div></div>
+      </div>
+      <div class="tab-panel" id="tab-files" style="display:none;padding:8px 0;">
+        <div style="padding:0 12px 8px;"><input style="width:100%;background:var(--bg3);border:1px solid var(--rule2);color:var(--ink);font-family:var(--mono);font-size:12px;padding:8px 10px;outline:none;" placeholder="🔍 搜索文件…"></div>
+        <div style="font-family:var(--mono);font-size:12px;color:var(--muted);line-height:2;padding:0 12px;">
+          <div style="color:var(--primary);">▸ 📁 .git</div><div style="color:var(--primary);">▸ 📁 src</div><div style="color:var(--primary);">▾ 📁 ui</div><div style="padding-left:16px;color:var(--primary);">▸ 📁 components</div><div style="padding-left:16px;color:var(--primary);">▸ 📁 state</div><div style="padding-left:16px;color:var(--ink2);">📄 App.tsx</div><div style="padding-left:16px;color:var(--ink2);">📄 main.tsx</div><div style="color:var(--primary);">▸ 📁 capabilities</div><div style="color:var(--success);">📄 tauri.conf.json</div><div style="color:var(--ink2);">📄 Cargo.toml</div><div style="color:var(--warn);">🌐 index.html</div>
+        </div>
+      </div>
+      <div class="tab-panel" id="tab-git" style="display:none;padding:12px;">
+        <div style="font-family:var(--pixel);font-size:10px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;margin-bottom:10px;">Changes · CaPilot</div>
+        <div style="font-family:var(--mono);font-size:12px;color:var(--ink2);line-height:2;">
+          <div style="color:var(--warn);">M  src/agent_runtime/adapter.rs <span style="color:var(--muted);">+12 -3</span></div>
+          <div style="color:var(--warn);">M  ui/components/composer.tsx <span style="color:var(--muted);">+45 -8</span></div>
+          <div style="color:var(--success);">A  src/esp/ble.rs <span style="color:var(--muted);">+230</span></div>
+          <div style="color:var(--danger);">D  Doc/old-notes.md <span style="color:var(--muted);">-156</span></div>
+        </div>
+        <div style="margin-top:12px;display:flex;gap:6px;"><span class="act-btn">Stage All</span><span class="act-btn">Commit</span><span class="act-btn">Pull</span><span class="act-btn">Push</span></div>
+      </div>
+    </div>
+    <div id="right-report">
+      <div class="report-header" onclick="toggleReport()">🤖 Master Agent Report <span class="report-toggle">▼</span></div>
+      <div class="report-body" id="report-body">
+        <div class="report-time">20s ago</div>
+        <div class="report-quote">"ESP32 OTA升级完成，等待下一步任务"</div>
+        <div class="report-meta">Task: OTA Firmware Update<br>Status: Waiting</div>
+        <div class="report-actions"><span class="rbtn">展开任务详情</span><span class="rbtn">跳转到 Master 终端</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- STATUS BAR -->
+<div id="statusbar">
+  <span class="sb-item"><span class="sb-dot bt"></span>蓝牙</span><span class="sb-item">📶 WiFi</span><span class="sb-sep"></span><span class="sb-item sb-battery">🔋 78%</span><span class="sb-sep"></span><span class="sb-item">汇报🔔 开</span><span class="sb-item">worker×2</span><span class="sb-spacer"></span><span class="sb-item sb-mode">模式 Auto</span><span class="sb-item">速度 auto</span>
+</div>
+</div>
+
+<script>
+// Tab switching
+document.querySelectorAll('#right-tabs-header .rtab').forEach(t => { t.addEventListener('click', () => { document.querySelectorAll('#right-tabs-header .rtab').forEach(x => x.classList.remove('active')); t.classList.add('active'); document.querySelectorAll('#right-tab-content .tab-panel').forEach(p => p.style.display = 'none'); const p = document.getElementById('tab-' + t.dataset.tab); if (p) p.style.display = 'block'; }); });
+
+// Master Report toggle
+window.toggleReport = function() { const b = document.getElementById('report-body'), t = document.querySelector('#right-report .report-toggle'); if (b.style.display === 'none') { b.style.display = 'block'; t.textContent = '▼'; } else { b.style.display = 'none'; t.textContent = '▲'; } };
+
+// Leftbar toggle
+window.toggleLeftbar = function() { const lb = document.getElementById('leftbar'); if (lb.style.display === 'none') { lb.style.display = ''; lb.style.width = ''; } else { lb.style.display = 'none'; } };
+
+// Toggle collapse (Master or Project)
+window.toggleGroup = function(id) { document.getElementById(id).classList.toggle('collapsed'); };
+
+// Select terminal + filter tab bar to project
+window.selectTerminal = function(el, proj) {
+  document.querySelectorAll('#leftbar .terminal-item').forEach(i => i.classList.remove('active'));
+  el.classList.add('active');
+  filterTabBar(proj);
+};
+
+// Double-click project → focus (highlight + filter tabs)
+window.focusProject = function(id) {
+  document.querySelectorAll('#leftbar .proj').forEach(p => p.classList.remove('focused'));
+  document.getElementById(id).classList.add('focused');
+  // Ensure expanded
+  document.getElementById(id).classList.remove('collapsed');
+  // Get project key from id (proj-capilot → capilot)
+  const proj = id.replace('proj-', '');
+  filterTabBar(proj);
+};
+
+// Filter tab bar to show only one project's tabs
+function filterTabBar(proj) {
+  const tabbar = document.getElementById('tabbar');
+  tabbar.dataset.project = proj;
+  // Update badge
+  const badge = tabbar.querySelector('.tab-proj-badge');
+  if (badge) badge.textContent = proj === 'master' ? 'Master' : proj.charAt(0).toUpperCase() + proj.slice(1);
+  // Show/hide tabs
+  tabbar.querySelectorAll('.tab-item').forEach(t => {
+    t.style.display = (t.dataset.project === proj || !t.dataset.project) ? '' : 'none';
+  });
+  // Highlight matching project in sidebar
+  document.querySelectorAll('#leftbar .proj').forEach(p => p.classList.remove('focused'));
+  const projEl = document.getElementById('proj-' + proj);
+  if (projEl) { projEl.classList.add('focused'); projEl.classList.remove('collapsed'); }
+}
+
+// Initialize: CaPilot focused
+filterTabBar('capilot');
+
+// Resize handles
+(function() {
+  const h = document.getElementById('resize-left'), b = document.getElementById('leftbar'); let sx, sw;
+  h.addEventListener('mousedown', e => { sx = e.clientX; sw = b.offsetWidth; h.classList.add('active'); document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none'; const mv = e => { b.style.width = Math.max(160, Math.min(500, sw + e.clientX - sx)) + 'px'; }, up = () => { h.classList.remove('active'); document.body.style.cursor = ''; document.body.style.userSelect = ''; document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); }; document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up); });
+})();
+(function() {
+  const h = document.getElementById('resize-right'), b = document.getElementById('rightbar'); let sx, sw;
+  h.addEventListener('mousedown', e => { sx = e.clientX; sw = b.offsetWidth; h.classList.add('active'); document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none'; const mv = e => { b.style.width = Math.max(220, Math.min(600, sw + sx - e.clientX)) + 'px'; }, up = () => { h.classList.remove('active'); document.body.style.cursor = ''; document.body.style.userSelect = ''; document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); }; document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up); });
+})();
+</script>
+</body>
+</html>
