@@ -3,7 +3,6 @@ import { LeftSidebar } from "./components/layout/LeftSidebar";
 import { MainArea } from "./components/layout/MainArea";
 import { RightSidebar } from "./components/layout/RightSidebar";
 import { StatusBar } from "./components/layout/StatusBar";
-import { Composer } from "./components/layout/Composer";
 import "./App.css";
 
 function App() {
@@ -15,7 +14,6 @@ function App() {
         <MainArea />
         <RightSidebar />
       </div>
-      <Composer />
       <StatusBar />
     </div>
   );

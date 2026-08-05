@@ -20,9 +20,9 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
     const term = new Terminal({
       cursorBlink: true,
       fontSize: 13,
-      fontFamily: "'JetBrains Mono', 'Cascadia Code', ui-monospace, monospace",
+      fontFamily: "'JetBrainsMono', ui-monospace, monospace",
       theme: {
-        background: "#07090F",
+        background: "#05070D",
         foreground: "#E8ECF1",
         cursor: "#8B5CF6",
         selectionBackground: "rgba(139, 92, 246, 0.3)",
@@ -89,8 +89,8 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
       ref={containerRef}
       style={{
         flex: 1,
-        padding: "4px 8px",
-        background: "var(--bg)",
+        padding: "10px 14px",
+        background: "#05070D",
       }}
     />
   );

@@ -47,6 +47,8 @@ body::after {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--rule2); }
 
+.tab-bar::-webkit-scrollbar { height: 2px; }
+
 /* ── App Shell ────────────────────────────────────────────────── */
 
 .app { display: flex; flex-direction: column; height: 100vh; position: relative; z-index: 1; }
@@ -196,7 +198,7 @@ body::after {
 
 .tab-runtime {
   font-family: var(--pixel); font-size: 8px; color: var(--brand);
-  letter-spacing: 1px; text-transform: uppercase;
+  letter-spacing: 1px;
 }
 
 .tab-close {

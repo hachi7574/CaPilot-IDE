@@ -5,7 +5,9 @@ import { EditorPanel } from "../editor/EditorPanel";
 export function ContentArea() {
   const tabs = useStore((s) => s.tabs);
   const activeTabId = useStore((s) => s.activeTabId);
+  const agents = useStore((s) => s.agents);
   const activeTab = tabs.find((t) => t.id === activeTabId);
+  const activeAgent = activeTab?.agentId ? agents.get(activeTab.agentId) : undefined;
 
   if (!activeTab) {
     return (
@@ -27,7 +29,7 @@ export function ContentArea() {
         <div className="panel-header">
           PANEL · {activeTab.title}{" "}
           {activeTab.type === "agent"
-            ? `(${activeTab.agentId?.slice(0, 6) || "master"})`
+            ? `(${activeAgent?.runtime || "claude"})`
             : ""}
         </div>
         {activeTab.type === "agent" && (

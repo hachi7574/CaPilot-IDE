@@ -115,9 +115,9 @@ export function Composer() {
       {/* Target line */}
       <div className="composer-target">
         <span>→</span>{" "}
-        {composerTarget === "master"
+        agent: {composerTarget === "master"
           ? "master"
-          : `agent: ${activeTab?.title || "none"}`}
+          : activeTab?.title || "none"}
       </div>
 
       {/* Input area */}
@@ -168,9 +168,6 @@ export function Composer() {
         </span>
         <button className="collapse-btn" onClick={toggleComposer}>
           {composerOpen ? "▼" : "▲"}
-        </button>
-        <button className="send-btn" onClick={handleSend}>
-          ↑ Send
         </button>
       </div>
     </div>
