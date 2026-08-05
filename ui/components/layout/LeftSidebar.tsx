@@ -89,6 +89,17 @@ export function LeftSidebar() {
     });
   };
 
+  // Spawn a terminal under a project, expanding the project first so the new
+  // terminal is immediately visible (hover "+" button + project context menu).
+  const spawnInProject = (proj: string) => {
+    setCollapsedProjs((prev) => {
+      const next = new Set(prev);
+      next.delete(proj);
+      return next;
+    });
+    spawnAgent("standalone", proj).catch(console.error);
+  };
+
   const openAgentTab = useCallback(
     (id: string, title?: string) => {
       if (!tabs.find((t) => t.id === id)) {
@@ -173,11 +184,17 @@ export function LeftSidebar() {
   const toggleMaster = () => setMasterExpanded((v) => !v);
 
   // [☰] collapses / expands ALL project groups (sidebar stays visible).
+  // Empty projects (zero terminals) are never collapsible — they have no
+  // triangle and their header doesn't toggle — so they are excluded here.
+  const expandableProjects = projectNames.filter(
+    (n) => (agentsByProject.get(n)?.agents?.length ?? 0) > 0
+  );
   const allCollapsed =
-    projectNames.length > 0 && projectNames.every((n) => collapsedProjs.has(n));
+    expandableProjects.length > 0 &&
+    expandableProjects.every((n) => collapsedProjs.has(n));
   const toggleAllProjects = () => {
-    if (projectNames.length === 0) return;
-    setCollapsedProjs(allCollapsed ? new Set() : new Set(projectNames));
+    if (expandableProjects.length === 0) return;
+    setCollapsedProjs(allCollapsed ? new Set() : new Set(expandableProjects));
   };
 
   // [📁+] create a new workspace project and surface it in the tree.
@@ -247,7 +264,7 @@ export function LeftSidebar() {
                 ☰
               </span>
               <span className="sidebar-btn" onClick={() => setNprojOpen(true)} title="新建项目">
-                📁+
+                +
               </span>
             </div>
 
@@ -269,9 +286,9 @@ export function LeftSidebar() {
                     });
                   }}
                 >
+                  <span className="uj-master-arrow">▾</span>
                   <span className="u9-master-icon">🔄</span>
                   <span className="u9-master-name">Master</span>
-                  <span className="uj-master-arrow">▲</span>
                 </div>
                 {masterExpanded && (
                   <>
@@ -334,14 +351,17 @@ export function LeftSidebar() {
                   const proj = agentsByProject.get(name);
                   const projAgents = proj?.agents ?? [];
                   const projCwd = proj?.cwd;
+                  // A project with zero terminals has nothing to collapse: no
+                  // triangle, and the header click does not toggle.
+                  const hasAgents = projAgents.length > 0;
                   return (
                     <div
                       key={name}
-                      className={`proj${collapsedProjs.has(name) ? " collapsed" : ""}${focusedProj === name ? " focused" : ""}`}
+                      className={`proj${hasAgents && collapsedProjs.has(name) ? " collapsed" : ""}${focusedProj === name ? " focused" : ""}`}
                     >
                       <div
                         className="proj-header"
-                        onClick={() => toggleProj(name)}
+                        onClick={() => hasAgents && toggleProj(name)}
                         onDoubleClick={() => focusProject(name)}
                         onContextMenu={(e) => {
                           e.preventDefault();
@@ -354,9 +374,18 @@ export function LeftSidebar() {
                           });
                         }}
                       >
-                        <span className="pj-icon">📁</span>
+                        {hasAgents && <span className="pj-arrow">▾</span>}
                         <span className="pj-name">{name}</span>
-                        <span className="pj-arrow">▲</span>
+                        <button
+                          className="um-new-term"
+                          title="新建终端"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            spawnInProject(name);
+                          }}
+                        >
+                          +
+                        </button>
                       </div>
                       {projAgents.length === 0 ? (
                         <div className="nproj-empty-row">（空）· 右键新建终端</div>
@@ -397,7 +426,13 @@ export function LeftSidebar() {
         )}
       </div>
 
-      {ctx && <ContextMenu ctx={ctx} onClose={() => setCtx(null)} />}
+      {ctx && (
+        <ContextMenu
+          ctx={ctx}
+          onClose={() => setCtx(null)}
+          onSpawnInProject={spawnInProject}
+        />
+      )}
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
       {nprojOpen && (
         <NewProjectModal
@@ -514,7 +549,15 @@ function NewProjectModal({
 
 /* ── Right-click context menu ─────────────────────────────────── */
 
-function ContextMenu({ ctx, onClose }: { ctx: CtxState; onClose: () => void }) {
+function ContextMenu({
+  ctx,
+  onClose,
+  onSpawnInProject,
+}: {
+  ctx: CtxState;
+  onClose: () => void;
+  onSpawnInProject?: (project: string) => void;
+}) {
   // ── Project context ───────────────────────────────────────────
   if (ctx.project) {
     const proj = ctx.project;
@@ -529,7 +572,10 @@ function ContextMenu({ ctx, onClose }: { ctx: CtxState; onClose: () => void }) {
         <div
           className="ctx-item"
           onClick={() => {
-            spawnAgent("standalone", proj);
+            // Spawn + expand (so a terminal added to an empty/collapsed
+            // project is immediately visible).
+            if (onSpawnInProject) onSpawnInProject(proj);
+            else spawnAgent("standalone", proj);
             onClose();
           }}
         >
@@ -668,7 +714,10 @@ function ContextMenu({ ctx, onClose }: { ctx: CtxState; onClose: () => void }) {
         </div>
       ))}
       <div className="ctx-sep" />
-      {project && !isMasterProject && projCount === 1 ? (
+      <div className="ctx-item danger" onClick={closeAgent}>
+        ✕ 终止并关闭
+      </div>
+      {project && !isMasterProject && projCount === 1 && (
         <div
           className="ctx-item danger"
           onClick={() => {
@@ -679,10 +728,6 @@ function ContextMenu({ ctx, onClose }: { ctx: CtxState; onClose: () => void }) {
           }}
         >
           🗑 关闭并移除项目
-        </div>
-      ) : (
-        <div className="ctx-item danger" onClick={closeAgent}>
-          ✕ 关闭并终止
         </div>
       )}
     </div>

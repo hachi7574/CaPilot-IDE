@@ -1304,3 +1304,42 @@ body::after {
   transition: all 0.2s var(--ease-apple);
 }
 .uj-master-new:hover { background: var(--bg3); color: var(--brand); }
+
+/* ── LeftSidebar refinements (um-*) — hover "+" new-terminal on project headers ── */
+
+/* Small "+" that appears on the right of a project header on hover/focus.
+   Clicking spawns a terminal under that project (and expands it). Hidden by
+   default; mirrors .tm-close but styled as an "add" (brand) affordance. */
+.um-new-term {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-left: 2px;
+  flex-shrink: 0;
+  font-family: var(--pixel);
+  font-size: 12px;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 0;
+  transition: all .15s var(--ease-apple);
+}
+
+.proj-header:hover .um-new-term,
+.proj-header:focus-within .um-new-term {
+  display: flex;
+}
+
+.um-new-term:hover {
+  color: var(--primary);
+  background: rgba(139, 92, 246, .12);
+}
+
+/* The collapse triangle now sits at the LEFT of the project title (glyph ▾);
+   the existing .proj.collapsed .pj-arrow rotate(-90deg) still flips it to ▸.
+   JSX order (arrow → name → +) keeps the + button right-aligned. */
