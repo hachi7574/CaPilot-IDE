@@ -15,6 +15,8 @@ export async function spawnAgent(
     role,
     project: DEFAULT_PROJECT,
     resumeKey: null,
+    model: s.selectedModel,
+    speed: s.speed,
     onData: channel,
   })) as AgentInfo;
   flush(info.id);

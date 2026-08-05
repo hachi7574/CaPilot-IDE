@@ -325,6 +325,7 @@ function FilesPanel() {
   const root = useProjectRoot();
   const [dirs, setDirs] = useState<Map<string, FsEntry[]>>(new Map());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [filter, setFilter] = useState("");
   const addTab = useStore((s) => s.addTab);
 
   useEffect(() => {
@@ -340,6 +341,33 @@ function FilesPanel() {
       setDirs((prev) => new Map(prev).set(dir, []));
     }
   };
+
+  /** Recursively load the whole tree so the search filter can match deep files. */
+  const loadTree = async (dir: string) => {
+    const visited = new Set<string>();
+    const stack = [dir];
+    while (stack.length) {
+      const d = stack.pop()!;
+      if (visited.has(d)) continue;
+      visited.add(d);
+      try {
+        const list = await invoke<FsEntry[]>("fs_list", { dir: d });
+        setDirs((prev) => new Map(prev).set(d, list));
+        for (const e of list) {
+          if (e.is_dir && !SKIP_DIRS.has(e.name)) stack.push(`${d}/${e.name}`);
+        }
+      } catch {
+        // Unreadable directory — skip.
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (filter.trim() === "") return;
+    const t = setTimeout(() => loadTree(root), 200);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filter, root]);
 
   const toggleDir = (dir: string) => {
     if (expanded.has(dir)) {
@@ -358,13 +386,20 @@ function FilesPanel() {
     addTab({ id: `file:${path}`, type: "editor", filePath: path, title: name });
   };
 
+  const isFiltering = filter.trim() !== "";
+  const q = filter.trim().toLowerCase();
+
   const renderEntries = (dir: string, depth: number): React.ReactNode => {
     const entries = (dirs.get(dir) || [])
       .filter((e) => !SKIP_DIRS.has(e.name))
+      // While filtering, keep every directory visible so matching files deep
+      // down stay reachable; files are matched by name.
+      .filter((e) => q === "" || e.is_dir || e.name.toLowerCase().includes(q))
       .sort((a, b) => (a.is_dir === b.is_dir ? a.name.localeCompare(b.name) : a.is_dir ? -1 : 1));
     return entries.map((e) => {
       const path = `${dir}/${e.name}`;
       if (e.is_dir) {
+        const open = isFiltering || expanded.has(path);
         return (
           <div key={path}>
             <div
@@ -372,9 +407,9 @@ function FilesPanel() {
               style={{ paddingLeft: depth * 14 }}
               onClick={() => toggleDir(path)}
             >
-              {expanded.has(path) ? "▾" : "▸"} 📁 {e.name}
+              {open ? "▾" : "▸"} 📁 {e.name}
             </div>
-            {expanded.has(path) && renderEntries(path, depth + 1)}
+            {open && renderEntries(path, depth + 1)}
           </div>
         );
       }
@@ -384,6 +419,7 @@ function FilesPanel() {
           className="file"
           style={{ paddingLeft: depth * 14 }}
           onClick={() => openFile(path, e.name)}
+          title={path}
         >
           📄 {e.name}
         </div>
@@ -396,6 +432,14 @@ function FilesPanel() {
       <div style={{ padding: "0 12px 8px", fontSize: 11, color: "var(--muted)", fontFamily: "var(--mono)" }}>
         {root}
       </div>
+      <div className="files-search" style={{ padding: "0 12px 8px" }}>
+        <input
+          type="text"
+          placeholder="🔍 搜索文件…"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+        />
+      </div>
       <div className="files-tree">{renderEntries(root, 0)}</div>
     </div>
   );
@@ -407,6 +451,8 @@ interface GitEntry {
   index: string;
   worktree: string;
   path: string;
+  add: number;
+  del: number;
 }
 
 function statusGlyph(e: GitEntry): { glyph: string; cls: string } {
@@ -422,27 +468,113 @@ function statusGlyph(e: GitEntry): { glyph: string; cls: string } {
 function GitPanel() {
   const root = useProjectRoot();
   const [entries, setEntries] = useState<GitEntry[]>([]);
+  const [branch, setBranch] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [diffFor, setDiffFor] = useState<string | null>(null);
+  const [diffText, setDiffText] = useState<Record<string, string>>({});
+
+  const refresh = async () => {
+    try {
+      const list = await invoke<GitEntry[]>("git_status", { dir: root });
+      setEntries(list ?? []);
+      setError(null);
+    } catch (e) {
+      setEntries([]);
+      setError(String(e));
+    }
+    try {
+      const br = await invoke<string>("git_branch", { repo: root });
+      setBranch(br);
+    } catch {
+      setBranch("");
+    }
+  };
 
   useEffect(() => {
-    invoke<GitEntry[]>("git_status", { dir: root })
-      .then((list) => {
-        setEntries(list ?? []);
-        setError(null);
-      })
-      .catch((e) => {
-        setEntries([]);
-        setError(String(e));
-      });
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [root]);
+
+  const runAction = async (fn: () => Promise<unknown>, okMsg: string) => {
+    setBusy(true);
+    setFeedback(null);
+    try {
+      await fn();
+      setFeedback(okMsg);
+      await refresh();
+    } catch (e) {
+      setFeedback(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const stageAll = () =>
+    runAction(async () => {
+      const files = entries.map((e) => e.path);
+      if (files.length === 0) return;
+      await invoke("git_stage", { repo: root, files });
+    }, "已暂存全部变更");
+
+  const toggleFile = (e: GitEntry) => {
+    const staged = e.index !== " " && e.index !== "?";
+    return runAction(async () => {
+      await invoke(staged ? "git_unstage" : "git_stage", {
+        repo: root,
+        files: [e.path],
+      });
+      setDiffFor(null);
+    }, staged ? "已取消暂存" : "已暂存");
+  };
+
+  const commit = () =>
+    runAction(async () => {
+      const m = msg.trim();
+      if (!m) throw new Error("请输入 commit message");
+      await invoke("git_commit", { repo: root, message: m });
+      setMsg("");
+    }, "提交成功");
+
+  const pull = () => runAction(() => invoke("git_pull", { repo: root }), "Pull 完成");
+  const push = () => runAction(() => invoke("git_push", { repo: root }), "Push 完成");
+
+  const toggleDiff = async (e: GitEntry) => {
+    if (diffFor === e.path) {
+      setDiffFor(null);
+      return;
+    }
+    setDiffFor(e.path);
+    try {
+      const text = await invoke<string>("git_diff", { repo: root, file: e.path });
+      setDiffText((prev) => ({ ...prev, [e.path]: text }));
+    } catch {
+      setDiffText((prev) => ({ ...prev, [e.path]: "" }));
+    }
+  };
 
   const projName = root.split("/").pop();
 
   return (
     <div className="tab-panel" id="tab-git" style={{ padding: 12 }}>
-      <div className="git-title">Changes · {projName}</div>
+      <div className="git-title">
+        {branch ? `⎇ ${branch}` : "Changes"} · {projName}
+      </div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+        <span className="act-btn" onClick={() => refresh()}>
+          ↻ 刷新
+        </span>
+        <span className={`act-btn${busy ? " active" : ""}`} onClick={stageAll}>
+          Stage All
+        </span>
+      </div>
       {error && (
         <div style={{ fontSize: 11, color: "var(--warn)", marginBottom: 8 }}>{error}</div>
+      )}
+      {feedback && (
+        <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 8 }}>{feedback}</div>
       )}
       <div className="git-changes">
         {entries.length === 0 && !error && (
@@ -450,18 +582,65 @@ function GitPanel() {
         )}
         {entries.map((e) => {
           const { glyph, cls } = statusGlyph(e);
+          const staged = e.index !== " " && e.index !== "?";
+          const counts =
+            e.add + e.del > 0 ? `+${e.add} -${e.del}` : staged ? "staged" : "";
           return (
-            <div className={cls} key={e.path}>
-              {glyph} {e.path}
+            <div key={e.path}>
+              <div className={`${cls} git-row`} onClick={() => toggleFile(e)}>
+                <span
+                  className="git-toggle"
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    toggleDiff(e);
+                  }}
+                  title="查看 diff"
+                >
+                  {diffFor === e.path ? "▾" : "▸"}
+                </span>
+                <span className="git-glyph">{glyph}</span>
+                <span className="git-path">{e.path}</span>
+                <span className="git-counts">{counts}</span>
+              </div>
+              {diffFor === e.path && (
+                <pre className="git-diff">
+                  {diffText[e.path] || "(无 diff — 可能为已暂存或二进制变更)"}
+                </pre>
+              )}
             </div>
           );
         })}
       </div>
-      <div className="git-actions">
-        <span className="act-btn">Stage All</span>
-        <span className="act-btn">Commit</span>
-        <span className="act-btn">Pull</span>
-        <span className="act-btn">Push</span>
+      <div className="git-commit" style={{ marginTop: 12, display: "flex", gap: 6 }}>
+        <input
+          type="text"
+          placeholder="Commit message…"
+          value={msg}
+          onChange={(e) => setMsg(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && commit()}
+          style={{
+            flex: 1,
+            background: "var(--bg3)",
+            border: "1px solid var(--rule2)",
+            color: "var(--ink)",
+            fontFamily: "var(--mono)",
+            fontSize: 12,
+            padding: "6px 8px",
+            outline: "none",
+            minWidth: 0,
+          }}
+        />
+        <span className="act-btn accent" onClick={commit}>
+          Commit
+        </span>
+      </div>
+      <div className="git-actions" style={{ marginTop: 8 }}>
+        <span className="act-btn" onClick={pull}>
+          Pull
+        </span>
+        <span className="act-btn" onClick={push}>
+          Push
+        </span>
       </div>
     </div>
   );

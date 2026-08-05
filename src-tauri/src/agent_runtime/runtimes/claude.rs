@@ -100,10 +100,14 @@ impl AgentRuntimeAdapter for ClaudeAdapter {
     }
 
     fn spawn_interactive(&self, session: &AgentSession) -> Result<(String, Vec<String>), String> {
+        // Composer `[模型↑]` selection wins; fall back to sonnet for interactive.
+        let model = session
+            .model
+            .clone()
+            .unwrap_or_else(|| "claude-sonnet-5".to_string());
         let mut args = vec![
             "--model".to_string(),
-            // Default to sonnet for interactive; user can change via composer
-            "claude-sonnet-5".to_string(),
+            model,
         ];
 
         // Add permission mode args
@@ -116,13 +120,17 @@ impl AgentRuntimeAdapter for ClaudeAdapter {
     }
 
     fn spawn_headless(&self, session: &AgentSession, prompt: &str) -> Result<(String, Vec<String>), String> {
+        let model = session
+            .model
+            .clone()
+            .unwrap_or_else(|| "claude-sonnet-5".to_string());
         let mut args = vec![
             "-p".to_string(),
             prompt.to_string(),
             "--output-format".to_string(),
             "stream-json".to_string(),
             "--model".to_string(),
-            "claude-sonnet-5".to_string(),
+            model,
         ];
 
         args.extend(self.speed_args(session.speed));

@@ -37,6 +37,15 @@ fn role_str(role: &AgentRole) -> &'static str {
     }
 }
 
+fn parse_speed(s: &str) -> Speed {
+    match s {
+        "high" => Speed::High,
+        "mid" => Speed::Mid,
+        "fast" => Speed::Fast,
+        _ => Speed::Auto,
+    }
+}
+
 /// Prepend `~/CaPilot/bin` to PATH so every agent shell can invoke the
 /// `capilot` orchestration shim (DevPlan §5.2).
 fn capilot_path_env() -> Vec<(String, String)> {
@@ -61,6 +70,8 @@ fn build_and_spawn(
     role: AgentRole,
     runtime: &str,
     resume_key: Option<String>,
+    model: Option<String>,
+    speed: &str,
     cwd: PathBuf,
     on_data: Channel<Vec<u8>>,
 ) -> Result<AgentInfo, String> {
@@ -73,7 +84,8 @@ fn build_and_spawn(
         id: id.to_string(),
         runtime: runtime.to_string(),
         mode: PermissionMode::Ask,
-        speed: Speed::Auto,
+        speed: parse_speed(speed),
+        model,
         cwd: cwd.clone(),
         context_dir: cwd.clone(),
         role: role.clone(),
@@ -164,6 +176,8 @@ async fn agent_spawn(
     role: String,
     project: String,
     resume_key: Option<String>,
+    model: Option<String>,
+    speed: Option<String>,
     on_data: Channel<Vec<u8>>,
 ) -> Result<AgentInfo, String> {
     let agent_id = uuid::Uuid::new_v4().to_string();
@@ -192,6 +206,8 @@ async fn agent_spawn(
         role,
         &runtime,
         resume_key,
+        model,
+        &speed.unwrap_or_else(|| "auto".to_string()),
         cwd,
         on_data,
     )
@@ -225,6 +241,8 @@ async fn agent_resume(
         role,
         &rec.runtime,
         rec.resume_key.clone(),
+        None,
+        "auto",
         rec.cwd.clone(),
         on_data,
     )
@@ -311,6 +329,8 @@ async fn agent_switch_runtime(
         role,
         &runtime,
         rec.resume_key.clone(),
+        None,
+        "auto",
         rec.cwd.clone(),
         on_data,
     )
@@ -425,6 +445,13 @@ async fn runtime_list_available() -> Vec<agent_runtime::adapter::RuntimeInfo> {
     out
 }
 
+/// Models a runtime can offer — powers the composer `[模型↑]` switcher
+/// (DevPlan §3.2).
+#[tauri::command]
+async fn runtime_models(runtime: String) -> Vec<agent_runtime::adapter::ModelInfo> {
+    get_adapter(&runtime).list_models()
+}
+
 // ── Filesystem commands ─────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -489,6 +516,8 @@ pub struct GitEntry {
     pub index: String,
     pub worktree: String,
     pub path: String,
+    pub add: i32,
+    pub del: i32,
 }
 
 /// Parse `git status --porcelain` output into structured entries.
@@ -511,23 +540,116 @@ fn parse_porcelain(text: &str) -> Vec<GitEntry> {
             index: index.to_string(),
             worktree: worktree.to_string(),
             path,
+            add: 0,
+            del: 0,
         });
     }
     entries
 }
 
-#[tauri::command]
-async fn git_status(dir: String) -> Result<Vec<GitEntry>, String> {
+/// Run `git` in `repo`, returning trimmed stdout. Errors surface stderr.
+fn git_run(repo: &str, args: &[&str]) -> Result<String, String> {
     let out = std::process::Command::new("git")
-        .args(["-C", &dir, "status", "--porcelain"])
+        .arg("-C")
+        .arg(repo)
+        .args(args)
         .output()
         .map_err(|e| format!("git failed: {}", e))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("git error (not a repository?): {}", err.trim()));
+        return Err(format!("git error: {}", err.trim()));
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    Ok(parse_porcelain(&text))
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Parse `git diff --numstat` lines ("adds\tdeletes\tpath") into a path→(add,del) map.
+fn parse_numstat(text: &str) -> std::collections::HashMap<String, (i32, i32)> {
+    let mut map = std::collections::HashMap::new();
+    for line in text.lines() {
+        let mut parts = line.split('\t');
+        let add = parts.next().unwrap_or("0").trim();
+        let del = parts.next().unwrap_or("0").trim();
+        let path = parts.next().unwrap_or("").trim();
+        // Binary files report "-" instead of a number.
+        if path.is_empty() || add == "-" || del == "-" {
+            continue;
+        }
+        if let (Ok(a), Ok(d)) = (add.parse::<i32>(), del.parse::<i32>()) {
+            map.insert(path.to_string(), (a, d));
+        }
+    }
+    map
+}
+
+#[tauri::command]
+async fn git_status(dir: String) -> Result<Vec<GitEntry>, String> {
+    let text = git_run(&dir, &["status", "--porcelain"])?;
+    let mut entries = parse_porcelain(&text);
+
+    // Per-file line counts: staged (--cached) + unstaged diffs.
+    let mut counts: std::collections::HashMap<String, (i32, i32)> =
+        std::collections::HashMap::new();
+    for args in [&["diff", "--cached", "--numstat"][..], &["diff", "--numstat"][..]] {
+        if let Ok(out) = git_run(&dir, args) {
+            for (path, (a, d)) in parse_numstat(&out) {
+                let c = counts.entry(path).or_insert((0, 0));
+                c.0 += a;
+                c.1 += d;
+            }
+        }
+    }
+    for e in &mut entries {
+        if let Some((a, d)) = counts.get(&e.path) {
+            e.add = *a;
+            e.del = *d;
+        } else if e.index == "?" && e.worktree == "?" {
+            // Untracked file: every line counts as an addition.
+            let full = std::path::Path::new(&dir).join(&e.path);
+            if let Ok(content) = std::fs::read_to_string(&full) {
+                e.add = content.lines().count() as i32;
+            }
+        }
+    }
+    Ok(entries)
+}
+
+#[tauri::command]
+async fn git_stage(repo: String, files: Vec<String>) -> Result<(), String> {
+    let mut args: Vec<&str> = vec!["add", "--"];
+    args.extend(files.iter().map(String::as_str));
+    git_run(&repo, &args).map(|_| ())
+}
+
+#[tauri::command]
+async fn git_unstage(repo: String, files: Vec<String>) -> Result<(), String> {
+    let mut args: Vec<&str> = vec!["reset", "--"];
+    args.extend(files.iter().map(String::as_str));
+    git_run(&repo, &args).map(|_| ())
+}
+
+#[tauri::command]
+async fn git_commit(repo: String, message: String) -> Result<(), String> {
+    git_run(&repo, &["commit", "-m", message.as_str()]).map(|_| ())
+}
+
+#[tauri::command]
+async fn git_branch(repo: String) -> Result<String, String> {
+    git_run(&repo, &["branch", "--show-current"])
+}
+
+#[tauri::command]
+async fn git_diff(repo: String, file: String) -> Result<String, String> {
+    git_run(&repo, &["diff", "--", file.as_str()])
+}
+
+#[tauri::command]
+async fn git_pull(repo: String) -> Result<(), String> {
+    git_run(&repo, &["pull"]).map(|_| ())
+}
+
+#[tauri::command]
+async fn git_push(repo: String) -> Result<(), String> {
+    git_run(&repo, &["push"]).map(|_| ())
 }
 
 #[cfg(test)]
@@ -620,10 +742,18 @@ pub fn run() {
             smart_return_set,
             smart_return_get,
             runtime_list_available,
+            runtime_models,
             fs_read,
             fs_write,
             fs_list,
             git_status,
+            git_stage,
+            git_unstage,
+            git_commit,
+            git_branch,
+            git_diff,
+            git_pull,
+            git_push,
             esp_connect,
             esp_disconnect,
             esp_status,

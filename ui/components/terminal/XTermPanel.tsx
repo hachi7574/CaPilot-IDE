@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -26,6 +26,18 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
   const channelRef = useRef<Channel<number[]> | null>(null);
   const agentChannels = useStore((s) => s.agentChannels);
   const channel = agentChannels.get(agentId);
+
+  // DevPlan §4.6 — worker lock: input typed while the agent is a worker is
+  // intercepted instead of silently forwarded; the user picks 仍然发送/解锁.
+  const [lockWarning, setLockWarning] = useState(false);
+  const lockedInputRef = useRef("");
+  const unlockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (unlockTimerRef.current) clearTimeout(unlockTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -115,8 +127,17 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
         });
     }
 
-    // Forward user input to the PTY (raw keystroke passthrough).
+    // Forward user input to the PTY (raw keystroke passthrough). Worker agents
+    // are locked (DevPlan §4.6): swallow the keystrokes into a buffer and show a
+    // warning instead of silently dropping them.
     term.onData((data) => {
+      const role = useStore.getState().agents.get(agentId)?.role;
+      const unlocked = useStore.getState().workerUnlockId === agentId;
+      if (role === "worker" && !unlocked) {
+        lockedInputRef.current += data;
+        setLockWarning(true);
+        return;
+      }
       invoke("agent_write", { id: agentId, data, raw: true }).catch(() => {});
     });
 
@@ -148,6 +169,28 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId, channel]);
 
+  const handleStillSendTerminal = () => {
+    const text = lockedInputRef.current;
+    if (text) {
+      // Line submission (raw:false appends \r), matching the composer send.
+      invoke("agent_write", { id: agentId, data: text, raw: false }).catch(() => {});
+    }
+    lockedInputRef.current = "";
+    setLockWarning(false);
+  };
+
+  const handleUnlockTerminal = () => {
+    setLockWarning(false);
+    lockedInputRef.current = "";
+    useStore.getState().setWorkerUnlock(agentId);
+    // "解锁 allows input for a bit" — auto-relock after 8s.
+    if (unlockTimerRef.current) clearTimeout(unlockTimerRef.current);
+    unlockTimerRef.current = setTimeout(() => {
+      const s = useStore.getState();
+      if (s.workerUnlockId === agentId) s.setWorkerUnlock(null);
+    }, 8000);
+  };
+
   return (
     <div
       ref={containerRef}
@@ -155,7 +198,24 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
         flex: 1,
         padding: "10px 14px",
         background: "#05070D",
+        position: "relative",
       }}
-    />
+    >
+      {lockWarning && (
+        <div className="term-lock-banner">
+          <span>🔒 此 agent 是 worker，输入会被编排结果覆盖</span>
+          <button onClick={handleStillSendTerminal}>仍然发送</button>
+          <button onClick={handleUnlockTerminal}>解锁</button>
+          <button
+            onClick={() => {
+              lockedInputRef.current = "";
+              setLockWarning(false);
+            }}
+          >
+            知道了
+          </button>
+        </div>
+      )}
+    </div>
   );
 }

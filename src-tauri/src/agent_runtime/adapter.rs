@@ -62,6 +62,8 @@ pub struct AgentSession {
     pub runtime: RuntimeId,
     pub mode: PermissionMode,
     pub speed: Speed,
+    /// Selected model id (composer `[模型↑]`). `None` = runtime default.
+    pub model: Option<String>,
     pub cwd: PathBuf,
     pub context_dir: PathBuf,
     pub role: AgentRole,

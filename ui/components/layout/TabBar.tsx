@@ -13,7 +13,9 @@ export function TabBar() {
   const activeTabId = useStore((s) => s.activeTabId);
   const agents = useStore((s) => s.agents);
   const workerMode = useStore((s) => s.workerMode);
+  const draggedTabId = useStore((s) => s.draggedTabId);
   const setActiveTab = useStore((s) => s.setActiveTab);
+  const setDraggedTabId = useStore((s) => s.setDraggedTabId);
   const toggleLeftSidebar = useStore((s) => s.toggleLeftSidebar);
   const closeTab = useStore((s) => s.closeTab);
 
@@ -47,7 +49,14 @@ export function TabBar() {
         return (
           <div
             key={tab.id}
-            className={`tab-item${tab.id === activeTabId ? " active" : ""}`}
+            className={`tab-item${tab.id === activeTabId ? " active" : ""}${draggedTabId === tab.id ? " dragging" : ""}`}
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData("text/plain", tab.id);
+              e.dataTransfer.effectAllowed = "copy";
+              setDraggedTabId(tab.id);
+            }}
+            onDragEnd={() => setDraggedTabId(null)}
             onClick={() => setActiveTab(tab.id)}
           >
             <span className={`tab-dot ${status}`} />

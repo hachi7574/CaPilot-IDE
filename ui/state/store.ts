@@ -140,9 +140,25 @@ interface AppState {
   composerOpen: boolean;
   permissionMode: PermissionMode;
   speed: Speed;
+  /** Runtime model id chosen via composer `[模型↑]` (null = runtime default). */
+  selectedModel: string | null;
   workerMode: boolean;
   draftHistory: string[];
   draftIndex: number;
+
+  // Split layout (DevPlan §3.1.2) — paneA/paneB hold tab ids; a null pair
+  // means the default single-panel view.
+  splitPaneA: string | null;
+  splitPaneB: string | null;
+  splitDirection: "row" | "column" | null;
+  /** 0..1 fraction of the container taken by paneA. */
+  splitRatio: number;
+  /** Tab id currently being dragged (for edge-drop feedback). */
+  draggedTabId: string | null;
+
+  // Worker lock (DevPlan §4.6) — agent id currently unlocked (allows a send /
+  // terminal input) despite being a worker.
+  workerUnlockId: string | null;
 
   // Sidebars
   leftSidebarOpen: boolean;
@@ -171,10 +187,17 @@ interface AppState {
   addTabSilent: (tab: Tab) => void;
   closeTab: (id: string) => void;
   setActiveTab: (id: string) => void;
+  setSplit: (paneA: string, paneB: string, direction: "row" | "column") => void;
+  clearSplit: () => void;
+  removeSplitPane: (id: string) => void;
+  setSplitRatio: (ratio: number) => void;
+  setDraggedTabId: (id: string | null) => void;
+  setWorkerUnlock: (id: string | null) => void;
   setComposerTarget: (target: "agent" | "master") => void;
   toggleComposer: () => void;
   setPermissionMode: (mode: PermissionMode) => void;
   setSpeed: (speed: Speed) => void;
+  setSelectedModel: (model: string | null) => void;
   toggleWorkerMode: () => void;
   pushDraft: (text: string) => void;
   navigateDraft: (dir: -1 | 1) => string | null;
@@ -201,6 +224,7 @@ export const useStore = create<AppState>((set, get) => ({
   composerOpen: true,
   permissionMode: "ask",
   speed: "auto",
+  selectedModel: null,
   workerMode: false,
   draftHistory: [],
   draftIndex: -1,
@@ -208,6 +232,12 @@ export const useStore = create<AppState>((set, get) => ({
   rightSidebarOpen: true,
   leftWidth: 248,
   rightWidth: 340,
+  splitPaneA: null,
+  splitPaneB: null,
+  splitDirection: null,
+  splitRatio: 0.5,
+  draggedTabId: null,
+  workerUnlockId: null,
   espStatus: {
     connected: false,
     kind: null,
@@ -287,10 +317,15 @@ export const useStore = create<AppState>((set, get) => ({
   setSmartReturn: (enabled) => set({ smartReturn: enabled }),
 
   addTab: (tab) =>
-    set((s) => ({
-      tabs: [...s.tabs.filter((t) => t.id !== tab.id), tab],
-      activeTabId: tab.id,
-    })),
+    set((s) => {
+      const tabs = [...s.tabs.filter((t) => t.id !== tab.id), tab];
+      // With an active split, surface a newly opened tab in the primary pane.
+      const splitActive = s.splitPaneA !== null && s.splitPaneB !== null;
+      if (splitActive && s.splitPaneA !== tab.id && s.splitPaneB !== tab.id) {
+        return { tabs, activeTabId: tab.id, splitPaneA: tab.id };
+      }
+      return { tabs, activeTabId: tab.id };
+    }),
 
   addTabSilent: (tab) =>
     set((s) => ({
@@ -300,12 +335,93 @@ export const useStore = create<AppState>((set, get) => ({
   closeTab: (id) =>
     set((s) => {
       const tabs = s.tabs.filter((t) => t.id !== id);
+      // Closing a tab that occupies a split pane collapses the split so the
+      // remaining pane becomes the single view.
+      const splitActive = s.splitPaneA !== null && s.splitPaneB !== null;
+      if (splitActive) {
+        if (s.splitPaneA === id && s.splitPaneB === id) {
+          return {
+            tabs,
+            activeTabId: tabs[tabs.length - 1]?.id ?? null,
+            splitPaneA: null,
+            splitPaneB: null,
+            splitDirection: null,
+          };
+        }
+        if (s.splitPaneA === id) {
+          return {
+            tabs,
+            activeTabId: s.splitPaneB,
+            splitPaneA: null,
+            splitPaneB: null,
+            splitDirection: null,
+          };
+        }
+        if (s.splitPaneB === id) {
+          return {
+            tabs,
+            activeTabId: s.splitPaneA,
+            splitPaneA: null,
+            splitPaneB: null,
+            splitDirection: null,
+          };
+        }
+      }
       const activeTabId =
         s.activeTabId === id ? (tabs[tabs.length - 1]?.id ?? null) : s.activeTabId;
       return { tabs, activeTabId };
     }),
 
-  setActiveTab: (id) => set({ activeTabId: id }),
+  setActiveTab: (id) =>
+    set((s) => {
+      // With an active split, clicking a tab that isn't already visible focuses
+      // it in the primary pane (paneA).
+      const splitActive = s.splitPaneA !== null && s.splitPaneB !== null;
+      if (splitActive && s.splitPaneA !== id && s.splitPaneB !== id) {
+        return { activeTabId: id, splitPaneA: id };
+      }
+      return { activeTabId: id };
+    }),
+
+  setSplit: (paneA, paneB, direction) =>
+    set({
+      splitPaneA: paneA,
+      splitPaneB: paneB,
+      splitDirection: direction,
+      splitRatio: 0.5,
+    }),
+
+  clearSplit: () =>
+    set({ splitPaneA: null, splitPaneB: null, splitDirection: null }),
+
+  removeSplitPane: (id) =>
+    set((s) => {
+      if (s.splitPaneA === null || s.splitPaneB === null) return {};
+      if (s.splitPaneA === id) {
+        return {
+          activeTabId: s.splitPaneB,
+          splitPaneA: null,
+          splitPaneB: null,
+          splitDirection: null,
+        };
+      }
+      if (s.splitPaneB === id) {
+        return {
+          activeTabId: s.splitPaneA,
+          splitPaneA: null,
+          splitPaneB: null,
+          splitDirection: null,
+        };
+      }
+      return {};
+    }),
+
+  setSplitRatio: (ratio) =>
+    set({ splitRatio: Math.max(0.2, Math.min(0.8, ratio)) }),
+
+  setDraggedTabId: (id) => set({ draggedTabId: id }),
+
+  setWorkerUnlock: (id) => set({ workerUnlockId: id }),
 
   setComposerTarget: (target) => set({ composerTarget: target }),
 
@@ -314,6 +430,8 @@ export const useStore = create<AppState>((set, get) => ({
   setPermissionMode: (mode) => set({ permissionMode: mode }),
 
   setSpeed: (speed) => set({ speed }),
+
+  setSelectedModel: (model) => set({ selectedModel: model }),
 
   toggleWorkerMode: () => set((s) => ({ workerMode: !s.workerMode })),
 

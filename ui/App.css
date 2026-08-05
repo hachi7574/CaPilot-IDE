@@ -393,6 +393,49 @@ body::after {
 
 .composer-collapsed .composer-input-wrap { display: none; }
 
+/* Composer: drag & drop hint (DevPlan §3.2: 拖文件 → @路径 chip) */
+.composer { position: relative; }
+.composer-input-wrap { position: relative; }
+.composer-input-wrap.drop-hint {
+  box-shadow: inset 0 0 0 1px var(--brand);
+  border-radius: 4px;
+  background: rgba(139,92,246,.06);
+}
+.composer-input-wrap.drop-hint::after {
+  content: "拖入 → @路径 chip";
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  font-family: var(--pixel); font-size: 10px; letter-spacing: 1px;
+  color: var(--brand); background: var(--bg3);
+  padding: 6px 14px; border: 1px dashed var(--brand);
+  pointer-events: none; z-index: 10; white-space: nowrap;
+}
+.composer-input-wrap.drop-hint .composer-input { opacity: .35; }
+
+/* Composer: `!` 终端直发 badge (DevPlan §3.2) */
+.composer-bang {
+  margin-left: auto;
+  font-family: var(--pixel); font-size: 9px; letter-spacing: 1px;
+  color: var(--warn); border: 1px solid var(--warn);
+  padding: 1px 6px; text-transform: uppercase;
+}
+
+/* Composer: `@` 文件补全 menu (DevPlan §3.2) */
+.composer-at-menu {
+  position: absolute; bottom: 100%; left: 0; right: 0;
+  max-height: 180px; overflow-y: auto; z-index: 40;
+  background: var(--bg3); border: 1px solid var(--rule2);
+  border-bottom: none; border-radius: 6px 6px 0 0;
+  box-shadow: 0 -4px 16px rgba(0,0,0,.35);
+}
+.composer-at-item {
+  display: flex; align-items: center; gap: 8px;
+  font-family: var(--mono); font-size: 12px; color: var(--ink);
+  padding: 5px 12px; cursor: pointer;
+}
+.composer-at-item:hover { background: var(--bg4); }
+.composer-at-item.active { background: var(--brand-dim); color: #F5F3FF; }
+.composer-at-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
 /* ── Status Bar ───────────────────────────────────────────────── */
 
 .statusbar {
@@ -445,6 +488,24 @@ body::after {
 .git-changes .gd { color: var(--danger); }
 .git-changes .gs { color: var(--muted); }
 .git-actions { margin-top: 12px; display: flex; gap: 6px; }
+
+/* Git panel row + inline diff */
+.git-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 1px 0; cursor: pointer;
+}
+.git-row:hover { background: var(--bg3); }
+.git-row .git-toggle { color: var(--muted); cursor: pointer; flex-shrink: 0; }
+.git-row .git-glyph { width: 14px; flex-shrink: 0; }
+.git-row .git-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-row .git-counts { color: var(--muted); font-size: 11px; flex-shrink: 0; }
+.git-diff {
+  margin: 4px 0 8px 20px; padding: 8px;
+  background: var(--bg); border: 1px solid var(--rule2);
+  font-family: var(--mono); font-size: 11px; color: var(--ink2);
+  line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+  max-height: 240px; overflow-y: auto; overflow-x: auto;
+}
 
 /* ── P1 additions ─────────────────────────────────────────────── */
 
@@ -503,3 +564,76 @@ body::after {
 /* Tab busy dot */
 .tab-dot.busy { background: var(--warn); }
 .tab-dot.waiting_input { background: var(--warn); }
+
+/* ── Content split panes (DevPlan §3.1.2) ─────────────────────── */
+
+.content-area { position: relative; }
+
+.panel-header-title {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.panel-close {
+  background: none; border: none; color: var(--muted); cursor: pointer;
+  font-size: 14px; padding: 0 2px; line-height: 1; margin-left: 6px;
+}
+.panel-close:hover { color: var(--danger); }
+
+.panel-placeholder {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  color: var(--muted); font-family: var(--mono); font-size: 12px;
+}
+
+.split-container { flex: 1; display: flex; overflow: hidden; min-width: 0; min-height: 0; }
+.split-row { flex-direction: row; }
+.split-column { flex-direction: column; }
+.split-pane { display: flex; min-width: 0; min-height: 0; overflow: hidden; }
+
+.split-divider { flex-shrink: 0; background: var(--rule); transition: background .2s; position: relative; z-index: 5; }
+.split-divider:hover, .split-divider.active { background: var(--brand); }
+.split-divider-col { width: 4px; cursor: col-resize; }
+.split-divider-row { height: 4px; cursor: row-resize; }
+
+.drop-zone {
+  position: absolute; pointer-events: none; z-index: 20;
+  border: 2px solid var(--brand); background: rgba(139, 92, 246, 0.15);
+}
+.drop-zone.left { left: 0; top: 0; bottom: 0; width: 30%; }
+.drop-zone.right { right: 0; top: 0; bottom: 0; width: 30%; }
+.drop-zone.top { top: 0; left: 0; right: 0; height: 30%; }
+.drop-zone.bottom { bottom: 0; left: 0; right: 0; height: 30%; }
+
+/* ── Worker lock (DevPlan §4.6) ───────────────────────────────── */
+
+.tab-item.dragging { opacity: 0.5; }
+
+.lock-banner {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 14px; border-bottom: 1px solid var(--rule);
+  background: rgba(250, 204, 21, 0.06); font-size: 12px; color: var(--warn);
+}
+.lock-banner.unlocked { background: rgba(74, 222, 128, 0.06); color: var(--success); }
+.lock-banner-text { flex: 1; font-family: var(--mono); }
+.lock-btn {
+  font-family: var(--pixel); font-size: 9px; letter-spacing: 1px;
+  padding: 3px 8px; color: var(--warn); border: 1px solid rgba(250, 204, 21, 0.4);
+  background: transparent; cursor: pointer; text-transform: uppercase;
+}
+.lock-btn:hover { background: rgba(250, 204, 21, 0.15); }
+
+.composer-input.locked { color: var(--muted); cursor: not-allowed; }
+
+.term-lock-banner {
+  position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
+  z-index: 30; display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px; background: rgba(250, 204, 21, 0.1);
+  border: 1px solid rgba(250, 204, 21, 0.5); color: var(--warn);
+  font-size: 12px; max-width: 90%;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+.term-lock-banner button {
+  font-family: var(--pixel); font-size: 9px; letter-spacing: 1px;
+  padding: 3px 8px; color: var(--warn); border: 1px solid rgba(250, 204, 21, 0.4);
+  background: transparent; cursor: pointer; text-transform: uppercase;
+}
+.term-lock-banner button:hover { background: rgba(250, 204, 21, 0.15); }
