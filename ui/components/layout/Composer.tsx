@@ -9,6 +9,7 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useStore } from "../../state/store";
 import { spawnAgent, ensureAgentChannel } from "../../state/agentActions";
 
@@ -30,6 +31,10 @@ interface ModelInfo {
 interface FsEntryBrief {
   name: string;
   is_dir: boolean;
+}
+
+interface RecentEntry extends FsEntryBrief {
+  path: string;
 }
 
 interface AtMenuState {
@@ -70,6 +75,15 @@ export function Composer() {
   const [atMenu, setAtMenu] = useState<AtMenuState | null>(null);
   const [dragHover, setDragHover] = useState(false);
   const [isBangInput, setIsBangInput] = useState(false);
+
+  // Composer popover menus (向上弹出)：模型选择 + 文件/引用.
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [refMenuOpen, setRefMenuOpen] = useState(false);
+  const [recentEntries, setRecentEntries] = useState<RecentEntry[]>([]);
+  const modelAnchorRef = useRef<HTMLSpanElement>(null);
+  const modelMenuRef = useRef<HTMLDivElement>(null);
+  const refAnchorRef = useRef<HTMLSpanElement>(null);
+  const refMenuRef = useRef<HTMLDivElement>(null);
 
   // Stale-response guard for async fs_list fetches in the `@` menu.
   const atReqRef = useRef(0);
@@ -118,12 +132,44 @@ export function Composer() {
     };
   }, []);
 
-  const cycleModel = useCallback(() => {
-    if (!models.length) return;
-    const idx = models.findIndex((m) => m.id === selectedModel);
-    const next = models[(idx + 1) % models.length];
-    setSelectedModel(next.id);
-  }, [models, selectedModel, setSelectedModel]);
+  // ── Popover open/close (click-outside + Escape) ───────────────
+  useEffect(() => {
+    if (!modelMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node | null;
+      if (modelMenuRef.current?.contains(t)) return;
+      if (modelAnchorRef.current?.contains(t)) return;
+      setModelMenuOpen(false);
+    };
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape") setModelMenuOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [modelMenuOpen]);
+
+  useEffect(() => {
+    if (!refMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node | null;
+      if (refMenuRef.current?.contains(t)) return;
+      if (refAnchorRef.current?.contains(t)) return;
+      setRefMenuOpen(false);
+    };
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape") setRefMenuOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [refMenuOpen]);
 
   // ── Text helpers ──────────────────────────────────────────────
   const resizeTextarea = useCallback((el: HTMLTextAreaElement) => {
@@ -167,12 +213,18 @@ export function Composer() {
     const dpr = window.devicePixelRatio || 1;
     const x = pos.x / dpr;
     const y = pos.y / dpr;
-    return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+    // A few px of tolerance so drops on the wrap's border still count.
+    return (
+      x >= r.left - 4 && x <= r.right + 4 && y >= r.top - 4 && y <= r.bottom + 4
+    );
   }, []);
 
   const handleDragEnter = useCallback((e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     dragDepthRef.current += 1;
+    // A new drag sequence is starting — clear any stale dedupe flag left over
+    // from the previous drop so the next drop inserts exactly once.
+    dropHandledRef.current = false;
     setDragHover(true);
   }, []);
 
@@ -189,10 +241,17 @@ export function Composer() {
   const handleDrop = useCallback(
     (e: DragEvent<HTMLDivElement>) => {
       e.preventDefault();
-      // Don't reset dragDepthRef here: the Tauri drag-drop event (which carries
-      // the real paths) fires after this, and still needs to know the drop
-      // happened over the composer. Only reset when a path was read directly.
-      // Some webviews still expose `.path` on File (Tauri v1 heritage).
+      // If the Tauri drag-drop event already inserted the paths for this same
+      // physical drop, consume the DOM drop without double-inserting.
+      if (dropHandledRef.current) {
+        dropHandledRef.current = false;
+        dragDepthRef.current = 0;
+        setDragHover(false);
+        return;
+      }
+      // Some webviews still expose `.path` on File (Tauri v1 heritage / v2
+      // dragDropEnabled). If present, insert directly; otherwise defer to the
+      // Tauri drag-drop event, which carries the real absolute paths.
       const f = e.dataTransfer.files?.[0] as
         | (File & { path?: string })
         | undefined;
@@ -202,6 +261,8 @@ export function Composer() {
         dragDepthRef.current = 0;
         setDragHover(false);
       }
+      // No `.path` → leave dragDepthRef/dropHandledRef untouched so the Tauri
+      // drag-drop event (which fires next) can still detect the composer.
     },
     [appendPaths]
   );
@@ -215,7 +276,10 @@ export function Composer() {
     getCurrentWebview()
       .onDragDropEvent((event) => {
         const p = event.payload;
-        if (p.type === "enter" || p.type === "over") {
+        if (p.type === "enter") {
+          dropHandledRef.current = false; // new drag sequence
+          setDragHover(isPointInComposer(p.position));
+        } else if (p.type === "over") {
           setDragHover(isPointInComposer(p.position));
         } else if (p.type === "leave") {
           setDragHover(false);
@@ -227,8 +291,8 @@ export function Composer() {
             dragDepthRef.current > 0 || isPointInComposer(p.position);
           if (overComposer && !dropHandledRef.current) {
             appendPaths(p.paths);
+            dropHandledRef.current = true;
           }
-          dropHandledRef.current = false;
           dragDepthRef.current = 0;
           setDragHover(false);
         }
@@ -326,6 +390,78 @@ export function Composer() {
       setAtMenu(null);
     },
     [atMenu, resizeTextarea]
+  );
+
+  // Load the active agent's cwd listing when the file/ref menu opens.
+  useEffect(() => {
+    if (!refMenuOpen) return;
+    const cwd = resolveTargetCwd();
+    if (!cwd) {
+      setRecentEntries([]);
+      return;
+    }
+    let cancelled = false;
+    invoke<FsEntryBrief[]>("fs_list", { dir: cwd })
+      .then((items) => {
+        if (cancelled) return;
+        const sorted = (items ?? []).slice().sort((a, b) => {
+          if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        });
+        setRecentEntries(
+          sorted
+            .slice(0, 12)
+            .map((it) => ({ ...it, path: `${cwd}/${it.name}` }))
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setRecentEntries([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [refMenuOpen, resolveTargetCwd]);
+
+  // ── `+ 文件/引用` menu actions ────────────────────────────────
+  const handlePickFile = useCallback(async () => {
+    setRefMenuOpen(false);
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        title: "选择文件 — 插入 @路径",
+        defaultPath: resolveTargetCwd() ?? undefined,
+      });
+      if (typeof selected === "string" && selected) {
+        appendPaths([selected]);
+      }
+    } catch (err) {
+      console.error("选择文件失败:", err);
+    }
+  }, [appendPaths, resolveTargetCwd]);
+
+  const handlePasteRef = useCallback(async () => {
+    setRefMenuOpen(false);
+    let text = "";
+    try {
+      text = (await navigator.clipboard.readText()).trim();
+    } catch {
+      text = "";
+    }
+    if (text) {
+      appendPaths([text]);
+    } else {
+      // 剪贴板为空 → 插入一个裸 `@` 让现有补全菜单接管.
+      insertText("@");
+    }
+  }, [appendPaths, insertText]);
+
+  const handleInsertRecent = useCallback(
+    (item: RecentEntry) => {
+      setRefMenuOpen(false);
+      appendPaths([item.path]);
+    },
+    [appendPaths]
   );
 
   // ── Send ──────────────────────────────────────────────────────
@@ -449,8 +585,14 @@ export function Composer() {
           setAtMenu(null);
           return;
         }
-        // Tab closes the menu, then falls through to target switching below.
-        if (e.key === "Tab") setAtMenu(null);
+        // Tab completes the highlighted `@` mention instead of switching the
+        // send target — otherwise Tab would hijack the autocomplete (Bug).
+        if (e.key === "Tab") {
+          e.preventDefault();
+          const item = atMenu.items[atMenu.idx];
+          if (item) insertAtItem(item);
+          return;
+        }
       }
 
       if (e.key === "Enter" && !e.shiftKey) {
@@ -498,6 +640,9 @@ export function Composer() {
       resizeTextarea(el);
       setIsBangInput(el.value.trimStart().startsWith("!"));
       handleAtAuto(el);
+      // Typing dismisses the popover menus (模型选择 / 文件引用).
+      setModelMenuOpen(false);
+      setRefMenuOpen(false);
     },
     [resizeTextarea, handleAtAuto]
   );
@@ -506,11 +651,16 @@ export function Composer() {
     <div className={`composer${!composerOpen ? " composer-collapsed" : ""}`}>
       {/* Target line */}
       <div className="composer-target">
-        <span>→</span>{" "}
-        agent:{" "}
-        {composerTarget === "master"
-          ? "master"
-          : activeTab?.title || "none"}
+        {composerTarget === "master" ? (
+          <span>→ master</span>
+        ) : (
+          <span>
+            → agent:{" "}
+            {activeTab?.type === "agent" && activeTab.agentId
+              ? activeTab.title || "agent"
+              : "(无标签)"}
+          </span>
+        )}
         {workerMode && composerTarget !== "master" ? " · worker" : ""}
         {workerLocked ? " · 🔒worker" : ""}
         {isBangInput && <span className="composer-bang">⚡ 终端直发</span>}
@@ -579,14 +729,83 @@ export function Composer() {
 
       {/* Actions */}
       <div className="composer-actions">
-        <span className="act-btn">+ 文件/引用</span>
-        <span
-          className="act-btn"
-          onClick={cycleModel}
-          title={`模型切换（当前：${currentModel ? currentModel.name : "runtime 默认"}）`}
-        >
-          模型{currentModel ? `: ${currentModel.name}` : " ↑"}
+        <span className="cmp-pop" ref={refAnchorRef}>
+          <span
+            className="act-btn"
+            title="插入文件引用 / 最近文件"
+            onClick={() => {
+              setModelMenuOpen(false);
+              setRefMenuOpen((o) => !o);
+            }}
+          >
+            + 文件/引用
+          </span>
+          {refMenuOpen && (
+            <div className="cmp-menu" ref={refMenuRef} role="menu">
+              <div className="cmp-menu-label">插入文件/引用</div>
+              <div className="cmp-menu-item" onClick={handlePickFile}>
+                <span className="cmp-menu-name">📄 选择文件…</span>
+              </div>
+              <div className="cmp-menu-item" onClick={handlePasteRef}>
+                <span className="cmp-menu-name">🔗 粘贴引用/路径</span>
+              </div>
+              <div className="cmp-menu-sep" />
+              <div className="cmp-menu-label">最近文件（agent cwd）</div>
+              {recentEntries.length === 0 && (
+                <div className="cmp-menu-empty">暂无文件</div>
+              )}
+              {recentEntries.map((it) => (
+                <div
+                  key={it.path}
+                  className="cmp-menu-item"
+                  onClick={() => handleInsertRecent(it)}
+                >
+                  <span className="cmp-menu-name">
+                    {it.name}
+                    {it.is_dir ? "/" : ""}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </span>
+
+        <span className="cmp-pop" ref={modelAnchorRef}>
+          <span
+            className="act-btn"
+            onClick={() => {
+              setRefMenuOpen(false);
+              setModelMenuOpen((o) => !o);
+            }}
+            title={`选择模型（当前：${currentModel ? currentModel.name : "runtime 默认"}）`}
+          >
+            模型{currentModel ? `: ${currentModel.name}` : " ↑"}
+          </span>
+          {modelMenuOpen && (
+            <div className="cmp-menu" ref={modelMenuRef} role="menu">
+              <div className="cmp-menu-label">选择模型</div>
+              {models.length === 0 && (
+                <div className="cmp-menu-empty">无可用模型</div>
+              )}
+              {models.map((m) => (
+                <div
+                  key={m.id}
+                  className={`cmp-menu-item${m.id === selectedModel ? " current" : ""}`}
+                  onClick={() => {
+                    setSelectedModel(m.id);
+                    setModelMenuOpen(false);
+                  }}
+                >
+                  <span className="cmp-menu-name">{m.name}</span>
+                  {m.id === selectedModel && (
+                    <span className="cmp-menu-check">✓</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </span>
+
         <span
           className="act-btn"
           onClick={() => {

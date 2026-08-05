@@ -865,3 +865,168 @@ body::after {
 .onboarding-dot.active { background: var(--brand); }
 
 .onboarding-nav { display: flex; gap: 10px; }
+
+/* ── Terminal-item close button (hover/focus reveals) ─────────── */
+
+.tm-close {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-left: 2px;
+  flex-shrink: 0;
+  font-family: var(--pixel);
+  font-size: 12px;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 0;
+  transition: all .15s var(--ease-apple);
+}
+
+.terminal-item:hover .tm-close,
+.terminal-item:focus-within .tm-close {
+  display: flex;
+}
+
+.tm-close:hover {
+  color: var(--danger);
+  background: rgba(255, 71, 87, .12);
+}
+
+/* Disabled context-menu item (master info line) */
+.ctx-item.disabled {
+  color: var(--muted);
+  cursor: default;
+}
+.ctx-item.disabled:hover { background: transparent; color: var(--muted); }
+
+/* ── Overview dashboard polish (ovx-*) — matches Preview #tab-overview ── */
+
+/* Per-agent resource rows (📈 资源监视) */
+.ovx-res {
+  margin: 2px 0 9px;
+  padding-left: 6px;
+  border-left: 2px solid transparent;
+}
+.ovx-res.active {
+  border-left-color: var(--brand);
+}
+.ovx-res.active .ovx-res-head .ov-label {
+  color: var(--brand);
+}
+.ovx-res-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 1px 0;
+}
+.ovx-res-head .ov-label {
+  flex: 1;
+  min-width: 0;
+}
+.ovx-res-head .ov-value {
+  white-space: nowrap;
+}
+.ovx-res-bars {
+  display: flex;
+  gap: 6px;
+  margin-top: 2px;
+}
+.ovx-res-bar {
+  flex: 1;
+  height: 5px;
+  background: var(--bg3);
+  border: 1px solid var(--rule);
+}
+.ovx-res-bar .ov-bar-fill {
+  display: block;
+  height: 100%;
+}
+
+/* ── Composer popover menus (cmp-*) — 模型选择 / 文件引用（向上弹出） ── */
+
+.cmp-pop {
+  position: relative;
+  display: inline-block;
+}
+
+.cmp-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  min-width: 220px;
+  max-width: 360px;
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--bg2);
+  border: 1px solid var(--rule2);
+  border-radius: 8px;
+  box-shadow: var(--shadow-hard), 0 8px 30px rgba(0, 0, 0, 0.45);
+  padding: 4px;
+  font-size: 12px;
+  z-index: 100;
+}
+
+.cmp-menu-label {
+  padding: 4px 10px 2px;
+  font-size: 9px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-family: var(--pixel);
+}
+
+.cmp-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  color: var(--ink2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.cmp-menu-item:hover {
+  background: var(--bg3);
+  color: var(--ink);
+}
+.cmp-menu-item.current {
+  color: var(--brand);
+}
+
+.cmp-menu-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.cmp-menu-check {
+  color: var(--brand);
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.cmp-menu-sep {
+  height: 1px;
+  background: var(--rule2);
+  margin: 4px 6px;
+}
+
+.cmp-menu-empty {
+  padding: 6px 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+

@@ -3,7 +3,7 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { useStore, AgentInfo } from "../../state/store";
 import { setAgentRole } from "../../state/orchestration";
-import { spawnAgent } from "../../state/agentActions";
+import { spawnAgent, closeAgent as closeAgentAction } from "../../state/agentActions";
 import { SettingsModal } from "./SettingsModal";
 
 /** Derive the workspace project name from an agent cwd. */
@@ -20,11 +20,12 @@ interface CtxState {
   agentId?: string;
   project?: string;
   cwd?: string;
+  /** Right-click was on the pinned Master terminal (not a deletable project agent). */
+  isMaster?: boolean;
 }
 
 export function LeftSidebar() {
   const leftSidebarOpen = useStore((s) => s.leftSidebarOpen);
-  const toggleLeftSidebar = useStore((s) => s.toggleLeftSidebar);
   const agents = useStore((s) => s.agents);
   const tabs = useStore((s) => s.tabs);
   const activeTabId = useStore((s) => s.activeTabId);
@@ -131,6 +132,15 @@ export function LeftSidebar() {
     });
   });
 
+  // [☰] collapses / expands ALL project groups (sidebar stays visible).
+  const projectNames = [...projects.keys()];
+  const allCollapsed =
+    projectNames.length > 0 && projectNames.every((n) => collapsedProjs.has(n));
+  const toggleAllProjects = () => {
+    if (projectNames.length === 0) return;
+    setCollapsedProjs(allCollapsed ? new Set() : new Set(projectNames));
+  };
+
   return (
     <>
       <div
@@ -147,7 +157,11 @@ export function LeftSidebar() {
               <span className="sidebar-btn active" title="全部显示">
                 👁
               </span>
-              <span className="sidebar-btn" onClick={toggleLeftSidebar} title="收起侧栏">
+              <span
+                className={`sidebar-btn${allCollapsed ? " active" : ""}`}
+                onClick={toggleAllProjects}
+                title={allCollapsed ? "展开全部项目" : "收起全部项目"}
+              >
                 ☰
               </span>
               <span className="sidebar-btn" title="新建项目">
@@ -173,6 +187,16 @@ export function LeftSidebar() {
                 <div
                   className={`terminal-item${activeTabId === (masterAgentId || "master") ? " active" : ""}`}
                   onClick={openMaster}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setCtx({
+                      x: e.clientX,
+                      y: e.clientY,
+                      agentId: masterAgentId ?? undefined,
+                      isMaster: true,
+                    });
+                  }}
                 >
                   <span className="tm-icon">🔄</span>
                   <span className="tm-name">Master</span>
@@ -232,6 +256,16 @@ export function LeftSidebar() {
                         <span className="tm-icon">🤖</span>
                         <span className="tm-name">{a.title}</span>
                         <span className="tm-time">—</span>
+                        <button
+                          className="tm-close"
+                          title="关闭并终止"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            closeAgentAction(a.id);
+                          }}
+                        >
+                          ×
+                        </button>
                       </div>
                     ))}
                   </div>
@@ -288,6 +322,11 @@ function ContextMenu({ ctx, onClose }: { ctx: CtxState; onClose: () => void }) {
         </div>
       </div>
     );
+  }
+
+  // ── Master context ────────────────────────────────────────────
+  if (ctx.isMaster) {
+    return <MasterContextMenu ctx={ctx} onClose={onClose} />;
   }
 
   // ── Agent context ─────────────────────────────────────────────
@@ -377,6 +416,78 @@ function ContextMenu({ ctx, onClose }: { ctx: CtxState; onClose: () => void }) {
       <div className="ctx-item danger" onClick={closeAgent}>
         ✕ 关闭并终止
       </div>
+    </div>
+  );
+}
+
+/* ── Master terminal context menu ────────────────────────────── */
+
+function MasterContextMenu({ ctx, onClose }: { ctx: CtxState; onClose: () => void }) {
+  const masterAgentId = useStore((s) => s.masterAgentId);
+  const runtimes = useStore((s) => s.runtimes);
+  const addAgent = useStore((s) => s.addAgent);
+  // The master terminal may be right-clicked before a master agent exists; fall
+  // back to the store's masterAgentId when the ctx didn't carry one.
+  const id = ctx.agentId ?? masterAgentId;
+  const agent = useStore((s) => s.agents.get(id ?? ""));
+
+  const switchRuntime = async (runtime: string) => {
+    if (!id) return;
+    try {
+      const channel = new Channel<number[]>();
+      channel.onmessage = (data) => useStore.getState().appendAgentOutput(id, data);
+      const info = (await invoke("agent_switch_runtime", {
+        id,
+        runtime,
+        onData: channel,
+      })) as AgentInfo;
+      addAgent(info, channel);
+    } catch (e) {
+      console.error("runtime switch failed:", e);
+    }
+    onClose();
+  };
+
+  const closeMaster = async () => {
+    if (!id) return;
+    try {
+      // Kill the master PTY only — the pinned slot is not deletable (DevPlan).
+      await invoke("agent_kill", { id });
+    } catch {
+      // ignore
+    }
+    onClose();
+  };
+
+  return (
+    <div
+      className="ctx-menu"
+      style={{ position: "fixed", left: ctx.x, top: ctx.y, zIndex: 1000 }}
+      onClick={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.stopPropagation()}
+    >
+      <div className="ctx-item disabled">⭐ master 会话</div>
+      {id && (
+        <>
+          <div className="ctx-sep" />
+          <div className="ctx-label">切换 runtime</div>
+          {runtimes.map((rt) => (
+            <div
+              key={rt.id}
+              className={`ctx-item${rt.id === agent?.runtime ? " current" : ""}`}
+              onClick={() => switchRuntime(rt.id)}
+            >
+              {rt.name}
+              {!rt.available && " (未安装)"}
+              {rt.id === agent?.runtime && " · 当前"}
+            </div>
+          ))}
+          <div className="ctx-sep" />
+          <div className="ctx-item danger" onClick={closeMaster}>
+            ✕ 关闭 master PTY
+          </div>
+        </>
+      )}
     </div>
   );
 }

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { useStore } from "../../state/store";
-import { fmtMem } from "../../state/resource";
+import { useStore, type AgentInfo, type ResourcePoint } from "../../state/store";
+import { fmtCpu, fmtMem } from "../../state/resource";
 
 type RightTab = "overview" | "files" | "git";
 
@@ -126,17 +126,24 @@ function OverviewDashboard() {
   const smartReturn = useStore((s) => s.smartReturn);
   const agents = useStore((s) => s.agents);
   const agentResources = useStore((s) => s.agentResources);
-  const resourceHistory = useStore((s) => s.resourceHistory);
   const activeTabId = useStore((s) => s.activeTabId);
   const tabs = useStore((s) => s.tabs);
 
   const busyCount = workerInfos.filter((w) => w.status === "busy").length;
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const activeAgentId = activeTab?.agentId ?? null;
-  const activeRes = activeAgentId ? agentResources.get(activeAgentId) : undefined;
-  const activeHist = activeAgentId ? resourceHistory.get(activeAgentId) || [] : [];
-  const cpuMax = Math.max(10, ...activeHist.map((p) => p.cpu_pct));
-  const memMax = Math.max(1, ...activeHist.map((p) => p.mem_bytes));
+
+  // Per-agent resource snapshots merged from the backend `resource://sample`
+  // event (fields confirmed: cpu_pct + mem_bytes — see store.applyResourceSample).
+  const resList = [...agents.values()]
+    .map((a) => ({ a, res: agentResources.get(a.id) }))
+    .filter((e): e is { a: AgentInfo; res: ResourcePoint } => e.res !== undefined);
+  const memMax = Math.max(1, ...resList.map((e) => e.res.mem_bytes));
+  const totalCpu = resList.reduce((s, e) => s + e.res.cpu_pct, 0);
+  const totalMem = resList.reduce((s, e) => s + e.res.mem_bytes, 0);
+  const resSummary = resList.length
+    ? `📈 ${resList.length} 个 agent · CPU ${fmtCpu(totalCpu)} · MEM ${fmtMem(totalMem)}`
+    : "📈 暂无运行数据";
 
   const toggleSmartReturn = async () => {
     const { setSmartReturn } = await import("../../state/orchestration");
@@ -177,62 +184,8 @@ function OverviewDashboard() {
         </div>
       </CollapsibleSection>
 
-      {/* Resource monitor */}
-      <CollapsibleSection
-        title="📈 资源监视"
-        summary={`📈 ${activeRes ? `CPU ${Math.round(activeRes.cpu_pct)}% · MEM ${fmtMem(activeRes.mem_bytes)}` : "无活动 agent"}`}
-      >
-        {activeRes ? (
-          <>
-            <div className="ov-row">
-              <span className="ov-label">CPU</span>
-              <span className="ov-value">{Math.round(activeRes.cpu_pct)}%</span>
-            </div>
-            <div className="ov-bar-row">
-              <div className="ov-bar">
-                <div
-                  className="ov-bar-fill pu"
-                  style={{ width: `${Math.min(100, (activeRes.cpu_pct / cpuMax) * 100)}%` }}
-                />
-              </div>
-            </div>
-            <div className="ov-row">
-              <span className="ov-label">Memory</span>
-              <span className="ov-value">{fmtMem(activeRes.mem_bytes)}</span>
-            </div>
-            <div className="ov-bar-row">
-              <div className="ov-bar">
-                <div
-                  className="ov-bar-fill ai"
-                  style={{ width: `${Math.min(100, (activeRes.mem_bytes / memMax) * 100)}%` }}
-                />
-              </div>
-            </div>
-            <div className="ov-divider" />
-            {[...agents.values()].map((a) => {
-              const r = agentResources.get(a.id);
-              return (
-                <div className="ov-row" key={a.id}>
-                  <span className="ov-label" style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
-                    {a.title || a.id.slice(0, 6)}
-                  </span>
-                  <span className="ov-value">
-                    {r ? `${Math.round(r.cpu_pct)}% · ${fmtMem(r.mem_bytes)}` : "—"}
-                  </span>
-                </div>
-              );
-            })}
-          </>
-        ) : (
-          <div className="ov-row">
-            <span className="ov-label">没有运行中的 agent</span>
-            <span className="ov-value">—</span>
-          </div>
-        )}
-      </CollapsibleSection>
-
       {/* Runtime */}
-      <CollapsibleSection title="📊 Runtime" summary="📊 Runtime 0/1M Tokens">
+      <CollapsibleSection title="📊 Runtime" summary="📊 Runtime 0/1M Tokens · 缓存—">
         <div className="ov-row">
           <span className="ov-label">上下文窗口</span>
           <span className="ov-value gr">🟢 充足</span>
@@ -295,6 +248,40 @@ function OverviewDashboard() {
         </div>
       </CollapsibleSection>
 
+      {/* Remaining quota */}
+      <CollapsibleSection title="剩余用量" summary="剩余用量 5h — · 周— · 月—">
+        <div className="ov-bar-row">
+          <div className="ov-bar-label">⏱ 5小时窗口</div>
+          <div className="ov-bar">
+            <div className="ov-bar-fill gr" style={{ width: "0%" }} />
+          </div>
+          <div className="ov-bar-stats">
+            <span></span>
+            <span>剩余 —</span>
+          </div>
+        </div>
+        <div className="ov-bar-row">
+          <div className="ov-bar-label">📅 周额度</div>
+          <div className="ov-bar">
+            <div className="ov-bar-fill ye" style={{ width: "0%" }} />
+          </div>
+          <div className="ov-bar-stats">
+            <span></span>
+            <span>剩余 —</span>
+          </div>
+        </div>
+        <div className="ov-bar-row">
+          <div className="ov-bar-label">🗓 月额度</div>
+          <div className="ov-bar">
+            <div className="ov-bar-fill gr" style={{ width: "0%" }} />
+          </div>
+          <div className="ov-bar-stats">
+            <span></span>
+            <span>剩余 —</span>
+          </div>
+        </div>
+      </CollapsibleSection>
+
       {/* Computer */}
       <CollapsibleSection title="💻 Computer Status" summary="💻 🟢 Online">
         <div className="ov-row">
@@ -310,15 +297,68 @@ function OverviewDashboard() {
           <span className="ov-value">—</span>
         </div>
         <div className="ov-row">
+          <span className="ov-label">GPU</span>
+          <span className="ov-value">—</span>
+        </div>
+        <div className="ov-row">
           <span className="ov-label">Disk</span>
           <span className="ov-value">—</span>
         </div>
+        <div className="ov-row">
+          <span className="ov-label">Network</span>
+          <span className="ov-value">—</span>
+        </div>
+      </CollapsibleSection>
+
+      {/* Resource monitor — per-agent CPU/MEM (uses store data + fmtCpu/fmtMem) */}
+      <CollapsibleSection title="📈 资源监视" summary={resSummary}>
+        {resList.length === 0 ? (
+          <div className="ov-row">
+            <span className="ov-label">暂无 agent 资源数据</span>
+            <span className="ov-value">—</span>
+          </div>
+        ) : (
+          resList.map(({ a, res }) => {
+            const isActive = a.id === activeAgentId;
+            const cpuW = Math.max(0, Math.min(100, res.cpu_pct));
+            const memW = Math.max(0, Math.min(100, Math.round((res.mem_bytes / memMax) * 100)));
+            return (
+              <div className={`ovx-res${isActive ? " active" : ""}`} key={a.id}>
+                <div className="ovx-res-head">
+                  <span className="ov-label" style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {isActive ? "▶ " : ""}
+                    {a.title || a.id.slice(0, 6)}
+                  </span>
+                  <span className="ov-value">
+                    {fmtCpu(res.cpu_pct)} · {fmtMem(res.mem_bytes)}
+                  </span>
+                </div>
+                <div className="ovx-res-bars">
+                  <div className="ovx-res-bar">
+                    <div
+                      className="ov-bar-fill pu"
+                      style={{ width: `${cpuW}%` }}
+                      title={`CPU ${fmtCpu(res.cpu_pct)}`}
+                    />
+                  </div>
+                  <div className="ovx-res-bar">
+                    <div
+                      className="ov-bar-fill ai"
+                      style={{ width: `${memW}%` }}
+                      title={`MEM ${fmtMem(res.mem_bytes)}`}
+                    />
+                  </div>
+                </div>
+              </div>
+            );
+          })
+        )}
       </CollapsibleSection>
 
       {/* ESP */}
       <CollapsibleSection
         title="🔌 ESP Device Status"
-        summary={`🔌 ${esp.connected ? (esp.name ?? "ESP") : "Not connected"}${esp.battery_pct !== null ? ` · 🔋${esp.battery_pct}%` : ""}`}
+        summary={`🔌 ${esp.connected ? (esp.name ?? "ESP") : "Not connected"}${esp.kind ? ` · ${esp.kind.toUpperCase()}` : ""}${esp.battery_pct != null ? ` · 🔋${esp.battery_pct}%` : ""}`}
       >
         <div className="ov-esp-status">
           <span
@@ -344,6 +384,29 @@ function OverviewDashboard() {
                 : "🔵 Bluetooth"
               : "—"}
           </span>
+        </div>
+        <div className="ov-bar-row">
+          <div className="ov-bar-label">
+            🔋 Battery {esp.battery_pct != null ? `${esp.battery_pct}%` : "—"}
+          </div>
+          <div className="ov-bar">
+            <div
+              className="ov-bar-fill gr"
+              style={{ width: `${esp.battery_pct != null ? Math.max(0, Math.min(100, esp.battery_pct)) : 0}%` }}
+            />
+          </div>
+        </div>
+        <div className="ov-row">
+          <span className="ov-label">Temperature</span>
+          <span className="ov-value">—</span>
+        </div>
+        <div className="ov-row">
+          <span className="ov-label">Signal</span>
+          <span className="ov-value">{esp.rssi != null ? `${esp.rssi}dBm` : "—"}</span>
+        </div>
+        <div className="ov-row">
+          <span className="ov-label">Firmware</span>
+          <span className="ov-value">—</span>
         </div>
       </CollapsibleSection>
     </div>
