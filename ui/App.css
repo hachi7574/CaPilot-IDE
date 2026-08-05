@@ -1211,3 +1211,96 @@ body::after {
   transition: background .2s var(--ease-apple);
 }
 .ov-section.collapsed .uf-ov-summary:hover { background: var(--bg3); }
+
+/* ── Composer send button (ul-*) ──────────────────────────────── */
+
+.ul-composer-input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.ul-composer-input-row .composer-input {
+  flex: 1;
+  min-width: 0;
+}
+.ul-send-btn {
+  font-family: var(--pixel);
+  font-size: 10px;
+  letter-spacing: 1px;
+  padding: 4px 12px;
+  color: var(--brand);
+  border: 1px solid var(--brand);
+  background: rgba(139, 92, 246, 0.06);
+  cursor: pointer;
+  text-transform: uppercase;
+  flex-shrink: 0;
+  transition: all .2s var(--ease-apple);
+}
+.ul-send-btn:hover:not(:disabled) {
+  background: var(--brand);
+  color: #F5F3FF;
+}
+.ul-send-btn:disabled {
+  opacity: .4;
+  cursor: default;
+}
+
+/* ── Overview dashboard polish (uk-*) — panelized sections + unified title font ── */
+
+/* Panelize each overview section so the partitions read clearly: subtle tinted
+   background, 1px rule border (no radius — LUCY square style), small gap
+   between sections. Hover highlight on header/summary (var(--bg3)) still shows. */
+.ov-section.uk-section {
+  background: rgba(139, 92, 246, 0.04);
+  border: 1px solid var(--rule);
+  margin: 0 0 6px;
+}
+
+/* Collapsed summary row uses the SAME font as the expanded header
+   (var(--pixel) 10px uppercase) so the title bar reads uniformly in both
+   states. Ellipsis/nowrap from .uf-ov-summary is preserved. */
+.ov-section.collapsed .ov-summary.uk-summary {
+  font-family: var(--pixel);
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* ── Master group expand/collapse (uj-*) ────────────────────────
+   Master is a collapsible purple group (like a project): header toggles
+   expand; collapsed hides the master terminal row, standalone terminals,
+   and the "＋ 新建终端" affordance. The purple button look stays on the
+   existing .u9-master-btn rules. */
+
+.uj-master-group { border-bottom: 2px solid var(--rule); }
+/* The group owns the separator; drop the button's own border so there's no
+   doubled rule line. */
+.uj-master-group .u9-master-btn { border-bottom: none; }
+
+.uj-master-group.collapsed .terminal-item,
+.uj-master-group.collapsed .uj-master-new { display: none; }
+
+.uj-master-group .uj-master-arrow {
+  font-family: var(--pixel);
+  font-size: 10px;
+  color: rgba(245, 243, 255, 0.7);
+  flex-shrink: 0;
+  transition: transform 0.2s var(--ease-apple);
+}
+.uj-master-group.collapsed .uj-master-arrow { transform: rotate(-90deg); }
+
+.uj-master-group .uj-master-term .tm-name { color: var(--ai); }
+
+.uj-master-new {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px 5px 22px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.2s var(--ease-apple);
+}
+.uj-master-new:hover { background: var(--bg3); color: var(--brand); }

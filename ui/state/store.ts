@@ -536,6 +536,10 @@ export const useStore = create<AppState>((set, get) => ({
 
   removeProject: (name) => {
     const s = get();
+    // Guard: the Master group is pinned and never deletable. It is not part of
+    // `projects` and its agents live under the "master" project group, so a
+    // stray call must not kill the master session or its terminals.
+    if (name === "master") return;
     // Remove the project from the list (disk files are kept — DevPlan §3.3).
     set({ projects: s.projects.filter((p) => p !== name) });
 

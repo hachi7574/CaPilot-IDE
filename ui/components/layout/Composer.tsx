@@ -75,6 +75,8 @@ export function Composer() {
   const [atMenu, setAtMenu] = useState<AtMenuState | null>(null);
   const [dragHover, setDragHover] = useState(false);
   const [isBangInput, setIsBangInput] = useState(false);
+  // Non-empty input → enables the send button (`.ul-send-btn`).
+  const [hasInput, setHasInput] = useState(false);
 
   // Composer popover menus (向上弹出)：模型选择 + 文件/引用.
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
@@ -187,6 +189,7 @@ export function Composer() {
       el.selectionStart = el.selectionEnd = newPos;
       el.focus();
       resizeTextarea(el);
+      setHasInput(true);
     },
     [resizeTextarea]
   );
@@ -398,6 +401,7 @@ export function Composer() {
       el.selectionStart = el.selectionEnd = newPos;
       el.focus();
       resizeTextarea(el);
+      setHasInput(true);
       setAtMenu(null);
     },
     [atMenu, resizeTextarea]
@@ -493,6 +497,7 @@ export function Composer() {
     el.value = "";
     el.style.height = "auto";
     setIsBangInput(false);
+    setHasInput(false);
 
     sendingRef.current = true;
     let agentId = targetAgentId;
@@ -650,6 +655,7 @@ export function Composer() {
       const el = e.currentTarget;
       resizeTextarea(el);
       setIsBangInput(el.value.trimStart().startsWith("!"));
+      setHasInput(el.value.trim().length > 0);
       handleAtAuto(el);
       // Typing dismisses the popover menus (模型选择 / 文件引用).
       setModelMenuOpen(false);
@@ -702,19 +708,29 @@ export function Composer() {
             <span className="lock-banner-text">🔓 已解锁（发送后重新锁定）</span>
           </div>
         )}
-        <textarea
-          ref={textareaRef}
-          className={`composer-input${locked ? " locked" : ""}`}
-          placeholder={
-            locked
-              ? "🔒 worker — 输入被编排锁定"
-              : "发消息…（/ 命令 · @ 文件 · ! 终端 · 拖入文件）"
-          }
-          rows={2}
-          readOnly={locked}
-          onKeyDown={handleKeyDown}
-          onInput={handleInput}
-        />
+        <div className="ul-composer-input-row">
+          <textarea
+            ref={textareaRef}
+            className={`composer-input${locked ? " locked" : ""}`}
+            placeholder={
+              locked
+                ? "🔒 worker — 输入被编排锁定"
+                : "发消息…（/ 命令 · @ 文件 · ! 终端 · 拖入文件）"
+            }
+            rows={2}
+            readOnly={locked}
+            onKeyDown={handleKeyDown}
+            onInput={handleInput}
+          />
+          <button
+            className="ul-send-btn"
+            title="发送消息（Enter）"
+            onClick={() => handleSend()}
+            disabled={locked || sendingRef.current || !hasInput}
+          >
+            发送
+          </button>
+        </div>
       </div>
 
       {/* `@` file autocomplete menu */}

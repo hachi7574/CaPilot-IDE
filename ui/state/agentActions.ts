@@ -2,7 +2,18 @@ import { invoke } from "@tauri-apps/api/core";
 import { useStore, AgentInfo, createBufferedChannel } from "./store";
 
 const DEFAULT_RUNTIME = "claude";
-const DEFAULT_PROJECT = "default";
+
+/**
+ * Project name for the pinned Master group (never a real workspace project).
+ * Standalone terminals spawned via the master group's "＋ 新建终端" belong here.
+ */
+export const MASTER_PROJECT = "master";
+
+/**
+ * Fallback project for un-scoped spawns (no project passed) — they land in the
+ * Master group, so a stray empty "default" project never appears.
+ */
+const DEFAULT_PROJECT = MASTER_PROJECT;
 
 /** Spawn a brand-new agent session and register it in the store. */
 export async function spawnAgent(

@@ -231,7 +231,7 @@ function OverviewDashboard() {
       </CollapsibleSection>
 
       {/* Usage */}
-      <CollapsibleSection title="用量分析" summary="用量分析 主模型— · 子代理—">
+      <CollapsibleSection title="📈 用量分析" summary="📈 用量分析 主模型— · 子代理—">
         <div className="ov-usage-item">
           <div className="ov-usage-label">主模型</div>
           <div className="ov-bar">
@@ -257,7 +257,7 @@ function OverviewDashboard() {
       </CollapsibleSection>
 
       {/* Remaining quota */}
-      <CollapsibleSection title="剩余用量" summary="剩余用量 5h — · 周— · 月—">
+      <CollapsibleSection title="⏱ 剩余用量" summary="⏱ 剩余用量 5h — · 周— · 月—">
         <div className="ov-bar-row">
           <div className="ov-bar-label">⏱ 5小时窗口</div>
           <div className="ov-bar">
@@ -385,8 +385,8 @@ function CollapsibleSection({
 
   if (collapsed) {
     return (
-      <div className="ov-section collapsed">
-        <div className="ov-summary uf-ov-summary" onClick={() => setCollapsed(false)}>
+      <div className="ov-section uk-section collapsed">
+        <div className="ov-summary uf-ov-summary uk-summary" onClick={() => setCollapsed(false)}>
           {summary}
         </div>
       </div>
@@ -394,7 +394,7 @@ function CollapsibleSection({
   }
 
   return (
-    <div className="ov-section">
+    <div className="ov-section uk-section">
       <div className="ov-section-header" onClick={() => setCollapsed(true)}>
         {title}
         <span className="ov-toggle">▼</span>

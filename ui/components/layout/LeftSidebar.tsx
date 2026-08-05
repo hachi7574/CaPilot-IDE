@@ -4,7 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { useStore, AgentInfo } from "../../state/store";
 import { setAgentRole } from "../../state/orchestration";
-import { spawnAgent, closeAgent as closeAgentAction } from "../../state/agentActions";
+import { spawnAgent, closeAgent as closeAgentAction, MASTER_PROJECT } from "../../state/agentActions";
 import { SettingsModal } from "./SettingsModal";
 
 /** Derive the workspace project name from an agent cwd. */
@@ -39,6 +39,7 @@ export function LeftSidebar() {
 
   const [focusedProj, setFocusedProj] = useState<string | null>(null);
   const [collapsedProjs, setCollapsedProjs] = useState<Set<string>>(new Set());
+  const [masterExpanded, setMasterExpanded] = useState(true);
   const [ctx, setCtx] = useState<CtxState | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [nprojOpen, setNprojOpen] = useState(false);
@@ -152,10 +153,24 @@ export function LeftSidebar() {
   // The tree is DRIVEN BY the store's project list (which includes empty
   // projects). Any project that only exists via an agent's cwd — e.g. before
   // `list_projects` resolves on mount — is merged in so nothing regresses.
+  // The Master group's project ("master") is pinned and rendered separately, so
+  // it is always excluded here.
   const projectNames = [...projects];
   for (const name of agentsByProject.keys()) {
     if (!projectNames.includes(name)) projectNames.push(name);
   }
+  for (let i = projectNames.length - 1; i >= 0; i--) {
+    if (projectNames[i] === MASTER_PROJECT) projectNames.splice(i, 1);
+  }
+
+  // Terminals living in the Master group: standalone agents spawned via the
+  // group's "＋ 新建终端" (cwd maps to the "master" project). The master session
+  // row itself is always rendered separately, so it is excluded here.
+  const masterTerminals = (agentsByProject.get(MASTER_PROJECT)?.agents ?? []).filter(
+    (a) => a.id !== masterAgentId
+  );
+
+  const toggleMaster = () => setMasterExpanded((v) => !v);
 
   // [☰] collapses / expands ALL project groups (sidebar stays visible).
   const allCollapsed =
@@ -238,23 +253,75 @@ export function LeftSidebar() {
 
             {/* Zone 3: Tree */}
             <div className="sidebar-tree">
-              {/* Master (pinned, always first) — a single purple button. */}
-              <div
-                className={`u9-master-btn${activeTabId === (masterAgentId || "master") ? " active" : ""}`}
-                onClick={openMaster}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  setCtx({
-                    x: e.clientX,
-                    y: e.clientY,
-                    agentId: masterAgentId ?? undefined,
-                    isMaster: true,
-                  });
-                }}
-              >
-                <span className="u9-master-icon">🔄</span>
-                <span className="u9-master-name">Master 会话</span>
+              {/* Master (pinned, always first) — a collapsible purple group. */}
+              <div className={`uj-master-group${masterExpanded ? "" : " collapsed"}`}>
+                <div
+                  className={`u9-master-btn${activeTabId === (masterAgentId || "master") ? " active" : ""}`}
+                  onClick={toggleMaster}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setCtx({
+                      x: e.clientX,
+                      y: e.clientY,
+                      agentId: masterAgentId ?? undefined,
+                      isMaster: true,
+                    });
+                  }}
+                >
+                  <span className="u9-master-icon">🔄</span>
+                  <span className="u9-master-name">Master</span>
+                  <span className="uj-master-arrow">▲</span>
+                </div>
+                {masterExpanded && (
+                  <>
+                    {/* Master session terminal row — opens the master. */}
+                    <div
+                      className={`terminal-item uj-master-term${activeTabId === (masterAgentId || "master") ? " active" : ""}`}
+                      onClick={openMaster}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setCtx({
+                          x: e.clientX,
+                          y: e.clientY,
+                          agentId: masterAgentId ?? undefined,
+                          isMaster: true,
+                        });
+                      }}
+                    >
+                      <span className="tm-icon">🤖</span>
+                      <span className="tm-name">⭐ master</span>
+                      <span className="tm-time">—</span>
+                    </div>
+                    {/* Standalone terminals spawned into the Master group. */}
+                    {masterTerminals.map((a) => (
+                      <div
+                        key={a.id}
+                        className={`terminal-item${activeTabId === a.id ? " active" : ""}`}
+                        onClick={() => openAgentTab(a.id)}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setCtx({ x: e.clientX, y: e.clientY, agentId: a.id });
+                        }}
+                      >
+                        <span className="tm-icon">🤖</span>
+                        <span className="tm-name">{a.title}</span>
+                        <span className="tm-time">—</span>
+                      </div>
+                    ))}
+                    {/* New terminal affordance — belongs to the Master group. */}
+                    <div
+                      className="uj-master-new"
+                      onClick={() => {
+                        spawnAgent("standalone", MASTER_PROJECT).catch(console.error);
+                      }}
+                    >
+                      ＋ 新建终端
+                    </div>
+                  </>
+                )}
               </div>
 
               {/* Dynamic projects (driven by store.projects, includes empties) */}
@@ -505,10 +572,24 @@ function ContextMenu({ ctx, onClose }: { ctx: CtxState; onClose: () => void }) {
 
   // ── Agent context ─────────────────────────────────────────────
   const agent = useStore((s) => s.agents.get(ctx.agentId ?? ""));
+  const allAgents = useStore((s) => s.agents);
   const runtimes = useStore((s) => s.runtimes);
   const addAgent = useStore((s) => s.addAgent);
   const closeTab = useStore((s) => s.closeTab);
   const removeAgent = useStore((s) => s.removeAgent);
+
+  // Count terminals in this project (same `projectOf` grouping as the tree).
+  // When it is the project's ONLY terminal, the context menu swaps the normal
+  // "关闭并终止" for "关闭并移除项目" (removes the whole project). The Master
+  // group is never a deletable project, so its terminals keep the plain close.
+  const project = agent ? projectOf(agent.cwd) : undefined;
+  const isMasterProject = project === MASTER_PROJECT;
+  let projCount = 0;
+  if (project && !isMasterProject) {
+    allAgents.forEach((a) => {
+      if (projectOf(a.cwd) === project) projCount++;
+    });
+  }
 
   const switchRuntime = async (runtime: string) => {
     try {
@@ -587,9 +668,23 @@ function ContextMenu({ ctx, onClose }: { ctx: CtxState; onClose: () => void }) {
         </div>
       ))}
       <div className="ctx-sep" />
-      <div className="ctx-item danger" onClick={closeAgent}>
-        ✕ 关闭并终止
-      </div>
+      {project && !isMasterProject && projCount === 1 ? (
+        <div
+          className="ctx-item danger"
+          onClick={() => {
+            // Last terminal of the project — remove the whole project (kills +
+            // closes its agents via the store action).
+            useStore.getState().removeProject(project);
+            onClose();
+          }}
+        >
+          🗑 关闭并移除项目
+        </div>
+      ) : (
+        <div className="ctx-item danger" onClick={closeAgent}>
+          ✕ 关闭并终止
+        </div>
+      )}
     </div>
   );
 }
@@ -622,17 +717,6 @@ function MasterContextMenu({ ctx, onClose }: { ctx: CtxState; onClose: () => voi
     onClose();
   };
 
-  const closeMaster = async () => {
-    if (!id) return;
-    try {
-      // Kill the master PTY only — the pinned slot is not deletable (DevPlan).
-      await invoke("agent_kill", { id });
-    } catch {
-      // ignore
-    }
-    onClose();
-  };
-
   return (
     <div
       className="ctx-menu"
@@ -656,10 +740,6 @@ function MasterContextMenu({ ctx, onClose }: { ctx: CtxState; onClose: () => voi
               {rt.id === agent?.runtime && " · 当前"}
             </div>
           ))}
-          <div className="ctx-sep" />
-          <div className="ctx-item danger" onClick={closeMaster}>
-            ✕ 关闭 master PTY
-          </div>
         </>
       )}
     </div>
