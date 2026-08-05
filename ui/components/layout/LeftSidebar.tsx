@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { useStore, AgentInfo } from "../../state/store";
 import { setAgentRole } from "../../state/orchestration";
@@ -166,19 +167,31 @@ export function LeftSidebar() {
   };
 
   // [📁+] create a new workspace project and surface it in the tree.
-  const handleCreateProject = async (name: string): Promise<string | null> => {
+  // With `path`, the project is rooted at an existing local folder the user
+  // picked (create_project creates context/ + agents/ inside it + git init and
+  // returns the canonical path); without it, the existing `~/CaPilot/workspaces`
+  // behavior is kept. The store key is always the project *name* (base name for
+  // the folder flow), never the canonical path.
+  const handleCreateProject = async (
+    name: string,
+    path?: string
+  ): Promise<string | null> => {
     const trimmed = name.trim();
     if (!trimmed) return "请输入项目名称";
     try {
-      const created = await invoke<string>("create_project", { name: trimmed });
-      addProject(created);
+      if (path) {
+        await invoke<string>("create_project", { name: trimmed, path });
+      } else {
+        await invoke<string>("create_project", { name: trimmed });
+      }
+      addProject(trimmed);
       // Default-new projects are expanded.
       setCollapsedProjs((prev) => {
         const next = new Set(prev);
-        next.delete(created);
+        next.delete(trimmed);
         return next;
       });
-      setFocusedProj((cur) => (cur === created ? cur : created));
+      setFocusedProj((cur) => (cur === trimmed ? cur : trimmed));
       setNprojError(null);
       return null;
     } catch (e) {
@@ -348,7 +361,7 @@ function NewProjectModal({
 }: {
   error: string | null;
   onClose: () => void;
-  onCreate: (name: string) => Promise<string | null>;
+  onCreate: (name: string, path?: string) => Promise<string | null>;
 }) {
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
@@ -358,19 +371,47 @@ function NewProjectModal({
     inputRef.current?.focus();
   }, []);
 
+  const closeOnSuccess = (err: string | null) => {
+    if (err) return;
+    setName("");
+    onClose();
+  };
+
   const submit = async () => {
     const trimmed = name.trim();
     if (!trimmed || busy) return;
     setBusy(true);
     const err = await onCreate(trimmed);
     setBusy(false);
-    if (!err) setName("");
+    closeOnSuccess(err);
+  };
+
+  // 📂 Choose an existing local folder → root the new project there. The project
+  // name is derived from the folder's base name (last path segment).
+  const pickFolder = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const selected = await open({ directory: true, multiple: false });
+      if (typeof selected === "string" && selected) {
+        const createdName =
+          selected.split(/[\\/]/).filter(Boolean).pop() ?? "项目";
+        const err = await onCreate(createdName, selected);
+        closeOnSuccess(err);
+      }
+    } catch (e) {
+      console.error("选择文件夹失败:", e);
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
     <div className="nproj-overlay" onClick={onClose}>
       <div className="nproj-card" onClick={(e) => e.stopPropagation()}>
         <div className="nproj-title">📁+ 新建项目</div>
+
+        <div className="ug-nproj-label">新建文件夹</div>
         <input
           ref={inputRef}
           className="nproj-input"
@@ -395,6 +436,13 @@ function NewProjectModal({
             {busy ? "创建中…" : "创建"}
           </button>
         </div>
+
+        <div className="ug-nproj-sep" />
+
+        <div className="ug-nproj-label">或选择现有文件夹</div>
+        <button className="ug-nproj-folder" onClick={pickFolder} disabled={busy}>
+          📂 选择现有文件夹…
+        </button>
       </div>
     </div>
   );

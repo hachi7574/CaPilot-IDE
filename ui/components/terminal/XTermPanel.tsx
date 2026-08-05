@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { useStore, AgentInfo } from "../../state/store";
@@ -7,6 +8,11 @@ import "@xterm/xterm/css/xterm.css";
 
 interface XTermPanelProps {
   agentId: string;
+}
+
+/** Shell-escape a path so spaces / quotes survive (single-quote wrap, `'` → `'\''`). */
+function shellEscape(path: string): string {
+  return `'${path.replace(/'/g, `'\\''`)}'`;
 }
 
 /**
@@ -32,6 +38,52 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
   const [lockWarning, setLockWarning] = useState(false);
   const lockedInputRef = useRef("");
   const unlockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // DevPlan §4.2 ④ — dragging a file onto the terminal pastes its path
+  // (shell-escaped) into the PTY. Guards against double-insert when both the DOM
+  // drop handler and the Tauri drag-drop event observe the same physical drop.
+  const dropHandledRef = useRef(false);
+  // Nesting counter (dragenter/dragleave fire when crossing xterm child nodes).
+  const dragDepthRef = useRef(0);
+  const [dragHover, setDragHover] = useState(false);
+
+  /** Tauri drag-drop positions are physical px; CSS rects are CSS px. */
+  const isPointInTerminal = useCallback((pos: { x: number; y: number }) => {
+    const el = containerRef.current;
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const x = pos.x / dpr;
+    const y = pos.y / dpr;
+    // A few px of tolerance so drops on the container's border still count.
+    return (
+      x >= r.left - 4 && x <= r.right + 4 && y >= r.top - 4 && y <= r.bottom + 4
+    );
+  }, []);
+
+  /** Insert shell-escaped path(s) into the PTY (raw keystroke passthrough).
+   *  Worker-locked agents route through the same lock banner instead of silently
+   *  accepting the input. */
+  const insertPathToPty = useCallback(
+    (paths: string[]) => {
+      if (!paths.length) return;
+      const escaped = paths.map(shellEscape).join(" ");
+      // Leading space so the path doesn't glue to preceding text (typing a path
+      // in a shell); raw:true sends the keystrokes verbatim (no \r appended).
+      const payload = ` ${escaped}`;
+      const role = useStore.getState().agents.get(agentId)?.role;
+      const unlocked = useStore.getState().workerUnlockId === agentId;
+      if (role === "worker" && !unlocked) {
+        lockedInputRef.current += payload;
+        setLockWarning(true);
+        return;
+      }
+      invoke("agent_write", { id: agentId, data: payload, raw: true }).catch(
+        () => {}
+      );
+    },
+    [agentId]
+  );
 
   useEffect(() => {
     return () => {
@@ -169,6 +221,50 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId, channel]);
 
+  // Tauri drag-drop event — more reliable in the webview than DOM drop (the
+  // Composer uses the same fallback). Scoped to the terminal via position so a
+  // drop anywhere else in the window doesn't paste into this PTY.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    // StrictMode double-mount guard: onDragDropEvent resolves asynchronously, so
+    // cleanup can run before `.then()` assigns unlisten — the late listener must
+    // drop itself instead of leaking into the second mount.
+    let cancelled = false;
+    getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const p = event.payload;
+        if (p.type === "enter") {
+          dropHandledRef.current = false; // new drag sequence
+          setDragHover(isPointInTerminal(p.position));
+        } else if (p.type === "over") {
+          setDragHover(isPointInTerminal(p.position));
+        } else if (p.type === "leave") {
+          dragDepthRef.current = 0;
+          setDragHover(false);
+        } else if (p.type === "drop") {
+          const overTerminal =
+            dragDepthRef.current > 0 || isPointInTerminal(p.position);
+          if (overTerminal && !dropHandledRef.current) {
+            insertPathToPty(p.paths);
+            dropHandledRef.current = true;
+          }
+          dragDepthRef.current = 0;
+          setDragHover(false);
+        }
+      })
+      .then((un) => {
+        if (cancelled) {
+          un();
+        } else {
+          unlisten = un;
+        }
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [insertPathToPty, isPointInTerminal]);
+
   const handleStillSendTerminal = () => {
     const text = lockedInputRef.current;
     if (text) {
@@ -194,11 +290,51 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
   return (
     <div
       ref={containerRef}
+      className={dragHover ? "ug-xterm-drophint" : undefined}
       style={{
         flex: 1,
         padding: "10px 14px",
         background: "#05070D",
         position: "relative",
+      }}
+      onDragEnter={(e) => {
+        e.preventDefault();
+        dragDepthRef.current += 1;
+        // A new drag sequence is starting — clear any stale dedupe flag left over
+        // from the previous drop so the next drop inserts exactly once.
+        dropHandledRef.current = false;
+        setDragHover(true);
+      }}
+      onDragOver={(e) => {
+        e.preventDefault(); // allow the drop
+      }}
+      onDragLeave={(e) => {
+        e.preventDefault();
+        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+        if (dragDepthRef.current === 0) setDragHover(false);
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        // If the Tauri drag-drop event already inserted the path for this same
+        // physical drop, consume the DOM drop without double-inserting.
+        if (dropHandledRef.current) {
+          dropHandledRef.current = false;
+          dragDepthRef.current = 0;
+          setDragHover(false);
+          return;
+        }
+        // Some webviews still expose `.path` on File (Tauri v1 heritage / v2
+        // dragDropEnabled). If present, insert directly; otherwise defer to the
+        // Tauri drag-drop event, which carries the real absolute paths.
+        const f = e.dataTransfer.files?.[0] as
+          | (File & { path?: string })
+          | undefined;
+        if (f?.path) {
+          insertPathToPty([f.path]);
+          dropHandledRef.current = true;
+          dragDepthRef.current = 0;
+          setDragHover(false);
+        }
       }}
     >
       {lockWarning && (

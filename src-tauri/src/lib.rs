@@ -437,10 +437,30 @@ async fn workspace_root(
 /// `~/CaPilot/workspaces/<name>/{context, agents}` (+ git init). Returns the
 /// project name on success.
 #[tauri::command]
-fn create_project(name: String) -> Result<String, String> {
+fn create_project(name: String, path: Option<String>) -> Result<String, String> {
     sanitize_project(&name)?;
-    ensure_project(&name).map_err(|e| format!("Failed to init workspace: {}", e))?;
-    Ok(name)
+    if let Some(path) = path {
+        // Project rooted at an EXISTING local folder the user picked.
+        let dir = std::path::Path::new(&path);
+        if !dir.is_dir() {
+            return Err("所选文件夹不存在或不是目录".to_string());
+        }
+        let canonical = dir.canonicalize().map_err(|e| format!("无效路径: {}", e))?;
+        // Create the contexts layout inside the chosen folder (idempotent).
+        std::fs::create_dir_all(canonical.join("context"))
+            .map_err(|e| format!("Failed to create context dir: {}", e))?;
+        std::fs::create_dir_all(canonical.join("agents"))
+            .map_err(|e| format!("Failed to create agents dir: {}", e))?;
+        // git init if not already a repo (best-effort).
+        let _ = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&canonical)
+            .status();
+        Ok(canonical.to_string_lossy().to_string())
+    } else {
+        ensure_project(&name).map_err(|e| format!("Failed to init workspace: {}", e))?;
+        Ok(name)
+    }
 }
 
 /// List all workspace project names under `~/CaPilot/workspaces/` (directories
@@ -865,6 +885,26 @@ fn resource_history(
     monitor.history(&agent_id)
 }
 
+/// System-wide CPU + memory for the Computer Status panel.
+#[derive(serde::Serialize)]
+struct SystemStats {
+    cpu_pct: f32,
+    mem_used: u64,
+    mem_total: u64,
+}
+
+#[tauri::command]
+fn system_stats(
+    monitor: tauri::State<'_, Arc<resource::ResourceMonitor>>,
+) -> SystemStats {
+    let (cpu_pct, mem_used, mem_total) = monitor.system_snapshot();
+    SystemStats {
+        cpu_pct,
+        mem_used,
+        mem_total,
+    }
+}
+
 // ── App entry point ─────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -931,6 +971,7 @@ pub fn run() {
             esp_status,
             esp_send,
             resource_history,
+            system_stats,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

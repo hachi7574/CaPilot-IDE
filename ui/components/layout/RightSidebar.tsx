@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { useStore, type AgentInfo, type ResourcePoint } from "../../state/store";
-import { fmtCpu, fmtMem } from "../../state/resource";
+import { useStore } from "../../state/store";
 
 type RightTab = "overview" | "files" | "git";
 
@@ -133,30 +132,68 @@ function useProjectRoot(): string {
 
 /* ── Overview Dashboard ───────────────────────────────────────── */
 
+/** System-wide CPU/MEM snapshot from the backend `system_stats` command. */
+interface SystemStats {
+  cpu_pct: number;
+  mem_used: number;
+  mem_total: number;
+}
+
+/** CPU% to 2 decimals, e.g. "23.12%". */
+function fmtCpu(cpu: number | undefined | null): string {
+  if (cpu === undefined || cpu === null || Number.isNaN(cpu)) return "—";
+  return `${cpu.toFixed(2)}%`;
+}
+
+/** Bytes → GB with 2 decimals, e.g. "8.32G". */
+function bytesToG(bytes: number | undefined | null): string {
+  if (bytes === undefined || bytes === null || Number.isNaN(bytes)) return "—";
+  return `${(bytes / 1024 ** 3).toFixed(2)}G`;
+}
+
 function OverviewDashboard() {
   const esp = useStore((s) => s.espStatus);
-  const agents = useStore((s) => s.agents);
-  const agentResources = useStore((s) => s.agentResources);
 
-  // Aggregate per-agent resource snapshots (resource://sample) as a proxy for
-  // the computer's CPU/MEM; fall back to "—" when no agents are running.
-  const resList = [...agents.values()]
-    .map((a) => ({ a, res: agentResources.get(a.id) }))
-    .filter((e): e is { a: AgentInfo; res: ResourcePoint } => e.res !== undefined);
-  const totalCpu = resList.reduce((s, e) => s + e.res.cpu_pct, 0);
-  const totalMem = resList.reduce((s, e) => s + e.res.mem_bytes, 0);
-  const hasRes = resList.length > 0;
-  const cpuDisplay = hasRes ? fmtCpu(totalCpu) : "—";
-  const memDisplay = hasRes ? fmtMem(totalMem) : "—";
+  // Live system-wide CPU/MEM for the Computer Status panel (2s tick).
+  const [stats, setStats] = useState<SystemStats | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const tick = () => {
+      invoke<SystemStats>("system_stats")
+        .then((s) => {
+          if (!cancelled) setStats(s);
+        })
+        .catch(() => {
+          if (!cancelled) setStats(null);
+        });
+    };
+    tick();
+    const timer = setInterval(tick, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
+
+  const cpuPct = stats?.cpu_pct;
+  const memText =
+    stats && stats.mem_used != null && stats.mem_total
+      ? `${bytesToG(stats.mem_used)} / ${bytesToG(stats.mem_total)}`
+      : "—";
+  const cpuWidth = cpuPct != null ? Math.max(0, Math.min(100, cpuPct)) : 0;
+  const memWidth =
+    stats && stats.mem_total
+      ? Math.max(0, Math.min(100, (stats.mem_used / stats.mem_total) * 100))
+      : 0;
 
   const espKind =
     esp.kind === "ble" ? "🔵BLE" : esp.kind === "wifi" ? "📶WiFi" : esp.kind === "usb" ? "🔌USB" : "";
-  const espSummary = `🔌 ${esp.connected ? (esp.name ?? "ESP") : "Not connected"}${espKind ? ` · ${espKind}` : ""}${esp.battery_pct != null ? ` · 🔋${esp.battery_pct}%` : ""}`;
+  const espSummary = `🔌 ESP 设备状态 ${esp.connected ? (esp.name ?? "ESP") : "未连接"}${espKind ? ` · ${espKind}` : ""}${esp.battery_pct != null ? ` · 🔋${esp.battery_pct}%` : ""}`;
 
   return (
     <div className="tab-panel" id="tab-overview">
       {/* Runtime */}
-      <CollapsibleSection title="📊 Runtime" summary="📊 Runtime 0/1M Tokens · 缓存—">
+      <CollapsibleSection title="📊 运行时" summary="📊 运行时 0/1M · 缓存—">
         <div className="ov-row">
           <span className="ov-label">上下文窗口</span>
           <span className="ov-value gr">🟢 充足</span>
@@ -254,35 +291,32 @@ function OverviewDashboard() {
       </CollapsibleSection>
 
       {/* Computer */}
-      <CollapsibleSection title="💻 Computer Status" summary="💻 🟢 Online">
-        <div className="ov-row">
-          <span className="ov-label">状态</span>
-          <span className="ov-value gr">🟢 Online</span>
+      <CollapsibleSection
+        title="💻 电脑状态"
+        summary={`💻 电脑状态 CPU ${fmtCpu(cpuPct)} · 内存 ${memText}`}
+      >
+        <div className="ov-bar-row">
+          <div className="ov-row">
+            <span className="ov-label">CPU</span>
+            <span className="ov-value">{fmtCpu(cpuPct)}</span>
+          </div>
+          <div className="ov-bar">
+            <div className="ov-bar-fill pu" style={{ width: `${cpuWidth}%` }} />
+          </div>
         </div>
-        <div className="ov-row">
-          <span className="ov-label">CPU</span>
-          <span className="ov-value">{cpuDisplay}</span>
-        </div>
-        <div className="ov-row">
-          <span className="ov-label">Memory</span>
-          <span className="ov-value">{memDisplay}</span>
-        </div>
-        <div className="ov-row">
-          <span className="ov-label">GPU</span>
-          <span className="ov-value">—</span>
-        </div>
-        <div className="ov-row">
-          <span className="ov-label">Disk</span>
-          <span className="ov-value">—</span>
-        </div>
-        <div className="ov-row">
-          <span className="ov-label">Network</span>
-          <span className="ov-value">—</span>
+        <div className="ov-bar-row">
+          <div className="ov-row">
+            <span className="ov-label">内存</span>
+            <span className="ov-value">{memText}</span>
+          </div>
+          <div className="ov-bar">
+            <div className="ov-bar-fill gr" style={{ width: `${memWidth}%` }} />
+          </div>
         </div>
       </CollapsibleSection>
 
       {/* ESP */}
-      <CollapsibleSection title="🔌 ESP Device Status" summary={espSummary}>
+      <CollapsibleSection title="🔌 ESP 设备状态" summary={espSummary}>
         <div className="ov-esp-status">
           <span
             className="ov-esp-dot"
@@ -358,7 +392,7 @@ function CollapsibleSection({
         {title}
         <span className="ov-toggle">{collapsed ? "▲" : "▼"}</span>
       </div>
-      <div className="ov-summary">{summary}</div>
+      <div className="ov-summary uf-ov-summary">{summary}</div>
       <div className="ov-section-body">{children}</div>
     </div>
   );

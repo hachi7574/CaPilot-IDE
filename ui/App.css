@@ -1119,3 +1119,57 @@ body::after {
 /* Files tree: config files (tauri.conf.json / *.conf.json) in success color. */
 .files-tree .rtx-file-conf { color: var(--success); }
 
+/* ── New-project modal: choose existing folder (ug-*) ─────────── */
+
+.ug-nproj-sep {
+  border-top: 1px solid var(--rule);
+  margin: 4px 0 2px;
+}
+
+.ug-nproj-label {
+  font-family: var(--pixel);
+  font-size: 9px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.ug-nproj-folder {
+  font-family: var(--pixel);
+  font-size: 10px;
+  letter-spacing: 1px;
+  padding: 8px 12px;
+  color: var(--primary);
+  border: 1px dashed var(--brand-dim);
+  background: rgba(139, 92, 246, 0.05);
+  cursor: pointer;
+  text-transform: uppercase;
+  text-align: center;
+  transition: all .2s var(--ease-apple);
+}
+.ug-nproj-folder:hover {
+  border-color: var(--brand);
+  background: rgba(139, 92, 246, 0.12);
+  color: var(--brand);
+}
+.ug-nproj-folder:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ── Terminal drag & drop hint (DevPlan §4.2 ④) ──────────────── */
+
+.ug-xterm-drophint {
+  outline: 1px dashed var(--brand);
+  outline-offset: -2px;
+  background: rgba(139, 92, 246, 0.06);
+}
+
+/* uf — Overview collapsed summaries: single line, truncate instead of wrapping
+   (matched to each section header title). */
+.uf-ov-summary {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+

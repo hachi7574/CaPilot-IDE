@@ -103,6 +103,20 @@ impl ResourceMonitor {
             .into()
     }
 
+    /// System-wide CPU + memory snapshot for the "Computer Status" panel.
+    /// Reuses the same `System` instance so CPU deltas are meaningful.
+    /// Returns (cpu_pct, mem_used_bytes, mem_total_bytes).
+    pub fn system_snapshot(&self) -> (f32, u64, u64) {
+        let mut sys = self.sys.lock().unwrap();
+        sys.refresh_cpu_usage();
+        sys.refresh_memory();
+        (
+            sys.global_cpu_usage(),
+            sys.used_memory(),
+            sys.total_memory(),
+        )
+    }
+
     fn push_history(&self, agent_id: &str, cpu_pct: f32, mem_bytes: u64) {
         let mut hist = self.history.lock().unwrap();
         let buf = hist.entry(agent_id.to_string()).or_default();
