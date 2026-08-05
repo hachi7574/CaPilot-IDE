@@ -1,5 +1,21 @@
-import { useState } from "react";
-import { useStore } from "../../state/store";
+import { useState, useEffect, useCallback } from "react";
+import { invoke, Channel } from "@tauri-apps/api/core";
+import { useStore, AgentInfo } from "../../state/store";
+import { setAgentRole } from "../../state/orchestration";
+
+/** Derive the workspace project name from an agent cwd. */
+function projectOf(cwd: string): string {
+  const m = cwd.match(/workspaces\/([^/]+)/);
+  if (m) return m[1];
+  const parts = cwd.split("/").filter(Boolean);
+  return parts[parts.length - 1] || cwd;
+}
+
+interface CtxState {
+  x: number;
+  y: number;
+  agentId: string;
+}
 
 export function LeftSidebar() {
   const leftSidebarOpen = useStore((s) => s.leftSidebarOpen);
@@ -7,12 +23,29 @@ export function LeftSidebar() {
   const agents = useStore((s) => s.agents);
   const tabs = useStore((s) => s.tabs);
   const activeTabId = useStore((s) => s.activeTabId);
+  const masterAgentId = useStore((s) => s.masterAgentId);
   const setActiveTab = useStore((s) => s.setActiveTab);
   const addTab = useStore((s) => s.addTab);
 
   const [masterCollapsed, setMasterCollapsed] = useState(false);
   const [focusedProj, setFocusedProj] = useState<string | null>(null);
   const [collapsedProjs, setCollapsedProjs] = useState<Set<string>>(new Set());
+  const [ctx, setCtx] = useState<CtxState | null>(null);
+
+  // Close the context menu on outside click / Escape.
+  useEffect(() => {
+    if (!ctx) return;
+    const close = () => setCtx(null);
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
+    window.addEventListener("click", close);
+    window.addEventListener("contextmenu", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("contextmenu", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [ctx]);
 
   const toggleProj = (id: string) => {
     setCollapsedProjs((prev) => {
@@ -31,6 +64,47 @@ export function LeftSidebar() {
       return next;
     });
   };
+
+  const openAgentTab = useCallback(
+    (id: string, title?: string) => {
+      if (!tabs.find((t) => t.id === id)) {
+        const agentInfo = agents.get(id);
+        addTab({
+          id,
+          type: "agent",
+          agentId: id,
+          title: title || agentInfo?.title || `agent-${id.slice(0, 6)}`,
+        });
+      }
+      setActiveTab(id);
+    },
+    [tabs, agents, addTab, setActiveTab]
+  );
+
+  const openMaster = () => {
+    const masterId = masterAgentId;
+    if (masterId && agents.has(masterId)) {
+      openAgentTab(masterId, "⭐master");
+    } else {
+      if (!tabs.find((t) => t.id === "master")) {
+        addTab({ id: "master", type: "agent", agentId: undefined, title: "⭐master" });
+      }
+      setActiveTab("master");
+    }
+  };
+
+  // Group agents by workspace project.
+  const projects = new Map<string, { cwd: string; agents: { id: string; title: string }[] }>();
+  agents.forEach((a, id) => {
+    const projName = projectOf(a.cwd);
+    if (!projects.has(projName)) {
+      projects.set(projName, { cwd: a.cwd, agents: [] });
+    }
+    projects.get(projName)!.agents.push({
+      id,
+      title: a.title || `agent-${id.slice(0, 4)}`,
+    });
+  });
 
   return (
     <>
@@ -69,18 +143,8 @@ export function LeftSidebar() {
                   <span className="m-arrow">▲</span>
                 </div>
                 <div
-                  className={`terminal-item${activeTabId === "master" ? " active" : ""}`}
-                  onClick={() => {
-                    if (!tabs.find((t) => t.id === "master")) {
-                      addTab({
-                        id: "master",
-                        type: "agent",
-                        agentId: undefined,
-                        title: "⭐master",
-                      });
-                    }
-                    setActiveTab("master");
-                  }}
+                  className={`terminal-item${activeTabId === (masterAgentId || "master") ? " active" : ""}`}
+                  onClick={openMaster}
                 >
                   <span className="tm-icon">🔄</span>
                   <span className="tm-name">Master</span>
@@ -90,19 +154,6 @@ export function LeftSidebar() {
 
               {/* Dynamic projects from agents */}
               {(() => {
-                // Group agents by cwd (projects)
-                const projects = new Map<
-                  string,
-                  { cwd: string; agents: { id: string; title: string }[] }
-                >();
-                agents.forEach((a, id) => {
-                  const projName = a.cwd.split("/").pop() || a.cwd;
-                  if (!projects.has(projName)) {
-                    projects.set(projName, { cwd: a.cwd, agents: [] });
-                  }
-                  projects.get(projName)!.agents.push({ id, title: a.title || `agent-${id.slice(0, 4)}` });
-                });
-
                 if (projects.size === 0) {
                   return (
                     <div className="proj">
@@ -133,17 +184,11 @@ export function LeftSidebar() {
                       <div
                         key={a.id}
                         className={`terminal-item${activeTabId === a.id ? " active" : ""}`}
-                        onClick={() => {
-                          if (!tabs.find((t) => t.id === a.id)) {
-                            const agentInfo = agents.get(a.id);
-                            addTab({
-                              id: a.id,
-                              type: "agent",
-                              agentId: a.id,
-                              title: agentInfo?.title || `agent-${a.id.slice(0, 6)}`,
-                            });
-                          }
-                          setActiveTab(a.id);
+                        onClick={() => openAgentTab(a.id)}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setCtx({ x: e.clientX, y: e.clientY, agentId: a.id });
                         }}
                       >
                         <span className="tm-icon">🤖</span>
@@ -159,8 +204,92 @@ export function LeftSidebar() {
         )}
       </div>
 
+      {ctx && <ContextMenu ctx={ctx} onClose={() => setCtx(null)} />}
+
       {/* Resize handle */}
       <div className="resize-handle" id="resize-left" />
     </>
+  );
+}
+
+/* ── Right-click context menu ─────────────────────────────────── */
+
+function ContextMenu({ ctx, onClose }: { ctx: CtxState; onClose: () => void }) {
+  const agent = useStore((s) => s.agents.get(ctx.agentId));
+  const runtimes = useStore((s) => s.runtimes);
+  const addAgent = useStore((s) => s.addAgent);
+  const closeTab = useStore((s) => s.closeTab);
+  const removeAgent = useStore((s) => s.removeAgent);
+
+  const switchRuntime = async (runtime: string) => {
+    try {
+      const channel = new Channel<number[]>();
+      channel.onmessage = (data) =>
+        useStore.getState().appendAgentOutput(ctx.agentId, data);
+      const info = (await invoke("agent_switch_runtime", {
+        id: ctx.agentId,
+        runtime,
+        onData: channel,
+      })) as AgentInfo;
+      addAgent(info, channel);
+    } catch (e) {
+      console.error("runtime switch failed:", e);
+    }
+    onClose();
+  };
+
+  const setRole = async (role: "worker" | "standalone") => {
+    await setAgentRole(ctx.agentId, role);
+    onClose();
+  };
+
+  const closeAgent = async () => {
+    try {
+      await invoke("agent_kill", { id: ctx.agentId });
+    } catch {
+      // ignore
+    }
+    closeTab(ctx.agentId);
+    removeAgent(ctx.agentId);
+    onClose();
+  };
+
+  const isWorker = agent?.role === "worker";
+
+  return (
+    <div
+      className="ctx-menu"
+      style={{ position: "fixed", left: ctx.x, top: ctx.y, zIndex: 1000 }}
+      onClick={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.stopPropagation()}
+    >
+      {!isWorker && (
+        <div className="ctx-item" onClick={() => setRole("worker")}>
+          🤖 设为 worker
+        </div>
+      )}
+      {isWorker && (
+        <div className="ctx-item" onClick={() => setRole("standalone")}>
+          🔓 取消 worker
+        </div>
+      )}
+      <div className="ctx-sep" />
+      <div className="ctx-label">切换 runtime</div>
+      {runtimes.map((rt) => (
+        <div
+          key={rt.id}
+          className={`ctx-item${rt.id === agent?.runtime ? " current" : ""}`}
+          onClick={() => switchRuntime(rt.id)}
+        >
+          {rt.name}
+          {!rt.available && " (未安装)"}
+          {rt.id === agent?.runtime && " · 当前"}
+        </div>
+      ))}
+      <div className="ctx-sep" />
+      <div className="ctx-item danger" onClick={closeAgent}>
+        ✕ 关闭并终止
+      </div>
+    </div>
   );
 }

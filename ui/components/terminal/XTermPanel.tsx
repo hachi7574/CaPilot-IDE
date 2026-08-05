@@ -1,18 +1,31 @@
 import { useEffect, useRef } from "react";
+import { invoke, Channel } from "@tauri-apps/api/core";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { useStore } from "../../state/store";
+import { useStore, AgentInfo } from "../../state/store";
 import "@xterm/xterm/css/xterm.css";
 
 interface XTermPanelProps {
   agentId: string;
 }
 
+/**
+ * xterm panel bound to an agent's PTY channel.
+ *
+ * Race handling: the Composer starts buffering channel output into
+ * `store.agentOutputs` from the instant the PTY spawns. This component drains
+ * that buffer on mount, then redirects the channel straight to the terminal.
+ * On unmount it routes output back to the buffer so nothing is lost if the tab
+ * is reopened. When the channel object changes (e.g. runtime switch), the
+ * effect re-runs and attaches the new channel.
+ */
 export function XTermPanel({ agentId }: XTermPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const channelRef = useRef<Channel<number[]> | null>(null);
   const agentChannels = useStore((s) => s.agentChannels);
+  const channel = agentChannels.get(agentId);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -54,24 +67,64 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
     termRef.current = term;
     fitAddonRef.current = fitAddon;
 
-    // Connect to the PTY channel for this agent
-    const channel = agentChannels.get(agentId);
-    if (channel) {
-      channel.onmessage = (data: number[]) => {
+    let disposed = false;
+
+    const writeToTerm = (data: number[]) => {
+      if (disposed) return;
+      try {
         term.write(new Uint8Array(data));
-      };
+      } catch {
+        // terminal disposed
+      }
+    };
+
+    const sendResize = () => {
+      const rows = term.rows || 24;
+      const cols = term.cols || 80;
+      invoke("agent_resize", { id: agentId, rows, cols }).catch(() => {});
+    };
+
+    /** Attach a channel: drain buffered output, then stream live. */
+    const attachChannel = (ch: Channel<number[]>) => {
+      channelRef.current = ch;
+      ch.onmessage = writeToTerm;
+      const buffered = useStore.getState().agentOutputs.get(agentId);
+      if (buffered && buffered.length) {
+        writeToTerm(buffered);
+        useStore.getState().clearAgentOutput(agentId);
+      }
+      sendResize();
+    };
+
+    if (channel) {
+      attachChannel(channel);
+    } else {
+      // Restored session with no live PTY → resume it.
+      const resumeChannel = new Channel<number[]>();
+      resumeChannel.onmessage = (data) =>
+        useStore.getState().appendAgentOutput(agentId, data);
+      invoke<AgentInfo>("agent_resume", { id: agentId, onData: resumeChannel })
+        .then((info) => {
+          if (disposed) return;
+          useStore.getState().addAgent(info, resumeChannel);
+          attachChannel(resumeChannel);
+        })
+        .catch((err) => {
+          const bytes = Array.from(new TextEncoder().encode(`[resume failed] ${err}\n`));
+          writeToTerm(bytes);
+        });
     }
 
-    // Forward user input to the PTY
+    // Forward user input to the PTY (raw keystroke passthrough).
     term.onData((data) => {
-      // TODO: invoke agent_write command
-      console.debug("term input:", data);
+      invoke("agent_write", { id: agentId, data, raw: true }).catch(() => {});
     });
 
     // Resize handler
     const handleResize = () => {
       if (fitAddonRef.current) {
         fitAddonRef.current.fit();
+        sendResize();
       }
     };
 
@@ -79,10 +132,21 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
     observer.observe(containerRef.current);
 
     return () => {
+      disposed = true;
       observer.disconnect();
       term.dispose();
+      // Route output back to the buffer so a reopened tab catches up.
+      const ch = channelRef.current;
+      if (ch) {
+        ch.onmessage = (data) =>
+          useStore.getState().appendAgentOutput(agentId, data);
+      }
+      channelRef.current = null;
+      termRef.current = null;
+      fitAddonRef.current = null;
     };
-  }, [agentId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentId, channel]);
 
   return (
     <div

@@ -32,8 +32,23 @@ export function ContentArea() {
             ? `(${activeAgent?.runtime || "claude"})`
             : ""}
         </div>
-        {activeTab.type === "agent" && (
-          <XTermPanel agentId={activeTab.agentId || "master"} />
+        {activeTab.type === "agent" && activeTab.agentId && (
+          <XTermPanel agentId={activeTab.agentId} />
+        )}
+        {activeTab.type === "agent" && !activeTab.agentId && (
+          <div
+            style={{
+              flex: 1,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "var(--muted)",
+              fontFamily: "var(--mono)",
+              fontSize: 12,
+            }}
+          >
+            Master 会话未启动 — 在输入框发消息自动创建
+          </div>
         )}
         {activeTab.type === "editor" && activeTab.filePath && (
           <EditorPanel filePath={activeTab.filePath} />

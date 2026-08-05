@@ -1,16 +1,33 @@
 import { useStore } from "../../state/store";
+import { spawnAgent } from "../../state/agentActions";
+
+function projectOf(cwd: string): string {
+  const m = cwd.match(/workspaces\/([^/]+)/);
+  if (m) return m[1];
+  const parts = cwd.split("/").filter(Boolean);
+  return parts[parts.length - 1] || cwd;
+}
 
 export function TabBar() {
   const tabs = useStore((s) => s.tabs);
   const activeTabId = useStore((s) => s.activeTabId);
   const agents = useStore((s) => s.agents);
+  const workerMode = useStore((s) => s.workerMode);
   const setActiveTab = useStore((s) => s.setActiveTab);
   const toggleLeftSidebar = useStore((s) => s.toggleLeftSidebar);
 
   // Derive project name from current active tab's agent cwd
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const activeAgent = activeTab?.agentId ? agents.get(activeTab.agentId) : undefined;
-  const projectName = activeAgent?.cwd.split("/").pop() || (activeTab ? "Agent" : "");
+  const projectName = activeAgent?.cwd ? projectOf(activeAgent.cwd) : activeTab ? "Agent" : "";
+
+  const handleNew = async () => {
+    try {
+      await spawnAgent(workerMode ? "worker" : "standalone");
+    } catch (err) {
+      console.error("Failed to spawn agent:", err);
+    }
+  };
 
   return (
     <div className="tab-bar">
@@ -25,6 +42,7 @@ export function TabBar() {
       {tabs.map((tab) => {
         const agent = tab.agentId ? agents.get(tab.agentId) : undefined;
         const status = agent?.status || "idle";
+        const roleBadge = agent?.role && agent.role !== "standalone" ? ` · ${agent.role}` : "";
         return (
           <div
             key={tab.id}
@@ -36,12 +54,12 @@ export function TabBar() {
               {tab.type === "agent" ? "🤖" : "📄"}{tab.title}
             </span>
             {agent?.runtime && (
-              <span className="tab-runtime">{agent.runtime}</span>
+              <span className="tab-runtime">{agent.runtime}{roleBadge}</span>
             )}
           </div>
         );
       })}
-      <button className="tab-add" title="新建终端">
+      <button className="tab-add" title="新建终端" onClick={handleNew}>
         +
       </button>
     </div>

@@ -1,6 +1,7 @@
 import { useRef, useCallback, KeyboardEvent } from "react";
-import { invoke, Channel } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { useStore } from "../../state/store";
+import { spawnAgent, ensureAgentChannel } from "../../state/agentActions";
 
 const PERMISSION_MODES = ["ask", "auto", "yolo"] as const;
 const SPEED_LABELS: Record<string, string> = {
@@ -17,17 +18,19 @@ export function Composer() {
   const composerTarget = useStore((s) => s.composerTarget);
   const permissionMode = useStore((s) => s.permissionMode);
   const speed = useStore((s) => s.speed);
+  const workerMode = useStore((s) => s.workerMode);
   const activeTabId = useStore((s) => s.activeTabId);
   const tabs = useStore((s) => s.tabs);
+  const agents = useStore((s) => s.agents);
+  const masterAgentId = useStore((s) => s.masterAgentId);
 
   const toggleComposer = useStore((s) => s.toggleComposer);
   const setComposerTarget = useStore((s) => s.setComposerTarget);
   const setPermissionMode = useStore((s) => s.setPermissionMode);
   const setSpeed = useStore((s) => s.setSpeed);
+  const toggleWorkerMode = useStore((s) => s.toggleWorkerMode);
   const pushDraft = useStore((s) => s.pushDraft);
   const navigateDraft = useStore((s) => s.navigateDraft);
-  const addAgent = useStore((s) => s.addAgent);
-  const addTab = useStore((s) => s.addTab);
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const targetAgentId =
@@ -40,45 +43,52 @@ export function Composer() {
     pushDraft(text);
 
     let agentId = targetAgentId;
-    if (!agentId) {
-      try {
-        const channel = new Channel<number[]>();
-        const cwd = "/home/hachi";
-        const info = await invoke("agent_spawn", {
-          runtime: "claude",
-          cwd,
-          role: "master",
-          onData: channel,
-        });
-        const agentInfo = info as import("../../state/store").AgentInfo;
-        agentId = agentInfo.id;
-        addAgent(agentInfo, channel);
-        addTab({
-          id: agentId,
-          type: "agent",
-          agentId,
-          title: `claude@master`,
-        });
-        setTimeout(() => {
-          invoke("agent_write", { id: agentId, data: text });
-        }, 500);
-      } catch (err) {
-        console.error("Failed to spawn agent:", err);
-        return;
+    let justSpawned = false;
+    try {
+      if (!agentId) {
+        if (composerTarget === "master") {
+          // Reuse the existing master session instead of spawning a new one.
+          if (masterAgentId && agents.has(masterAgentId)) {
+            agentId = masterAgentId;
+          }
+        }
+        if (!agentId) {
+          const role =
+            composerTarget === "master"
+              ? "master"
+              : workerMode
+              ? "worker"
+              : "standalone";
+          agentId = await spawnAgent(role);
+          justSpawned = true;
+        }
       }
-    } else {
-      try {
-        await invoke("agent_write", { id: agentId, data: text });
-      } catch (err) {
-        console.error("Failed to write to agent:", err);
+
+      // Resumed/restored sessions may not have a channel yet.
+      const resumed = await ensureAgentChannel(agentId);
+      // Give a freshly-spawned/resumed CLI TUI time to attach its input loop
+      // before injecting the message.
+      if (justSpawned || resumed) {
+        await new Promise((r) => setTimeout(r, 800));
       }
+      await invoke("agent_write", { id: agentId, data: text });
+    } catch (err) {
+      console.error("Failed to send to agent:", err);
+      return;
     }
 
     if (textareaRef.current) {
       textareaRef.current.value = "";
       textareaRef.current.style.height = "auto";
     }
-  }, [targetAgentId, pushDraft, addAgent, addTab]);
+  }, [
+    targetAgentId,
+    composerTarget,
+    workerMode,
+    masterAgentId,
+    agents,
+    pushDraft,
+  ]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -107,7 +117,14 @@ export function Composer() {
         }
       }
     },
-    [handleSend, permissionMode, composerTarget, setPermissionMode, setComposerTarget, navigateDraft]
+    [
+      handleSend,
+      permissionMode,
+      composerTarget,
+      setPermissionMode,
+      setComposerTarget,
+      navigateDraft,
+    ]
   );
 
   return (
@@ -115,9 +132,11 @@ export function Composer() {
       {/* Target line */}
       <div className="composer-target">
         <span>→</span>{" "}
-        agent: {composerTarget === "master"
+        agent:{" "}
+        {composerTarget === "master"
           ? "master"
           : activeTab?.title || "none"}
+        {workerMode && composerTarget !== "master" ? " · worker" : ""}
       </div>
 
       {/* Input area */}
@@ -151,8 +170,12 @@ export function Composer() {
           速度: {SPEED_LABELS[speed]}
         </span>
         <span className="act-sep" />
-        <span className="act-btn accent" title="worker 开关">
-          🤖worker 开
+        <span
+          className={`act-btn accent${workerMode ? " active" : ""}`}
+          title="worker 开关：开启后新终端进编排池"
+          onClick={toggleWorkerMode}
+        >
+          🤖worker {workerMode ? "开" : "关"}
         </span>
         <span className="act-sep" />
         <span className="act-mode-group">

@@ -1,7 +1,9 @@
 use crate::agent_runtime::adapter::{
     AgentRuntimeAdapter, AgentSession, ModelInfo, PermissionMode, Speed,
 };
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::SystemTime;
 
 pub struct ClaudeAdapter;
 
@@ -28,6 +30,34 @@ impl ClaudeAdapter {
             format!("{}/.claude.json", home),
         ];
         cred_paths.iter().any(|p| std::path::Path::new(p).exists())
+    }
+
+    /// Detect the most recent Claude Code session id for a cwd.
+    ///
+    /// Claude Code stores sessions under `~/.claude/projects/<project-key>/`
+    /// where `<project-key>` is the cwd with `/` → `-` (e.g. `/home/x` →
+    /// `-home-x`). Return the newest `*.jsonl` stem, or None if the cwd has no
+    /// session yet (fresh agent).
+    fn detect_resume_key(cwd: &Path) -> Option<String> {
+        let home = std::env::var("HOME").ok()?;
+        let project_key = cwd
+            .to_string_lossy()
+            .trim_start_matches('/')
+            .replace('/', "-");
+        let dir = PathBuf::from(&home).join(".claude").join("projects").join(project_key);
+        let mut sessions: Vec<(SystemTime, String)> = Vec::new();
+        let entries = std::fs::read_dir(dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let mtime = path.metadata().ok()?.modified().ok()?;
+            let stem = path.file_stem()?.to_string_lossy().to_string();
+            sessions.push((mtime, stem));
+        }
+        sessions.sort_by(|a, b| b.0.cmp(&a.0));
+        sessions.first().map(|(_, s)| s.clone())
     }
 }
 
@@ -101,10 +131,12 @@ impl AgentRuntimeAdapter for ClaudeAdapter {
         Ok(("claude".to_string(), args))
     }
 
-    fn resume_args(&self, _session: &AgentSession) -> Vec<String> {
-        // Claude Code uses --resume to continue the last session
-        // For now, always resume the last session in the CWD
-        vec!["--resume".to_string()]
+    fn resume_args(&self, session: &AgentSession) -> Vec<String> {
+        // Resume the most recent Claude Code session in this context dir.
+        match Self::detect_resume_key(&session.cwd) {
+            Some(key) => vec!["--resume".to_string(), key],
+            None => vec![], // no previous session — start fresh
+        }
     }
 
     fn speed_args(&self, speed: Speed) -> Vec<String> {

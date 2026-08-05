@@ -445,3 +445,61 @@ body::after {
 .git-changes .gd { color: var(--danger); }
 .git-changes .gs { color: var(--muted); }
 .git-actions { margin-top: 12px; display: flex; gap: 6px; }
+
+/* ── P1 additions ─────────────────────────────────────────────── */
+
+/* Context menu (right-click on terminal items) */
+.ctx-menu {
+  position: fixed;
+  min-width: 170px;
+  background: var(--bg2);
+  border: 1px solid var(--rule2);
+  border-radius: 8px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  padding: 4px;
+  font-size: 12px;
+  z-index: 1000;
+}
+.ctx-item {
+  padding: 7px 10px;
+  border-radius: 6px;
+  color: var(--ink2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ctx-item:hover { background: var(--bg3); color: var(--ink); }
+.ctx-item.current { color: var(--brand); }
+.ctx-item.danger { color: var(--danger); }
+.ctx-sep { height: 1px; background: var(--rule2); margin: 4px 6px; }
+.ctx-label {
+  padding: 4px 10px 2px;
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-family: var(--pixel);
+}
+
+/* Worker toggle active state */
+.act-btn.active { border-color: var(--brand); background: rgba(139, 92, 246, 0.18); color: var(--brand); box-shadow: 0 0 8px rgba(139, 92, 246, 0.3); }
+
+/* Status bar off state */
+.sb-item.off { color: var(--muted); opacity: 0.6; }
+
+/* File tree clickability */
+.files-tree .dir, .files-tree .file {
+  cursor: pointer;
+  padding: 3px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.files-tree .dir:hover, .files-tree .file:hover { background: var(--bg3); color: var(--ink); }
+
+/* Git panel renamed/other rows */
+.git-changes .gr { color: var(--primary); }
+.git-changes .gm, .git-changes .ga, .git-changes .gd, .git-changes .gr { padding: 1px 0; }
+
+/* Tab busy dot */
+.tab-dot.busy { background: var(--warn); }
+.tab-dot.waiting_input { background: var(--warn); }

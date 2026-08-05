@@ -1,16 +1,20 @@
 import { useStore } from "../../state/store";
 import { connectEsp, disconnectEsp } from "../../state/esp";
+import { setSmartReturn } from "../../state/orchestration";
 
 export function StatusBar() {
   const agents = useStore((s) => s.agents);
+  const workerInfos = useStore((s) => s.workerInfos);
   const permissionMode = useStore((s) => s.permissionMode);
   const speed = useStore((s) => s.speed);
+  const smartReturn = useStore((s) => s.smartReturn);
   const espStatus = useStore((s) => s.espStatus);
   const espConnecting = useStore((s) => s.espConnecting);
 
-  const workerCount = [...agents.values()].filter(
-    (a) => a.role === "worker"
-  ).length;
+  const workerCount = Math.max(
+    workerInfos.length,
+    [...agents.values()].filter((a) => a.role === "worker").length
+  );
 
   const handleEspClick = async () => {
     if (espStatus.connected) {
@@ -20,6 +24,8 @@ export function StatusBar() {
       if (err) console.error("ESP connect failed:", err);
     }
   };
+
+  const toggleSmartReturn = () => setSmartReturn(!smartReturn);
 
   return (
     <div className="statusbar">
@@ -42,7 +48,14 @@ export function StatusBar() {
         🔋 {espStatus.battery_pct !== null ? `${espStatus.battery_pct}%` : "—"}
       </span>
       <span className="sb-sep" />
-      <span className="sb-item">汇报🔔 开</span>
+      <span
+        className={`sb-item${smartReturn ? "" : " off"}`}
+        onClick={toggleSmartReturn}
+        style={{ cursor: "pointer" }}
+        title="master 智能返回（分级汇报）开关"
+      >
+        汇报🔔 {smartReturn ? "开" : "关"}
+      </span>
       <span className="sb-item">worker×{workerCount}</span>
       <span className="sb-spacer" />
       <span className="sb-item sb-mode">模式 {permissionMode}</span>

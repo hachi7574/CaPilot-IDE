@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useStore } from "../../state/store";
 
 type RightTab = "overview" | "files" | "git";
@@ -6,6 +7,8 @@ type RightTab = "overview" | "files" | "git";
 export function RightSidebar() {
   const [activeTab, setActiveTab] = useState<RightTab>("overview");
   const [reportCollapsed, setReportCollapsed] = useState(false);
+  const reports = useStore((s) => s.reports);
+  const latest = reports[0];
 
   return (
     <>
@@ -51,11 +54,16 @@ export function RightSidebar() {
           </div>
           {!reportCollapsed && (
             <div className="report-body">
-              <div className="report-time">—</div>
-              <div className="report-quote">Waiting for agent activity…</div>
+              <div className="report-time">
+                {latest ? fmtTs(latest.ts) : "—"}
+              </div>
+              <div className="report-quote">
+                {latest ? latest.summary : "Waiting for agent activity…"}
+              </div>
               <div className="report-meta">
-                Task: —<br />
-                Status: Idle
+                Task: {latest ? `worker ${latest.worker}` : "—"}
+                <br />
+                Status: {latest ? latest.level : "Idle"}
               </div>
               <div className="report-actions">
                 <span className="rbtn">展开任务详情</span>
@@ -69,12 +77,75 @@ export function RightSidebar() {
   );
 }
 
+function fmtTs(ms: number): string {
+  const d = new Date(ms);
+  return d.toLocaleTimeString();
+}
+
+/** Root directory for the file tree / git panel (active agent's cwd). */
+function useProjectRoot(): string {
+  const agents = useStore((s) => s.agents);
+  const activeTabId = useStore((s) => s.activeTabId);
+  const tabs = useStore((s) => s.tabs);
+  const activeTab = tabs.find((t) => t.id === activeTabId);
+  const cwd = activeTab?.agentId ? agents.get(activeTab.agentId)?.cwd : undefined;
+  const [fallback, setFallback] = useState("/tmp");
+  useEffect(() => {
+    invoke<string>("workspace_root")
+      .then(setFallback)
+      .catch(() => {});
+  }, []);
+  return cwd || fallback;
+}
+
 /* ── Overview Dashboard ───────────────────────────────────────── */
 
 function OverviewDashboard() {
   const esp = useStore((s) => s.espStatus);
+  const workerInfos = useStore((s) => s.workerInfos);
+  const smartReturn = useStore((s) => s.smartReturn);
+
+  const busyCount = workerInfos.filter((w) => w.status === "busy").length;
+
+  const toggleSmartReturn = async () => {
+    const { setSmartReturn } = await import("../../state/orchestration");
+    setSmartReturn(!smartReturn);
+  };
+
   return (
     <div className="tab-panel" id="tab-overview">
+      <CollapsibleSection
+        title="🤖 Worker 编排"
+        summary={`${workerInfos.length} workers · ${busyCount} busy · 智能返回${smartReturn ? " 开" : " 关"}`}
+      >
+        {workerInfos.length === 0 && (
+          <div className="ov-row">
+            <span className="ov-label">没有 worker</span>
+            <span className="ov-value">—</span>
+          </div>
+        )}
+        {workerInfos.map((w) => (
+          <div className="ov-row" key={w.id}>
+            <span className="ov-label" style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+              {w.title || w.id.slice(0, 6)}
+            </span>
+            <span className="ov-value">
+              {w.status === "busy" ? "🟠 busy" : w.status === "offline" ? "⚫ offline" : "🟢 idle"}
+            </span>
+          </div>
+        ))}
+        <div className="ov-divider" />
+        <div
+          className="ov-row"
+          style={{ cursor: "pointer" }}
+          onClick={toggleSmartReturn}
+          title="智能返回分级开关"
+        >
+          <span className="ov-label">智能返回</span>
+          <span className="ov-value">{smartReturn ? "✅ 开" : "⬜ 关"}</span>
+        </div>
+      </CollapsibleSection>
+
       {/* Runtime */}
       <CollapsibleSection title="📊 Runtime" summary="📊 Runtime 0/1M Tokens">
         <div className="ov-row">
@@ -139,40 +210,6 @@ function OverviewDashboard() {
         </div>
       </CollapsibleSection>
 
-      {/* Rate limits */}
-      <CollapsibleSection title="剩余用量" summary="剩余用量 5h — · 周— · 月—">
-        <div className="ov-bar-row">
-          <div className="ov-bar-label">⏱ 5小时窗口</div>
-          <div className="ov-bar">
-            <div className="ov-bar-fill gr" style={{ width: "100%" }} />
-          </div>
-          <div className="ov-bar-stats">
-            <span />
-            <span>剩余 100%</span>
-          </div>
-        </div>
-        <div className="ov-bar-row">
-          <div className="ov-bar-label">📅 周额度</div>
-          <div className="ov-bar">
-            <div className="ov-bar-fill ye" style={{ width: "100%" }} />
-          </div>
-          <div className="ov-bar-stats">
-            <span />
-            <span>剩余 100%</span>
-          </div>
-        </div>
-        <div className="ov-bar-row">
-          <div className="ov-bar-label">🗓 月额度</div>
-          <div className="ov-bar">
-            <div className="ov-bar-fill gr" style={{ width: "100%" }} />
-          </div>
-          <div className="ov-bar-stats">
-            <span />
-            <span>剩余 100%</span>
-          </div>
-        </div>
-      </CollapsibleSection>
-
       {/* Computer */}
       <CollapsibleSection title="💻 Computer Status" summary="💻 🟢 Online">
         <div className="ov-row">
@@ -188,15 +225,7 @@ function OverviewDashboard() {
           <span className="ov-value">—</span>
         </div>
         <div className="ov-row">
-          <span className="ov-label">GPU</span>
-          <span className="ov-value">—</span>
-        </div>
-        <div className="ov-row">
           <span className="ov-label">Disk</span>
-          <span className="ov-value">—</span>
-        </div>
-        <div className="ov-row">
-          <span className="ov-label">Network</span>
           <span className="ov-value">—</span>
         </div>
       </CollapsibleSection>
@@ -231,32 +260,6 @@ function OverviewDashboard() {
               : "—"}
           </span>
         </div>
-        {esp.address && (
-          <div className="ov-row">
-            <span className="ov-label">Address</span>
-            <span className="ov-value">{esp.address}</span>
-          </div>
-        )}
-        {esp.rssi !== null && (
-          <div className="ov-row">
-            <span className="ov-label">Signal</span>
-            <span className="ov-value">{esp.rssi} dBm</span>
-          </div>
-        )}
-        {esp.battery_pct !== null && (
-          <div className="ov-bar-row">
-            <div className="ov-bar-label">🔋 Battery {esp.battery_pct}%</div>
-            <div className="ov-bar">
-              <div className="ov-bar-fill gr" style={{ width: `${esp.battery_pct}%` }} />
-            </div>
-          </div>
-        )}
-        {esp.battery_mv !== null && (
-          <div className="ov-row">
-            <span className="ov-label">Battery mV</span>
-            <span className="ov-value">{esp.battery_mv}</span>
-          </div>
-        )}
       </CollapsibleSection>
     </div>
   );
@@ -292,70 +295,148 @@ function CollapsibleSection({
 
 /* ── Files Panel ──────────────────────────────────────────────── */
 
+interface FsEntry {
+  name: string;
+  is_dir: boolean;
+}
+
+const SKIP_DIRS = new Set([".git", "node_modules", "target", ".claude", "dist", "build"]);
+
 function FilesPanel() {
+  const root = useProjectRoot();
+  const [dirs, setDirs] = useState<Map<string, FsEntry[]>>(new Map());
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const addTab = useStore((s) => s.addTab);
+
+  useEffect(() => {
+    loadChildren(root);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [root]);
+
+  const loadChildren = async (dir: string) => {
+    try {
+      const list = await invoke<FsEntry[]>("fs_list", { dir });
+      setDirs((prev) => new Map(prev).set(dir, list));
+    } catch {
+      setDirs((prev) => new Map(prev).set(dir, []));
+    }
+  };
+
+  const toggleDir = (dir: string) => {
+    if (expanded.has(dir)) {
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        next.delete(dir);
+        return next;
+      });
+    } else {
+      setExpanded((prev) => new Set(prev).add(dir));
+      loadChildren(dir);
+    }
+  };
+
+  const openFile = (path: string, name: string) => {
+    addTab({ id: `file:${path}`, type: "editor", filePath: path, title: name });
+  };
+
+  const renderEntries = (dir: string, depth: number): React.ReactNode => {
+    const entries = (dirs.get(dir) || [])
+      .filter((e) => !SKIP_DIRS.has(e.name))
+      .sort((a, b) => (a.is_dir === b.is_dir ? a.name.localeCompare(b.name) : a.is_dir ? -1 : 1));
+    return entries.map((e) => {
+      const path = `${dir}/${e.name}`;
+      if (e.is_dir) {
+        return (
+          <div key={path}>
+            <div
+              className="dir"
+              style={{ paddingLeft: depth * 14 }}
+              onClick={() => toggleDir(path)}
+            >
+              {expanded.has(path) ? "▾" : "▸"} 📁 {e.name}
+            </div>
+            {expanded.has(path) && renderEntries(path, depth + 1)}
+          </div>
+        );
+      }
+      return (
+        <div
+          key={path}
+          className="file"
+          style={{ paddingLeft: depth * 14 }}
+          onClick={() => openFile(path, e.name)}
+        >
+          📄 {e.name}
+        </div>
+      );
+    });
+  };
+
   return (
     <div className="tab-panel" id="tab-files" style={{ padding: "8px 0" }}>
-      <div style={{ padding: "0 12px 8px" }}>
-        <input
-          className="files-search"
-          style={{
-            width: "100%",
-            background: "var(--bg3)",
-            border: "1px solid var(--rule2)",
-            color: "var(--ink)",
-            fontFamily: "var(--mono)",
-            fontSize: 12,
-            padding: "8px 10px",
-            outline: "none",
-          }}
-          placeholder="🔍 搜索文件…"
-        />
+      <div style={{ padding: "0 12px 8px", fontSize: 11, color: "var(--muted)", fontFamily: "var(--mono)" }}>
+        {root}
       </div>
-      <div className="files-tree">
-        <div className="dir">▸ 📁 src-tauri</div>
-        <div className="dir">▾ 📁 ui</div>
-        <div style={{ paddingLeft: 16 }} className="dir">
-          ▸ 📁 components
-        </div>
-        <div style={{ paddingLeft: 16 }} className="dir">
-          ▸ 📁 state
-        </div>
-        <div style={{ paddingLeft: 16 }} className="file">
-          📄 App.tsx
-        </div>
-        <div style={{ paddingLeft: 16 }} className="file">
-          📄 main.tsx
-        </div>
-        <div className="dir">▸ 📁 capabilities</div>
-        <div className="file file-new">📄 tauri.conf.json</div>
-        <div className="file">📄 Cargo.toml</div>
-        <div className="file file-web">🌐 index.html</div>
-      </div>
+      <div className="files-tree">{renderEntries(root, 0)}</div>
     </div>
   );
 }
 
 /* ── Git Panel ────────────────────────────────────────────────── */
 
+interface GitEntry {
+  index: string;
+  worktree: string;
+  path: string;
+}
+
+function statusGlyph(e: GitEntry): { glyph: string; cls: string } {
+  const code = (e.index + e.worktree).trim();
+  if (code === "??") return { glyph: "A", cls: "ga" };
+  if (code === "M" || code === "MM" || code === " M" || code === "M ") return { glyph: "M", cls: "gm" };
+  if (e.index === "A") return { glyph: "A", cls: "ga" };
+  if (e.index === "D" || e.worktree === "D") return { glyph: "D", cls: "gd" };
+  if (e.index === "R") return { glyph: "R", cls: "gr" };
+  return { glyph: code || "·", cls: "gm" };
+}
+
 function GitPanel() {
+  const root = useProjectRoot();
+  const [entries, setEntries] = useState<GitEntry[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    invoke<GitEntry[]>("git_status", { dir: root })
+      .then((list) => {
+        setEntries(list ?? []);
+        setError(null);
+      })
+      .catch((e) => {
+        setEntries([]);
+        setError(String(e));
+      });
+  }, [root]);
+
+  const projName = root.split("/").pop();
+
   return (
     <div className="tab-panel" id="tab-git" style={{ padding: 12 }}>
-      <div className="git-title">Changes · CaPilot</div>
+      <div className="git-title">Changes · {projName}</div>
+      {error && (
+        <div style={{ fontSize: 11, color: "var(--warn)", marginBottom: 8 }}>{error}</div>
+      )}
       <div className="git-changes">
-        <div className="gm">
-          M src/agent_runtime/adapter.rs{" "}
-          <span className="gs">+12 -3</span>
-        </div>
-        <div className="gm">
-          M ui/components/Composer.tsx{" "}
-          <span className="gs">+45 -8</span>
-        </div>
-        <div className="ga">
-          A src/esp/ble.rs <span className="gs">+230</span>
-        </div>
-        <div className="gd">
-          D Doc/old-notes.md <span className="gs">-156</span>
-        </div>
+        {entries.length === 0 && !error && (
+          <div style={{ fontSize: 12, color: "var(--muted)" }}>工作区干净 ✅</div>
+        )}
+        {entries.map((e) => {
+          const { glyph, cls } = statusGlyph(e);
+          return (
+            <div className={cls} key={e.path}>
+              {glyph} {e.path}
+            </div>
+          );
+        })}
       </div>
       <div className="git-actions">
         <span className="act-btn">Stage All</span>

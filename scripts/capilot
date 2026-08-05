@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# capilot — CaPilot orchestration PATH shim.
+# Connects to the Rust orchestrator over a Unix socket and forwards commands:
+#   capilot dispatch <worker> <prompt...>
+#   capilot status
+#   capilot report [<worker>] <summary...>
+set -euo pipefail
+
+SOCKET_FILE="${HOME}/.capilot/socket"
+if [ -f "$SOCKET_FILE" ]; then
+  SOCKET="$(cat "$SOCKET_FILE" | tr -d '[:space:]')"
+else
+  SOCKET="${TMPDIR:-/tmp}/capilot-orchestrator.sock"
+fi
+
+if [ ! -S "$SOCKET" ]; then
+  echo "capilot: orchestrator not running (no socket at $SOCKET)" >&2
+  exit 1
+fi
+
+CMD="$*"
+
+if command -v socat >/dev/null 2>&1; then
+  RESP=$(printf '%s\n' "$CMD" | socat - "UNIX-CONNECT:$SOCKET")
+elif command -v nc >/dev/null 2>&1 && nc -h 2>&1 | grep -q -- "-U"; then
+  RESP=$(printf '%s\n' "$CMD" | nc -U -w 5 "$SOCKET")
+else
+  RESP=$(python3 - "$SOCKET" "$CMD" <<'PYEOF'
+import socket, sys
+sock, cmd = sys.argv[1], sys.argv[2]
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(5)
+s.connect(sock)
+s.sendall((cmd + "\n").encode())
+s.shutdown(socket.SHUT_WR)
+data = b""
+while True:
+    chunk = s.recv(4096)
+    if not chunk:
+        break
+    data += chunk
+s.close()
+sys.stdout.write(data.decode())
+PYEOF
+)
+fi
+
+printf '%s\n' "$RESP"
