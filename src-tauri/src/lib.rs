@@ -1,5 +1,5 @@
 mod agent_runtime;
-mod esp;
+pub mod esp;
 mod orchestration;
 mod persistence;
 
