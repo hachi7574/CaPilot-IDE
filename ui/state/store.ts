@@ -147,6 +147,8 @@ interface AppState {
   // Sidebars
   leftSidebarOpen: boolean;
   rightSidebarOpen: boolean;
+  leftWidth: number;
+  rightWidth: number;
 
   // ESP
   espStatus: EspStatus;
@@ -178,6 +180,8 @@ interface AppState {
   navigateDraft: (dir: -1 | 1) => string | null;
   toggleLeftSidebar: () => void;
   toggleRightSidebar: () => void;
+  setLeftWidth: (width: number) => void;
+  setRightWidth: (width: number) => void;
   setEspStatus: (status: Partial<EspStatus>) => void;
   setEspConnecting: (connecting: boolean) => void;
 }
@@ -202,6 +206,8 @@ export const useStore = create<AppState>((set, get) => ({
   draftIndex: -1,
   leftSidebarOpen: true,
   rightSidebarOpen: true,
+  leftWidth: 248,
+  rightWidth: 340,
   espStatus: {
     connected: false,
     kind: null,
@@ -328,6 +334,8 @@ export const useStore = create<AppState>((set, get) => ({
   toggleLeftSidebar: () => set((s) => ({ leftSidebarOpen: !s.leftSidebarOpen })),
 
   toggleRightSidebar: () => set((s) => ({ rightSidebarOpen: !s.rightSidebarOpen })),
+  setLeftWidth: (width) => set({ leftWidth: width }),
+  setRightWidth: (width) => set({ rightWidth: width }),
 
   setEspStatus: (status) =>
     set((s) => ({ espStatus: { ...s.espStatus, ...status } })),

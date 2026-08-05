@@ -1,7 +1,10 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
+import { openPath } from "@tauri-apps/plugin-opener";
 import { useStore, AgentInfo } from "../../state/store";
 import { setAgentRole } from "../../state/orchestration";
+import { spawnAgent } from "../../state/agentActions";
+import { SettingsModal } from "./SettingsModal";
 
 /** Derive the workspace project name from an agent cwd. */
 function projectOf(cwd: string): string {
@@ -14,7 +17,9 @@ function projectOf(cwd: string): string {
 interface CtxState {
   x: number;
   y: number;
-  agentId: string;
+  agentId?: string;
+  project?: string;
+  cwd?: string;
 }
 
 export function LeftSidebar() {
@@ -31,6 +36,9 @@ export function LeftSidebar() {
   const [focusedProj, setFocusedProj] = useState<string | null>(null);
   const [collapsedProjs, setCollapsedProjs] = useState<Set<string>>(new Set());
   const [ctx, setCtx] = useState<CtxState | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const leftWidth = useStore((s) => s.leftWidth);
+  const setLeftWidth = useStore((s) => s.setLeftWidth);
 
   // Close the context menu on outside click / Escape.
   useEffect(() => {
@@ -93,6 +101,23 @@ export function LeftSidebar() {
     }
   };
 
+  // Draggable left sidebar resize.
+  const startLeftResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = leftWidth;
+    const onMove = (ev: MouseEvent) => {
+      const w = Math.min(420, Math.max(180, startWidth + (ev.clientX - startX)));
+      setLeftWidth(w);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
   // Group agents by workspace project.
   const projects = new Map<string, { cwd: string; agents: { id: string; title: string }[] }>();
   agents.forEach((a, id) => {
@@ -108,7 +133,10 @@ export function LeftSidebar() {
 
   return (
     <>
-      <div className={`left-sidebar${!leftSidebarOpen ? " collapsed" : ""}`}>
+      <div
+        className={`left-sidebar${!leftSidebarOpen ? " collapsed" : ""}`}
+        style={leftSidebarOpen ? { width: leftWidth } : undefined}
+      >
         {leftSidebarOpen && (
           <>
             {/* Zone 1: Brand */}
@@ -125,7 +153,7 @@ export function LeftSidebar() {
               <span className="sidebar-btn" title="新建项目">
                 📁+
               </span>
-              <span className="sidebar-btn" title="设置">
+              <span className="sidebar-btn" onClick={() => setSettingsOpen(true)} title="设置">
                 ⚙
               </span>
             </div>
@@ -175,6 +203,16 @@ export function LeftSidebar() {
                       className="proj-header"
                       onClick={() => toggleProj(name)}
                       onDoubleClick={() => focusProject(name)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setCtx({
+                          x: e.clientX,
+                          y: e.clientY,
+                          project: name,
+                          cwd: proj.cwd,
+                        });
+                      }}
                     >
                       <span className="pj-icon">📁</span>
                       <span className="pj-name">{name}</span>
@@ -205,9 +243,10 @@ export function LeftSidebar() {
       </div>
 
       {ctx && <ContextMenu ctx={ctx} onClose={() => setCtx(null)} />}
+      {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
 
       {/* Resize handle */}
-      <div className="resize-handle" id="resize-left" />
+      <div className="resize-handle" id="resize-left" onMouseDown={startLeftResize} />
     </>
   );
 }
@@ -215,7 +254,44 @@ export function LeftSidebar() {
 /* ── Right-click context menu ─────────────────────────────────── */
 
 function ContextMenu({ ctx, onClose }: { ctx: CtxState; onClose: () => void }) {
-  const agent = useStore((s) => s.agents.get(ctx.agentId));
+  // ── Project context ───────────────────────────────────────────
+  if (ctx.project) {
+    return (
+      <div
+        className="ctx-menu"
+        style={{ position: "fixed", left: ctx.x, top: ctx.y, zIndex: 1000 }}
+        onClick={(e) => e.stopPropagation()}
+        onContextMenu={(e) => e.stopPropagation()}
+      >
+        <div className="ctx-label">{ctx.project}</div>
+        <div
+          className="ctx-item"
+          onClick={() => {
+            spawnAgent("standalone");
+            onClose();
+          }}
+        >
+          🖥 新建终端
+        </div>
+        <div
+          className="ctx-item"
+          onClick={() => {
+            if (ctx.cwd) openPath(ctx.cwd).catch(console.error);
+            onClose();
+          }}
+        >
+          📁 在文件管理器中显示
+        </div>
+        <div className="ctx-sep" />
+        <div className="ctx-item" onClick={onClose}>
+          ✏ 重命名项目（待开发）
+        </div>
+      </div>
+    );
+  }
+
+  // ── Agent context ─────────────────────────────────────────────
+  const agent = useStore((s) => s.agents.get(ctx.agentId ?? ""));
   const runtimes = useStore((s) => s.runtimes);
   const addAgent = useStore((s) => s.addAgent);
   const closeTab = useStore((s) => s.closeTab);
@@ -225,7 +301,7 @@ function ContextMenu({ ctx, onClose }: { ctx: CtxState; onClose: () => void }) {
     try {
       const channel = new Channel<number[]>();
       channel.onmessage = (data) =>
-        useStore.getState().appendAgentOutput(ctx.agentId, data);
+        useStore.getState().appendAgentOutput(ctx.agentId ?? "", data);
       const info = (await invoke("agent_switch_runtime", {
         id: ctx.agentId,
         runtime,
@@ -239,11 +315,13 @@ function ContextMenu({ ctx, onClose }: { ctx: CtxState; onClose: () => void }) {
   };
 
   const setRole = async (role: "worker" | "standalone") => {
+    if (!ctx.agentId) return;
     await setAgentRole(ctx.agentId, role);
     onClose();
   };
 
   const closeAgent = async () => {
+    if (!ctx.agentId) return;
     try {
       await invoke("agent_kill", { id: ctx.agentId });
     } catch {

@@ -9,11 +9,30 @@ export function RightSidebar() {
   const [reportCollapsed, setReportCollapsed] = useState(false);
   const reports = useStore((s) => s.reports);
   const latest = reports[0];
+  const rightWidth = useStore((s) => s.rightWidth);
+  const setRightWidth = useStore((s) => s.setRightWidth);
+
+  // Draggable right sidebar resize (drag right → narrower).
+  const startRightResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = rightWidth;
+    const onMove = (ev: MouseEvent) => {
+      const w = Math.min(520, Math.max(260, startWidth - (ev.clientX - startX)));
+      setRightWidth(w);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
 
   return (
     <>
-      <div className="resize-handle" id="resize-right" />
-      <div className="right-sidebar">
+      <div className="resize-handle" id="resize-right" onMouseDown={startRightResize} />
+      <div className="right-sidebar" style={{ width: rightWidth }}>
         {/* Tabs */}
         <div className="right-tabs">
           <div

@@ -15,6 +15,7 @@ export function TabBar() {
   const workerMode = useStore((s) => s.workerMode);
   const setActiveTab = useStore((s) => s.setActiveTab);
   const toggleLeftSidebar = useStore((s) => s.toggleLeftSidebar);
+  const closeTab = useStore((s) => s.closeTab);
 
   // Derive project name from current active tab's agent cwd
   const activeTab = tabs.find((t) => t.id === activeTabId);
@@ -56,6 +57,16 @@ export function TabBar() {
             {agent?.runtime && (
               <span className="tab-runtime">{agent.runtime}{roleBadge}</span>
             )}
+            <button
+              className="tab-close"
+              onClick={(e) => {
+                e.stopPropagation();
+                closeTab(tab.id);
+              }}
+              title="关闭标签"
+            >
+              ×
+            </button>
           </div>
         );
       })}

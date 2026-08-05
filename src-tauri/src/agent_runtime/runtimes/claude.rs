@@ -152,7 +152,7 @@ impl AgentRuntimeAdapter for ClaudeAdapter {
         match mode {
             PermissionMode::Ask => vec![
                 "--permission-mode".to_string(),
-                "accept-edits".to_string(),
+                "acceptEdits".to_string(),
             ],
             PermissionMode::Auto => vec![], // Claude's default behavior
             PermissionMode::Yolo => vec![
