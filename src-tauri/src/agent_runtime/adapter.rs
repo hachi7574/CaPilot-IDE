@@ -83,6 +83,7 @@ pub struct AgentInfo {
 
 /// Result of a headless (non-interactive) agent run
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct HeadlessRun {
     pub agent_id: AgentId,
     pub output: String,
@@ -101,6 +102,7 @@ pub struct RuntimeInfo {
 
 /// The core trait that every agent CLI must implement.
 /// Each runtime (claude, codex, opencode, etc.) gets one file in `runtimes/`.
+#[allow(dead_code)]
 pub trait AgentRuntimeAdapter: Send + Sync {
     /// Unique identifier (e.g. "claude", "codex")
     fn id(&self) -> &str;
@@ -137,6 +139,7 @@ pub trait AgentRuntimeAdapter: Send + Sync {
 
 /// Error type for agent operations
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum AgentError {
     #[error("runtime not found: {0}")]
     RuntimeNotFound(String),

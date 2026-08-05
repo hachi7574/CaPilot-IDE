@@ -8,6 +8,7 @@ use tauri::ipc::Channel;
 use tokio::sync::Mutex;
 
 /// Wrapper around a running PTY child process
+#[allow(dead_code)]
 struct PtyChild {
     pid: u32,
     writer: Box<dyn Write + Send>,
