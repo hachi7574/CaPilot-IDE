@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "CaPilot IDE — AI Agent Orchestration Workbench"
 authors = ["hachi7574"]
 edition = "2021"
+default-run = "capilot-ide"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
