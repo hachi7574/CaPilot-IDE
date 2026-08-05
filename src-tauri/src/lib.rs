@@ -1,8 +1,10 @@
 mod agent_runtime;
+mod esp;
 
 use agent_runtime::adapter::{AgentRole, AgentRuntimeAdapter, AgentSession, PermissionMode, Speed};
 use agent_runtime::pty::PtyManager;
 use agent_runtime::runtimes::claude::ClaudeAdapter;
+use esp::manager::EspManager;
 use std::path::PathBuf;
 use tauri::ipc::Channel;
 
@@ -153,6 +155,41 @@ async fn fs_list(dir: String) -> Result<Vec<String>, String> {
     Ok(entries)
 }
 
+// ── ESP commands ────────────────────────────────────────────────
+
+#[tauri::command]
+async fn esp_connect(
+    state: tauri::State<'_, EspManager>,
+    app: tauri::AppHandle,
+) -> Result<esp::transport::EspStatus, String> {
+    state
+        .connect_ble(app)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(state.status().await)
+}
+
+#[tauri::command]
+async fn esp_disconnect(state: tauri::State<'_, EspManager>) -> Result<(), String> {
+    state.disconnect().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn esp_status(state: tauri::State<'_, EspManager>) -> Result<esp::transport::EspStatus, String> {
+    Ok(state.status().await)
+}
+
+#[tauri::command]
+async fn esp_send(
+    state: tauri::State<'_, EspManager>,
+    payload: String,
+) -> Result<(), String> {
+    state
+        .send_command(payload.as_bytes())
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ── App entry point ─────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -166,6 +203,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {}))
         .plugin(tauri_plugin_process::init())
         .manage(PtyManager::new())
+        .manage(EspManager::new())
         .invoke_handler(tauri::generate_handler![
             agent_spawn,
             agent_write,
@@ -175,6 +213,10 @@ pub fn run() {
             fs_read,
             fs_write,
             fs_list,
+            esp_connect,
+            esp_disconnect,
+            esp_status,
+            esp_send,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

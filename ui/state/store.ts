@@ -39,6 +39,17 @@ export interface Tab {
   title: string;
 }
 
+export interface EspStatus {
+  connected: boolean;
+  kind: "ble" | "usb" | "wifi" | null;
+  name: string | null;
+  address: string | null;
+  rssi: number | null;
+  battery_pct: number | null;
+  battery_mv: number | null;
+  last_seen_ms: number | null;
+}
+
 // ── Store ────────────────────────────────────────────────────────
 
 interface AppState {
@@ -65,6 +76,10 @@ interface AppState {
   leftSidebarOpen: boolean;
   rightSidebarOpen: boolean;
 
+  // ESP
+  espStatus: EspStatus;
+  espConnecting: boolean;
+
   // Actions
   addAgent: (info: AgentInfo, channel: Channel<number[]>) => void;
   removeAgent: (id: string) => void;
@@ -80,6 +95,8 @@ interface AppState {
   pushDraft: (text: string) => void;
   navigateDraft: (dir: -1 | 1) => string | null;
   toggleLeftSidebar: () => void;
+  setEspStatus: (status: Partial<EspStatus>) => void;
+  setEspConnecting: (connecting: boolean) => void;
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -96,6 +113,17 @@ export const useStore = create<AppState>((set, get) => ({
   draftIndex: -1,
   leftSidebarOpen: true,
   rightSidebarOpen: true,
+  espStatus: {
+    connected: false,
+    kind: null,
+    name: null,
+    address: null,
+    rssi: null,
+    battery_pct: null,
+    battery_mv: null,
+    last_seen_ms: null,
+  },
+  espConnecting: false,
 
   addAgent: (info, channel) =>
     set((s) => {
@@ -164,4 +192,9 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   toggleLeftSidebar: () => set((s) => ({ leftSidebarOpen: !s.leftSidebarOpen })),
+
+  setEspStatus: (status) =>
+    set((s) => ({ espStatus: { ...s.espStatus, ...status } })),
+
+  setEspConnecting: (connecting) => set({ espConnecting: connecting }),
 }));

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useStore } from "../../state/store";
 
 type RightTab = "overview" | "files" | "git";
 
@@ -71,6 +72,7 @@ export function RightSidebar() {
 /* ── Overview Dashboard ───────────────────────────────────────── */
 
 function OverviewDashboard() {
+  const esp = useStore((s) => s.espStatus);
   return (
     <div className="tab-panel" id="tab-overview">
       {/* Runtime */}
@@ -200,15 +202,61 @@ function OverviewDashboard() {
       </CollapsibleSection>
 
       {/* ESP */}
-      <CollapsibleSection title="🔌 ESP Device Status" summary="🔌 —">
+      <CollapsibleSection
+        title="🔌 ESP Device Status"
+        summary={`🔌 ${esp.connected ? (esp.name ?? "ESP") : "Not connected"}${esp.battery_pct !== null ? ` · 🔋${esp.battery_pct}%` : ""}`}
+      >
         <div className="ov-esp-status">
-          <span className="ov-esp-dot" />
-          <span className="ov-esp-name">Not connected</span>
+          <span
+            className="ov-esp-dot"
+            style={
+              esp.connected
+                ? { background: "var(--success)", borderColor: "var(--success)" }
+                : { background: "var(--muted)", borderColor: "var(--muted)" }
+            }
+          />
+          <span className="ov-esp-name">
+            {esp.connected ? (esp.name ?? "ESP32-C5") : "Not connected"}
+          </span>
         </div>
         <div className="ov-row">
           <span className="ov-label">Connection</span>
-          <span className="ov-esp-conn">—</span>
+          <span className="ov-esp-conn">
+            {esp.connected
+              ? esp.kind === "wifi"
+                ? "📶 WiFi"
+                : esp.kind === "usb"
+                ? "🔌 USB"
+                : "🔵 Bluetooth"
+              : "—"}
+          </span>
         </div>
+        {esp.address && (
+          <div className="ov-row">
+            <span className="ov-label">Address</span>
+            <span className="ov-value">{esp.address}</span>
+          </div>
+        )}
+        {esp.rssi !== null && (
+          <div className="ov-row">
+            <span className="ov-label">Signal</span>
+            <span className="ov-value">{esp.rssi} dBm</span>
+          </div>
+        )}
+        {esp.battery_pct !== null && (
+          <div className="ov-bar-row">
+            <div className="ov-bar-label">🔋 Battery {esp.battery_pct}%</div>
+            <div className="ov-bar">
+              <div className="ov-bar-fill gr" style={{ width: `${esp.battery_pct}%` }} />
+            </div>
+          </div>
+        )}
+        {esp.battery_mv !== null && (
+          <div className="ov-row">
+            <span className="ov-label">Battery mV</span>
+            <span className="ov-value">{esp.battery_mv}</span>
+          </div>
+        )}
       </CollapsibleSection>
     </div>
   );

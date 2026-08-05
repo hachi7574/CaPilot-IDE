@@ -472,8 +472,10 @@ dependencies = [
 name = "capilot-ide"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "btleplug",
  "futures",
+ "log",
  "portable-pty",
  "serde",
  "serde_json",
