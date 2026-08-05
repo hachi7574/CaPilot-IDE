@@ -14,7 +14,7 @@ SOCKET_FILE="${HOME}/.capilot/socket"
 if [ -f "$SOCKET_FILE" ]; then
   SOCKET="$(cat "$SOCKET_FILE" | tr -d '[:space:]')"
 else
-  SOCKET="${TMPDIR:-/tmp}/capilot-orchestrator.sock"
+  SOCKET="${XDG_RUNTIME_DIR:-${HOME}/.capilot/run}/capilot-orchestrator.sock"
 fi
 
 if [ ! -S "$SOCKET" ]; then

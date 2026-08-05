@@ -323,9 +323,18 @@ function ContextMenu({ ctx, onClose }: { ctx: CtxState; onClose: () => void }) {
   const closeAgent = async () => {
     if (!ctx.agentId) return;
     try {
-      await invoke("agent_kill", { id: ctx.agentId });
+      // sessions_delete kills the PTY, removes the agent dir + DB session row,
+      // and unregisters the worker — so a killed agent won't resurrect on
+      // restart (Bug 7).
+      await invoke("sessions_delete", { id: ctx.agentId });
     } catch {
-      // ignore
+      // Fall back to a plain kill so the terminal still closes even if session
+      // cleanup failed.
+      try {
+        await invoke("agent_kill", { id: ctx.agentId });
+      } catch {
+        // ignore
+      }
     }
     closeTab(ctx.agentId);
     removeAgent(ctx.agentId);

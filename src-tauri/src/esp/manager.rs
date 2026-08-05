@@ -2,7 +2,7 @@
 //! ESP events to the frontend, and tracks the latest telemetry/status.
 
 use crate::esp::ble::BleUart;
-use crate::esp::protocol::{encode, FrameType};
+use crate::esp::protocol::{encode, FrameError, FrameType};
 use crate::esp::transport::{EspError, EspEvent, EspStatus, EspTransport, SeqCounter, TransportKind};
 use std::sync::Arc;
 use tauri::Emitter;
@@ -14,6 +14,10 @@ pub struct EspManager {
     transport: Arc<Mutex<Option<Box<dyn EspTransport>>>>,
     status: Arc<Mutex<EspStatus>>,
     seq: Mutex<SeqCounter>,
+    /// Join handle of the event-forwarding task for the current connection.
+    /// Aborted on reconnect/disconnect so stale events from a previous
+    /// transport can't keep reaching the frontend.
+    forward_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl EspManager {
@@ -22,6 +26,7 @@ impl EspManager {
             transport: Arc::new(Mutex::new(None)),
             status: Arc::new(Mutex::new(EspStatus::default())),
             seq: Mutex::new(SeqCounter(0)),
+            forward_task: Mutex::new(None),
         }
     }
 
@@ -32,10 +37,30 @@ impl EspManager {
 
     /// Connect the BLE transport and begin forwarding events.
     pub async fn connect_ble(&self, app: tauri::AppHandle) -> Result<(), EspError> {
+        // Stop any previous forward task so stale events can't reach the UI.
+        self.abort_forward().await;
+        // Tear down any previous transport cleanly (this stops its reader task).
+        let mut slot = self.transport.lock().await;
+        if let Some(mut old) = slot.take() {
+            if let Err(e) = old.disconnect().await {
+                log::warn!("previous ESP transport disconnect failed: {e}");
+            }
+        }
+        drop(slot);
+
         let mut transport = BleUart::new();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<EspEvent>(128);
 
-        transport.connect(tx).await?;
+        if let Err(e) = transport.connect(tx).await {
+            // The old transport is already gone — don't leave the UI with a
+            // stale "connected" status.
+            let mut status = self.status.lock().await;
+            status.connected = false;
+            status.name = None;
+            status.address = None;
+            drop(status);
+            return Err(e);
+        }
 
         // Update status: connected.
         let mut status = self.status.lock().await;
@@ -43,12 +68,7 @@ impl EspManager {
         status.kind = Some(TransportKind::Ble);
         drop(status);
 
-        // Store transport (stops the old one if present).
-        let mut slot = self.transport.lock().await;
-        if let Some(mut old) = slot.take() {
-            let _ = old.disconnect().await;
-        }
-        *slot = Some(Box::new(transport));
+        *self.transport.lock().await = Some(Box::new(transport));
 
         // Forward events from the transport channel to the frontend.
         let status_arc = self.status.clone();
@@ -85,22 +105,32 @@ impl EspManager {
                 let _ = app.emit(ESP_EVENT, &evt);
             }
         };
-        tokio::spawn(forward);
+        *self.forward_task.lock().await = Some(tokio::spawn(forward));
 
         Ok(())
     }
 
-    /// Disconnect the active transport.
+    /// Disconnect the active transport and stop the forward task.
     pub async fn disconnect(&self) -> Result<(), EspError> {
+        self.abort_forward().await;
         let mut slot = self.transport.lock().await;
         if let Some(mut t) = slot.take() {
-            t.disconnect().await?;
+            if let Err(e) = t.disconnect().await {
+                log::warn!("ESP transport disconnect error: {e}");
+            }
         }
         let mut status = self.status.lock().await;
         status.connected = false;
         status.battery_pct = None;
         status.last_seen_ms = None;
         Ok(())
+    }
+
+    /// Abort the current event-forwarding task (if any).
+    async fn abort_forward(&self) {
+        if let Some(handle) = self.forward_task.lock().await.take() {
+            handle.abort();
+        }
     }
 
     /// Send a command frame (type 0x02) with the given payload.
@@ -131,6 +161,6 @@ impl EspManager {
 
 /// Wire helper used by commands.
 #[allow(dead_code)]
-pub fn encode_frame(frame_type: FrameType, payload: &[u8]) -> Vec<u8> {
+pub fn encode_frame(frame_type: FrameType, payload: &[u8]) -> Result<Vec<u8>, FrameError> {
     encode(frame_type, 0, payload)
 }

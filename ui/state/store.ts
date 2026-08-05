@@ -291,6 +291,10 @@ export const useStore = create<AppState>((set, get) => ({
       const agents = new Map(s.agents);
       agents.set(info.id, info);
       const channels = new Map(s.agentChannels);
+      // Only overwrite the PTY channel when a new one is supplied. `channel ===
+      // null` means a role-only update (setAgentRole) or a restored session with
+      // no live PTY yet — in that case preserve the agent's existing live
+      // channel so XTermPanel doesn't lose it and fall into the resume path.
       if (channel) channels.set(info.id, channel);
       return { agents, agentChannels: channels };
     }),
@@ -307,7 +311,16 @@ export const useStore = create<AppState>((set, get) => ({
       resources.delete(id);
       const history = new Map(s.resourceHistory);
       history.delete(id);
-      return { agents, agentChannels: channels, agentOutputs: outputs, agentResources: resources, resourceHistory: history };
+      // If the removed agent was the master, clear masterAgentId so the composer
+      // doesn't see a stale master and spawn a duplicate (Bug 4).
+      return {
+        agents,
+        agentChannels: channels,
+        agentOutputs: outputs,
+        agentResources: resources,
+        resourceHistory: history,
+        ...(s.masterAgentId === id ? { masterAgentId: null } : {}),
+      };
     }),
 
   updateAgentStatus: (id, status) =>

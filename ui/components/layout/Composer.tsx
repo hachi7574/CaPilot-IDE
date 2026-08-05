@@ -78,6 +78,17 @@ export function Composer() {
   const dropHandledRef = useRef(false);
   // Nesting counter (dragenter/dragleave fire when crossing child boundaries).
   const dragDepthRef = useRef(0);
+  // Guards against double-send on rapid Enter (Bug 3).
+  const sendingRef = useRef(false);
+  // Auto-relock timer for the composer 解锁 (mirrors XTermPanel's 8s window).
+  const unlockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Clear the composer unlock timer on unmount.
+  useEffect(() => {
+    return () => {
+      if (unlockTimerRef.current) clearTimeout(unlockTimerRef.current);
+    };
+  }, []);
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const targetAgentId =
@@ -197,6 +208,10 @@ export function Composer() {
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    // StrictMode double-mount guard: onDragDropEvent resolves asynchronously,
+    // so cleanup can run before `.then()` assigns unlisten — the late listener
+    // must drop itself instead of leaking into the second mount.
+    let cancelled = false;
     getCurrentWebview()
       .onDragDropEvent((event) => {
         const p = event.payload;
@@ -219,9 +234,14 @@ export function Composer() {
         }
       })
       .then((un) => {
-        unlisten = un;
+        if (cancelled) {
+          un();
+        } else {
+          unlisten = un;
+        }
       });
     return () => {
+      cancelled = true;
       unlisten?.();
     };
   }, [appendPaths, isPointInComposer]);
@@ -310,6 +330,7 @@ export function Composer() {
 
   // ── Send ──────────────────────────────────────────────────────
   const handleSend = useCallback(async () => {
+    if (sendingRef.current) return; // in-flight guard (rapid Enter, Bug 3)
     const el = textareaRef.current;
     if (!el) return;
     const raw = el.value.trim();
@@ -320,6 +341,13 @@ export function Composer() {
     const text = isBang ? raw.slice(1).trimStart() : raw;
     pushDraft(raw);
 
+    // Clear the textarea synchronously before any await so a second Enter can't
+    // read the same value (Bug 3).
+    el.value = "";
+    el.style.height = "auto";
+    setIsBangInput(false);
+
+    sendingRef.current = true;
     let agentId = targetAgentId;
     let justSpawned = false;
     try {
@@ -352,17 +380,16 @@ export function Composer() {
       await invoke("agent_write", { id: agentId, data: text });
     } catch (err) {
       console.error("Failed to send to agent:", err);
-      return;
+    } finally {
+      // Relock worker input even when the send fails (Bug 6), and release the
+      // in-flight guard so the next Enter can send again.
+      if (unlockTimerRef.current) {
+        clearTimeout(unlockTimerRef.current);
+        unlockTimerRef.current = null;
+      }
+      setWorkerUnlock(null);
+      sendingRef.current = false;
     }
-
-    // Relock worker input after a successful send (解锁 until next send).
-    setWorkerUnlock(null);
-
-    if (el) {
-      el.value = "";
-      el.style.height = "auto";
-    }
-    setIsBangInput(false);
   }, [
     targetAgentId,
     composerTarget,
@@ -373,11 +400,23 @@ export function Composer() {
     setWorkerUnlock,
   ]);
 
+  /** 解锁 — allow worker input for 8s (mirrors XTermPanel's auto-relock, Bug 6). */
+  const handleUnlock = useCallback(() => {
+    const id = activeTab?.agentId;
+    if (!id) return;
+    setWorkerUnlock(id);
+    if (unlockTimerRef.current) clearTimeout(unlockTimerRef.current);
+    unlockTimerRef.current = setTimeout(() => {
+      const s = useStore.getState();
+      if (s.workerUnlockId === id) s.setWorkerUnlock(null);
+    }, 8000);
+  }, [activeTab?.agentId, setWorkerUnlock]);
+
   const handleStillSend = useCallback(async () => {
     if (!activeTab?.agentId) return;
-    setWorkerUnlock(activeTab.agentId); // allow a single send…
+    handleUnlock(); // allow a single send…
     await handleSend(); // …which relocks after sending.
-  }, [activeTab?.agentId, handleSend, setWorkerUnlock]);
+  }, [activeTab?.agentId, handleSend, handleUnlock]);
 
   // ── Keyboard ──────────────────────────────────────────────────
   const handleKeyDown = useCallback(
@@ -492,10 +531,7 @@ export function Composer() {
             <button className="lock-btn" onClick={handleStillSend}>
               仍然发送
             </button>
-            <button
-              className="lock-btn"
-              onClick={() => activeTab?.agentId && setWorkerUnlock(activeTab.agentId)}
-            >
+            <button className="lock-btn" onClick={handleUnlock}>
               解锁
             </button>
           </div>

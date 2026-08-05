@@ -12,6 +12,9 @@ import { useStore } from "./store";
 export function useEspSync() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    // StrictMode double-mount guard: cleanup can run while `listen()` is still
+    // pending, so a late-resolving listener must drop itself (see resource.ts).
+    let cancelled = false;
 
     const init = async () => {
       try {
@@ -20,7 +23,7 @@ export function useEspSync() {
       } catch {
         // Backend not ready yet — ignore.
       }
-      unlisten = await listen("esp://event", (event) => {
+      const un = await listen("esp://event", (event) => {
         const payload = event.payload as any;
         if (!payload) return;
         const s = useStore.getState();
@@ -50,10 +53,18 @@ export function useEspSync() {
             break;
         }
       });
+      if (cancelled) {
+        un();
+      } else {
+        unlisten = un;
+      }
     };
 
     init();
-    return () => unlisten?.();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, []);
 }
 

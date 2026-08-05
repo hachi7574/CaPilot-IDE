@@ -194,7 +194,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Err(_elapsed) => {
                 if !sent_cmd && start.elapsed() >= SEND_CMD_AFTER {
                     sent_cmd = true;
-                    let cmd = encode(FrameType::Command, 0, TEST_CMD_PAYLOAD.as_bytes());
+                    let cmd = encode(FrameType::Command, 0, TEST_CMD_PAYLOAD.as_bytes())?;
                     println!(">>> Sending test command via RX ({} bytes):", cmd.len());
                     hex_dump(&cmd);
                     match peripheral.write(rx, &cmd, WriteType::WithResponse).await {

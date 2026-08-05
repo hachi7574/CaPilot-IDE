@@ -88,7 +88,7 @@ pub trait EspTransport: Send + Sync {
 
     /// Convenience: encode + send.
     async fn send(&self, frame_type: FrameType, seq: u8, payload: &[u8]) -> Result<(), EspError> {
-        let wire = crate::esp::protocol::encode(frame_type, seq, payload);
+        let wire = crate::esp::protocol::encode(frame_type, seq, payload)?;
         self.write_frame(&wire).await
     }
 

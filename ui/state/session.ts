@@ -9,8 +9,13 @@ import { useStore, RestoredSession } from "./store";
  */
 export function useSessionRestore() {
   useEffect(() => {
+    // StrictMode double-mount guard: the sessions_list invoke resolves after
+    // the first mount's cleanup, so the restore would run twice and re-add /
+    // re-subscribe. Dropping late resolutions keeps the restore single-shot.
+    let cancelled = false;
     invoke<RestoredSession[]>("sessions_list")
       .then((sessions) => {
+        if (cancelled) return;
         const s = useStore.getState();
         for (const rec of sessions ?? []) {
           s.addAgent(
@@ -37,5 +42,8 @@ export function useSessionRestore() {
       .catch(() => {
         // Backend not ready — ignore.
       });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 }

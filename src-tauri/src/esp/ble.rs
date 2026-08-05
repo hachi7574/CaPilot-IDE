@@ -9,7 +9,7 @@ use crate::esp::protocol::{drain_frames, Frame};
 use crate::esp::transport::{EspError, EspEvent, EspTransport, TransportKind};
 use async_trait::async_trait;
 use btleplug::api::{Central, Manager as _, Peripheral as _, ScanFilter, WriteType};
-use btleplug::platform::{Manager, Peripheral};
+use btleplug::platform::{Adapter, Manager, Peripheral};
 use futures::stream::StreamExt;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -20,6 +20,47 @@ const NUS_RX_UUID: Uuid = Uuid::from_u128(0x6e400003_b5a3_f393_e0a9_e50e24dcca9e
 
 const TARGET_NAME: &str = "CaPilot-C5";
 const SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// RAII guard: stops the Bluetooth scan on drop so mid-loop errors don't leave
+/// the adapter scanning forever.
+struct ScanGuard {
+    adapter: Adapter,
+}
+
+impl Drop for ScanGuard {
+    fn drop(&mut self) {
+        let adapter = self.adapter.clone();
+        // We're inside the tokio runtime (async fn), so block_on would panic;
+        // spawn the async stop instead.
+        tokio::spawn(async move {
+            let _ = adapter.stop_scan().await;
+        });
+    }
+}
+
+/// RAII guard: disconnects a peripheral on drop. Armed right after a successful
+/// `connect()`, so any failure in discover/subscribe tears the device down
+/// instead of leaking a connected peripheral.
+struct ConnectGuard {
+    peripheral: Option<Peripheral>,
+}
+
+impl ConnectGuard {
+    /// Success path: stop the guard from disconnecting on drop.
+    fn disarm(&mut self) {
+        self.peripheral = None;
+    }
+}
+
+impl Drop for ConnectGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.peripheral.take() {
+            tokio::spawn(async move {
+                let _ = p.disconnect().await;
+            });
+        }
+    }
+}
 
 pub struct BleUart {
     peripheral: Option<Peripheral>,
@@ -67,6 +108,11 @@ impl BleUart {
             .await
             .map_err(|e| EspError::Ble(e.to_string()))?;
 
+        // Stop the scan on every exit path (success or error).
+        let _scan_guard = ScanGuard {
+            adapter: adapter.clone(),
+        };
+
         let deadline = std::time::Instant::now() + SCAN_TIMEOUT;
         let mut found: Option<Peripheral> = None;
         while std::time::Instant::now() < deadline {
@@ -87,7 +133,7 @@ impl BleUart {
                     .unwrap_or(false);
                 let service_match = props
                     .as_ref()
-                    .map_or(false, |x| x.services.contains(&NUS_SERVICE_UUID));
+                    .is_some_and(|x| x.services.contains(&NUS_SERVICE_UUID));
                 if name_match || service_match {
                     found = Some(p);
                     break;
@@ -98,10 +144,6 @@ impl BleUart {
             }
             tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         }
-        adapter
-            .stop_scan()
-            .await
-            .map_err(|e| EspError::Ble(e.to_string()))?;
 
         found.ok_or(EspError::ScanTimeout)
     }
@@ -129,6 +171,13 @@ impl EspTransport for BleUart {
             .connect()
             .await
             .map_err(|e| EspError::Ble(format!("connect: {e}")))?;
+
+        // From here on the peripheral is connected: if anything below fails,
+        // the guard tears it down instead of leaking it.
+        let mut guard = ConnectGuard {
+            peripheral: Some(peripheral.clone()),
+        };
+
         peripheral
             .discover_services()
             .await
@@ -143,8 +192,6 @@ impl EspTransport for BleUart {
             .iter()
             .find(|c| c.uuid == NUS_RX_UUID)
             .ok_or_else(|| EspError::Ble("NUS RX char not found".into()))?;
-        self.rx_uuid = Some(rx.uuid);
-        self.peripheral = Some(peripheral.clone());
 
         // Notification stream must be created before subscribe.
         let mut notifications = peripheral
@@ -155,6 +202,9 @@ impl EspTransport for BleUart {
             .subscribe(tx)
             .await
             .map_err(|e| EspError::Ble(format!("subscribe: {e}")))?;
+
+        self.rx_uuid = Some(rx.uuid);
+        self.peripheral = Some(peripheral.clone());
 
         let evt_sink = events.clone();
         let addr = self.address.clone().unwrap_or_default();
@@ -192,6 +242,8 @@ impl EspTransport for BleUart {
                 .await;
         }));
 
+        // Everything succeeded — don't disconnect on drop.
+        guard.disarm();
         Ok(())
     }
 

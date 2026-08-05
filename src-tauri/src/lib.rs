@@ -49,6 +49,35 @@ fn parse_speed(s: &str) -> Speed {
     }
 }
 
+fn parse_mode(s: &str) -> PermissionMode {
+    match s {
+        "auto" => PermissionMode::Auto,
+        "yolo" => PermissionMode::Yolo,
+        _ => PermissionMode::Ask,
+    }
+}
+
+/// Validate a project name: reject absolute paths and `..`/`.` traversal so a
+/// project can't escape the workspace root (persistence::project_dir joins it).
+fn sanitize_project(project: &str) -> Result<(), String> {
+    if project.is_empty() {
+        return Err("Project name cannot be empty".to_string());
+    }
+    let p = std::path::Path::new(project);
+    use std::path::Component;
+    if p.is_absolute()
+        || p.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::CurDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err("Invalid project name".to_string());
+    }
+    Ok(())
+}
+
 /// Prepend `~/CaPilot/bin` to PATH so every agent shell can invoke the
 /// `capilot` orchestration shim (DevPlan §5.2).
 fn capilot_path_env() -> Vec<(String, String)> {
@@ -75,6 +104,7 @@ fn build_and_spawn(
     resume_key: Option<String>,
     model: Option<String>,
     speed: &str,
+    mode: &str,
     cwd: PathBuf,
     on_data: Channel<Vec<u8>>,
 ) -> Result<AgentInfo, String> {
@@ -86,7 +116,7 @@ fn build_and_spawn(
     let session = AgentSession {
         id: id.to_string(),
         runtime: runtime.to_string(),
-        mode: PermissionMode::Ask,
+        mode: parse_mode(mode),
         speed: parse_speed(speed),
         model,
         cwd: cwd.clone(),
@@ -99,9 +129,13 @@ fn build_and_spawn(
     let (cmd, mut args) = adapter
         .spawn_interactive(&session)
         .map_err(|e| format!("Failed to build command: {}", e))?;
-    // Resume an existing conversation in the same context dir. Claude detects
-    // the most recent session in cwd; other runtimes use the stored key.
-    let resume_args = adapter.resume_args(&session);
+    // Resume an existing conversation in the same context dir. An explicit
+    // stored resume_key wins; otherwise fall back to adapter auto-detect.
+    let resume_args = if let Some(key) = &resume_key {
+        vec!["--resume".to_string(), key.clone()]
+    } else {
+        adapter.resume_args(&session)
+    };
     let detected_key = if resume_args.is_empty() {
         None
     } else {
@@ -181,6 +215,7 @@ async fn agent_spawn(
     resume_key: Option<String>,
     model: Option<String>,
     speed: Option<String>,
+    mode: Option<String>,
     on_data: Channel<Vec<u8>>,
 ) -> Result<AgentInfo, String> {
     let agent_id = uuid::Uuid::new_v4().to_string();
@@ -189,6 +224,7 @@ async fn agent_spawn(
     } else {
         project
     };
+    sanitize_project(&project)?;
     ensure_project(&project).map_err(|e| format!("Failed to init workspace: {}", e))?;
 
     let role = parse_role(&role);
@@ -211,6 +247,7 @@ async fn agent_spawn(
         resume_key,
         model,
         &speed.unwrap_or_else(|| "auto".to_string()),
+        &mode.unwrap_or_else(|| "ask".to_string()),
         cwd,
         on_data,
     )
@@ -246,6 +283,7 @@ async fn agent_resume(
         rec.resume_key.clone(),
         None,
         "auto",
+        "ask",
         rec.cwd.clone(),
         on_data,
     )
@@ -310,6 +348,16 @@ async fn agent_switch_runtime(
         return Err(format!("Session not found: {}", id));
     };
 
+    // Validate the target runtime BEFORE killing the old PTY so a failed
+    // switch can't brick the session (DevPlan §4.8).
+    let adapter = get_adapter(&runtime);
+    if !adapter.is_available() {
+        return Err(format!(
+            "Cannot switch to '{}': runtime not available",
+            runtime
+        ));
+    }
+
     pty.kill(&id).map_err(|e| e.to_string())?;
     {
         let db = persistence.db().lock().unwrap();
@@ -334,6 +382,7 @@ async fn agent_switch_runtime(
         rec.resume_key.clone(),
         None,
         "auto",
+        "ask",
         rec.cwd.clone(),
         on_data,
     )
@@ -499,7 +548,34 @@ async fn fs_write(path: String, content: String) -> Result<(), String> {
         .ok_or_else(|| "Invalid path: no file name".to_string())?;
     let resolved = canonical_parent.join(file_name);
 
-    // If the target already exists, double-check the canonical path stays in HOME.
+    // Reject symlink final components (including DANGLING ones — a dangling
+    // symlink outside HOME would otherwise be followed by fs::write after the
+    // canonicalize() checks pass). Resolve the link target and verify it stays
+    // in HOME; if the target is itself a symlink or escapes, refuse.
+    if let Ok(meta) = std::fs::symlink_metadata(&resolved) {
+        if meta.file_type().is_symlink() {
+            let target = std::fs::read_link(&resolved)
+                .map_err(|e| format!("Failed to read symlink: {}", e))?;
+            let real = if target.is_absolute() {
+                target
+            } else {
+                resolved
+                    .parent()
+                    .unwrap_or(std::path::Path::new("/"))
+                    .join(&target)
+            };
+            let canonical_target = std::fs::canonicalize(&real)
+                .map_err(|_| "Symlink target could not be resolved".to_string())?;
+            if !canonical_target.starts_with(home_path) {
+                return Err("Path escapes allowed directories".to_string());
+            }
+            return std::fs::write(&canonical_target, &content)
+                .map_err(|e| format!("Failed to write file: {}", e));
+        }
+    }
+
+    // If the target already exists and is a regular file, double-check the
+    // canonical path stays in HOME.
     if let Ok(canon) = resolved.canonicalize() {
         if !canon.starts_with(home_path) {
             return Err("Path escapes allowed directories".to_string());

@@ -46,13 +46,21 @@ export async function ensureAgentChannel(agentId: string): Promise<boolean> {
   return true;
 }
 
-/** Close an agent: kill PTY, remove session, close tabs. */
+/** Close an agent: kill PTY, remove session row (so it won't resurrect), close tabs. */
 export async function closeAgent(agentId: string): Promise<void> {
   const s = useStore.getState();
   try {
-    await invoke("agent_kill", { id: agentId });
+    // sessions_delete kills the PTY, removes the agent dir + DB session row,
+    // and unregisters the worker (Bug 7).
+    await invoke("sessions_delete", { id: agentId });
   } catch {
-    // ignore
+    // Fall back to a plain kill so the terminal still closes even if session
+    // cleanup failed.
+    try {
+      await invoke("agent_kill", { id: agentId });
+    } catch {
+      // ignore
+    }
   }
   s.closeTab(agentId);
   s.removeAgent(agentId);

@@ -8,6 +8,7 @@ use crate::orchestration::smart_return;
 use crate::persistence::Persistence;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,7 +17,19 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
 fn default_socket_path() -> PathBuf {
-    std::env::temp_dir().join("capilot-orchestrator.sock")
+    // Prefer the per-user runtime dir; fall back to a private dir under HOME.
+    // Never use a fixed world-visible path in /tmp (local DoS / injection).
+    if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+        let dir = PathBuf::from(runtime_dir);
+        if dir.is_dir() {
+            return dir.join("capilot-orchestrator.sock");
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".capilot")
+        .join("run")
+        .join("capilot-orchestrator.sock")
 }
 
 /// Where the shim looks for the socket path.
@@ -118,38 +131,139 @@ impl Dispatcher {
         self.workers.lock().unwrap().remove(id);
     }
 
-    pub fn mark_busy(&self, id: &str, task: &str) {
+    /// Atomically check-and-mark a worker busy. Returns false if it was already
+    /// busy. The check and the mark happen under a single lock acquisition so
+    /// two concurrent dispatches can't both claim the same idle worker.
+    fn try_mark_busy(&self, id: &str, task: &str) -> bool {
         let mut workers = self.workers.lock().unwrap();
-        if let Some(ws) = workers.get_mut(id) {
-            ws.status = WorkerStatus::Busy;
-            ws.last_task = Some(task.to_string());
+        if workers
+            .get(id)
+            .is_some_and(|ws| ws.status == WorkerStatus::Busy)
+        {
+            return false;
+        }
+        let ws = workers.entry(id.to_string()).or_default();
+        ws.status = WorkerStatus::Busy;
+        ws.last_task = Some(task.to_string());
+        true
+    }
+
+    /// Mark a worker idle; returns true if the status actually changed.
+    pub fn mark_idle(&self, id: &str) -> bool {
+        let mut workers = self.workers.lock().unwrap();
+        let Some(ws) = workers.get_mut(id) else {
+            return false;
+        };
+        if ws.status == WorkerStatus::Idle {
+            return false;
+        }
+        ws.status = WorkerStatus::Idle;
+        true
+    }
+
+    /// Mark a worker idle and notify the frontend if its state changed.
+    fn set_worker_idle(&self, id: &str, app: &AppHandle) {
+        if self.mark_idle(id) {
+            self.emit_worker_status(id, app);
         }
     }
 
-    #[allow(dead_code)]
-    pub fn mark_idle(&self, id: &str) {
-        let mut workers = self.workers.lock().unwrap();
-        if let Some(ws) = workers.get_mut(id) {
-            ws.status = WorkerStatus::Idle;
-        }
-    }
-
-    /// Start the Unix socket listener in the background.
-    pub fn start(self: &Arc<Self>, app: AppHandle) {
-        let this = self.clone();
-        tauri::async_runtime::spawn(async move {
-            this.run_socket(app).await;
+    /// Emit a worker-status event (`orchestration://event`) so the UI stays in
+    /// sync with busy/idle transitions.
+    fn emit_worker_status(&self, id: &str, app: &AppHandle) {
+        let (status, last_task) = {
+            let workers = self.workers.lock().unwrap();
+            match workers.get(id) {
+                Some(ws) => {
+                    let s = if ws.status == WorkerStatus::Busy {
+                        "busy"
+                    } else {
+                        "idle"
+                    };
+                    (s.to_string(), ws.last_task.clone())
+                }
+                None => ("idle".to_string(), None),
+            }
+        };
+        let _ = app.emit("orchestration://event", WorkerInfo {
+            id: id.to_string(),
+            title: id.to_string(),
+            runtime: String::new(),
+            status,
+            last_task,
         });
     }
 
+    /// Start the Unix socket listener and a periodic stale-busy sweeper in the
+    /// background.
+    pub fn start(self: &Arc<Self>, app: AppHandle) {
+        let this = self.clone();
+        let app_socket = app.clone();
+        tauri::async_runtime::spawn(async move {
+            this.run_socket(app_socket).await;
+        });
+        // Sweep: a worker whose PTY died (kill / session delete / crash) while
+        // Busy must return to Idle so it can be dispatched again.
+        let this2 = self.clone();
+        let app_sweep = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3));
+            loop {
+                tick.tick().await;
+                this2.sweep_stale_busy(&app_sweep);
+            }
+        });
+    }
+
+    /// Mark any Busy worker whose PTY is no longer alive back to Idle.
+    fn sweep_stale_busy(&self, app: &AppHandle) {
+        let stale: Vec<String> = {
+            let workers = self.workers.lock().unwrap();
+            workers
+                .iter()
+                .filter(|(id, ws)| ws.status == WorkerStatus::Busy && !self.pty.is_alive(id))
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        for id in stale {
+            log::info!("worker {id} PTY is no longer alive — returning to idle");
+            self.set_worker_idle(&id, app);
+        }
+    }
+
     async fn run_socket(self: Arc<Self>, app: AppHandle) {
+        // Ensure the socket directory exists before binding.
+        if let Some(parent) = self.socket_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                log::error!(
+                    "capilot socket dir {} create failed: {e}",
+                    parent.display()
+                );
+                return;
+            }
+        }
         let listener = match UnixListener::bind(&self.socket_path) {
             Ok(l) => l,
             Err(e) => {
-                log::error!("capilot socket bind failed: {e}");
+                log::error!(
+                    "capilot orchestrator socket bind FAILED at {}: {e} — capilot dispatch/status/report shim will not work",
+                    self.socket_path.display()
+                );
                 return;
             }
         };
+        // Restrict the socket to the current user regardless of umask.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(&self.socket_path) {
+                let mut perms = meta.permissions();
+                perms.set_mode(0o600);
+                if let Err(e) = std::fs::set_permissions(&self.socket_path, perms) {
+                    log::warn!("capilot socket chmod 0600 failed: {e}");
+                }
+            }
+        }
         // Persist the socket path for the shim.
         if let Some(parent) = socket_path_file().parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -174,6 +288,25 @@ impl Dispatcher {
     }
 
     async fn handle_conn(&self, mut stream: UnixStream, app: AppHandle) {
+        // Peer auth: only accept connections from the socket owner's user. The
+        // shim runs as the same user, so a different euid is hostile. Uses
+        // SO_PEERCRED (tokio's peer_cred) and the socket file's owner uid.
+        let socket_uid = std::fs::metadata(&self.socket_path).ok().map(|m| m.uid());
+        match (stream.peer_cred(), socket_uid) {
+            (Ok(cred), Some(expected)) if cred.uid() == expected => {}
+            (Ok(cred), _) => {
+                log::warn!(
+                    "rejected capilot socket peer uid {} (expected {:?})",
+                    cred.uid(),
+                    socket_uid
+                );
+                return;
+            }
+            (Err(e), _) => {
+                log::warn!("capilot socket peer_cred unavailable: {e}; rejecting connection");
+                return;
+            }
+        }
         let (r, mut w) = stream.split();
         let mut reader = BufReader::new(r);
         let mut line = String::new();
@@ -218,32 +351,27 @@ impl Dispatcher {
         let Some(agent_id) = self.resolve_worker(worker) else {
             return format!("ERR worker not found: {worker}");
         };
-        {
-            let workers = self.workers.lock().unwrap();
-            if let Some(ws) = workers.get(&agent_id) {
-                if ws.status == WorkerStatus::Busy {
-                    return format!("ERR worker busy: {worker}");
-                }
-            }
+        // Check busy + mark busy atomically (single lock acquisition) so two
+        // concurrent dispatches can't both claim the same idle worker.
+        if !self.try_mark_busy(&agent_id, prompt) {
+            return format!("ERR worker busy: {worker}");
         }
         if !self.pty.is_alive(&agent_id) {
+            // PTY is gone — undo the busy mark so the worker isn't stuck Busy.
+            self.set_worker_idle(&agent_id, app);
             return format!("ERR worker has no live PTY (offline): {worker} — resume it in the IDE first");
         }
         // Inject the instruction into the worker's interactive TUI.
         let payload = format!("{}\r", prompt);
         match self.pty.write(&agent_id, payload.as_bytes()) {
             Ok(()) => {
-                self.mark_busy(&agent_id, prompt);
-                let _ = app.emit("orchestration://event", WorkerInfo {
-                    id: agent_id.clone(),
-                    title: agent_id.clone(),
-                    runtime: String::new(),
-                    status: "busy".to_string(),
-                    last_task: Some(prompt.to_string()),
-                });
+                self.emit_worker_status(&agent_id, app);
                 format!("OK dispatched to {worker}")
             }
-            Err(e) => format!("ERR write failed: {e}"),
+            Err(e) => {
+                self.set_worker_idle(&agent_id, app);
+                format!("ERR write failed: {e}")
+            }
         }
     }
 
@@ -288,7 +416,8 @@ impl Dispatcher {
 
     /// `capilot report <worker> <summary>` — worker completion → smart return.
     fn report(&self, first: &str, rest: &str, app: &AppHandle) -> String {
-        let (worker, summary) = if self.resolve_worker(first).is_some() {
+        let worker_id = self.resolve_worker(first);
+        let (worker, summary) = if worker_id.is_some() {
             (first.to_string(), rest.to_string())
         } else if first.is_empty() {
             ("unknown".to_string(), String::new())
@@ -336,6 +465,12 @@ impl Dispatcher {
                 let msg = format!("\r\n[编排] worker {worker} 完成：{}\r\n", report.summary);
                 let _ = self.pty.write(&mid, msg.as_bytes());
             }
+        }
+
+        // Worker completed its task — return it to idle so it can be dispatched
+        // again (the frontend is notified via the status event).
+        if let Some(wid) = worker_id {
+            self.set_worker_idle(&wid, app);
         }
         format!("OK report registered ({level})")
     }

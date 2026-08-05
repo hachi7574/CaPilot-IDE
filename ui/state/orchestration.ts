@@ -13,6 +13,12 @@ import { useStore, WorkerInfo, WorkerReport } from "./store";
 export function useOrchestrationSync() {
   useEffect(() => {
     let unlisteners: (() => void)[] = [];
+    // StrictMode mounts the effect twice (mount → cleanup → mount). The
+    // `listen()` promises resolve asynchronously, so cleanup can run while they
+    // are still pending and `unlisteners` is still empty — the first listener
+    // would leak and the second mount would subscribe again. This flag makes the
+    // late-resolving listeners drop themselves instead of wiring up.
+    let cancelled = false;
 
     const init = async () => {
       const s = useStore.getState();
@@ -37,22 +43,32 @@ export function useOrchestrationSync() {
         // ignore
       }
 
-      unlisteners.push(
-        await listen("orchestration://event", (event) => {
-          const payload = event.payload as WorkerInfo;
-          if (payload?.id) useStore.getState().upsertWorkerInfo(payload);
-        })
-      );
-      unlisteners.push(
-        await listen("orchestration://report", (event) => {
-          const payload = event.payload as WorkerReport;
-          if (payload?.summary) useStore.getState().addReport(payload);
-        })
-      );
+      const un1 = await listen("orchestration://event", (event) => {
+        const payload = event.payload as WorkerInfo;
+        if (payload?.id) useStore.getState().upsertWorkerInfo(payload);
+      });
+      if (cancelled) {
+        un1();
+        return;
+      }
+      unlisteners.push(un1);
+
+      const un2 = await listen("orchestration://report", (event) => {
+        const payload = event.payload as WorkerReport;
+        if (payload?.summary) useStore.getState().addReport(payload);
+      });
+      if (cancelled) {
+        un2();
+        return;
+      }
+      unlisteners.push(un2);
     };
 
     init();
-    return () => unlisteners.forEach((fn) => fn());
+    return () => {
+      cancelled = true;
+      unlisteners.forEach((fn) => fn());
+    };
   }, []);
 }
 

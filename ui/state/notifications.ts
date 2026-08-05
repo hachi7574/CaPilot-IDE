@@ -18,10 +18,13 @@ export function useNotifications() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let unsub: (() => void) | undefined;
+    // StrictMode double-mount guard: `listen()` resolves after cleanup, so a
+    // late listener must drop itself instead of leaking into the second mount.
+    let cancelled = false;
 
     // ESP drop → system notification.
     const init = async () => {
-      unlisten = await listen("esp://event", (event) => {
+      const un = await listen("esp://event", (event) => {
         const payload = event.payload as any;
         if (payload?.event === "disconnected") {
           const reason =
@@ -31,6 +34,11 @@ export function useNotifications() {
           notify("ESP 断连", reason);
         }
       });
+      if (cancelled) {
+        un();
+      } else {
+        unlisten = un;
+      }
     };
 
     // New worker report appended to the store → system notification.
@@ -46,6 +54,7 @@ export function useNotifications() {
 
     init();
     return () => {
+      cancelled = true;
       unlisten?.();
       unsub?.();
     };
