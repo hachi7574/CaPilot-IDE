@@ -1,10 +1,8 @@
-import { useRef, useCallback, KeyboardEvent, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { Channel } from "@tauri-apps/api/core";
+import { useRef, useCallback, KeyboardEvent } from "react";
+import { invoke, Channel } from "@tauri-apps/api/core";
 import { useStore } from "../../state/store";
 
 const PERMISSION_MODES = ["ask", "auto", "yolo"] as const;
-const SPEEDS = ["high", "mid", "fast", "auto"] as const;
 const SPEED_LABELS: Record<string, string> = {
   high: "high",
   mid: "mid",
@@ -14,6 +12,7 @@ const SPEED_LABELS: Record<string, string> = {
 
 export function Composer() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
   const composerOpen = useStore((s) => s.composerOpen);
   const composerTarget = useStore((s) => s.composerTarget);
   const permissionMode = useStore((s) => s.permissionMode);
@@ -30,7 +29,6 @@ export function Composer() {
   const addAgent = useStore((s) => s.addAgent);
   const addTab = useStore((s) => s.addTab);
 
-  // Get the target agent ID (from active tab or master)
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const targetAgentId =
     composerTarget === "agent" ? activeTab?.agentId : undefined;
@@ -39,39 +37,28 @@ export function Composer() {
     const text = textareaRef.current?.value.trim();
     if (!text) return;
 
-    // Save to draft history
     pushDraft(text);
 
-    // If no agent exists yet, spawn one
     let agentId = targetAgentId;
     if (!agentId) {
       try {
-        // Create a Channel to receive PTY output
         const channel = new Channel<number[]>();
-
-        // Determine CWD (use home dir for now)
         const cwd = "/home/hachi";
-
         const info = await invoke("agent_spawn", {
           runtime: "claude",
           cwd,
           role: "master",
           onData: channel,
         });
-
-        // Type assertion for the returned info
         const agentInfo = info as import("../../state/store").AgentInfo;
         agentId = agentInfo.id;
-
         addAgent(agentInfo, channel);
         addTab({
-          id: `agent-${agentId}`,
+          id: agentId,
           type: "agent",
           agentId,
           title: `claude@master`,
         });
-
-        // Write the message to the PTY
         setTimeout(() => {
           invoke("agent_write", { id: agentId, data: text });
         }, 500);
@@ -80,7 +67,6 @@ export function Composer() {
         return;
       }
     } else {
-      // Write to existing agent PTY
       try {
         await invoke("agent_write", { id: agentId, data: text });
       } catch (err) {
@@ -88,7 +74,6 @@ export function Composer() {
       }
     }
 
-    // Clear input
     if (textareaRef.current) {
       textareaRef.current.value = "";
       textareaRef.current.style.height = "auto";
@@ -103,11 +88,9 @@ export function Composer() {
       } else if (e.key === "Tab") {
         e.preventDefault();
         if (e.shiftKey) {
-          // Cycle permission mode
           const idx = PERMISSION_MODES.indexOf(permissionMode);
           setPermissionMode(PERMISSION_MODES[(idx + 1) % 3]);
         } else {
-          // Toggle send target
           setComposerTarget(composerTarget === "agent" ? "master" : "agent");
         }
       } else if (e.key === "ArrowUp" && !e.currentTarget.value) {
@@ -123,82 +106,18 @@ export function Composer() {
           e.currentTarget.value = draft;
         }
       }
-      // Esc: no-op (do not respond)
     },
-    [
-      handleSend,
-      permissionMode,
-      composerTarget,
-      setPermissionMode,
-      setComposerTarget,
-      navigateDraft,
-    ]
+    [handleSend, permissionMode, composerTarget, setPermissionMode, setComposerTarget, navigateDraft]
   );
 
-  const handleInput = () => {
-    const el = textareaRef.current;
-    if (el) {
-      el.style.height = "auto";
-      el.style.height = Math.min(el.scrollHeight, 200) + "px";
-    }
-  };
-
-  // Focus textarea when composer opens
-  useEffect(() => {
-    if (composerOpen && textareaRef.current) {
-      textareaRef.current.focus();
-    }
-  }, [composerOpen]);
-
   return (
-    <div className={`composer ${!composerOpen ? "composer-collapsed" : ""}`}>
-      {/* Function bar */}
-      <div className="composer-toolbar">
-        <span className="composer-target">
-          → {composerTarget === "master" ? "master" : activeTab?.title || "agent"}
-        </span>
-
-        <button className="composer-btn" title="Attach file/reference/skill">
-          +file
-        </button>
-
-        <button className="composer-btn" title="Switch model">
-          model↑
-        </button>
-
-        <button
-          className="composer-btn"
-          onClick={() => {
-            const idx = SPEEDS.indexOf(speed);
-            setSpeed(SPEEDS[(idx + 1) % 4]);
-          }}
-          title={`Speed: ${speed}`}
-        >
-          {SPEED_LABELS[speed]}↑
-        </button>
-
-        <button className="composer-btn" title="Toggle worker">
-          🤖worker
-        </button>
-
-        <button
-          className={`composer-btn ${permissionMode === "yolo" ? "active" : ""}`}
-          onClick={() => {
-            const idx = PERMISSION_MODES.indexOf(permissionMode);
-            setPermissionMode(PERMISSION_MODES[(idx + 1) % 3]);
-          }}
-        >
-          [{permissionMode}]
-        </button>
-
-        <button
-          className="composer-btn toggle"
-          onClick={toggleComposer}
-          style={{ marginLeft: "auto" }}
-          title={composerOpen ? "Collapse" : "Expand"}
-        >
-          {composerOpen ? "▼" : "▲"}
-        </button>
+    <div className={`composer${!composerOpen ? " composer-collapsed" : ""}`}>
+      {/* Target line */}
+      <div className="composer-target">
+        <span>→</span>{" "}
+        {composerTarget === "master"
+          ? "master"
+          : `agent: ${activeTab?.title || "none"}`}
       </div>
 
       {/* Input area */}
@@ -206,17 +125,52 @@ export function Composer() {
         <textarea
           ref={textareaRef}
           className="composer-input"
-          placeholder={`→ ${composerTarget}  Type a message… (/cmd · @file · Enter send · Tab toggle)`}
+          placeholder="发消息…（/ 命令 · @ 文件 · ! 终端 · 拖入文件）"
           rows={2}
           onKeyDown={handleKeyDown}
-          onInput={handleInput}
+          onInput={(e) => {
+            const el = e.currentTarget;
+            el.style.height = "auto";
+            el.style.height = Math.min(el.scrollHeight, 200) + "px";
+          }}
         />
-        <button
-          className="composer-btn send"
-          onClick={handleSend}
-          title="Send (Enter)"
+      </div>
+
+      {/* Actions */}
+      <div className="composer-actions">
+        <span className="act-btn">+ 文件/引用</span>
+        <span className="act-btn">模型 ↑</span>
+        <span
+          className="act-btn"
+          onClick={() => {
+            const s = ["high", "mid", "fast", "auto"] as const;
+            const idx = s.indexOf(speed);
+            setSpeed(s[(idx + 1) % 4]);
+          }}
         >
-          ↑ send
+          速度: {SPEED_LABELS[speed]}
+        </span>
+        <span className="act-sep" />
+        <span className="act-btn accent" title="worker 开关">
+          🤖worker 开
+        </span>
+        <span className="act-sep" />
+        <span className="act-mode-group">
+          {PERMISSION_MODES.map((m) => (
+            <span
+              key={m}
+              className={`act-mode-btn${permissionMode === m ? " active" : ""}`}
+              onClick={() => setPermissionMode(m)}
+            >
+              {m}
+            </span>
+          ))}
+        </span>
+        <button className="collapse-btn" onClick={toggleComposer}>
+          {composerOpen ? "▼" : "▲"}
+        </button>
+        <button className="send-btn" onClick={handleSend}>
+          ↑ Send
         </button>
       </div>
     </div>
