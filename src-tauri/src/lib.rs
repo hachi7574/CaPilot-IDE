@@ -9,7 +9,7 @@ use agent_runtime::pty::PtyManager;
 use agent_runtime::runtimes::{get_adapter, known_runtimes};
 use esp::manager::EspManager;
 use orchestration::Dispatcher;
-use persistence::{agent_dir, ensure_project, project_dir, read_agent_meta, write_agent_meta, AgentMeta, AgentSessionRecord, Persistence, DEFAULT_PROJECT};
+use persistence::{agent_dir, ensure_project, project_dir, read_agent_meta, write_agent_meta, write_agent_meta_to_dir, AgentMeta, AgentSessionRecord, Persistence, DEFAULT_PROJECT};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -106,6 +106,9 @@ fn build_and_spawn(
     speed: &str,
     mode: &str,
     cwd: PathBuf,
+    // Custom meta dir (`<project_root>/agents/<id>`) for git-cloned / local
+    // folder projects. `None` keeps the default `workspace_root/project/agents`.
+    meta_dir: Option<PathBuf>,
     on_data: Channel<Vec<u8>>,
 ) -> Result<AgentInfo, String> {
     let adapter = get_adapter(runtime);
@@ -174,7 +177,11 @@ fn build_and_spawn(
         title: info.title.clone(),
         updated_at: now,
     };
-    if let Err(e) = write_agent_meta(project, &meta) {
+    let meta_res = match &meta_dir {
+        Some(dir) => write_agent_meta_to_dir(dir, &meta),
+        None => write_agent_meta(project, &meta),
+    };
+    if let Err(e) = meta_res {
         log::warn!("failed to write .agent-meta.json for {id}: {e}");
     }
     let record = AgentSessionRecord {
@@ -216,6 +223,9 @@ async fn agent_spawn(
     model: Option<String>,
     speed: Option<String>,
     mode: Option<String>,
+    // Custom project root (git-cloned / local-folder project). When provided,
+    // the agent's cwd lives under this root instead of `workspace_root()/name`.
+    project_root: Option<String>,
     on_data: Channel<Vec<u8>>,
 ) -> Result<AgentInfo, String> {
     let agent_id = uuid::Uuid::new_v4().to_string();
@@ -225,16 +235,48 @@ async fn agent_spawn(
         project
     };
     sanitize_project(&project)?;
-    ensure_project(&project).map_err(|e| format!("Failed to init workspace: {}", e))?;
+
+    // Normal workspace projects are initialised under ~/CaPilot/workspaces.
+    // Custom-rooted projects (cloned / picked folder) already exist on disk, so
+    // they skip the workspace layout creation.
+    if project_root.is_none() {
+        ensure_project(&project).map_err(|e| format!("Failed to init workspace: {}", e))?;
+    }
 
     let role = parse_role(&role);
-    let cwd = if role == AgentRole::Master {
+
+    // Resolve the project root (create it so a master session always has a
+    // valid cwd, then canonicalize to an absolute path).
+    let root = match &project_root {
+        Some(pr) => {
+            let p = std::path::PathBuf::from(pr);
+            std::fs::create_dir_all(&p).map_err(|e| format!("Failed to create project root: {}", e))?;
+            Some(
+                p.canonicalize()
+                    .map_err(|e| format!("Invalid project root: {}", e))?,
+            )
+        }
+        None => None,
+    };
+
+    let cwd = if let Some(pr) = &root {
+        if role == AgentRole::Master {
+            pr.clone()
+        } else {
+            let dir = pr.join("agents").join(&agent_id);
+            std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create agent dir: {}", e))?;
+            dir
+        }
+    } else if role == AgentRole::Master {
         project_dir(&project)
     } else {
         let dir = agent_dir(&project, &agent_id);
         std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create agent dir: {}", e))?;
         dir
     };
+
+    // Custom-rooted projects write .agent-meta.json under `<root>/agents/<id>`.
+    let meta_dir = root.as_ref().map(|pr| pr.join("agents").join(&agent_id));
 
     build_and_spawn(
         pty.inner(),
@@ -249,6 +291,7 @@ async fn agent_spawn(
         &speed.unwrap_or_else(|| "auto".to_string()),
         &mode.unwrap_or_else(|| "ask".to_string()),
         cwd,
+        meta_dir,
         on_data,
     )
 }
@@ -285,6 +328,7 @@ async fn agent_resume(
         "auto",
         "ask",
         rec.cwd.clone(),
+        None,
         on_data,
     )
 }
@@ -384,6 +428,7 @@ async fn agent_switch_runtime(
         "auto",
         "ask",
         rec.cwd.clone(),
+        None,
         on_data,
     )
 }
@@ -463,16 +508,25 @@ fn create_project(name: String, path: Option<String>) -> Result<String, String> 
     }
 }
 
+/// One workspace project from `list_projects`: its display name and on-disk
+/// root. `root` is `workspace_root().join(name)` for the default flow; the
+/// frontend also keeps folder/clone-rooted projects here (their root differs).
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectInfo {
+    pub name: String,
+    pub root: String,
+}
+
 /// List all workspace project names under `~/CaPilot/workspaces/` (directories
 /// only, hidden entries excluded). Powers the sidebar's project tree so empty
 /// projects show up too.
 #[tauri::command]
-fn list_projects() -> Result<Vec<String>, String> {
+fn list_projects() -> Result<Vec<ProjectInfo>, String> {
     let root = persistence::workspace_root();
     if !root.exists() {
         return Ok(Vec::new());
     }
-    let mut names = Vec::new();
+    let mut projects = Vec::new();
     for entry in std::fs::read_dir(&root)
         .map_err(|e| format!("Failed to read workspaces dir: {}", e))?
     {
@@ -487,10 +541,13 @@ fn list_projects() -> Result<Vec<String>, String> {
         if name.starts_with('.') {
             continue;
         }
-        names.push(name);
+        projects.push(ProjectInfo {
+            root: root.join(&name).to_string_lossy().to_string(),
+            name,
+        });
     }
-    names.sort();
-    Ok(names)
+    projects.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(projects)
 }
 
 #[tauri::command]
@@ -846,6 +903,51 @@ async fn git_status(dir: String) -> Result<Vec<GitEntry>, String> {
     Ok(entries)
 }
 
+/// Whether a directory is a git repo / has a remote / current branch. Powers the
+/// Git panel's "未初始化 git" prompt and "无远程仓库" hint.
+#[derive(Debug, Clone, Serialize)]
+pub struct RepoInfo {
+    pub is_repo: bool,
+    pub has_remote: bool,
+    pub branch: Option<String>,
+}
+
+/// `git init` in `repo` (idempotent). Called from the Git panel when the focused
+/// project is not yet a git repository.
+#[tauri::command]
+async fn git_init(repo: String) -> Result<(), String> {
+    git_run(&repo, &["init"]).map(|_| ())
+}
+
+/// Probe a directory's git state: is it a repo, does it have a remote, what is
+/// the current branch (best-effort). Never fails — a non-git / missing dir just
+/// reports `is_repo: false`.
+#[tauri::command]
+async fn git_repo_info(repo: String) -> Result<RepoInfo, String> {
+    // `git rev-parse --is-inside-work-tree` succeeds inside a work tree (or bare
+    // repo). A missing dir / not-a-repo simply fails → is_repo=false.
+    let is_repo = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    // Non-empty `git remote` output ⇒ at least one remote is configured.
+    let has_remote = git_run(&repo, &["remote"])
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    // Current branch (empty on a fresh repo with no commits) — best-effort.
+    let branch = git_run(&repo, &["branch", "--show-current"])
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    Ok(RepoInfo {
+        is_repo,
+        has_remote,
+        branch,
+    })
+}
+
 #[tauri::command]
 async fn git_stage(repo: String, files: Vec<String>) -> Result<(), String> {
     let mut args: Vec<&str> = vec!["add", "--"];
@@ -1146,6 +1248,8 @@ pub fn run() {
             fs_write,
             fs_list,
             git_status,
+            git_init,
+            git_repo_info,
             git_stage,
             git_unstage,
             git_commit,

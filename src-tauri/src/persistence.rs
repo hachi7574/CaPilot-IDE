@@ -85,12 +85,18 @@ pub fn sessions_db_path(project: &str) -> PathBuf {
 
 // ── .agent-meta.json ────────────────────────────────────────────
 
-pub fn write_agent_meta(project: &str, meta: &AgentMeta) -> std::io::Result<()> {
-    let dir = agent_dir(project, &meta.id);
-    std::fs::create_dir_all(&dir)?;
+/// Write `.agent-meta.json` into `dir` (which is created if missing). Shared by
+/// `write_agent_meta` and the custom project-root path (git-cloned / local
+/// folder projects whose agents live under `<root>/agents/<id>`).
+pub fn write_agent_meta_to_dir(dir: &std::path::Path, meta: &AgentMeta) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
     let path = dir.join(".agent-meta.json");
     let json = serde_json::to_vec_pretty(meta).map_err(std::io::Error::other)?;
     std::fs::write(path, json)
+}
+
+pub fn write_agent_meta(project: &str, meta: &AgentMeta) -> std::io::Result<()> {
+    write_agent_meta_to_dir(&agent_dir(project, &meta.id), meta)
 }
 
 pub fn read_agent_meta(project: &str, agent_id: &str) -> std::io::Result<AgentMeta> {

@@ -22,10 +22,18 @@ export async function spawnAgent(
 ): Promise<string> {
   const s = useStore.getState();
   const { channel, flush } = createBufferedChannel();
+  const proj = project ?? DEFAULT_PROJECT;
+  // A git-cloned / local-folder project carries its own on-disk root (the
+  // store's `projectRoots` map). Pass it through so the agent's cwd lives under
+  // that root instead of ~/CaPilot/workspaces/<name>. The pinned Master group
+  // never gets a custom root (its spawns use the workspace layout).
+  const projectRoot =
+    proj === MASTER_PROJECT ? undefined : s.projectRoots[proj];
   const info = (await invoke("agent_spawn", {
     runtime: DEFAULT_RUNTIME,
     role,
-    project: project ?? DEFAULT_PROJECT,
+    project: proj,
+    projectRoot: projectRoot ?? null,
     resumeKey: null,
     model: s.selectedModel,
     speed: s.speed,

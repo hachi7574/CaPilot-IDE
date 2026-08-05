@@ -1487,3 +1487,57 @@ body::after {
 .un-git-clone {
   align-self: flex-end;
 }
+
+/* ── Git panel: not-initialized / no-remote prompts (up-*) ──────
+   Shown by GitPanel when the focused project's root is not a git repo
+   (init prompt) or has no configured remote (muted hint). LUCY theme. */
+
+/* Not a git repo yet: warn-tinted prompt + a "git init" action. */
+.up-git-init {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  margin-top: 4px;
+  border: 1px solid rgba(250, 204, 21, 0.4);
+  background: rgba(250, 204, 21, 0.05);
+}
+.up-git-init-text {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--warn);
+}
+.up-git-init-btn {
+  flex-shrink: 0;
+  border-color: rgba(250, 204, 21, 0.4);
+  color: var(--warn);
+}
+.up-git-init-btn:hover {
+  border-color: var(--warn);
+  color: var(--warn);
+  background: rgba(250, 204, 21, 0.12);
+}
+
+/* Is a repo but has no remote: muted, non-blocking hint near the top. */
+.up-git-hint {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  padding: 6px 10px;
+  margin-bottom: 10px;
+  border: 1px solid var(--rule2);
+  background: var(--bg3);
+}
+
+/* ── Workspace focus model (uo-*) — single-select project focus ── */
+
+/* Subtle tint on the Master group when it is the focused project (mirrors the
+   `.proj.focused` highlight for dynamic projects). Clicking the ⭐ master
+   terminal focuses "master", so the group gets the same visual cue. */
+.uj-master-group.uo-master-focused {
+  background: rgba(139, 92, 246, 0.08);
+}
+.uj-master-group.uo-master-focused .u9-master-btn {
+  box-shadow: inset 3px 0 0 rgba(245, 243, 255, 0.9);
+}

@@ -114,11 +114,19 @@ function fmtRelTime(ms: number): string {
   return `${Math.floor(h / 24)}d ago`;
 }
 
-/** Root directory for the file tree / git panel (active agent's cwd). */
+/**
+ * Root directory for the file tree / git panel.
+ *
+ * Prefers the focused project's root (`store.focusedProject` + its entry in
+ * `store.projectRoots`), so both panels follow the project focused in the left
+ * sidebar. Falls back to the active tab's agent cwd, then the workspace root.
+ */
 function useProjectRoot(): string {
   const agents = useStore((s) => s.agents);
   const activeTabId = useStore((s) => s.activeTabId);
   const tabs = useStore((s) => s.tabs);
+  const focusedProject = useStore((s) => s.focusedProject);
+  const projectRoots = useStore((s) => s.projectRoots);
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const cwd = activeTab?.agentId ? agents.get(activeTab.agentId)?.cwd : undefined;
   const [fallback, setFallback] = useState("/tmp");
@@ -127,6 +135,9 @@ function useProjectRoot(): string {
       .then(setFallback)
       .catch(() => {});
   }, []);
+  // Focused project's root (e.g. a git-cloned / local-folder project) wins.
+  const focusedRoot = focusedProject ? projectRoots[focusedProject] : undefined;
+  if (focusedRoot) return focusedRoot;
   return cwd || fallback;
 }
 
@@ -581,6 +592,13 @@ interface GitLogEntry {
   ts: number;
 }
 
+/** Rust `RepoInfo` from `git_repo_info` — whether the root is a git repo. */
+interface RepoInfo {
+  is_repo: boolean;
+  has_remote: boolean;
+  branch: string | null;
+}
+
 function statusGlyph(e: GitEntry): { glyph: string; cls: string } {
   const code = (e.index + e.worktree).trim();
   if (code === "??") return { glyph: "A", cls: "ga" };
@@ -605,6 +623,7 @@ function fmtTs(sec: number): string {
 
 function GitPanel() {
   const root = useProjectRoot();
+  const [repoInfo, setRepoInfo] = useState<RepoInfo | null>(null);
   const [entries, setEntries] = useState<GitEntry[]>([]);
   const [branch, setBranch] = useState("");
   const [branches, setBranches] = useState<GitBranch[]>([]);
@@ -621,6 +640,24 @@ function GitPanel() {
   const setActiveTab = useStore((s) => s.setActiveTab);
 
   const refresh = async () => {
+    // Probe git state first: a non-repo dir short-circuits the normal fetches
+    // (git_status / branches / log all fail outside a work tree).
+    let ri: RepoInfo | null = null;
+    try {
+      ri = await invoke<RepoInfo>("git_repo_info", { repo: root });
+    } catch {
+      ri = null;
+    }
+    setRepoInfo(ri);
+    if (!ri?.is_repo) {
+      setEntries([]);
+      setBranch("");
+      setBranchSel("");
+      setBranches([]);
+      setLog([]);
+      setError(null);
+      return;
+    }
     try {
       const list = await invoke<GitEntry[]>("git_status", { dir: root });
       setEntries(list ?? []);
@@ -699,6 +736,12 @@ function GitPanel() {
   const pull = () => runAction(() => invoke("git_pull", { repo: root }), "Pull 完成");
   const push = () => runAction(() => invoke("git_push", { repo: root }), "Push 完成");
 
+  // Not-yet-initialized repo → `git init`, then re-probe + load the panel.
+  const initRepo = () =>
+    runAction(async () => {
+      await invoke("git_init", { repo: root });
+    }, "已初始化 git 仓库");
+
   const toggleDiff = async (e: GitEntry) => {
     if (diffFor === e.path) {
       setDiffFor(null);
@@ -746,12 +789,35 @@ function GitPanel() {
       ? [{ name: branch, current: true }, ...branches]
       : branches;
 
+  const isRepo = !!repoInfo?.is_repo;
+  // A repo with no `remote` configured: Pull/Push would fail, so hint at it but
+  // keep the rest of the panel functional.
+  const noRemote = isRepo && !repoInfo?.has_remote;
+
   return (
     <div className="tab-panel" id="tab-git" style={{ padding: 12 }}>
       <div className="git-title" title={branch ? `⎇ ${branch}` : undefined}>
         Changes · {projName}
       </div>
 
+      {noRemote && (
+        <div className="up-git-hint" title="未配置远程仓库">
+          🚫 无远程仓库（Pull / Push 不可用）
+        </div>
+      )}
+
+      {repoInfo && !repoInfo.is_repo ? (
+        <div className="up-git-init">
+          <div className="up-git-init-text">该项目未初始化 git</div>
+          <span
+            className={`act-btn up-git-init-btn${busy ? " active" : ""}`}
+            onClick={initRepo}
+          >
+            {busy ? "初始化中…" : "git init"}
+          </span>
+        </div>
+      ) : (
+        <>
       {/* Branch switcher (DevPlan §7.4A) */}
       <div className="gg-branch">
         <span className="gg-branch-label">⎇ 分支</span>
@@ -889,6 +955,8 @@ function GitPanel() {
           </div>
         )}
       </div>
+        </>
+      )}
     </div>
   );
 }

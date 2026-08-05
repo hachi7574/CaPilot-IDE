@@ -1,4 +1,4 @@
-import { useStore } from "../../state/store";
+import { useStore, Tab, AgentInfo } from "../../state/store";
 import { spawnAgent } from "../../state/agentActions";
 
 function projectOf(cwd: string): string {
@@ -8,10 +8,56 @@ function projectOf(cwd: string): string {
   return parts[parts.length - 1] || cwd;
 }
 
+/** Longest-matching project root for an editor file path (or undefined). */
+function projectRootOfPath(
+  filePath: string,
+  projectRoots: Record<string, string>
+): string | undefined {
+  let best: string | undefined;
+  let bestLen = -1;
+  for (const [name, root] of Object.entries(projectRoots)) {
+    const prefix = root.endsWith("/") ? root : `${root}/`;
+    if (filePath.startsWith(prefix) && prefix.length > bestLen) {
+      best = name;
+      bestLen = prefix.length;
+    }
+  }
+  return best;
+}
+
+/** Map a tab to its owning project, or undefined when it can't be determined.
+ *  - agent tab → the agent's cwd via `projectOf` (master-group cwd → "master")
+ *  - editor tab → longest matching `projectRoots` prefix, else `projectOf` on
+ *    the file path's dirname */
+function tabProject(
+  tab: Tab,
+  agents: Map<string, AgentInfo>,
+  projectRoots: Record<string, string>
+): string | undefined {
+  if (tab.type === "agent") {
+    // Pinned master placeholder tab (no live agent yet).
+    if (tab.id === "master") return "master";
+    if (tab.agentId) {
+      const agent = agents.get(tab.agentId);
+      if (agent?.cwd) return projectOf(agent.cwd);
+    }
+    return undefined;
+  }
+  if (tab.type === "editor" && tab.filePath) {
+    const byRoot = projectRootOfPath(tab.filePath, projectRoots);
+    if (byRoot) return byRoot;
+    const dir = tab.filePath.split("/").slice(0, -1).join("/");
+    return projectOf(dir || tab.filePath);
+  }
+  return undefined;
+}
+
 export function TabBar() {
   const tabs = useStore((s) => s.tabs);
   const activeTabId = useStore((s) => s.activeTabId);
   const agents = useStore((s) => s.agents);
+  const projectRoots = useStore((s) => s.projectRoots);
+  const focusedProject = useStore((s) => s.focusedProject);
   const workerMode = useStore((s) => s.workerMode);
   const draggedTabId = useStore((s) => s.draggedTabId);
   const setActiveTab = useStore((s) => s.setActiveTab);
@@ -19,10 +65,24 @@ export function TabBar() {
   const toggleLeftSidebar = useStore((s) => s.toggleLeftSidebar);
   const closeTab = useStore((s) => s.closeTab);
 
-  // Derive project name from current active tab's agent cwd
+  // Project-scoped view: when a project is focused, show only its tabs. Tabs
+  // whose project can't be determined (e.g. mid-spawn) stay visible, and tabs
+  // of other projects remain in the store — hidden, NOT closed.
+  const visibleTabs = focusedProject
+    ? tabs.filter((t) => {
+        const tp = tabProject(t, agents, projectRoots);
+        return tp === undefined || tp === focusedProject;
+      })
+    : tabs;
+
+  // Project badge shows the focused project; fall back to the active tab's
+  // project when nothing is focused.
   const activeTab = tabs.find((t) => t.id === activeTabId);
-  const activeAgent = activeTab?.agentId ? agents.get(activeTab.agentId) : undefined;
-  const projectName = activeAgent?.cwd ? projectOf(activeAgent.cwd) : activeTab ? "Agent" : "";
+  const projectName = focusedProject
+    ? focusedProject
+    : activeTab
+      ? (tabProject(activeTab, agents, projectRoots) ?? "Agent")
+      : "";
 
   const handleNew = async () => {
     try {
@@ -42,7 +102,7 @@ export function TabBar() {
           {projectName}
         </span>
       )}
-      {tabs.map((tab) => {
+      {visibleTabs.map((tab) => {
         const agent = tab.agentId ? agents.get(tab.agentId) : undefined;
         const status = agent?.status || "idle";
         const roleBadge = agent?.role && agent.role !== "standalone" ? ` · ${agent.role}` : "";

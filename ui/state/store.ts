@@ -186,6 +186,10 @@ interface AppState {
 
   // Projects (workspace dirs under ~/CaPilot/workspaces/<name>)
   projects: string[];
+  /** project name → absolute root path (from list_projects / create_project). */
+  projectRoots: Record<string, string>;
+  /** Single-select focused project; null = unfocused (tab bar shows all tabs). */
+  focusedProject: string | null;
 
   // Sidebars
   leftSidebarOpen: boolean;
@@ -240,7 +244,10 @@ interface AppState {
   setLeftWidth: (width: number) => void;
   setRightWidth: (width: number) => void;
   setProjects: (projects: string[]) => void;
-  addProject: (name: string) => void;
+  setProjectRoots: (roots: Record<string, string>) => void;
+  setFocusedProject: (name: string | null) => void;
+  projectRoot: (name: string) => string | undefined;
+  addProject: (name: string, root?: string) => void;
   removeProject: (name: string) => void;
   setEspStatus: (status: Partial<EspStatus>) => void;
   setEspConnecting: (connecting: boolean) => void;
@@ -302,6 +309,8 @@ export const useStore = create<AppState>((set, get) => ({
   agentResources: new Map(),
   resourceHistory: new Map(),
   projects: [],
+  projectRoots: {},
+  focusedProject: null,
   onboarded: loadOnboarded(),
 
   addAgent: (info, channel) =>
@@ -528,10 +537,28 @@ export const useStore = create<AppState>((set, get) => ({
 
   setProjects: (projects) => set({ projects }),
 
-  addProject: (name) =>
+  setProjectRoots: (roots) =>
+    set((s) => ({ projectRoots: { ...s.projectRoots, ...roots } })),
+
+  setFocusedProject: (name) => set({ focusedProject: name }),
+
+  projectRoot: (name) => get().projectRoots[name],
+
+  addProject: (name, root) =>
     set((s) => {
-      if (s.projects.includes(name)) return {};
-      return { projects: [...s.projects, name] };
+      if (s.projects.includes(name)) {
+        // Already listed — keep the name list untouched; only (re)record the
+        // root mapping when one is provided.
+        return root !== undefined
+          ? { projectRoots: { ...s.projectRoots, [name]: root } }
+          : {};
+      }
+      return {
+        projects: [...s.projects, name],
+        ...(root !== undefined
+          ? { projectRoots: { ...s.projectRoots, [name]: root } }
+          : {}),
+      };
     }),
 
   removeProject: (name) => {
@@ -541,7 +568,15 @@ export const useStore = create<AppState>((set, get) => ({
     // stray call must not kill the master session or its terminals.
     if (name === "master") return;
     // Remove the project from the list (disk files are kept — DevPlan §3.3).
-    set({ projects: s.projects.filter((p) => p !== name) });
+    // Drop its root mapping and clear focus when the removed project was the
+    // focused one (tab bar then falls back to showing all tabs).
+    const projectRoots = { ...s.projectRoots };
+    delete projectRoots[name];
+    set({
+      projects: s.projects.filter((p) => p !== name),
+      projectRoots,
+      focusedProject: s.focusedProject === name ? null : s.focusedProject,
+    });
 
     // Close + kill every agent whose workspace cwd belongs to the removed
     // project (matches the sidebar's projectOf grouping).

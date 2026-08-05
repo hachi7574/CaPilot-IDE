@@ -41,11 +41,13 @@ export function LeftSidebar() {
   const masterAgentId = useStore((s) => s.masterAgentId);
   const projects = useStore((s) => s.projects);
   const setProjects = useStore((s) => s.setProjects);
+  const setProjectRoots = useStore((s) => s.setProjectRoots);
+  const focusedProject = useStore((s) => s.focusedProject);
+  const setFocusedProject = useStore((s) => s.setFocusedProject);
   const addProject = useStore((s) => s.addProject);
   const setActiveTab = useStore((s) => s.setActiveTab);
   const addTab = useStore((s) => s.addTab);
 
-  const [focusedProj, setFocusedProj] = useState<string | null>(null);
   const [collapsedProjs, setCollapsedProjs] = useState<Set<string>>(new Set());
   const [masterExpanded, setMasterExpanded] = useState(true);
   const [ctx, setCtx] = useState<CtxState | null>(null);
@@ -56,13 +58,26 @@ export function LeftSidebar() {
   const setLeftWidth = useStore((s) => s.setLeftWidth);
 
   // On mount, pull the on-disk workspace list so empty projects render too.
+  // Rust `list_projects` returns `{name, root}` entries — feed both the name
+  // list (tree grouping) and the root map (tab-bar editor-file resolution).
+  // Then default the focus to the first project so the very first view is
+  // already project-scoped.
   useEffect(() => {
-    invoke<string[]>("list_projects")
-      .then((names) => {
-        if (Array.isArray(names) && names.length) setProjects(names);
+    invoke<{ name: string; root: string }[]>("list_projects")
+      .then((entries) => {
+        if (Array.isArray(entries) && entries.length) {
+          const names = entries.map((e) => e.name);
+          const roots: Record<string, string> = {};
+          for (const e of entries) roots[e.name] = e.root;
+          setProjects(names);
+          setProjectRoots(roots);
+          if (useStore.getState().focusedProject === null) {
+            setFocusedProject(names[0]);
+          }
+        }
       })
       .catch(console.error);
-  }, [setProjects]);
+  }, [setProjects, setProjectRoots, setFocusedProject]);
 
   // Close the context menu on outside click / Escape.
   useEffect(() => {
@@ -89,7 +104,7 @@ export function LeftSidebar() {
   };
 
   const focusProject = (id: string) => {
-    setFocusedProj(id === focusedProj ? null : id);
+    setFocusedProject(id === focusedProject ? null : id);
     setCollapsedProjs((prev) => {
       const next = new Set(prev);
       next.delete(id);
@@ -125,6 +140,7 @@ export function LeftSidebar() {
   );
 
   const openMaster = () => {
+    setFocusedProject(MASTER_PROJECT);
     const masterId = masterAgentId;
     if (masterId && agents.has(masterId)) {
       openAgentTab(masterId, "⭐master");
@@ -134,6 +150,13 @@ export function LeftSidebar() {
       }
       setActiveTab("master");
     }
+  };
+
+  // Open a terminal AND single-select its project (terminal clicks focus the
+  // owning project — any other project loses focus).
+  const openProjectTerminal = (proj: string, id: string) => {
+    setFocusedProject(proj);
+    openAgentTab(id);
   };
 
   // Draggable left sidebar resize.
@@ -229,18 +252,21 @@ export function LeftSidebar() {
     if (!trimmed) return "请输入项目名称";
     try {
       if (path) {
-        await invoke<string>("create_project", { name: trimmed, path });
+        const root = await invoke<string>("create_project", { name: trimmed, path });
+        // Rooted at the user-picked folder — record the canonical path so the
+        // tab bar can map editor files under it to this project.
+        addProject(trimmed, root);
       } else {
         await invoke<string>("create_project", { name: trimmed });
+        addProject(trimmed);
       }
-      addProject(trimmed);
       // Default-new projects are expanded.
       setCollapsedProjs((prev) => {
         const next = new Set(prev);
         next.delete(trimmed);
         return next;
       });
-      setFocusedProj((cur) => (cur === trimmed ? cur : trimmed));
+      setFocusedProject(trimmed);
       setNprojError(null);
       // New project auto-opens a fresh agent terminal (spawnAgent adds +
       // activates the tab). Best-effort: a failed spawn must not block the
@@ -282,19 +308,21 @@ export function LeftSidebar() {
       return "请选择父目录";
     }
     try {
-      await invoke<string>("git_clone", {
+      const root = await invoke<string>("git_clone", {
         url: trimmedUrl,
         name: trimmedName,
         parentDir,
       });
-      addProject(trimmedName);
+      // Record the clone dir as the project root so the tab bar can resolve
+      // editor files opened inside it to this project.
+      addProject(trimmedName, root);
       // Newly cloned projects are expanded.
       setCollapsedProjs((prev) => {
         const next = new Set(prev);
         next.delete(trimmedName);
         return next;
       });
-      setFocusedProj((cur) => (cur === trimmedName ? cur : trimmedName));
+      setFocusedProject(trimmedName);
       setNprojError(null);
       // Auto-open a fresh agent terminal in the clone. Best-effort: a failed
       // spawn must not block the modal close or undo the cloned project.
@@ -342,7 +370,7 @@ export function LeftSidebar() {
             {/* Zone 3: Tree */}
             <div className="sidebar-tree">
               {/* Master (pinned, always first) — a collapsible purple group. */}
-              <div className={`uj-master-group${masterExpanded ? "" : " collapsed"}`}>
+              <div className={`uj-master-group${masterExpanded ? "" : " collapsed"}${focusedProject === MASTER_PROJECT ? " uo-master-focused" : ""}`}>
                 <div
                   className={`u9-master-btn${activeTabId === (masterAgentId || "master") ? " active" : ""}`}
                   onClick={toggleMaster}
@@ -398,7 +426,7 @@ export function LeftSidebar() {
                       <div
                         key={a.id}
                         className={`terminal-item${activeTabId === a.id ? " active" : ""}`}
-                        onClick={() => openAgentTab(a.id)}
+                        onClick={() => openProjectTerminal(MASTER_PROJECT, a.id)}
                         onContextMenu={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
@@ -430,7 +458,7 @@ export function LeftSidebar() {
                   return (
                     <div
                       key={name}
-                      className={`proj${hasAgents && collapsedProjs.has(name) ? " collapsed" : ""}${focusedProj === name ? " focused" : ""}`}
+                      className={`proj${hasAgents && collapsedProjs.has(name) ? " collapsed" : ""}${focusedProject === name ? " focused" : ""}`}
                     >
                       <div
                         className="proj-header"
@@ -467,7 +495,7 @@ export function LeftSidebar() {
                           <div
                             key={a.id}
                             className={`terminal-item${activeTabId === a.id ? " active" : ""}`}
-                            onClick={() => openAgentTab(a.id)}
+                            onClick={() => openProjectTerminal(name, a.id)}
                             onContextMenu={(e) => {
                               e.preventDefault();
                               e.stopPropagation();
