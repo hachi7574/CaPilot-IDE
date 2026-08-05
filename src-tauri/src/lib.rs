@@ -1011,6 +1011,37 @@ async fn git_diff(repo: String, file: String) -> Result<String, String> {
     git_run(&repo, &["diff", "--", file.as_str()])
 }
 
+/// Staged (index) diff of a single file vs HEAD — `git diff --cached -- <file>`.
+/// Powers the merge view's "暂存的更改" rows (diff vs HEAD).
+#[tauri::command]
+async fn git_diff_cached(repo: String, file: String) -> Result<String, String> {
+    git_run(&repo, &["diff", "--cached", "--", file.as_str()])
+}
+
+/// Read a file's content from a git object (`git show <rev>:<file>`). `rev` is a
+/// trusted constant the frontend sends — `"HEAD"` (committed) or `":0:"` (index /
+/// staged) — and `file` comes from our own `git status` listing, so both are passed
+/// via `Command::arg` with no shell. Unlike `git_run`, the output is NOT trimmed:
+/// exact file content (incl. trailing newline) is required for the merge view.
+/// Binary blobs (invalid UTF-8) surface a clean error instead of garbage.
+#[tauri::command]
+async fn git_show(repo: String, file: String, rev: String) -> Result<String, String> {
+    let spec = format!("{}:{}", rev, file);
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("show")
+        .arg(&spec)
+        .output()
+        .map_err(|e| format!("git failed: {}", e))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("git error: {}", err.trim()));
+    }
+    String::from_utf8(out.stdout)
+        .map_err(|_| format!("该文件为二进制内容，无法预览 diff: {}", file))
+}
+
 #[tauri::command]
 async fn git_pull(repo: String) -> Result<(), String> {
     git_run(&repo, &["pull"]).map(|_| ())
@@ -1258,6 +1289,8 @@ pub fn run() {
             git_checkout,
             git_log,
             git_diff,
+            git_diff_cached,
+            git_show,
             git_pull,
             git_push,
             git_clone,

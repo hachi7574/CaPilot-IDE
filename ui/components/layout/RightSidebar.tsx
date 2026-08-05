@@ -1,5 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { EditorState } from "@codemirror/state";
+import { EditorView, lineNumbers } from "@codemirror/view";
+import { oneDark } from "@codemirror/theme-one-dark";
+import { MergeView } from "@codemirror/merge";
 import { useStore } from "../../state/store";
 
 type RightTab = "overview" | "files" | "git";
@@ -599,14 +603,14 @@ interface RepoInfo {
   branch: string | null;
 }
 
-function statusGlyph(e: GitEntry): { glyph: string; cls: string } {
-  const code = (e.index + e.worktree).trim();
-  if (code === "??") return { glyph: "A", cls: "ga" };
-  if (code === "M" || code === "MM" || code === " M" || code === "M ") return { glyph: "M", cls: "gm" };
-  if (e.index === "A") return { glyph: "A", cls: "ga" };
-  if (e.index === "D" || e.worktree === "D") return { glyph: "D", cls: "gd" };
-  if (e.index === "R") return { glyph: "R", cls: "gr" };
-  return { glyph: code || "·", cls: "gm" };
+/** Status glyph for a single porcelain status char (M/A/D/R/?). */
+function glyphFor(code: string): { glyph: string; cls: string } {
+  const c = code.trim();
+  if (c === "?" || c === "A") return { glyph: "A", cls: "ga" };
+  if (c === "M") return { glyph: "M", cls: "gm" };
+  if (c === "D") return { glyph: "D", cls: "gd" };
+  if (c === "R") return { glyph: "R", cls: "gr" };
+  return { glyph: c || "·", cls: "gm" };
 }
 
 /** Unix-seconds timestamp → compact "MM-DD HH:mm" (zh-CN). */
@@ -621,21 +625,63 @@ function fmtTs(sec: number): string {
   });
 }
 
+/** OLD (left) / NEW (right) file content feeding the @codemirror/merge view. */
+interface DiffContent {
+  old: string;
+  new: string;
+}
+
+/**
+ * Inline side-by-side diff powered by `@codemirror/merge`. Mounts a read-only
+ * MergeView (OLD left / NEW right) into the container, destroying it on update
+ * or unmount so there is never more than one view per container.
+ */
+function InlineMergeDiff({ oldText, newText }: { oldText: string; newText: string }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    // Clear any leftover DOM (StrictMode double-mount safety).
+    el.textContent = "";
+    const readOnlyExt = [
+      oneDark,
+      lineNumbers(),
+      EditorState.readOnly.of(true),
+      EditorView.editable.of(false),
+    ];
+    const view = new MergeView({
+      a: { doc: oldText, extensions: readOnlyExt },
+      b: { doc: newText, extensions: readOnlyExt },
+      parent: el,
+      orientation: "a-b",
+      gutter: true,
+      highlightChanges: true,
+    });
+    return () => {
+      view.destroy();
+      if (containerRef.current) containerRef.current.textContent = "";
+    };
+  }, [oldText, newText]);
+  return <div className="gv-diff-cm" ref={containerRef} />;
+}
+
 function GitPanel() {
   const root = useProjectRoot();
   const [repoInfo, setRepoInfo] = useState<RepoInfo | null>(null);
   const [entries, setEntries] = useState<GitEntry[]>([]);
   const [branch, setBranch] = useState("");
   const [branches, setBranches] = useState<GitBranch[]>([]);
-  const [branchSel, setBranchSel] = useState("");
   const [log, setLog] = useState<GitLogEntry[]>([]);
   const [logOpen, setLogOpen] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  const [stagedOpen, setStagedOpen] = useState(true);
+  const [changesOpen, setChangesOpen] = useState(true);
   const [diffFor, setDiffFor] = useState<string | null>(null);
-  const [diffText, setDiffText] = useState<Record<string, string>>({});
+  const [diffContent, setDiffContent] = useState<Record<string, DiffContent>>({});
+  const [menuOpen, setMenuOpen] = useState(false);
   const addTab = useStore((s) => s.addTab);
   const setActiveTab = useStore((s) => s.setActiveTab);
 
@@ -652,10 +698,11 @@ function GitPanel() {
     if (!ri?.is_repo) {
       setEntries([]);
       setBranch("");
-      setBranchSel("");
       setBranches([]);
       setLog([]);
       setError(null);
+      setDiffFor(null);
+      setDiffContent({});
       return;
     }
     try {
@@ -669,10 +716,8 @@ function GitPanel() {
     try {
       const br = await invoke<string>("git_branch", { repo: root });
       setBranch(br);
-      setBranchSel(br);
     } catch {
       setBranch("");
-      setBranchSel("");
     }
     try {
       const bl = await invoke<GitBranch[]>("git_branches", { repo: root });
@@ -686,6 +731,10 @@ function GitPanel() {
     } catch {
       setLog([]);
     }
+    // Inline diffs reference a specific file state; drop them so a stage/unstage
+    // never shows a stale old/new pair after refresh.
+    setDiffFor(null);
+    setDiffContent({});
   };
 
   useEffect(() => {
@@ -707,22 +756,34 @@ function GitPanel() {
     }
   };
 
+  // Split `git_status` entries into staged (index status) vs changes (worktree
+  // status). Untracked (??) rows fall under 更改.
+  const staged = entries.filter((e) => e.index !== " " && e.index !== "?");
+  const changes = entries.filter((e) => e.worktree !== " ");
+
   const stageAll = () =>
     runAction(async () => {
-      const files = entries.map((e) => e.path);
+      const files = changes.map((e) => e.path);
       if (files.length === 0) return;
       await invoke("git_stage", { repo: root, files });
     }, "已暂存全部变更");
 
-  const toggleFile = (e: GitEntry) => {
-    const staged = e.index !== " " && e.index !== "?";
+  const unstageAll = () =>
+    runAction(async () => {
+      const files = staged.map((e) => e.path);
+      if (files.length === 0) return;
+      await invoke("git_unstage", { repo: root, files });
+    }, "已取消暂存全部变更");
+
+  const toggleFile = (e: GitEntry, kind: "staged" | "changes") => {
+    const shouldStage = kind === "changes";
     return runAction(async () => {
-      await invoke(staged ? "git_unstage" : "git_stage", {
+      await invoke(shouldStage ? "git_stage" : "git_unstage", {
         repo: root,
         files: [e.path],
       });
       setDiffFor(null);
-    }, staged ? "已取消暂存" : "已暂存");
+    }, shouldStage ? "已暂存" : "已取消暂存");
   };
 
   const commit = () =>
@@ -742,31 +803,64 @@ function GitPanel() {
       await invoke("git_init", { repo: root });
     }, "已初始化 git 仓库");
 
-  const toggleDiff = async (e: GitEntry) => {
+  const gitShowSafe = async (rev: string, file: string): Promise<string> => {
+    try {
+      return await invoke<string>("git_show", { repo: root, file, rev });
+    } catch {
+      return "";
+    }
+  };
+
+  const readWorktreeSafe = async (file: string): Promise<string> => {
+    const abs = root.endsWith("/") ? `${root}${file}` : `${root}/${file}`;
+    try {
+      return await invoke<string>("fs_read", { path: abs });
+    } catch {
+      return "";
+    }
+  };
+
+  /** Load OLD (left) + NEW (right) content for a file's merge view.
+   *  Staged → HEAD vs index (`git show HEAD:<f>` / `git show :0:<f>`);
+   *  Untracked → empty vs working tree; Unstaged → index vs working tree. */
+  const loadDiffContent = async (e: GitEntry): Promise<DiffContent> => {
+    const isStagedRow = e.index !== " " && e.index !== "?";
+    const untracked = e.index === "?" && e.worktree === "?";
+    let old = "";
+    let fresh = "";
+    if (isStagedRow) {
+      old = await gitShowSafe("HEAD", e.path);
+      fresh = await gitShowSafe(":0:", e.path);
+    } else if (untracked) {
+      old = "";
+      fresh = await readWorktreeSafe(e.path);
+    } else {
+      old = await gitShowSafe(":0:", e.path);
+      fresh = await readWorktreeSafe(e.path);
+    }
+    return { old, new: fresh };
+  };
+
+  const toggleDiff = (e: GitEntry) => {
     if (diffFor === e.path) {
       setDiffFor(null);
       return;
     }
     setDiffFor(e.path);
-    try {
-      const text = await invoke<string>("git_diff", { repo: root, file: e.path });
-      setDiffText((prev) => ({ ...prev, [e.path]: text }));
-    } catch {
-      setDiffText((prev) => ({ ...prev, [e.path]: "" }));
-    }
+    void loadDiffContent(e).then((c) => {
+      setDiffContent((prev) => ({ ...prev, [e.path]: c }));
+    });
   };
 
   const switchBranch = async (name: string) => {
     if (!name || name === branch) return;
     setBusy(true);
     setFeedback(null);
-    setBranchSel(name);
     try {
       await invoke("git_checkout", { repo: root, branch: name });
       setFeedback(`已切换到分支 ${name}`);
     } catch (e) {
       setFeedback(String(e));
-      setBranchSel(branch);
     } finally {
       setBusy(false);
     }
@@ -780,8 +874,7 @@ function GitPanel() {
     setActiveTab(`file:${abs}`);
   };
 
-  const projName = root.split("/").pop();
-  // Ensure the current branch always appears in the dropdown even when the
+  // Ensure the current branch always appears in the branch menu even when the
   // branch list is stale/empty (e.g. non-git dir or a fresh checkout).
   const branchList = branches.some((b) => b.name === branch)
     ? branches
@@ -794,18 +887,109 @@ function GitPanel() {
   // keep the rest of the panel functional.
   const noRemote = isRepo && !repoInfo?.has_remote;
 
+  const renderFileRow = (e: GitEntry, kind: "staged" | "changes") => {
+    const code = kind === "staged" ? e.index : e.worktree;
+    const { glyph, cls } = glyphFor(code);
+    const open = diffFor === e.path;
+    const isStagedRow = kind === "staged";
+    return (
+      <div key={e.path}>
+        <div className={`gv-file ${cls}`} onClick={() => toggleDiff(e)}>
+          <span className="gv-file-glyph">{glyph}</span>
+          <span className="gv-file-path" title={e.path}>
+            {e.path}
+          </span>
+          <span className="gv-file-actions">
+            <span
+              className="gv-file-act"
+              title={isStagedRow ? "取消暂存" : "暂存"}
+              onClick={(ev) => {
+                ev.stopPropagation();
+                toggleFile(e, kind);
+              }}
+            >
+              {isStagedRow ? "−" : "+"}
+            </span>
+            <span
+              className="gv-file-diff"
+              title="打开 diff"
+              onClick={(ev) => {
+                ev.stopPropagation();
+                toggleDiff(e);
+              }}
+            >
+              打开diff
+            </span>
+          </span>
+        </div>
+        {open && (
+          <div className="gv-diff">
+            <div className="gv-diff-head">
+              <span className="gv-diff-path" title={e.path}>
+                {e.path}
+              </span>
+              <span
+                className="gv-diff-open"
+                onClick={(ev) => {
+                  ev.stopPropagation();
+                  openInEditor(e.path);
+                }}
+              >
+                打开
+              </span>
+            </div>
+            {diffContent[e.path] ? (
+              <InlineMergeDiff
+                oldText={diffContent[e.path].old}
+                newText={diffContent[e.path].new}
+              />
+            ) : (
+              <div className="gv-diff-loading">加载 diff…</div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderGroup = (
+    title: string,
+    list: GitEntry[],
+    actionLabel: string,
+    onAction: () => void,
+    open: boolean,
+    onToggle: (v: boolean) => void,
+    kind: "staged" | "changes"
+  ) => (
+    <div className="gv-group">
+      <div className="gv-group-header" onClick={() => onToggle(!open)}>
+        <span className="gv-arrow">{open ? "▾" : "▸"}</span>
+        <span className="gv-group-title">
+          {title} ({list.length})
+        </span>
+        {list.length > 0 && (
+          <span
+            className="gv-group-action"
+            onClick={(ev) => {
+              ev.stopPropagation();
+              onAction();
+            }}
+          >
+            {actionLabel}
+          </span>
+        )}
+      </div>
+      {open &&
+        (list.length === 0 ? (
+          <div className="gv-empty">(无)</div>
+        ) : (
+          list.map((e) => renderFileRow(e, kind))
+        ))}
+    </div>
+  );
+
   return (
     <div className="tab-panel" id="tab-git" style={{ padding: 12 }}>
-      <div className="git-title" title={branch ? `⎇ ${branch}` : undefined}>
-        Changes · {projName}
-      </div>
-
-      {noRemote && (
-        <div className="up-git-hint" title="未配置远程仓库">
-          🚫 无远程仓库（Pull / Push 不可用）
-        </div>
-      )}
-
       {repoInfo && !repoInfo.is_repo ? (
         <div className="up-git-init">
           <div className="up-git-init-text">该项目未初始化 git</div>
@@ -818,143 +1002,130 @@ function GitPanel() {
         </div>
       ) : (
         <>
-      {/* Branch switcher (DevPlan §7.4A) */}
-      <div className="gg-branch">
-        <span className="gg-branch-label">⎇ 分支</span>
-        <select
-          className="gg-branch-select"
-          value={branchSel}
-          disabled={busy || branchList.length === 0}
-          onChange={(e) => switchBranch(e.target.value)}
-          title={branch ? `当前分支: ${branch}` : "无分支"}
-        >
-          {branchList.length === 0 && <option value="">无分支</option>}
-          {branchList.map((b) => (
-            <option key={b.name} value={b.name}>
-              {b.current ? "★ " : ""}
-              {b.name}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      {error && (
-        <div style={{ fontSize: 11, color: "var(--warn)", marginBottom: 8 }}>{error}</div>
-      )}
-      {feedback && (
-        <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 8 }}>{feedback}</div>
-      )}
-      <div className="git-changes">
-        {entries.length === 0 && !error && (
-          <div style={{ fontSize: 12, color: "var(--muted)" }}>工作区干净 ✅</div>
-        )}
-        {entries.map((e) => {
-          const { glyph, cls } = statusGlyph(e);
-          const staged = e.index !== " " && e.index !== "?";
-          const counts =
-            e.add + e.del > 0 ? `+${e.add} -${e.del}` : staged ? "staged" : "";
-          return (
-            <div key={e.path}>
-              <div className={`${cls} git-row`} onClick={() => toggleFile(e)}>
-                <span
-                  className="git-toggle"
-                  onClick={(ev) => {
-                    ev.stopPropagation();
-                    toggleDiff(e);
-                  }}
-                  title="查看 diff"
-                >
-                  {diffFor === e.path ? "▾" : "▸"}
-                </span>
-                <span className="git-glyph">{glyph}</span>
-                <span className="git-path">{e.path}</span>
-                <span className="git-counts">{counts}</span>
-              </div>
-              {diffFor === e.path && (
-                <div className="gg-diff-wrap">
-                  <div className="gg-diff-head">
-                    <span className="gg-diff-path" title={e.path}>
-                      {e.path}
-                    </span>
-                    <span
-                      className="gg-diff-open"
-                      onClick={(ev) => {
-                        ev.stopPropagation();
-                        openInEditor(e.path);
-                      }}
-                      title="在编辑器打开该文件"
-                    >
-                      📄 在编辑器打开
-                    </span>
-                  </div>
-                  <pre className="git-diff">
-                    {diffText[e.path] || "(无 diff — 可能为已暂存或二进制变更)"}
-                  </pre>
+          {/* Header row: title + branch + refresh + more-menu */}
+          <div className="gv-head">
+            <span className="gv-title">源代码管理</span>
+            <span className="gv-branch" title={branch ? `当前分支: ${branch}` : "无分支"}>
+              ⎇ {branch || "无分支"}
+            </span>
+            <span className="gv-icon" onClick={refresh} title="刷新">
+              ↻
+            </span>
+            <span className="gv-icon gv-more" onClick={() => setMenuOpen(!menuOpen)} title="更多">
+              ⋯
+            </span>
+            {menuOpen && <div className="gv-backdrop" onClick={() => setMenuOpen(false)} />}
+            {menuOpen && (
+              <div className="gv-menu" onClick={(e) => e.stopPropagation()}>
+                <div className="gv-menu-item" onClick={pull}>
+                  拉取
                 </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-      <div className="git-commit" style={{ marginTop: 12 }}>
-        <input
-          type="text"
-          placeholder="Commit message…"
-          value={msg}
-          onChange={(e) => setMsg(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && commit()}
-          style={{
-            width: "100%",
-            background: "var(--bg3)",
-            border: "1px solid var(--rule2)",
-            color: "var(--ink)",
-            fontFamily: "var(--mono)",
-            fontSize: 12,
-            padding: "6px 8px",
-            outline: "none",
-          }}
-        />
-      </div>
-      <div className="git-actions">
-        <span className={`act-btn${busy ? " active" : ""}`} onClick={stageAll}>
-          Stage All
-        </span>
-        <span className="act-btn" onClick={commit}>
-          Commit
-        </span>
-        <span className="act-btn" onClick={pull}>
-          Pull
-        </span>
-        <span className="act-btn" onClick={push}>
-          Push
-        </span>
-        <span className="act-btn" onClick={refresh} title="刷新">
-          ↻
-        </span>
-      </div>
-
-      {/* Commit history (DevPlan §7.4B) */}
-      <div className="gg-log">
-        <div className="gg-log-head" onClick={() => setLogOpen(!logOpen)}>
-          <span>提交历史</span>
-          <span className="gg-log-toggle">{logOpen ? "▼" : "▶"}</span>
-        </div>
-        {logOpen && (
-          <div className="gg-log-body">
-            {log.length === 0 && <div className="gg-log-empty">暂无提交记录</div>}
-            {log.map((c) => (
-              <div
-                key={c.hash}
-                className="gg-log-row"
-                title={`${c.author} · ${fmtTs(c.ts)}`}
-              >
-                <span className="gg-log-hash">{c.hash}</span>
-                <span className="gg-log-subject">{c.subject}</span>
+                <div className="gv-menu-item" onClick={push}>
+                  推送
+                </div>
+                <div className="gv-menu-label">分支管理</div>
+                <div className="gv-menu-branches">
+                  {branchList.length === 0 && <div className="gv-empty">无分支</div>}
+                  {branchList.map((b) => (
+                    <div
+                      key={b.name}
+                      className={`gv-menu-branch${b.current ? " current" : ""}`}
+                      onClick={() => {
+                        switchBranch(b.name);
+                        setMenuOpen(false);
+                      }}
+                    >
+                      {b.current ? "● " : "○ "}
+                      {b.name}
+                    </div>
+                  ))}
+                </div>
+                <div className="gv-menu-sep" />
+                <div className="gv-menu-item" onClick={stageAll}>
+                  全部暂存
+                </div>
+                <div className="gv-menu-item" onClick={unstageAll}>
+                  全部取消暂存
+                </div>
               </div>
-            ))}
+            )}
           </div>
-        )}
-      </div>
+
+          {/* Commit box: message textarea + check button */}
+          <div className="gv-commit">
+            <textarea
+              className="gv-commit-input"
+              placeholder="Commit message…"
+              rows={2}
+              value={msg}
+              onChange={(e) => setMsg(e.target.value)}
+              onKeyDown={(e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === "Enter") commit();
+              }}
+            />
+            <button
+              className="gv-commit-btn"
+              title="提交"
+              disabled={!msg.trim() || busy}
+              onClick={commit}
+            >
+              ✓
+            </button>
+          </div>
+
+          {noRemote && (
+            <div className="up-git-hint" title="未配置远程仓库">
+              🚫 无远程仓库（Pull / Push 不可用）
+            </div>
+          )}
+
+          {error && <div className="gv-msg gv-error">{error}</div>}
+          {feedback && <div className="gv-msg gv-feedback">{feedback}</div>}
+
+          {/* Staged / Changes groups */}
+          {renderGroup(
+            "暂存的更改",
+            staged,
+            "全部取消暂存",
+            unstageAll,
+            stagedOpen,
+            setStagedOpen,
+            "staged"
+          )}
+          {renderGroup(
+            "更改",
+            changes,
+            "全部暂存",
+            stageAll,
+            changesOpen,
+            setChangesOpen,
+            "changes"
+          )}
+
+          {entries.length === 0 && !error && <div className="gv-clean">工作区干净 ✅</div>}
+
+          {/* Commit history (DevPlan §7.4B) */}
+          <div className="gg-log">
+            <div className="gg-log-head" onClick={() => setLogOpen(!logOpen)}>
+              <span>提交历史</span>
+              <span className="gg-log-toggle">{logOpen ? "▼" : "▶"}</span>
+            </div>
+            {logOpen && (
+              <div className="gg-log-body">
+                {log.length === 0 && <div className="gg-log-empty">暂无提交记录</div>}
+                {log.map((c) => (
+                  <div
+                    key={c.hash}
+                    className="gg-log-row"
+                    title={`${c.author} · ${fmtTs(c.ts)}`}
+                  >
+                    <span className="gg-log-hash">{c.hash}</span>
+                    <span className="gg-log-subject">{c.subject}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </>
       )}
     </div>

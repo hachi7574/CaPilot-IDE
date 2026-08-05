@@ -1541,3 +1541,341 @@ body::after {
 .uj-master-group.uo-master-focused .u9-master-btn {
   box-shadow: inset 3px 0 0 rgba(245, 243, 255, 0.9);
 }
+
+/* ── Git panel v2 — VS Code Source Control style (gv-*) ──────────
+   Replaces the old flat git list with a VS Code-like SCM panel:
+   header (title + branch + refresh + ⋯ menu), commit box, collapsible
+   "暂存的更改" / "更改" groups, and an inline @codemirror/merge diff.
+   Keeps the LUCY dark theme (--bg2/--bg3/--rule/--brand). */
+
+/* Header row */
+.gv-head {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0 10px;
+  font-family: var(--pixel);
+}
+.gv-title {
+  flex-shrink: 0;
+  font-size: 12px;
+  letter-spacing: 1px;
+  color: var(--ink);
+  text-transform: uppercase;
+}
+.gv-branch {
+  flex-shrink: 0;
+  font-size: 10px;
+  letter-spacing: 0;
+  color: var(--brand);
+  border: 1px solid var(--brand-dim);
+  background: rgba(139, 92, 246, 0.08);
+  padding: 1px 6px;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gv-icon {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.2s var(--ease-apple);
+  line-height: 1;
+}
+.gv-icon:hover { color: var(--ink); }
+.gv-more {
+  position: relative;
+  z-index: 41;
+  font-weight: 700;
+  letter-spacing: 1px;
+  padding: 0 3px;
+}
+
+/* ⋯ popover menu (backdrop + menu) */
+.gv-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: transparent;
+}
+.gv-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 42;
+  min-width: 168px;
+  margin-top: 4px;
+  background: var(--bg3);
+  border: 1px solid var(--rule2);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  padding: 4px 0;
+}
+.gv-menu-item {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--ink2);
+  cursor: pointer;
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+.gv-menu-item:hover { background: var(--bg4); color: var(--ink); }
+.gv-menu-label {
+  padding: 6px 12px 3px;
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-family: var(--pixel);
+}
+.gv-menu-branches {
+  max-height: 150px;
+  overflow-y: auto;
+}
+.gv-menu-branch {
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--ink2);
+  cursor: pointer;
+  font-family: var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.gv-menu-branch:hover { background: var(--bg4); color: var(--ink); }
+.gv-menu-branch.current { color: var(--brand); }
+.gv-menu-sep { height: 1px; background: var(--rule2); margin: 4px 6px; }
+
+/* Commit box */
+.gv-commit {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.gv-commit-input {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  background: var(--bg3);
+  border: 1px solid var(--rule2);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 5px 8px;
+  outline: none;
+}
+.gv-commit-input:focus { border-color: var(--brand); }
+.gv-commit-input::placeholder { color: var(--muted); }
+.gv-commit-btn {
+  flex-shrink: 0;
+  align-self: stretch;
+  width: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--brand);
+  color: var(--brand);
+  background: rgba(139, 92, 246, 0.1);
+  cursor: pointer;
+  font-size: 15px;
+  transition: all 0.2s var(--ease-apple);
+}
+.gv-commit-btn:hover:not(:disabled) {
+  background: var(--brand);
+  color: #f5f3ff;
+  box-shadow: 0 0 8px rgba(139, 92, 246, 0.3);
+}
+.gv-commit-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* Message (error / feedback) rows */
+.gv-msg { font-size: 11px; margin-bottom: 8px; padding: 4px 8px; border: 1px solid var(--rule2); }
+.gv-error { color: var(--danger); border-color: rgba(248, 113, 113, 0.4); background: rgba(248, 113, 113, 0.06); }
+.gv-feedback { color: var(--muted); }
+
+/* Collapsible groups */
+.gv-group { margin-bottom: 2px; }
+.gv-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 0 4px;
+  font-family: var(--pixel);
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: var(--ink2);
+  text-transform: uppercase;
+  cursor: pointer;
+  border-bottom: 1px solid var(--rule);
+  transition: color 0.2s var(--ease-apple);
+}
+.gv-group-header:hover { color: var(--brand); }
+.gv-arrow { color: var(--muted); font-size: 10px; flex-shrink: 0; }
+.gv-group-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gv-group-action {
+  flex-shrink: 0;
+  font-family: var(--pixel);
+  font-size: 9px;
+  letter-spacing: 1px;
+  color: var(--muted);
+  padding: 1px 5px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  text-transform: uppercase;
+  transition: all 0.2s var(--ease-apple);
+}
+.gv-group-action:hover {
+  color: var(--brand);
+  border-color: var(--brand-dim);
+  background: rgba(139, 92, 246, 0.06);
+}
+
+/* File rows (mono, hover actions) */
+.gv-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0 2px 12px;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.gv-file:hover { background: var(--bg3); }
+.gv-file-glyph { width: 14px; flex-shrink: 0; text-align: center; }
+.gv-file.gm .gv-file-glyph { color: var(--warn); }
+.gv-file.ga .gv-file-glyph { color: var(--success); }
+.gv-file.gd .gv-file-glyph { color: var(--danger); }
+.gv-file.gr .gv-file-glyph { color: var(--primary); }
+.gv-file-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink2);
+}
+.gv-file-actions {
+  display: none;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding-right: 4px;
+}
+.gv-file:hover .gv-file-actions { display: flex; }
+.gv-file-act {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  cursor: pointer;
+  border: 1px solid var(--rule2);
+  background: var(--bg3);
+  font-size: 13px;
+  line-height: 1;
+  transition: all 0.15s var(--ease-apple);
+}
+.gv-file-act:hover { color: var(--brand); border-color: var(--brand); }
+.gv-file-diff {
+  flex-shrink: 0;
+  font-family: var(--pixel);
+  font-size: 9px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--brand);
+  border: 1px solid var(--brand-dim);
+  background: rgba(139, 92, 246, 0.06);
+  padding: 2px 5px;
+  cursor: pointer;
+  transition: all 0.15s var(--ease-apple);
+}
+.gv-file-diff:hover { background: rgba(139, 92, 246, 0.14); }
+
+/* Empty / clean rows */
+.gv-empty {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  padding: 3px 0 3px 12px;
+}
+.gv-clean {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 8px 0;
+  font-family: var(--mono);
+}
+
+/* Inline merge diff (@codemirror/merge) */
+.gv-diff {
+  margin: 2px 0 8px 12px;
+  border: 1px solid var(--rule2);
+  background: var(--bg);
+}
+.gv-diff-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 6px;
+  background: var(--bg3);
+  border-bottom: 1px solid var(--rule);
+}
+.gv-diff-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+.gv-diff-open {
+  flex-shrink: 0;
+  font-family: var(--pixel);
+  font-size: 9px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--brand);
+  border: 1px solid var(--brand-dim);
+  background: rgba(139, 92, 246, 0.06);
+  padding: 1px 6px;
+  cursor: pointer;
+  transition: all 0.2s var(--ease-apple);
+}
+.gv-diff-open:hover { background: rgba(139, 92, 246, 0.14); }
+.gv-diff-loading {
+  padding: 10px 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+.gv-diff-cm { height: 240px; background: var(--bg); }
+.gv-diff-cm .cm-mergeView {
+  height: 240px;
+  overflow: auto;
+  background: var(--bg);
+}
+.gv-diff-cm .cm-mergeViewEditor { overflow: auto; }
+.gv-diff-cm .cm-editor { background: var(--bg); }
+.gv-diff-cm .cm-gutters {
+  background: var(--bg2);
+  color: var(--muted);
+  border-color: var(--rule);
+}
+.gv-diff-cm .cm-activeLine,
+.gv-diff-cm .cm-activeLineGutter { background: transparent; }
+.gv-diff-cm .cm-scroller {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.gv-diff-cm .cm-mergeSpacer { background: var(--bg3); }
