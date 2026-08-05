@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { Channel } from "@tauri-apps/api/core";
+import { invoke, Channel } from "@tauri-apps/api/core";
 
 // ── Types ───────────────────────────────────────────────────────
 
@@ -97,6 +97,17 @@ export interface ResourcePoint {
 
 /** Max buffered bytes per agent before XTermPanel attaches. */
 const MAX_OUTPUT_BUFFER = 2_000_000;
+
+/**
+ * Derive the workspace project name from an agent cwd — mirrors the sidebar's
+ * `projectOf` so `removeProject` matches the exact grouping the tree uses.
+ */
+function projectOfCwd(cwd: string): string {
+  const m = cwd.match(/workspaces\/([^/]+)/);
+  if (m) return m[1];
+  const parts = cwd.split("/").filter(Boolean);
+  return parts[parts.length - 1] || cwd;
+}
 
 /**
  * Create a Tauri Channel that buffers every event immediately, so no PTY
@@ -230,6 +241,7 @@ interface AppState {
   setRightWidth: (width: number) => void;
   setProjects: (projects: string[]) => void;
   addProject: (name: string) => void;
+  removeProject: (name: string) => void;
   setEspStatus: (status: Partial<EspStatus>) => void;
   setEspConnecting: (connecting: boolean) => void;
   applyResourceSample: (resources: AgentResource[]) => void;
@@ -521,6 +533,38 @@ export const useStore = create<AppState>((set, get) => ({
       if (s.projects.includes(name)) return {};
       return { projects: [...s.projects, name] };
     }),
+
+  removeProject: (name) => {
+    const s = get();
+    // Remove the project from the list (disk files are kept — DevPlan §3.3).
+    set({ projects: s.projects.filter((p) => p !== name) });
+
+    // Close + kill every agent whose workspace cwd belongs to the removed
+    // project (matches the sidebar's projectOf grouping).
+    const doomed: string[] = [];
+    s.agents.forEach((a, id) => {
+      if (projectOfCwd(a.cwd) === name) doomed.push(id);
+    });
+    for (const id of doomed) {
+      // Best-effort kill (fire-and-forget); ignore failures.
+      invoke("agent_kill", { id }).catch(() => {});
+      s.closeTab(id);
+      s.removeAgent(id);
+    }
+
+    // Guard: removing the master's project clears the master slot. removeAgent
+    // already clears masterAgentId when the master agent itself is removed;
+    // this covers a master whose cwd escaped the match, and drops the pinned
+    // "master" placeholder tab so a stale terminal doesn't linger.
+    const masterId = s.masterAgentId;
+    if (masterId) {
+      const master = s.agents.get(masterId);
+      if (!master || projectOfCwd(master.cwd) === name) {
+        set({ masterAgentId: null });
+        if (s.tabs.some((t) => t.id === "master")) s.closeTab("master");
+      }
+    }
+  },
 
   setEspStatus: (status) =>
     set((s) => ({ espStatus: { ...s.espStatus, ...status } })),

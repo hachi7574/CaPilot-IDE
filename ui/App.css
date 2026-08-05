@@ -1173,3 +1173,41 @@ body::after {
   text-overflow: ellipsis;
 }
 
+/* ── Master session = single purple button (u9-*) ─────────────── */
+
+.u9-master-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--brand);
+  color: #F5F3FF;
+  font-family: var(--pixel);
+  font-size: 11px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  cursor: pointer;
+  border: none;
+  border-bottom: 2px solid var(--rule);
+  transition: background .2s var(--ease-apple);
+}
+.u9-master-btn:hover { background: var(--brand-dim); }
+.u9-master-btn.active {
+  box-shadow: inset 0 0 0 2px rgba(245, 243, 255, 0.35);
+}
+.u9-master-icon { font-size: 13px; flex-shrink: 0; }
+.u9-master-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Collapsed overview section: summary row is the only line shown, and acts as
+   the click-to-expand target (header row is not rendered in collapsed state). */
+.ov-section.collapsed .uf-ov-summary {
+  cursor: pointer;
+  transition: background .2s var(--ease-apple);
+}
+.ov-section.collapsed .uf-ov-summary:hover { background: var(--bg3); }

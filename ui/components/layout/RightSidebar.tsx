@@ -383,16 +383,22 @@ function CollapsibleSection({
 }) {
   const [collapsed, setCollapsed] = useState(false);
 
-  return (
-    <div className={`ov-section${collapsed ? " collapsed" : ""}`}>
-      <div
-        className="ov-section-header"
-        onClick={() => setCollapsed(!collapsed)}
-      >
-        {title}
-        <span className="ov-toggle">{collapsed ? "▲" : "▼"}</span>
+  if (collapsed) {
+    return (
+      <div className="ov-section collapsed">
+        <div className="ov-summary uf-ov-summary" onClick={() => setCollapsed(false)}>
+          {summary}
+        </div>
       </div>
-      <div className="ov-summary uf-ov-summary">{summary}</div>
+    );
+  }
+
+  return (
+    <div className="ov-section">
+      <div className="ov-section-header" onClick={() => setCollapsed(true)}>
+        {title}
+        <span className="ov-toggle">▼</span>
+      </div>
       <div className="ov-section-body">{children}</div>
     </div>
   );

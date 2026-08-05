@@ -37,7 +37,6 @@ export function LeftSidebar() {
   const setActiveTab = useStore((s) => s.setActiveTab);
   const addTab = useStore((s) => s.addTab);
 
-  const [masterCollapsed, setMasterCollapsed] = useState(false);
   const [focusedProj, setFocusedProj] = useState<string | null>(null);
   const [collapsedProjs, setCollapsedProjs] = useState<Set<string>>(new Set());
   const [ctx, setCtx] = useState<CtxState | null>(null);
@@ -193,6 +192,15 @@ export function LeftSidebar() {
       });
       setFocusedProj((cur) => (cur === trimmed ? cur : trimmed));
       setNprojError(null);
+      // New project auto-opens a fresh agent terminal (spawnAgent adds +
+      // activates the tab). Best-effort: a failed spawn must not block the
+      // modal close or undo the created project.
+      try {
+        await spawnAgent("standalone", trimmed);
+      } catch (e) {
+        console.error("自动打开终端失败:", e);
+        setNprojError(`项目已创建，但自动打开终端失败：${String(e)}`);
+      }
       return null;
     } catch (e) {
       setNprojError(String(e));
@@ -230,34 +238,23 @@ export function LeftSidebar() {
 
             {/* Zone 3: Tree */}
             <div className="sidebar-tree">
-              {/* Master (pinned, always first) */}
-              <div className={`master-pinned${masterCollapsed ? " collapsed" : ""}`}>
-                <div
-                  className="master-header"
-                  onClick={() => setMasterCollapsed(!masterCollapsed)}
-                >
-                  <span className="m-icon">⭐</span>
-                  <span className="m-name">Master 会话</span>
-                  <span className="m-arrow">▲</span>
-                </div>
-                <div
-                  className={`terminal-item${activeTabId === (masterAgentId || "master") ? " active" : ""}`}
-                  onClick={openMaster}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setCtx({
-                      x: e.clientX,
-                      y: e.clientY,
-                      agentId: masterAgentId ?? undefined,
-                      isMaster: true,
-                    });
-                  }}
-                >
-                  <span className="tm-icon">🔄</span>
-                  <span className="tm-name">Master</span>
-                  <span className="tm-time">—</span>
-                </div>
+              {/* Master (pinned, always first) — a single purple button. */}
+              <div
+                className={`u9-master-btn${activeTabId === (masterAgentId || "master") ? " active" : ""}`}
+                onClick={openMaster}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setCtx({
+                    x: e.clientX,
+                    y: e.clientY,
+                    agentId: masterAgentId ?? undefined,
+                    isMaster: true,
+                  });
+                }}
+              >
+                <span className="u9-master-icon">🔄</span>
+                <span className="u9-master-name">Master 会话</span>
               </div>
 
               {/* Dynamic projects (driven by store.projects, includes empties) */}
@@ -453,6 +450,7 @@ function NewProjectModal({
 function ContextMenu({ ctx, onClose }: { ctx: CtxState; onClose: () => void }) {
   // ── Project context ───────────────────────────────────────────
   if (ctx.project) {
+    const proj = ctx.project;
     return (
       <div
         className="ctx-menu"
@@ -460,11 +458,11 @@ function ContextMenu({ ctx, onClose }: { ctx: CtxState; onClose: () => void }) {
         onClick={(e) => e.stopPropagation()}
         onContextMenu={(e) => e.stopPropagation()}
       >
-        <div className="ctx-label">{ctx.project}</div>
+        <div className="ctx-label">{proj}</div>
         <div
           className="ctx-item"
           onClick={() => {
-            spawnAgent("standalone", ctx.project);
+            spawnAgent("standalone", proj);
             onClose();
           }}
         >
@@ -484,6 +482,17 @@ function ContextMenu({ ctx, onClose }: { ctx: CtxState; onClose: () => void }) {
         <div className="ctx-sep" />
         <div className="ctx-item" onClick={onClose}>
           ✏ 重命名项目（待开发）
+        </div>
+        <div className="ctx-sep" />
+        <div
+          className="ctx-item danger"
+          onClick={() => {
+            // Remove from the list only — disk files are kept (DevPlan §3.3).
+            useStore.getState().removeProject(proj);
+            onClose();
+          }}
+        >
+          🗑 移除项目
         </div>
       </div>
     );
