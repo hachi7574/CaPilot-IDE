@@ -1410,3 +1410,18 @@ body::after {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
 }
 .gg-log-empty { color: var(--muted); font-family: var(--mono); font-size: 11px; padding: 4px 0; }
+
+/* ── Overview collapsed inline summary (same title bar, values on the right) ── */
+.ov-summary-inline {
+  margin-left: auto;
+  margin-right: 10px;
+  font-family: var(--pixel);
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 60%;
+}

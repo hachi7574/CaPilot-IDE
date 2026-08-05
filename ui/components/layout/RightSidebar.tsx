@@ -383,23 +383,27 @@ function CollapsibleSection({
 }) {
   const [collapsed, setCollapsed] = useState(false);
 
-  if (collapsed) {
-    return (
-      <div className="ov-section uk-section collapsed">
-        <div className="ov-summary uf-ov-summary uk-summary" onClick={() => setCollapsed(false)}>
-          {summary}
-        </div>
-      </div>
-    );
-  }
+  // The summary strings include the title prefix (e.g. "📊 运行时 0/1M · 缓存—").
+  // The header already shows the title, so strip the prefix and show only the
+  // condensed VALUES inline when collapsed — the title bar keeps its exact
+  // font/height/color in both states.
+  const value = summary.startsWith(title)
+    ? summary.slice(title.length).trimStart()
+    : summary;
 
   return (
-    <div className="ov-section uk-section">
-      <div className="ov-section-header" onClick={() => setCollapsed(true)}>
+    <div className={`ov-section uk-section${collapsed ? " collapsed" : ""}`}>
+      <div
+        className="ov-section-header"
+        onClick={() => setCollapsed(!collapsed)}
+      >
         {title}
-        <span className="ov-toggle">▼</span>
+        {collapsed && value && (
+          <span className="ov-summary-inline">{value}</span>
+        )}
+        <span className="ov-toggle">{collapsed ? "▲" : "▼"}</span>
       </div>
-      <div className="ov-section-body">{children}</div>
+      {!collapsed && <div className="ov-section-body">{children}</div>}
     </div>
   );
 }
