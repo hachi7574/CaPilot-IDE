@@ -1425,3 +1425,65 @@ body::after {
   text-overflow: ellipsis;
   max-width: 60%;
 }
+
+/* ── LeftSidebar master hover "+" (un-*) — mirrors .um-new-term on the purple
+   master header. Hidden by default; shown on hover / keyboard focus of the
+   header. Clicking spawns a terminal under the Master group. ─────────────── */
+
+.un-master-new {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-left: 2px;
+  flex-shrink: 0;
+  font-family: var(--pixel);
+  font-size: 12px;
+  line-height: 1;
+  color: rgba(245, 243, 255, 0.85);
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 0;
+  transition: all .15s var(--ease-apple);
+}
+
+.u9-master-btn:hover .un-master-new,
+.u9-master-btn:focus-within .un-master-new {
+  display: flex;
+}
+
+.un-master-new:hover {
+  color: #F5F3FF;
+  background: rgba(245, 243, 255, 0.18);
+}
+
+/* ── New-project modal: git clone flow (un-*) — parent-dir picker row shows the
+   chosen path (ellipsized); the "克隆并创建" button aligns right. ───────────── */
+
+.un-git-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.un-git-row .ug-nproj-folder {
+  flex-shrink: 0;
+}
+
+.un-git-parent {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.un-git-clone {
+  align-self: flex-end;
+}

@@ -15,6 +15,14 @@ function projectOf(cwd: string): string {
   return parts[parts.length - 1] || cwd;
 }
 
+/** Derive a project name from a git clone URL (last path segment, strip .git).
+ *  e.g. `https://github.com/owner/repo.git` → `repo`; query/fragment stripped. */
+function repoBaseName(url: string): string {
+  const clean = url.split(/[?#]/)[0];
+  const seg = clean.split("/").filter(Boolean).pop() ?? "";
+  return seg.replace(/\.git$/i, "");
+}
+
 interface CtxState {
   x: number;
   y: number;
@@ -189,12 +197,22 @@ export function LeftSidebar() {
   const expandableProjects = projectNames.filter(
     (n) => (agentsByProject.get(n)?.agents?.length ?? 0) > 0
   );
+  // [☰] now covers the Master group too: "all collapsed" means the master group
+  // is collapsed AND every expandable project is collapsed. Toggling collapses /
+  // expands both (`.every` on an empty list is vacuously true, so with no
+  // expandable projects the button still reflects / toggles the master).
   const allCollapsed =
-    expandableProjects.length > 0 &&
-    expandableProjects.every((n) => collapsedProjs.has(n));
+    !masterExpanded && expandableProjects.every((n) => collapsedProjs.has(n));
   const toggleAllProjects = () => {
-    if (expandableProjects.length === 0) return;
-    setCollapsedProjs(allCollapsed ? new Set() : new Set(expandableProjects));
+    if (allCollapsed) {
+      // Expand everything: expand master + clear collapsed projects.
+      setMasterExpanded(true);
+      setCollapsedProjs(new Set());
+    } else {
+      // Collapse everything: collapse master + all expandable projects.
+      setMasterExpanded(false);
+      setCollapsedProjs(new Set(expandableProjects));
+    }
   };
 
   // [📁+] create a new workspace project and surface it in the tree.
@@ -229,6 +247,59 @@ export function LeftSidebar() {
       // modal close or undo the created project.
       try {
         await spawnAgent("standalone", trimmed);
+      } catch (e) {
+        console.error("自动打开终端失败:", e);
+        setNprojError(`项目已创建，但自动打开终端失败：${String(e)}`);
+      }
+      return null;
+    } catch (e) {
+      setNprojError(String(e));
+      return String(e);
+    }
+  };
+
+  // [🔄 从 Git 克隆] clone a remote repo into a chosen parent dir, then surface
+  // it in the tree like any other project (addProject + auto-spawn + expand).
+  // The Rust `git_clone` validates the URL + name + parent dir; we only check
+  // the fields are present here so the errors surface through `nprojError`.
+  const handleGitClone = async (
+    url: string,
+    name: string,
+    parentDir: string
+  ): Promise<string | null> => {
+    const trimmedUrl = url.trim();
+    const trimmedName = name.trim();
+    if (!trimmedUrl) {
+      setNprojError("请输入 Git 仓库地址");
+      return "请输入 Git 仓库地址";
+    }
+    if (!trimmedName) {
+      setNprojError("请输入项目名称");
+      return "请输入项目名称";
+    }
+    if (!parentDir) {
+      setNprojError("请选择父目录");
+      return "请选择父目录";
+    }
+    try {
+      await invoke<string>("git_clone", {
+        url: trimmedUrl,
+        name: trimmedName,
+        parentDir,
+      });
+      addProject(trimmedName);
+      // Newly cloned projects are expanded.
+      setCollapsedProjs((prev) => {
+        const next = new Set(prev);
+        next.delete(trimmedName);
+        return next;
+      });
+      setFocusedProj((cur) => (cur === trimmedName ? cur : trimmedName));
+      setNprojError(null);
+      // Auto-open a fresh agent terminal in the clone. Best-effort: a failed
+      // spawn must not block the modal close or undo the cloned project.
+      try {
+        await spawnAgent("standalone", trimmedName);
       } catch (e) {
         console.error("自动打开终端失败:", e);
         setNprojError(`项目已创建，但自动打开终端失败：${String(e)}`);
@@ -289,6 +360,17 @@ export function LeftSidebar() {
                   <span className="uj-master-arrow">▾</span>
                   <span className="u9-master-icon">🔄</span>
                   <span className="u9-master-name">Master</span>
+                  <button
+                    className="un-master-new"
+                    title="新建终端"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setMasterExpanded(true);
+                      spawnAgent("standalone", MASTER_PROJECT).catch(console.error);
+                    }}
+                  >
+                    +
+                  </button>
                 </div>
                 {masterExpanded && (
                   <>
@@ -328,15 +410,6 @@ export function LeftSidebar() {
                         <span className="tm-time">—</span>
                       </div>
                     ))}
-                    {/* New terminal affordance — belongs to the Master group. */}
-                    <div
-                      className="uj-master-new"
-                      onClick={() => {
-                        spawnAgent("standalone", MASTER_PROJECT).catch(console.error);
-                      }}
-                    >
-                      ＋ 新建终端
-                    </div>
                   </>
                 )}
               </div>
@@ -442,6 +515,7 @@ export function LeftSidebar() {
             setNprojError(null);
           }}
           onCreate={handleCreateProject}
+          onGitClone={handleGitClone}
         />
       )}
 
@@ -457,18 +531,34 @@ function NewProjectModal({
   error,
   onClose,
   onCreate,
+  onGitClone,
 }: {
   error: string | null;
   onClose: () => void;
   onCreate: (name: string, path?: string) => Promise<string | null>;
+  onGitClone: (url: string, name: string, parentDir: string) => Promise<string | null>;
 }) {
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
+  const [gitUrl, setGitUrl] = useState("");
+  const [gitName, setGitName] = useState("");
+  const [parentDir, setParentDir] = useState("");
+  const prevAutoName = useRef("");
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
+
+  // Auto-fill the project name from the repo URL's base name (editable): it
+  // tracks the last auto-derived value so a hand-typed name isn't clobbered.
+  useEffect(() => {
+    const base = repoBaseName(gitUrl);
+    if ((gitName === "" || gitName === prevAutoName.current) && base) {
+      setGitName(base);
+    }
+    prevAutoName.current = base;
+  }, [gitUrl, gitName]);
 
   const closeOnSuccess = (err: string | null) => {
     if (err) return;
@@ -503,6 +593,33 @@ function NewProjectModal({
     } finally {
       setBusy(false);
     }
+  };
+
+  // 📂 Pick the parent directory the repo will be cloned into.
+  const pickParentDir = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const selected = await open({ directory: true, multiple: false });
+      if (typeof selected === "string" && selected) {
+        setParentDir(selected);
+      }
+    } catch (e) {
+      console.error("选择父目录失败:", e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // 🔄 Clone the git repo into the chosen parent dir. Validation, store updates
+  // and auto-spawn live in the parent's onGitClone; errors surface via the
+  // shared `error` (nprojError) display and the modal stays open on failure.
+  const cloneSubmit = async () => {
+    if (busy) return;
+    setBusy(true);
+    const err = await onGitClone(gitUrl, gitName, parentDir);
+    setBusy(false);
+    closeOnSuccess(err);
   };
 
   return (
@@ -541,6 +658,51 @@ function NewProjectModal({
         <div className="ug-nproj-label">或选择现有文件夹</div>
         <button className="ug-nproj-folder" onClick={pickFolder} disabled={busy}>
           📂 选择现有文件夹…
+        </button>
+
+        <div className="ug-nproj-sep" />
+
+        <div className="ug-nproj-label">🔄 从 Git 克隆</div>
+        <input
+          className="nproj-input"
+          placeholder="https://github.com/owner/repo.git"
+          value={gitUrl}
+          onChange={(e) => setGitUrl(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") cloneSubmit();
+            if (e.key === "Escape") onClose();
+          }}
+        />
+        <div className="un-git-row">
+          <button
+            className="ug-nproj-folder"
+            onClick={pickParentDir}
+            disabled={busy}
+          >
+            📂 选择父目录…
+          </button>
+          {parentDir ? (
+            <span className="un-git-parent" title={parentDir}>
+              {parentDir}
+            </span>
+          ) : null}
+        </div>
+        <input
+          className="nproj-input"
+          placeholder="项目名称（默认取仓库名）"
+          value={gitName}
+          onChange={(e) => setGitName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") cloneSubmit();
+            if (e.key === "Escape") onClose();
+          }}
+        />
+        <button
+          className="nproj-btn primary un-git-clone"
+          onClick={cloneSubmit}
+          disabled={busy}
+        >
+          {busy ? "克隆中…" : "克隆并创建"}
         </button>
       </div>
     </div>

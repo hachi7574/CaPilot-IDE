@@ -914,6 +914,60 @@ async fn git_pull(repo: String) -> Result<(), String> {
     git_run(&repo, &["pull"]).map(|_| ())
 }
 
+/// Validate a git clone URL: only remote-ish prefixes are allowed so a URL
+/// can't be abused as a local path trick (`file://`, leading `-`, whitespace…).
+fn validate_git_url(url: &str) -> Result<(), String> {
+    if url.trim() != url || url.contains(char::is_whitespace) {
+        return Err("Git 地址不能包含空白字符".to_string());
+    }
+    if url.starts_with('-') {
+        return Err("Git 地址不能以 - 开头".to_string());
+    }
+    const PREFIXES: [&str; 5] = ["http://", "https://", "ssh://", "git@", "git://"];
+    if !PREFIXES.iter().any(|p| url.starts_with(p)) {
+        return Err("不支持的 Git 地址（仅支持 http://、https://、ssh://、git@、git://）".to_string());
+    }
+    Ok(())
+}
+
+/// Clone a remote git repository into `<parent_dir>/<name>`. The parent dir must
+/// already exist; the URL is validated and passed via `Command::arg` (no shell)
+/// after `--`, so a `-`-prefixed URL is never treated as a flag. Runs off the
+/// async runtime so a slow network clone doesn't block other IPC. On success
+/// returns the clone dir.
+#[tauri::command]
+async fn git_clone(url: String, name: String, parent_dir: String) -> Result<String, String> {
+    validate_git_url(&url)?;
+    sanitize_project(&name)?;
+    let parent = std::path::Path::new(&parent_dir)
+        .canonicalize()
+        .map_err(|e| format!("无效的父目录: {}", e))?;
+    if !parent.is_dir() {
+        return Err("父目录不存在或不是目录".to_string());
+    }
+    let target = parent.join(&name);
+    if target.exists() {
+        return Err(format!("目标目录已存在: {}", target.display()));
+    }
+    let target_for_cmd = target.clone();
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        std::process::Command::new("git")
+            .arg("clone")
+            .arg("--")
+            .arg(&url)
+            .arg(&target_for_cmd)
+            .output()
+    })
+    .await
+    .map_err(|e| format!("git clone 任务失败: {}", e))?
+    .map_err(|e| format!("git 启动失败: {}", e))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("git clone 失败: {}", err.trim()));
+    }
+    Ok(target.to_string_lossy().to_string())
+}
+
 #[tauri::command]
 async fn git_push(repo: String) -> Result<(), String> {
     git_run(&repo, &["push"]).map(|_| ())
@@ -1102,6 +1156,7 @@ pub fn run() {
             git_diff,
             git_pull,
             git_push,
+            git_clone,
             notify,
             esp_connect,
             esp_disconnect,
