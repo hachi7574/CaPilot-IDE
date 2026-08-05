@@ -742,6 +742,78 @@ fn parse_numstat(text: &str) -> std::collections::HashMap<String, (i32, i32)> {
     map
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct GitBranch {
+    pub name: String,
+    pub current: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GitLogEntry {
+    pub hash: String,
+    pub subject: String,
+    pub author: String,
+    pub ts: i64,
+}
+
+/// Parse `git branch` porcelain output into (name, current) pairs. The current
+/// branch carries a `* ` prefix; `+ ` marks a branch checked out in another
+/// worktree (treated as non-current). Detached-HEAD placeholders like
+/// `* (HEAD detached at …)` are skipped.
+fn parse_branches(text: &str) -> Vec<GitBranch> {
+    let mut branches = Vec::new();
+    for line in text.lines() {
+        let line = line.trim_end();
+        if line.len() < 2 {
+            continue;
+        }
+        let (current, raw) = if line.starts_with("* ") {
+            (true, &line[2..])
+        } else if line.starts_with('+') {
+            (false, line[1..].trim_start())
+        } else {
+            (false, line.trim())
+        };
+        let name = raw.trim();
+        // `git branch` renders detached HEAD as `* (HEAD detached at …)`.
+        if name.is_empty() || name.starts_with('(') {
+            continue;
+        }
+        branches.push(GitBranch {
+            name: name.to_string(),
+            current,
+        });
+    }
+    branches
+}
+
+/// Parse `git log --pretty=format:%h%x1f%s%x1f%an%x1f%ct` output. Each commit
+/// is one line; `%x1f` (unit separator) delimits hash/subject/author/ts.
+fn parse_log(text: &str) -> Vec<GitLogEntry> {
+    let mut entries = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split('\x1f');
+        let hash = parts.next().unwrap_or("").trim().to_string();
+        if hash.is_empty() {
+            continue;
+        }
+        let subject = parts.next().unwrap_or("").trim().to_string();
+        let author = parts.next().unwrap_or("").trim().to_string();
+        let ts = parts.next().unwrap_or("0").trim().parse::<i64>().unwrap_or(0);
+        entries.push(GitLogEntry {
+            hash,
+            subject,
+            author,
+            ts,
+        });
+    }
+    entries
+}
+
 #[tauri::command]
 async fn git_status(dir: String) -> Result<Vec<GitEntry>, String> {
     let text = git_run(&dir, &["status", "--porcelain"])?;
@@ -798,6 +870,40 @@ async fn git_branch(repo: String) -> Result<String, String> {
     git_run(&repo, &["branch", "--show-current"])
 }
 
+/// List all branches in `repo` (name + current flag). Powers the Git panel's
+/// branch switcher (DevPlan §7.4A).
+#[tauri::command]
+async fn git_branches(repo: String) -> Result<Vec<GitBranch>, String> {
+    let text = git_run(&repo, &["branch"])?;
+    Ok(parse_branches(&text))
+}
+
+/// Switch to an existing branch. `--` after the branch name forces branch
+/// interpretation so a branch whose name collides with a file still checks out
+/// the branch. The branch arg is trusted — it comes from our own `git branch`
+/// listing (DevPlan §7.4A).
+#[tauri::command]
+async fn git_checkout(repo: String, branch: String) -> Result<(), String> {
+    git_run(&repo, &["checkout", branch.as_str(), "--"]).map(|_| ())
+}
+
+/// Recent commit history (short hash, subject, author, timestamp) for the Git
+/// panel's "提交历史" section (DevPlan §7.4B). Defaults to the latest 20.
+#[tauri::command]
+async fn git_log(repo: String, count: Option<i32>) -> Result<Vec<GitLogEntry>, String> {
+    let n = count.unwrap_or(20).clamp(1, 200).to_string();
+    let text = git_run(
+        &repo,
+        &[
+            "log",
+            "--pretty=format:%h%x1f%s%x1f%an%x1f%ct",
+            "-n",
+            n.as_str(),
+        ],
+    )?;
+    Ok(parse_log(&text))
+}
+
 #[tauri::command]
 async fn git_diff(repo: String, file: String) -> Result<String, String> {
     git_run(&repo, &["diff", "--", file.as_str()])
@@ -815,7 +921,7 @@ async fn git_push(repo: String) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_porcelain;
+    use super::{parse_branches, parse_log, parse_porcelain};
 
     #[test]
     fn parses_porcelain_basic() {
@@ -828,6 +934,34 @@ mod tests {
         assert_eq!(entries[1].path, "ui/App.tsx");
         assert_eq!(entries[2].path, "new-file.txt");
         assert_eq!(entries[3].path, "new.rs");
+    }
+
+    #[test]
+    fn parses_branches_porcelain() {
+        let text = "* main\n  feature/foo\n+ other-worktree\n* (HEAD detached at abc1234)\n";
+        let branches = parse_branches(text);
+        assert_eq!(branches.len(), 3);
+        assert!(branches[0].current);
+        assert_eq!(branches[0].name, "main");
+        assert!(!branches[1].current);
+        assert_eq!(branches[1].name, "feature/foo");
+        assert!(!branches[2].current);
+        assert_eq!(branches[2].name, "other-worktree");
+    }
+
+    #[test]
+    fn parses_log_lines() {
+        let text =
+            "abc1234\u{1f}Fix crash on startup\u{1f}Alice\u{1f}1712345678\nd111111\u{1f}Add docs\u{1f}Bob\u{1f}1712345600\n";
+        let log = parse_log(text);
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].hash, "abc1234");
+        assert_eq!(log[0].subject, "Fix crash on startup");
+        assert_eq!(log[0].author, "Alice");
+        assert_eq!(log[0].ts, 1712345678);
+        assert_eq!(log[1].hash, "d111111");
+        assert_eq!(log[1].subject, "Add docs");
+        assert_eq!(log[1].author, "Bob");
     }
 }
 
@@ -962,6 +1096,9 @@ pub fn run() {
             git_unstage,
             git_commit,
             git_branch,
+            git_branches,
+            git_checkout,
+            git_log,
             git_diff,
             git_pull,
             git_push,

@@ -565,6 +565,18 @@ interface GitEntry {
   del: number;
 }
 
+interface GitBranch {
+  name: string;
+  current: boolean;
+}
+
+interface GitLogEntry {
+  hash: string;
+  subject: string;
+  author: string;
+  ts: number;
+}
+
 function statusGlyph(e: GitEntry): { glyph: string; cls: string } {
   const code = (e.index + e.worktree).trim();
   if (code === "??") return { glyph: "A", cls: "ga" };
@@ -575,16 +587,34 @@ function statusGlyph(e: GitEntry): { glyph: string; cls: string } {
   return { glyph: code || "·", cls: "gm" };
 }
 
+/** Unix-seconds timestamp → compact "MM-DD HH:mm" (zh-CN). */
+function fmtTs(sec: number): string {
+  if (!sec) return "—";
+  const d = new Date(sec * 1000);
+  return d.toLocaleString("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 function GitPanel() {
   const root = useProjectRoot();
   const [entries, setEntries] = useState<GitEntry[]>([]);
   const [branch, setBranch] = useState("");
+  const [branches, setBranches] = useState<GitBranch[]>([]);
+  const [branchSel, setBranchSel] = useState("");
+  const [log, setLog] = useState<GitLogEntry[]>([]);
+  const [logOpen, setLogOpen] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [diffFor, setDiffFor] = useState<string | null>(null);
   const [diffText, setDiffText] = useState<Record<string, string>>({});
+  const addTab = useStore((s) => s.addTab);
+  const setActiveTab = useStore((s) => s.setActiveTab);
 
   const refresh = async () => {
     try {
@@ -598,8 +628,22 @@ function GitPanel() {
     try {
       const br = await invoke<string>("git_branch", { repo: root });
       setBranch(br);
+      setBranchSel(br);
     } catch {
       setBranch("");
+      setBranchSel("");
+    }
+    try {
+      const bl = await invoke<GitBranch[]>("git_branches", { repo: root });
+      setBranches(bl ?? []);
+    } catch {
+      setBranches([]);
+    }
+    try {
+      const lg = await invoke<GitLogEntry[]>("git_log", { repo: root, count: 20 });
+      setLog(lg ?? []);
+    } catch {
+      setLog([]);
     }
   };
 
@@ -665,13 +709,65 @@ function GitPanel() {
     }
   };
 
+  const switchBranch = async (name: string) => {
+    if (!name || name === branch) return;
+    setBusy(true);
+    setFeedback(null);
+    setBranchSel(name);
+    try {
+      await invoke("git_checkout", { repo: root, branch: name });
+      setFeedback(`已切换到分支 ${name}`);
+    } catch (e) {
+      setFeedback(String(e));
+      setBranchSel(branch);
+    } finally {
+      setBusy(false);
+    }
+    await refresh();
+  };
+
+  const openInEditor = (path: string) => {
+    const abs = root.endsWith("/") ? `${root}${path}` : `${root}/${path}`;
+    const name = path.split("/").pop() || path;
+    addTab({ id: `file:${abs}`, type: "editor", filePath: abs, title: name });
+    setActiveTab(`file:${abs}`);
+  };
+
   const projName = root.split("/").pop();
+  // Ensure the current branch always appears in the dropdown even when the
+  // branch list is stale/empty (e.g. non-git dir or a fresh checkout).
+  const branchList = branches.some((b) => b.name === branch)
+    ? branches
+    : branch
+      ? [{ name: branch, current: true }, ...branches]
+      : branches;
 
   return (
     <div className="tab-panel" id="tab-git" style={{ padding: 12 }}>
       <div className="git-title" title={branch ? `⎇ ${branch}` : undefined}>
         Changes · {projName}
       </div>
+
+      {/* Branch switcher (DevPlan §7.4A) */}
+      <div className="gg-branch">
+        <span className="gg-branch-label">⎇ 分支</span>
+        <select
+          className="gg-branch-select"
+          value={branchSel}
+          disabled={busy || branchList.length === 0}
+          onChange={(e) => switchBranch(e.target.value)}
+          title={branch ? `当前分支: ${branch}` : "无分支"}
+        >
+          {branchList.length === 0 && <option value="">无分支</option>}
+          {branchList.map((b) => (
+            <option key={b.name} value={b.name}>
+              {b.current ? "★ " : ""}
+              {b.name}
+            </option>
+          ))}
+        </select>
+      </div>
+
       {error && (
         <div style={{ fontSize: 11, color: "var(--warn)", marginBottom: 8 }}>{error}</div>
       )}
@@ -705,9 +801,26 @@ function GitPanel() {
                 <span className="git-counts">{counts}</span>
               </div>
               {diffFor === e.path && (
-                <pre className="git-diff">
-                  {diffText[e.path] || "(无 diff — 可能为已暂存或二进制变更)"}
-                </pre>
+                <div className="gg-diff-wrap">
+                  <div className="gg-diff-head">
+                    <span className="gg-diff-path" title={e.path}>
+                      {e.path}
+                    </span>
+                    <span
+                      className="gg-diff-open"
+                      onClick={(ev) => {
+                        ev.stopPropagation();
+                        openInEditor(e.path);
+                      }}
+                      title="在编辑器打开该文件"
+                    >
+                      📄 在编辑器打开
+                    </span>
+                  </div>
+                  <pre className="git-diff">
+                    {diffText[e.path] || "(无 diff — 可能为已暂存或二进制变更)"}
+                  </pre>
+                </div>
               )}
             </div>
           );
@@ -748,6 +861,29 @@ function GitPanel() {
         <span className="act-btn" onClick={refresh} title="刷新">
           ↻
         </span>
+      </div>
+
+      {/* Commit history (DevPlan §7.4B) */}
+      <div className="gg-log">
+        <div className="gg-log-head" onClick={() => setLogOpen(!logOpen)}>
+          <span>提交历史</span>
+          <span className="gg-log-toggle">{logOpen ? "▼" : "▶"}</span>
+        </div>
+        {logOpen && (
+          <div className="gg-log-body">
+            {log.length === 0 && <div className="gg-log-empty">暂无提交记录</div>}
+            {log.map((c) => (
+              <div
+                key={c.hash}
+                className="gg-log-row"
+                title={`${c.author} · ${fmtTs(c.ts)}`}
+              >
+                <span className="gg-log-hash">{c.hash}</span>
+                <span className="gg-log-subject">{c.subject}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

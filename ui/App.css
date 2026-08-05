@@ -299,8 +299,10 @@ body::after {
   font-family: var(--pixel); font-size: 10px; color: var(--ink2);
   letter-spacing: 1px; text-transform: uppercase; cursor: pointer;
   transition: background .2s var(--ease-apple);
+  /* Lighter title-bar background than the (tinted) section body below it. */
+  background: rgba(139, 92, 246, 0.10);
 }
-.ov-section-header:hover { background: var(--bg3); }
+.ov-section-header:hover { background: rgba(139, 92, 246, 0.16); }
 .ov-toggle { margin-left: auto; color: var(--muted); font-size: 12px; }
 .ov-section-body { padding: 8px 12px 10px; }
 .ov-section.collapsed .ov-section-body { display: none; }
@@ -1343,3 +1345,68 @@ body::after {
 /* The collapse triangle now sits at the LEFT of the project title (glyph ▾);
    the existing .proj.collapsed .pj-arrow rotate(-90deg) still flips it to ▸.
    JSX order (arrow → name → +) keeps the + button right-aligned. */
+
+/* ── Git panel polish (gg-*) — branch switcher, diff header, commit history ── */
+
+/* Branch selector row: compact, matches right-sidebar width. */
+.gg-branch {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 10px;
+}
+.gg-branch-label {
+  font-family: var(--pixel); font-size: 9px; letter-spacing: 1px;
+  color: var(--muted); text-transform: uppercase; flex-shrink: 0;
+}
+.gg-branch-select {
+  flex: 1; min-width: 0; background: var(--bg3);
+  border: 1px solid var(--rule2); color: var(--ink);
+  font-family: var(--mono); font-size: 12px; padding: 4px 6px;
+  outline: none; cursor: pointer;
+}
+.gg-branch-select:focus { border-color: var(--brand); }
+.gg-branch-select:disabled { opacity: 0.5; cursor: default; }
+
+/* Inline diff header: file path + "在编辑器打开" action. */
+.gg-diff-wrap {
+  margin: 4px 0 8px 20px;
+}
+.gg-diff-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 2px 0 2px 8px; border-left: 1px solid var(--rule2);
+}
+.gg-diff-path {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-family: var(--mono); font-size: 11px; color: var(--muted);
+}
+.gg-diff-open {
+  flex-shrink: 0; font-family: var(--pixel); font-size: 9px; letter-spacing: 1px;
+  color: var(--primary); border: 1px solid var(--primary-dim);
+  background: rgba(139,92,246,.06); padding: 2px 6px; cursor: pointer;
+  text-transform: uppercase; transition: all .2s var(--ease-apple);
+}
+.gg-diff-open:hover { background: rgba(139,92,246,.14); color: var(--brand); }
+.gg-diff-wrap .git-diff { margin-left: 8px; }
+
+/* Commit history section (collapsible). */
+.gg-log { margin-top: 12px; border-top: 2px solid var(--rule); }
+.gg-log-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 7px 0 4px; font-family: var(--pixel); font-size: 10px;
+  letter-spacing: 1px; color: var(--ink2); text-transform: uppercase;
+  cursor: pointer; transition: color .2s var(--ease-apple);
+}
+.gg-log-head:hover { color: var(--brand); }
+.gg-log-toggle { color: var(--muted); font-size: 10px; }
+.gg-log-body {
+  max-height: 220px; overflow-y: auto; margin-top: 2px;
+  font-family: var(--mono); font-size: 11px; line-height: 1.7;
+}
+.gg-log-row {
+  display: flex; gap: 8px; padding: 2px 0; cursor: default;
+  color: var(--ink2); white-space: nowrap;
+}
+.gg-log-row:hover { background: var(--bg3); color: var(--ink); }
+.gg-log-hash { color: var(--brand); flex-shrink: 0; }
+.gg-log-subject {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+}
+.gg-log-empty { color: var(--muted); font-family: var(--mono); font-size: 11px; padding: 4px 0; }
