@@ -16,7 +16,14 @@ function shellEscape(path: string): string {
 }
 
 /**
- * xterm panel bound to an agent's PTY channel.
+ * agentIds with an agent_resume invoke already in flight. React StrictMode mounts
+ * effects twice (mount→cleanup→mount); without this guard each restored terminal
+ * spawns TWO claude processes (~300MB waste each). The second mount skips the
+ * invoke and picks up the channel once the first mount's resolve stores it.
+ */
+const resumeInFlight = new Set<string>();
+
+/** xterm panel bound to an agent's PTY channel.
  *
  * Race handling: the Composer starts buffering channel output into
  * `store.agentOutputs` from the instant the PTY spawns. This component drains
@@ -95,7 +102,12 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
     if (!containerRef.current) return;
 
     const term = new Terminal({
-      cursorBlink: true,
+      // Static cursor: xterm implements cursorBlink as an injected infinite CSS
+      // keyframe animation, and WebKitGTK's software compositor repaints the
+      // whole window at 60 fps for any CSS animation — measured ~1 full core.
+      // Claude's TUI draws its own cursor inside the PTY, so a static xterm
+      // cursor is barely visible. cursorBlink:false costs nothing perceptible.
+      cursorBlink: false,
       fontSize: 13,
       fontFamily: "'JetBrainsMono', ui-monospace, monospace",
       theme: {
@@ -162,18 +174,27 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
 
     if (channel) {
       attachChannel(channel);
+    } else if (resumeInFlight.has(agentId)) {
+      // StrictMode double-mount: the first mount's agent_resume is still running.
+      // Skip the invoke (don't spawn a second claude); when it resolves, addAgent
+      // stores the channel and this effect re-runs with a live channel to attach.
     } else {
       // Restored session with no live PTY → resume it.
+      resumeInFlight.add(agentId);
       const resumeChannel = new Channel<number[]>();
       resumeChannel.onmessage = (data) =>
         useStore.getState().appendAgentOutput(agentId, data);
       invoke<AgentInfo>("agent_resume", { id: agentId, onData: resumeChannel })
         .then((info) => {
-          if (disposed) return;
+          resumeInFlight.delete(agentId);
+          // addAgent unconditionally (even if this mount is already disposed): the
+          // store write is what hands the channel to any concurrently-mounted tab.
           useStore.getState().addAgent(info, resumeChannel);
+          if (disposed) return;
           attachChannel(resumeChannel);
         })
         .catch((err) => {
+          resumeInFlight.delete(agentId);
           const bytes = Array.from(new TextEncoder().encode(`[resume failed] ${err}\n`));
           writeToTerm(bytes);
         });
@@ -293,6 +314,14 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
       className={dragHover ? "ug-xterm-drophint" : undefined}
       style={{
         flex: 1,
+        // min-height: 0 + overflow hidden give this flex item a definite height
+        // that content can't expand. Without it, xterm's screen height feeds back
+        // through the ResizeObserver: each fit() adds a row, the container grows a
+        // cell height, RO fires again — unbounded (measured rows climbing 634→2734+,
+        // renderer compositing a ~50k px page). WebKitGTK software compositor
+        // repaints all of it every frame = ~1 core.
+        minHeight: 0,
+        overflow: "hidden",
         padding: "10px 14px",
         background: "#05070D",
         position: "relative",

@@ -191,10 +191,21 @@ body::after {
 .tab-item.active { background: var(--bg); border-color: var(--brand); color: var(--ink); border-bottom-color: transparent; }
 
 .tab-dot { width: 7px; height: 7px; flex-shrink: 0; }
-.tab-dot.running { background: var(--primary); animation: pulse-dot 1.5s var(--ease-apple) infinite; }
+/* Static running dot. An infinite opacity pulse here makes WebKitGTK (software
+   compositor) repaint the whole window at 60 fps while any agent is running —
+   measured ~1 full core. A static dot is what VS Code uses. */
+.tab-dot.running { background: var(--primary); }
 .tab-dot.done { background: var(--success); }
 .tab-dot.idle { background: var(--muted); }
 .tab-dot.failed { background: var(--danger); }
+
+/* xterm's cursor blink is an injected infinite CSS keyframe animation (option
+   or DEC mode 12 both enable it). WebKitGTK's software compositor repaints the
+   whole window at 60 fps for any CSS animation (~1 full core, measured) — the
+   same reason .tab-dot.running is static above. Kill the blink animation; the
+   cursor stays a solid block. Claude's TUI draws its own cursor inside the PTY,
+   so this is visually negligible. */
+.xterm .xterm-cursor.xterm-cursor-blink { animation: none !important; }
 
 .tab-runtime {
   font-family: var(--pixel); font-size: 8px; color: var(--brand);
@@ -316,7 +327,10 @@ body::after {
 .ov-bar-row { margin: 5px 0; }
 .ov-bar-label { font-family: var(--mono); font-size: 10px; color: var(--muted); margin-bottom: 3px; }
 .ov-bar { height: 7px; background: var(--bg3); border: 1px solid var(--rule); }
-.ov-bar-fill { height: 100%; transition: width .6s var(--ease-apple); }
+/* No width transition: the overview re-polls CPU/MEM every 2 s, and a .6s
+   width animation on each update keeps WebKitGTK repainting ~30% of the time
+   (measured). Static width instead — the animation wasn't worth a CPU core. */
+.ov-bar-fill { height: 100%; transition: none; }
 .ov-bar-fill.gr { background: var(--success); }
 .ov-bar-fill.pu { background: var(--brand); }
 .ov-bar-fill.ye { background: var(--warn); }

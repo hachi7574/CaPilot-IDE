@@ -1218,7 +1218,9 @@ struct SystemStats {
 fn system_stats(
     monitor: tauri::State<'_, Arc<resource::ResourceMonitor>>,
 ) -> SystemStats {
-    let (cpu_pct, mem_used, mem_total) = monitor.system_snapshot();
+    // Served from the sampler's per-tick cache — no re-scan of /proc, and no
+    // lock contention with the sampler's own `System`.
+    let (cpu_pct, mem_used, mem_total) = monitor.snapshot();
     SystemStats {
         cpu_pct,
         mem_used,
