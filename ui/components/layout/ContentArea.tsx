@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useStore, Tab } from "../../state/store";
 import { XTermPanel } from "../terminal/XTermPanel";
 import { EditorPanel } from "../editor/EditorPanel";
+import { DiffPanel } from "../editor/DiffPanel";
 
 type DropEdge = "left" | "right" | "top" | "bottom" | null;
 
@@ -27,6 +28,9 @@ function Panel({ tab, onRemove }: { tab: Tab; onRemove?: () => void }) {
         <div className="panel-placeholder">Master 会话未启动 — 在输入框发消息自动创建</div>
       )}
       {tab.type === "editor" && tab.filePath && <EditorPanel filePath={tab.filePath} />}
+      {tab.type === "diff" && (
+        <DiffPanel oldText={tab.diffOld ?? ""} newText={tab.diffNew ?? ""} />
+      )}
     </div>
   );
 }

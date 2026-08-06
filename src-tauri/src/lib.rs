@@ -9,7 +9,7 @@ use agent_runtime::pty::PtyManager;
 use agent_runtime::runtimes::{get_adapter, known_runtimes};
 use esp::manager::EspManager;
 use orchestration::Dispatcher;
-use persistence::{agent_dir, ensure_project, project_dir, read_agent_meta, write_agent_meta, write_agent_meta_to_dir, AgentMeta, AgentSessionRecord, Persistence, DEFAULT_PROJECT};
+use persistence::{agent_dir, ensure_project, project_dir, read_agent_meta, write_agent_meta, AgentMeta, AgentSessionRecord, Persistence, DEFAULT_PROJECT};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -106,9 +106,6 @@ fn build_and_spawn(
     speed: &str,
     mode: &str,
     cwd: PathBuf,
-    // Custom meta dir (`<project_root>/agents/<id>`) for git-cloned / local
-    // folder projects. `None` keeps the default `workspace_root/project/agents`.
-    meta_dir: Option<PathBuf>,
     on_data: Channel<Vec<u8>>,
 ) -> Result<AgentInfo, String> {
     let adapter = get_adapter(runtime);
@@ -177,11 +174,11 @@ fn build_and_spawn(
         title: info.title.clone(),
         updated_at: now,
     };
-    let meta_res = match &meta_dir {
-        Some(dir) => write_agent_meta_to_dir(dir, &meta),
-        None => write_agent_meta(project, &meta),
-    };
-    if let Err(e) = meta_res {
+    // Metadata always lives under the workspace layout
+    // (`~/CaPilot/workspaces/<project>/agents/<id>`) — even for custom-rooted
+    // projects — so the tree / session restore can find it without touching the
+    // project root.
+    if let Err(e) = write_agent_meta(project, &meta) {
         log::warn!("failed to write .agent-meta.json for {id}: {e}");
     }
     let record = AgentSessionRecord {
@@ -236,47 +233,33 @@ async fn agent_spawn(
     };
     sanitize_project(&project)?;
 
-    // Normal workspace projects are initialised under ~/CaPilot/workspaces.
-    // Custom-rooted projects (cloned / picked folder) already exist on disk, so
-    // they skip the workspace layout creation.
-    if project_root.is_none() {
-        ensure_project(&project).map_err(|e| format!("Failed to init workspace: {}", e))?;
-    }
+    // Every project hosts its per-agent session metadata under the workspace
+    // layout (`~/CaPilot/workspaces/<project>/agents/<id>`), so the tree and
+    // session restore can always find it. Custom-rooted projects (git-cloned /
+    // picked folder) get this layout too — it never touches the project root.
+    ensure_project(&project).map_err(|e| format!("Failed to init workspace: {}", e))?;
 
     let role = parse_role(&role);
 
-    // Resolve the project root (create it so a master session always has a
-    // valid cwd, then canonicalize to an absolute path).
-    let root = match &project_root {
+    // PTY working directory: custom-rooted agents open a terminal directly in
+    // the project root (cloned repo / picked folder); workspace projects keep
+    // the per-agent dir so each session's context stays isolated.
+    let cwd = match &project_root {
         Some(pr) => {
             let p = std::path::PathBuf::from(pr);
-            std::fs::create_dir_all(&p).map_err(|e| format!("Failed to create project root: {}", e))?;
-            Some(
-                p.canonicalize()
-                    .map_err(|e| format!("Invalid project root: {}", e))?,
-            )
+            std::fs::create_dir_all(&p)
+                .map_err(|e| format!("Failed to create project root: {}", e))?;
+            p.canonicalize()
+                .map_err(|e| format!("Invalid project root: {}", e))?
         }
-        None => None,
-    };
-
-    let cwd = if let Some(pr) = &root {
-        if role == AgentRole::Master {
-            pr.clone()
-        } else {
-            let dir = pr.join("agents").join(&agent_id);
-            std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create agent dir: {}", e))?;
+        None if role == AgentRole::Master => project_dir(&project),
+        None => {
+            let dir = agent_dir(&project, &agent_id);
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| format!("Failed to create agent dir: {}", e))?;
             dir
         }
-    } else if role == AgentRole::Master {
-        project_dir(&project)
-    } else {
-        let dir = agent_dir(&project, &agent_id);
-        std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create agent dir: {}", e))?;
-        dir
     };
-
-    // Custom-rooted projects write .agent-meta.json under `<root>/agents/<id>`.
-    let meta_dir = root.as_ref().map(|pr| pr.join("agents").join(&agent_id));
 
     build_and_spawn(
         pty.inner(),
@@ -291,7 +274,6 @@ async fn agent_spawn(
         &speed.unwrap_or_else(|| "auto".to_string()),
         &mode.unwrap_or_else(|| "ask".to_string()),
         cwd,
-        meta_dir,
         on_data,
     )
 }
@@ -328,7 +310,6 @@ async fn agent_resume(
         "auto",
         "ask",
         rec.cwd.clone(),
-        None,
         on_data,
     )
 }
@@ -428,7 +409,6 @@ async fn agent_switch_runtime(
         "auto",
         "ask",
         rec.cwd.clone(),
-        None,
         on_data,
     )
 }
@@ -491,12 +471,9 @@ fn create_project(name: String, path: Option<String>) -> Result<String, String> 
             return Err("所选文件夹不存在或不是目录".to_string());
         }
         let canonical = dir.canonicalize().map_err(|e| format!("无效路径: {}", e))?;
-        // Create the contexts layout inside the chosen folder (idempotent).
-        std::fs::create_dir_all(canonical.join("context"))
-            .map_err(|e| format!("Failed to create context dir: {}", e))?;
-        std::fs::create_dir_all(canonical.join("agents"))
-            .map_err(|e| format!("Failed to create agents dir: {}", e))?;
-        // git init if not already a repo (best-effort).
+        // Per-agent metadata lives under the workspace layout (created by
+        // agent_spawn), never inside the picked folder. git init is best-effort
+        // (the Git panel depends on a repo).
         let _ = std::process::Command::new("git")
             .args(["init", "-q"])
             .current_dir(&canonical)
@@ -541,8 +518,13 @@ fn list_projects() -> Result<Vec<ProjectInfo>, String> {
         if name.starts_with('.') {
             continue;
         }
+        // A custom-rooted project (cloned / picked folder) keeps its real root
+        // in the agents' metadata — surface it instead of the workspace dir so
+        // the sidebar restores the right cwd after a restart.
+        let project_root = persistence::custom_project_root(&name)
+            .unwrap_or_else(|| root.join(&name));
         projects.push(ProjectInfo {
-            root: root.join(&name).to_string_lossy().to_string(),
+            root: project_root.to_string_lossy().to_string(),
             name,
         });
     }
@@ -557,7 +539,10 @@ async fn sessions_delete(
     dispatcher: tauri::State<'_, Arc<Dispatcher>>,
     id: String,
 ) -> Result<(), String> {
-    pty.kill(&id).map_err(|e| e.to_string())?;
+    // Best-effort end to end: a failed kill (e.g. the PTY was already reaped by
+    // the reader task) must not skip session cleanup, or the DB row survives and
+    // the terminal resurrects on the next restart.
+    let _ = pty.kill(&id);
     let project = persistence.project().to_string();
     let dir = agent_dir(&project, &id);
     if dir.exists() {
@@ -565,7 +550,7 @@ async fn sessions_delete(
     }
     {
         let db = persistence.db().lock().unwrap();
-        db.delete(&id).map_err(|e| e.to_string())?;
+        let _ = db.delete(&id);
     }
     dispatcher.unregister_worker(&id);
     Ok(())
@@ -780,6 +765,17 @@ fn git_run(repo: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Stream-count lines in a file without loading it into memory (a huge untracked
+/// file would otherwise be read whole just to report `+N`). Capped at 1M lines so
+/// a pathological file can't stall `git_status`.
+fn count_lines(path: &std::path::Path) -> i32 {
+    use std::io::BufRead;
+    let Ok(file) = std::fs::File::open(path) else {
+        return 0;
+    };
+    std::io::BufReader::new(file).lines().take(1_000_000).count() as i32
+}
+
 /// Parse `git diff --numstat` lines ("adds\tdeletes\tpath") into a path→(add,del) map.
 fn parse_numstat(text: &str) -> std::collections::HashMap<String, (i32, i32)> {
     let mut map = std::collections::HashMap::new();
@@ -893,11 +889,10 @@ async fn git_status(dir: String) -> Result<Vec<GitEntry>, String> {
             e.add = *a;
             e.del = *d;
         } else if e.index == "?" && e.worktree == "?" {
-            // Untracked file: every line counts as an addition.
+            // Untracked file: every line counts as an addition. Stream-count so
+            // a large file isn't read whole into memory.
             let full = std::path::Path::new(&dir).join(&e.path);
-            if let Ok(content) = std::fs::read_to_string(&full) {
-                e.add = content.lines().count() as i32;
-            }
+            e.add = count_lines(&full);
         }
     }
     Ok(entries)
@@ -962,6 +957,53 @@ async fn git_unstage(repo: String, files: Vec<String>) -> Result<(), String> {
     git_run(&repo, &args).map(|_| ())
 }
 
+/// Discard a file's unstaged changes (VS Code "Discard Changes"): tracked files
+/// are restored from the index (`git restore`); untracked files can't be
+/// restored, so they are deleted. The file list comes from our own `git status`
+/// listing and is passed via `Command::arg` (no shell) after `--`.
+#[tauri::command]
+async fn git_discard(repo: String, files: Vec<String>) -> Result<(), String> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    // `git ls-files -z -- <paths>` lists only the tracked ones; the rest are
+    // untracked and get deleted from disk.
+    let mut ls: Vec<&str> = vec!["ls-files", "-z", "--"];
+    ls.extend(files.iter().map(String::as_str));
+    let tracked_out = git_run(&repo, &ls).unwrap_or_default();
+    let tracked: std::collections::HashSet<String> = tracked_out
+        .split('\0')
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let tracked_files: Vec<&str> = files
+        .iter()
+        .filter(|f| tracked.contains(*f))
+        .map(String::as_str)
+        .collect();
+    if !tracked_files.is_empty() {
+        let mut args: Vec<&str> = vec!["restore", "--"];
+        args.extend(tracked_files.iter().copied());
+        git_run(&repo, &args)?;
+    }
+    for f in files.iter().filter(|f| !tracked.contains(*f)) {
+        let p = std::path::Path::new(&repo).join(f);
+        if p.is_file() {
+            std::fs::remove_file(&p)
+                .map_err(|e| format!("删除未跟踪文件失败 {}: {}", f, e))?;
+        }
+    }
+    Ok(())
+}
+
+/// Discard all unstaged changes (`git restore .`). Untracked files are left in
+/// place — like VS Code's "Discard All Changes", which only restores tracked files.
+#[tauri::command]
+async fn git_discard_all(repo: String) -> Result<(), String> {
+    git_run(&repo, &["restore", "."]).map(|_| ())
+}
+
 #[tauri::command]
 async fn git_commit(repo: String, message: String) -> Result<(), String> {
     git_run(&repo, &["commit", "-m", message.as_str()]).map(|_| ())
@@ -1004,18 +1046,6 @@ async fn git_log(repo: String, count: Option<i32>) -> Result<Vec<GitLogEntry>, S
         ],
     )?;
     Ok(parse_log(&text))
-}
-
-#[tauri::command]
-async fn git_diff(repo: String, file: String) -> Result<String, String> {
-    git_run(&repo, &["diff", "--", file.as_str()])
-}
-
-/// Staged (index) diff of a single file vs HEAD — `git diff --cached -- <file>`.
-/// Powers the merge view's "暂存的更改" rows (diff vs HEAD).
-#[tauri::command]
-async fn git_diff_cached(repo: String, file: String) -> Result<String, String> {
-    git_run(&repo, &["diff", "--cached", "--", file.as_str()])
 }
 
 /// Read a file's content from a git object (`git show <rev>:<file>`). `rev` is a
@@ -1285,13 +1315,13 @@ pub fn run() {
             git_repo_info,
             git_stage,
             git_unstage,
+            git_discard,
+            git_discard_all,
             git_commit,
             git_branch,
             git_branches,
             git_checkout,
             git_log,
-            git_diff,
-            git_diff_cached,
             git_show,
             git_pull,
             git_push,
@@ -1307,7 +1337,7 @@ pub fn run() {
         .setup(move |app| {
             let handle = app.handle().clone();
             dispatcher.start(handle.clone());
-            // Resource sampler: every 1 s, sample each agent's process tree and
+            // Resource sampler: every 3 s, sample each agent's process tree and
             // emit `resource://sample` (DevPlan §10).
             let pty = app.state::<Arc<PtyManager>>().inner().clone();
             let resource = app.state::<Arc<resource::ResourceMonitor>>().inner().clone();

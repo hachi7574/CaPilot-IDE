@@ -78,6 +78,33 @@ pub fn agent_dir(project: &str, agent_id: &str) -> PathBuf {
     project_dir(project).join("agents").join(agent_id)
 }
 
+/// Recover a custom-rooted project's real on-disk root from its agent metadata.
+///
+/// Custom-rooted projects (git-cloned / picked folder) host their session
+/// metadata under `~/CaPilot/workspaces/<name>/agents/<id>`, but each agent's
+/// `cwd` points at the real project root. When an agent's cwd is NOT its own
+/// workspace-scoped dir (nor the workspace project dir), that cwd is the root to
+/// surface — so after a restart the sidebar restores the correct root instead of
+/// the empty workspace dir.
+pub fn custom_project_root(name: &str) -> Option<PathBuf> {
+    let agents_dir = project_dir(name).join("agents");
+    let entries = std::fs::read_dir(&agents_dir).ok()?;
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        if let Ok(data) = std::fs::read(dir.join(".agent-meta.json")) {
+            if let Ok(meta) = serde_json::from_slice::<AgentMeta>(&data) {
+                if meta.cwd != dir && meta.cwd != project_dir(name) {
+                    return Some(meta.cwd);
+                }
+            }
+        }
+    }
+    None
+}
+
 #[allow(dead_code)]
 pub fn sessions_db_path(project: &str) -> PathBuf {
     project_dir(project).join("sessions.db")

@@ -1636,6 +1636,8 @@ body::after {
   white-space: nowrap;
 }
 .gv-menu-item:hover { background: var(--bg4); color: var(--ink); }
+.gv-menu-danger { color: var(--danger); }
+.gv-menu-danger:hover { background: var(--bg4); color: var(--danger); }
 .gv-menu-label {
   padding: 6px 12px 3px;
   font-size: 10px;
@@ -1703,6 +1705,12 @@ body::after {
   box-shadow: 0 0 8px rgba(139, 92, 246, 0.3);
 }
 .gv-commit-btn:disabled { opacity: 0.4; cursor: default; }
+.gv-commit-hint {
+  font-size: 11px;
+  color: var(--muted);
+  margin: -4px 0 8px;
+  font-family: var(--mono);
+}
 
 /* Message (error / feedback) rows */
 .gv-msg { font-size: 11px; margin-bottom: 8px; padding: 4px 8px; border: 1px solid var(--rule2); }
@@ -1799,6 +1807,21 @@ body::after {
   transition: all 0.15s var(--ease-apple);
 }
 .gv-file-act:hover { color: var(--brand); border-color: var(--brand); }
+.gv-file-discard {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  cursor: pointer;
+  border: 1px solid var(--rule2);
+  background: var(--bg3);
+  font-size: 13px;
+  line-height: 1;
+  transition: all 0.15s var(--ease-apple);
+}
+.gv-file-discard:hover { color: var(--danger); border-color: rgba(248, 113, 113, 0.5); }
 .gv-file-diff {
   flex-shrink: 0;
   font-family: var(--pixel);
@@ -1867,6 +1890,12 @@ body::after {
   transition: all 0.2s var(--ease-apple);
 }
 .gv-diff-open:hover { background: rgba(139, 92, 246, 0.14); }
+.gv-diff-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
 .gv-diff-loading {
   padding: 10px 8px;
   font-family: var(--mono);
@@ -1893,3 +1922,26 @@ body::after {
   font-size: 11px;
 }
 .gv-diff-cm .cm-mergeSpacer { background: var(--bg3); }
+
+/* Full-height diff tab (editor pane), opened from the SCM panel */
+.diff-panel {
+  flex: 1;
+  overflow: auto;
+  background: var(--bg);
+}
+.diff-panel .cm-mergeView {
+  min-height: 100%;
+  background: var(--bg);
+}
+.diff-panel .cm-editor { background: var(--bg); }
+.diff-panel .cm-gutters {
+  background: var(--bg2);
+  color: var(--muted);
+  border-color: var(--rule);
+}
+.diff-panel .cm-activeLine,
+.diff-panel .cm-activeLineGutter { background: transparent; }
+.diff-panel .cm-scroller {
+  font-family: var(--mono);
+  font-size: 12px;
+}

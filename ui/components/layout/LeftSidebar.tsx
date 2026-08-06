@@ -212,6 +212,11 @@ export function LeftSidebar() {
     (a) => a.id !== masterAgentId
   );
 
+  // Master-group terminals are closable, but at least one must stay: the pinned
+  // ⭐ master row is always rendered, so closing is allowed once there is any
+  // extra terminal (group count > 1), and the last terminal keeps no ×.
+  const masterCloseable = masterTerminals.length >= 1;
+
   const toggleMaster = () => setMasterExpanded((v) => !v);
 
   // [☰] collapses / expands ALL project groups (sidebar stays visible).
@@ -420,6 +425,18 @@ export function LeftSidebar() {
                       <span className="tm-icon">🤖</span>
                       <span className="tm-name">⭐ master</span>
                       <span className="tm-time">—</span>
+                      {masterCloseable && masterAgentId && (
+                        <button
+                          className="tm-close"
+                          title="关闭并终止"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            closeAgentAction(masterAgentId);
+                          }}
+                        >
+                          ×
+                        </button>
+                      )}
                     </div>
                     {/* Standalone terminals spawned into the Master group. */}
                     {masterTerminals.map((a) => (
@@ -436,6 +453,16 @@ export function LeftSidebar() {
                         <span className="tm-icon">🤖</span>
                         <span className="tm-name">{a.title}</span>
                         <span className="tm-time">—</span>
+                        <button
+                          className="tm-close"
+                          title="关闭并终止"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            closeAgentAction(a.id);
+                          }}
+                        >
+                          ×
+                        </button>
                       </div>
                     ))}
                   </>
@@ -811,8 +838,6 @@ function ContextMenu({
   const allAgents = useStore((s) => s.agents);
   const runtimes = useStore((s) => s.runtimes);
   const addAgent = useStore((s) => s.addAgent);
-  const closeTab = useStore((s) => s.closeTab);
-  const removeAgent = useStore((s) => s.removeAgent);
 
   // Count terminals in this project (same `projectOf` grouping as the tree).
   // When it is the project's ONLY terminal, the context menu swaps the normal
@@ -852,22 +877,9 @@ function ContextMenu({
 
   const closeAgent = async () => {
     if (!ctx.agentId) return;
-    try {
-      // sessions_delete kills the PTY, removes the agent dir + DB session row,
-      // and unregisters the worker — so a killed agent won't resurrect on
-      // restart (Bug 7).
-      await invoke("sessions_delete", { id: ctx.agentId });
-    } catch {
-      // Fall back to a plain kill so the terminal still closes even if session
-      // cleanup failed.
-      try {
-        await invoke("agent_kill", { id: ctx.agentId });
-      } catch {
-        // ignore
-      }
-    }
-    closeTab(ctx.agentId);
-    removeAgent(ctx.agentId);
+    // Same path as the sidebar × button: closes the tab + row immediately,
+    // kills the PTY and drops the DB row so the terminal can't resurrect.
+    await closeAgentAction(ctx.agentId);
     onClose();
   };
 

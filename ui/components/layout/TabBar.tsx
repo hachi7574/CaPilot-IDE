@@ -1,5 +1,5 @@
 import { useStore, Tab, AgentInfo } from "../../state/store";
-import { spawnAgent } from "../../state/agentActions";
+import { spawnAgent, closeAgent as closeAgentAction } from "../../state/agentActions";
 
 function projectOf(cwd: string): string {
   const m = cwd.match(/workspaces\/([^/]+)/);
@@ -43,7 +43,7 @@ function tabProject(
     }
     return undefined;
   }
-  if (tab.type === "editor" && tab.filePath) {
+  if ((tab.type === "editor" || tab.type === "diff") && tab.filePath) {
     const byRoot = projectRootOfPath(tab.filePath, projectRoots);
     if (byRoot) return byRoot;
     const dir = tab.filePath.split("/").slice(0, -1).join("/");
@@ -130,9 +130,16 @@ export function TabBar() {
               className="tab-close"
               onClick={(e) => {
                 e.stopPropagation();
-                closeTab(tab.id);
+                // Closing a terminal tab terminates the agent (kills the PTY and
+                // removes the sidebar row too); editor tabs / the master
+                // placeholder just close the view.
+                if (tab.type === "agent" && tab.agentId) {
+                  closeAgentAction(tab.agentId);
+                } else {
+                  closeTab(tab.id);
+                }
               }}
-              title="关闭标签"
+              title={tab.type === "agent" && tab.agentId ? "关闭并终止" : "关闭标签"}
             >
               ×
             </button>

@@ -34,9 +34,14 @@ export interface RuntimeInfo {
 
 export interface Tab {
   id: string;
-  type: "agent" | "editor";
+  type: "agent" | "editor" | "diff";
   agentId?: string;
+  /** Editor: absolute file path. Diff: the "new" (worktree/index) side path,
+   *  used for project grouping in the tab bar. */
   filePath?: string;
+  /** Diff tabs carry a snapshot of the two sides at open time. */
+  diffOld?: string;
+  diffNew?: string;
   title: string;
 }
 
@@ -585,8 +590,10 @@ export const useStore = create<AppState>((set, get) => ({
       if (projectOfCwd(a.cwd) === name) doomed.push(id);
     });
     for (const id of doomed) {
-      // Best-effort kill (fire-and-forget); ignore failures.
-      invoke("agent_kill", { id }).catch(() => {});
+      // sessions_delete kills the PTY and drops the DB row so the agent can't
+      // resurrect on restart; fall back to a plain kill if cleanup fails.
+      invoke("sessions_delete", { id })
+        .catch(() => invoke("agent_kill", { id }).catch(() => {}));
       s.closeTab(id);
       s.removeAgent(id);
     }

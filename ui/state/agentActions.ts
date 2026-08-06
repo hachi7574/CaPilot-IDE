@@ -69,6 +69,17 @@ export async function ensureAgentChannel(agentId: string): Promise<boolean> {
 /** Close an agent: kill PTY, remove session row (so it won't resurrect), close tabs. */
 export async function closeAgent(agentId: string): Promise<void> {
   const s = useStore.getState();
+  // Close the UI first (tab + sidebar row) so the terminal disappears from the
+  // main content right away even if the backend kill is slow. The kill then
+  // runs after; sessions_delete also drops the DB row so nothing resurrects.
+  const wasMaster = s.masterAgentId === agentId;
+  s.closeTab(agentId);
+  s.removeAgent(agentId);
+  // Closing the master leaves its pinned "master" placeholder tab behind, which
+  // would otherwise linger in the tab bar as a dead entry.
+  if (wasMaster && s.tabs.some((t) => t.id === "master")) {
+    s.closeTab("master");
+  }
   try {
     // sessions_delete kills the PTY, removes the agent dir + DB session row,
     // and unregisters the worker (Bug 7).
@@ -82,6 +93,4 @@ export async function closeAgent(agentId: string): Promise<void> {
       // ignore
     }
   }
-  s.closeTab(agentId);
-  s.removeAgent(agentId);
 }

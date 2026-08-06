@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { EditorState } from "@codemirror/state";
 import { EditorView, lineNumbers } from "@codemirror/view";
 import { oneDark } from "@codemirror/theme-one-dark";
@@ -11,12 +12,8 @@ type RightTab = "overview" | "files" | "git";
 export function RightSidebar() {
   const [activeTab, setActiveTab] = useState<RightTab>("overview");
   const [reportCollapsed, setReportCollapsed] = useState(false);
-  // Re-render periodically so the report's relative timestamp stays fresh.
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    const t = setInterval(() => setTick((x) => x + 1), 10000);
-    return () => clearInterval(t);
-  }, []);
+  // The master-report's relative timestamp updates whenever a new report lands
+  // (the store re-renders this component), so no periodic re-render tick here.
   const reports = useStore((s) => s.reports);
   const latest = reports[0];
   const rightWidth = useStore((s) => s.rightWidth);
@@ -705,9 +702,11 @@ function GitPanel() {
       setDiffContent({});
       return;
     }
+    let statusList: GitEntry[] = [];
     try {
       const list = await invoke<GitEntry[]>("git_status", { dir: root });
-      setEntries(list ?? []);
+      statusList = list ?? [];
+      setEntries(statusList);
       setError(null);
     } catch (e) {
       setEntries([]);
@@ -731,16 +730,37 @@ function GitPanel() {
     } catch {
       setLog([]);
     }
-    // Inline diffs reference a specific file state; drop them so a stage/unstage
-    // never shows a stale old/new pair after refresh.
-    setDiffFor(null);
-    setDiffContent({});
+    // Keep the open inline diff live across refreshes: re-fetch its content if
+    // the file still appears in the status; drop it when the file disappeared
+    // (e.g. after a discard or a commit that removed it).
+    if (diffFor) {
+      const cur = statusList.find((x) => x.path === diffFor);
+      if (cur) {
+        void loadDiffContent(cur).then((c) =>
+          setDiffContent((prev) => ({ ...prev, [diffFor]: c }))
+        );
+      } else {
+        setDiffFor(null);
+        setDiffContent({});
+      }
+    }
   };
 
   useEffect(() => {
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [root]);
+
+  // Auto-refresh: poll git status while the panel is mounted (i.e. the Git tab
+  // is active) so changes agents make on disk appear without a manual ↻ — the
+  // key behaviour VS Code gets from its file watcher. A ref guarantees the
+  // interval always calls the latest refresh closure (no stale state).
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+  useEffect(() => {
+    const t = setInterval(() => refreshRef.current(), 2500);
+    return () => clearInterval(t);
+  }, []);
 
   const runAction = async (fn: () => Promise<unknown>, okMsg: string) => {
     setBusy(true);
@@ -790,6 +810,7 @@ function GitPanel() {
     runAction(async () => {
       const m = msg.trim();
       if (!m) throw new Error("请输入 commit message");
+      if (staged.length === 0) throw new Error("没有已暂存的更改（请先暂存文件）");
       await invoke("git_commit", { repo: root, message: m });
       setMsg("");
     }, "提交成功");
@@ -874,6 +895,48 @@ function GitPanel() {
     setActiveTab(`file:${abs}`);
   };
 
+  /** Open the file's currently-loaded inline diff as a full editor diff tab
+   *  (VS Code: clicking a change opens the side-by-side diff in the editor). */
+  const openDiffInEditor = (path: string) => {
+    const c = diffContent[path];
+    if (!c) return;
+    const abs = root.endsWith("/") ? `${root}${path}` : `${root}/${path}`;
+    const name = path.split("/").pop() || path;
+    addTab({
+      id: `diff:${abs}`,
+      type: "diff",
+      filePath: abs,
+      diffOld: c.old,
+      diffNew: c.new,
+      title: `${name} · diff`,
+    });
+    setActiveTab(`diff:${abs}`);
+  };
+
+  /** Discard a single file's unstaged changes (tracked → restore, untracked →
+   *  delete). Confirmed first — destructive and not undoable. */
+  const discardFile = async (e: GitEntry) => {
+    const ok = await confirm(`放弃「${e.path}」的更改？此操作不可撤销。`, {
+      title: "放弃更改",
+      kind: "warning",
+    });
+    if (!ok) return;
+    await runAction(async () => {
+      await invoke("git_discard", { repo: root, files: [e.path] });
+      setDiffFor(null);
+    }, "已放弃更改");
+  };
+
+  /** Discard all unstaged changes (`git restore .`). Staged changes stay. */
+  const discardAll = async () => {
+    const ok = await confirm("放弃所有未暂存的更改？已暂存的更改不受影响。", {
+      title: "放弃全部更改",
+      kind: "warning",
+    });
+    if (!ok) return;
+    await runAction(() => invoke("git_discard_all", { repo: root }), "已放弃全部未暂存更改");
+  };
+
   // Ensure the current branch always appears in the branch menu even when the
   // branch list is stale/empty (e.g. non-git dir or a fresh checkout).
   const branchList = branches.some((b) => b.name === branch)
@@ -910,6 +973,18 @@ function GitPanel() {
             >
               {isStagedRow ? "−" : "+"}
             </span>
+            {!isStagedRow && (
+              <span
+                className="gv-file-discard"
+                title="放弃更改"
+                onClick={(ev) => {
+                  ev.stopPropagation();
+                  void discardFile(e);
+                }}
+              >
+                ⌫
+              </span>
+            )}
             <span
               className="gv-file-diff"
               title="打开 diff"
@@ -928,14 +1003,27 @@ function GitPanel() {
               <span className="gv-diff-path" title={e.path}>
                 {e.path}
               </span>
-              <span
-                className="gv-diff-open"
-                onClick={(ev) => {
-                  ev.stopPropagation();
-                  openInEditor(e.path);
-                }}
-              >
-                打开
+              <span className="gv-diff-head-actions">
+                <span
+                  className="gv-diff-open"
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    openDiffInEditor(e.path);
+                  }}
+                  title="在编辑器打开 diff 视图"
+                >
+                  打开
+                </span>
+                <span
+                  className="gv-diff-open"
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    openInEditor(e.path);
+                  }}
+                  title="打开源文件"
+                >
+                  编辑
+                </span>
               </span>
             </div>
             {diffContent[e.path] ? (
@@ -1047,6 +1135,9 @@ function GitPanel() {
                 <div className="gv-menu-item" onClick={unstageAll}>
                   全部取消暂存
                 </div>
+                <div className="gv-menu-item gv-menu-danger" onClick={discardAll}>
+                  全部放弃更改
+                </div>
               </div>
             )}
           </div>
@@ -1055,7 +1146,7 @@ function GitPanel() {
           <div className="gv-commit">
             <textarea
               className="gv-commit-input"
-              placeholder="Commit message…"
+              placeholder="Commit message…  (Ctrl+Enter 提交)"
               rows={2}
               value={msg}
               onChange={(e) => setMsg(e.target.value)}
@@ -1066,12 +1157,17 @@ function GitPanel() {
             <button
               className="gv-commit-btn"
               title="提交"
-              disabled={!msg.trim() || busy}
+              disabled={!msg.trim() || busy || staged.length === 0}
               onClick={commit}
             >
               ✓
             </button>
           </div>
+          {msg.trim() && staged.length === 0 && entries.length > 0 && (
+            <div className="gv-commit-hint">
+              没有已暂存的更改 — 先暂存文件，或点菜单「全部暂存」
+            </div>
+          )}
 
           {noRemote && (
             <div className="up-git-hint" title="未配置远程仓库">
