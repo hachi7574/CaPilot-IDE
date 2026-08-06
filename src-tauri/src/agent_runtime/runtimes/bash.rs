@@ -62,13 +62,6 @@ impl AgentRuntimeAdapter for BashAdapter {
         Ok(("bash".to_string(), args))
     }
 
-    fn spawn_headless(&self, _session: &AgentSession, prompt: &str) -> Result<(String, Vec<String>), String> {
-        Ok((
-            "bash".to_string(),
-            vec!["-lc".to_string(), prompt.to_string()],
-        ))
-    }
-
     fn resume_args(&self, _session: &AgentSession) -> Vec<String> {
         vec![]
     }

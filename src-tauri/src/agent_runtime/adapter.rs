@@ -93,15 +93,6 @@ pub struct AgentInfo {
     pub model: Option<String>,
 }
 
-/// Result of a headless (non-interactive) agent run
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct HeadlessRun {
-    pub agent_id: AgentId,
-    pub output: String,
-    pub exit_code: i32,
-}
-
 /// Summary of an available runtime detected on the system
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeInfo {
@@ -114,7 +105,6 @@ pub struct RuntimeInfo {
 
 /// The core trait that every agent CLI must implement.
 /// Each runtime (claude, codex, opencode, etc.) gets one file in `runtimes/`.
-#[allow(dead_code)]
 pub trait AgentRuntimeAdapter: Send + Sync {
     /// Unique identifier (e.g. "claude", "codex")
     fn id(&self) -> &str;
@@ -134,10 +124,6 @@ pub trait AgentRuntimeAdapter: Send + Sync {
     /// Spawn an interactive TUI session (PTY).
     /// Returns (command, args) to execute.
     fn spawn_interactive(&self, session: &AgentSession) -> Result<(String, Vec<String>), String>;
-
-    /// Spawn a headless one-shot task.
-    /// Returns (command, args) to execute.
-    fn spawn_headless(&self, session: &AgentSession, prompt: &str) -> Result<(String, Vec<String>), String>;
 
     /// Build args to resume an existing session
     fn resume_args(&self, session: &AgentSession) -> Vec<String>;

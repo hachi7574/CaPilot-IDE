@@ -81,6 +81,11 @@ export function useAgentEvents() {
         // its dead channel stays attached so the last output remains visible.
         // Reopening from the sidebar "已结束" group drops the channel and resumes.
         s.updateAgentStatus(e.payload.id, "done");
+        // A finished master must vacate the composer's master slot: with a stale
+        // masterAgentId the composer keeps agent_write-ing the dead process, and
+        // the frontend `.catch(()=>{})` swallows the error → the user's input
+        // silently vanishes.
+        if (s.masterAgentId === e.payload.id) s.setMasterAgentId(null);
       }),
       listen<{ id: string }>("agent://removed", (e) => {
         const s = useStore.getState();

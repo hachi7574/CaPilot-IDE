@@ -159,15 +159,6 @@ pub fn custom_project_root(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Path to the single top-level sessions DB (`~/CaPilot/sessions.db`).
-#[allow(dead_code)]
-pub fn sessions_db_path(_project: &str) -> PathBuf {
-    workspace_root()
-        .parent()
-        .map(|p| p.join("sessions.db"))
-        .unwrap_or_else(|| PathBuf::from("CaPilot").join("sessions.db"))
-}
-
 // ── .agent-meta.json ────────────────────────────────────────────
 
 /// Write `.agent-meta.json` into `dir` (which is created if missing). Shared by
@@ -463,6 +454,14 @@ impl Persistence {
 
     pub fn db(&self) -> &Mutex<SessionsDb> {
         &self.db
+    }
+
+    /// Lock the sessions DB, tolerating a poisoned mutex (a panic while holding
+    /// the lock marks it poisoned; `unwrap()` would then panic on every command).
+    /// Returns None only if the lock is currently held by a panicked holder that
+    /// never released — practically never. Callers should fall back gracefully.
+    pub fn db_tolerant(&self) -> Option<std::sync::MutexGuard<'_, SessionsDb>> {
+        self.db.lock().ok()
     }
 }
 

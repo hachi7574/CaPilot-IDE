@@ -37,8 +37,13 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const channelRef = useRef<Channel<number[]> | null>(null);
-  const agentChannels = useStore((s) => s.agentChannels);
-  const channel = agentChannels.get(agentId);
+  // Precise subscription: subscribe only to THIS agent's channel. Zustand
+  // re-renders on reference inequality — `Map.get` returns the same Channel
+  // object until it is actually replaced, so this only re-renders when this
+  // agent's channel changes. Subscribing to the whole `agentChannels` Map made
+  // every mounted XTermPanel re-render whenever ANY agent's channel changed
+  // (e.g. a different agent spawning/resuming elsewhere in the app).
+  const channel = useStore((s) => s.agentChannels.get(agentId));
 
   // DevPlan §4.6 — worker lock: input typed while the agent is a worker is
   // intercepted instead of silently forwarded; the user picks 仍然发送/解锁.

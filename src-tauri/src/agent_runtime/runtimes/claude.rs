@@ -126,26 +126,6 @@ impl AgentRuntimeAdapter for ClaudeAdapter {
         Ok(("claude".to_string(), args))
     }
 
-    fn spawn_headless(&self, session: &AgentSession, prompt: &str) -> Result<(String, Vec<String>), String> {
-        let model = session
-            .model
-            .clone()
-            .unwrap_or_else(|| "claude-sonnet-5".to_string());
-        let mut args = vec![
-            "-p".to_string(),
-            prompt.to_string(),
-            "--output-format".to_string(),
-            "stream-json".to_string(),
-            "--model".to_string(),
-            model,
-        ];
-
-        args.extend(self.speed_args(session.speed));
-        args.extend(self.mode_args(session.mode));
-
-        Ok(("claude".to_string(), args))
-    }
-
     fn resume_args(&self, session: &AgentSession) -> Vec<String> {
         // An explicit stored key wins; otherwise fall back to detecting the most
         // recent session in this context dir.

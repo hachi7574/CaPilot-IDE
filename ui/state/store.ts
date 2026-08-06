@@ -190,6 +190,12 @@ interface AppState {
   /** Agent ids whose next terminal mount should force a resume (sidebar
    *  "已结束" reopen). Ended (`done`) sessions never auto-resume otherwise. */
   resumeOnOpen: Set<string>;
+  /** Tombstones for ids removed via removeAgent: guards against a stale
+   *  in-flight `agent_resume` resolving after the session was closed/deleted
+   *  (close/resume race). `addAgent` ignores tombstoned ids so a zombie agent
+   *  (status running, dead channel, no `agent://exited` ever coming) can't
+   *  reappear and be unclosable. */
+  closedAgentIds: Set<string>;
 
   // Runtimes
   runtimes: RuntimeInfo[];
@@ -390,6 +396,7 @@ export const useStore = create<AppState>((set, get) => ({
   agentOutputs: new Map(),
   masterAgentId: null,
   resumeOnOpen: new Set(),
+  closedAgentIds: new Set(),
   runtimes: [],
   workerInfos: [],
   reports: [],
@@ -437,6 +444,12 @@ export const useStore = create<AppState>((set, get) => ({
 
   addAgent: (info, channel, activityTs) =>
     set((s) => {
+      // Dead-session guard (close/resume race): an in-flight `agent_resume` can
+      // resolve AFTER the user closed & deleted the session. `removeAgent` put
+      // the id in `closedAgentIds`; skip the re-add or a zombie agent (status
+      // running, dead channel, no on_exit ever arriving) would reappear and be
+      // unclosable.
+      if (s.closedAgentIds.has(info.id)) return {};
       const agents = new Map(s.agents);
       agents.set(info.id, info);
       const channels = new Map(s.agentChannels);
@@ -467,6 +480,8 @@ export const useStore = create<AppState>((set, get) => ({
       history.delete(id);
       const resumeOnOpen = new Set(s.resumeOnOpen);
       resumeOnOpen.delete(id);
+      const closedAgentIds = new Set(s.closedAgentIds);
+      closedAgentIds.add(id);
       clearAgentActivity(id);
       // If the removed agent was the master, clear masterAgentId so the composer
       // doesn't see a stale master and spawn a duplicate (Bug 4).
@@ -477,6 +492,7 @@ export const useStore = create<AppState>((set, get) => ({
         agentResources: resources,
         resourceHistory: history,
         resumeOnOpen,
+        closedAgentIds,
         ...(s.masterAgentId === id ? { masterAgentId: null } : {}),
       };
     }),
@@ -492,10 +508,23 @@ export const useStore = create<AppState>((set, get) => ({
 
   appendAgentOutput: (id, data) =>
     set((s) => {
+      // A closed/deleted session accepts no more output — a stale resume
+      // channel must not resurrect its buffer.
+      if (s.closedAgentIds.has(id)) return {};
       const outputs = new Map(s.agentOutputs);
       const prev = outputs.get(id) || [];
-      const next = prev.length + data.length > MAX_OUTPUT_BUFFER ? data : [...prev, ...data];
-      outputs.set(id, next);
+      // Hot path (every PTY chunk): append in place instead of rebuilding the
+      // whole array — a per-chunk `[...prev, ...data]` copy is O(n²) on
+      // sustained output. Plain loop (vs push(...data)) also avoids the
+      // spread-argument limit for very large chunks.
+      for (let i = 0; i < data.length; i++) prev.push(data[i]);
+      // Slide a window over the OLDEST bytes when the cap is hit — the old code
+      // discarded the ENTIRE history for the last chunk, zeroing the scrollback.
+      // (Each element is one byte, so length === byte count.)
+      if (prev.length > MAX_OUTPUT_BUFFER) {
+        prev.splice(0, prev.length - MAX_OUTPUT_BUFFER);
+      }
+      outputs.set(id, prev);
       touchAgentActivity(id);
       return { agentOutputs: outputs };
     }),
@@ -904,3 +933,19 @@ export const useStore = create<AppState>((set, get) => ({
     set({ onboarded });
   },
 }));
+
+// ── Buffered-output accessors ───────────────────────────────────
+// `agentOutputs` lives in the store (kept reactive so a mounting XTermPanel can
+// drain it via getState()). These thin wrappers give readers a stable entry
+// point that doesn't reach into the store shape directly.
+
+/** Read an agent's buffered terminal output (bytes buffered before/while no
+ *  XTermPanel is attached). Returns undefined when nothing is buffered. */
+export function getAgentOutput(id: string): number[] | undefined {
+  return useStore.getState().agentOutputs.get(id);
+}
+
+/** Drop an agent's buffered terminal output. */
+export function clearAgentOutput(id: string): void {
+  useStore.getState().clearAgentOutput(id);
+}

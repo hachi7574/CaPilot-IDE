@@ -135,7 +135,6 @@ struct AgentRemoved {
 fn build_on_exit(
     persistence: Arc<Persistence>,
     app: tauri::AppHandle,
-    project: String,
 ) -> OnExit {
     Arc::new(move |agent_id, exit_code| {
         // Poisoned lock / read error → default to "keep" so a session is never
@@ -155,6 +154,21 @@ fn build_on_exit(
             if let Ok(db) = persistence.db().lock() {
                 let _ = db.update_status(&agent_id, "done", now_ms());
             }
+            // Keep the per-agent meta in sync (dual-write convention) so a
+            // stale `.agent-meta.json` never shows a finished session as running.
+            let project = persistence
+                .db()
+                .lock()
+                .ok()
+                .and_then(|db| db.get(&agent_id).ok().flatten())
+                .map(|rec| rec.project);
+            if let Some(project) = project {
+                if let Ok(mut meta) = read_agent_meta(&project, &agent_id) {
+                    meta.status = "done".to_string();
+                    meta.updated_at = now_ms();
+                    let _ = write_agent_meta(&project, &meta);
+                }
+            }
             let _ = app.emit(
                 "agent://exited",
                 AgentExited {
@@ -163,11 +177,21 @@ fn build_on_exit(
                 },
             );
         } else {
+            // Delete mode: read the row's CURRENT project (not a value captured
+            // at spawn — a project rename moves the agent dir, and the stale
+            // name would leave the new dir orphaned).
+            let project = persistence
+                .db()
+                .lock()
+                .ok()
+                .and_then(|db| db.get(&agent_id).ok().flatten())
+                .map(|rec| rec.project)
+                .unwrap_or_default();
             if let Ok(db) = persistence.db().lock() {
                 let _ = db.delete(&agent_id);
             }
             let dir = agent_dir(&project, &agent_id);
-            if dir.exists() {
+            if dir.starts_with(persistence::workspace_root()) && dir.exists() {
                 let _ = std::fs::remove_dir_all(&dir);
             }
             let _ = app.emit("agent://removed", AgentRemoved { id: agent_id });
@@ -237,11 +261,7 @@ fn build_and_spawn(
             24,
             80,
             on_data,
-            Some(build_on_exit(
-                persistence.clone(),
-                app.clone(),
-                project.to_string(),
-            )),
+            Some(build_on_exit(persistence.clone(), app.clone())),
             &capilot_path_env(),
         )
         .map_err(|e| e.to_string())?;
@@ -335,6 +355,14 @@ async fn agent_spawn(
     project_root: Option<String>,
     on_data: Channel<Vec<u8>>,
 ) -> Result<AgentInfo, String> {
+    // Session cap: a compromised frontend (or runaway automation) must not be
+    // able to spawn unbounded PTYs and exhaust the machine.
+    const MAX_LIVE_SESSIONS: usize = 64;
+    if pty.live_count() >= MAX_LIVE_SESSIONS {
+        return Err(format!(
+            "会话数已达上限 ({MAX_LIVE_SESSIONS})，请先关闭部分终端"
+        ));
+    }
     let agent_id = uuid::Uuid::new_v4().to_string();
     let project = if project.is_empty() {
         DEFAULT_PROJECT.to_string()
@@ -358,7 +386,15 @@ async fn agent_spawn(
     // isn't a long workspaces/master/agents/<uuid> path.
     let cwd = match &project_root {
         Some(pr) => {
+            // A caller-supplied project root feeds both `create_dir_all` and the
+            // spawned shell's cwd — constrain it to $HOME so an arbitrary path
+            // can't be created / used as a shell working dir.
+            let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+            let home_path = std::path::Path::new(&home);
             let p = std::path::PathBuf::from(pr);
+            if !p.starts_with(home_path) {
+                return Err("project root escapes allowed directories".to_string());
+            }
             std::fs::create_dir_all(&p)
                 .map_err(|e| format!("Failed to create project root: {}", e))?;
             p.canonicalize()
@@ -418,6 +454,17 @@ async fn agent_spawn(
             let adapter = get_adapter(&runtime);
             for _ in 0..5 {
                 tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                // If the session was deleted mid-poll, stop before rewriting
+                // .agent-meta.json (which would recreate the removed dir).
+                let still_exists = persistence
+                    .db()
+                    .lock()
+                    .ok()
+                    .and_then(|db| db.get(&agent_id).ok().flatten())
+                    .is_some();
+                if !still_exists {
+                    break;
+                }
                 if let Some(key) = adapter.capture_resume_key(&cwd_for_capture) {
                     if let Ok(db) = persistence.db().lock() {
                         let _ = db.update_resume_key(&agent_id, &key, now_ms());
@@ -499,8 +546,20 @@ async fn agent_kill(
     id: String,
 ) -> Result<(), String> {
     pty.kill(&id).map_err(|e| e.to_string())?;
+    // Only flip an active session to `idle` (reopenable). A session that already
+    // ended naturally is `done` — flipping it back to `idle` would make a
+    // finished conversation resurrect as an active tab after a restart (sleep on
+    // a project with ended agents would revive them).
     if let Ok(db) = persistence.db().lock() {
-        let _ = db.update_status(&id, "idle", now_ms());
+        let is_done = db
+            .get(&id)
+            .ok()
+            .flatten()
+            .map(|rec| rec.status == "done")
+            .unwrap_or(false);
+        if !is_done {
+            let _ = db.update_status(&id, "idle", now_ms());
+        }
     }
     Ok(())
 }
@@ -778,35 +837,51 @@ fn delete_project(name: String) -> Result<(), String> {
 /// their picked/cloned root folder (only the workspace metadata dir + DB row
 /// change). Returns the project's (possibly unchanged) root path.
 #[tauri::command]
-fn rename_project(old: String, new: String) -> Result<String, String> {
+fn rename_project(
+    persistence: tauri::State<'_, Arc<Persistence>>,
+    old: String,
+    new: String,
+) -> Result<String, String> {
+    rename_project_inner(&persistence, &old, &new)
+}
+
+/// Pure rename logic (separable for tests, which can't build a Tauri State).
+fn rename_project_inner(persistence: &Persistence, old: &str, new: &str) -> Result<String, String> {
     let root = persistence::workspace_root();
-    let old_dir = root.join(&old);
-    let new_dir = root.join(&new);
+    let old_dir = root.join(old);
+    let new_dir = root.join(new);
     if old == "master" {
         return Err("不能重命名 master".to_string());
     }
     if old == new {
-        return Ok(persistence::custom_project_root(&old)
+        return Ok(persistence::custom_project_root(old)
             .unwrap_or(old_dir)
             .to_string_lossy()
             .to_string());
     }
-    sanitize_project(&new)?;
+    // `old`/`new` are joined into paths below — reject traversal so neither can
+    // escape the workspace root (e.g. `../../.ssh` would rename ~/.ssh).
+    sanitize_project(old)?;
+    sanitize_project(new)?;
     if !old_dir.exists() {
-        return Err(format!("项目不存在: {}", old));
+        return Err(format!("项目不存在: {old}"));
     }
     if new_dir.exists() {
-        return Err(format!("已存在同名项目: {}", new));
+        return Err(format!("已存在同名项目: {new}"));
     }
     // The real root for custom-rooted projects is the picked/cloned folder —
     // capture it before the workspace metadata dir moves.
-    let custom = persistence::custom_project_root(&old);
-    std::fs::rename(&old_dir, &new_dir).map_err(|e| format!("重命名项目目录失败: {}", e))?;
+    let custom = persistence::custom_project_root(old);
+    std::fs::rename(&old_dir, &new_dir).map_err(|e| format!("重命名项目目录失败: {e}"))?;
     // Rewrite sessions + agent metadata whose cwd points into the old dir.
     let old_prefix = old_dir.to_string_lossy().into_owned();
     let new_prefix = new_dir.to_string_lossy().into_owned();
-    if let Ok(db) = persistence::SessionsDb::open(&new_dir.join("sessions.db")) {
-        let _ = db.rename_project(&old, &new, &old_prefix, &new_prefix);
+    // Sessions live in the SINGLE top-level `~/CaPilot/sessions.db` — rewrite
+    // the project column + cwd prefix there (not a per-project db, which does
+    // not exist). Otherwise renamed projects' sessions point at the old path
+    // and fail to resume after a restart.
+    if let Some(db) = persistence.db_tolerant() {
+        let _ = db.rename_project(old, new, &old_prefix, &new_prefix);
     }
     if let Ok(agents_dir) = std::fs::read_dir(new_dir.join("agents")) {
         for entry in agents_dir.flatten() {
@@ -841,19 +916,24 @@ async fn sessions_delete(
     // the terminal resurrects on the next restart.
     let _ = pty.kill(&id);
     // The agent's own project (from its DB row) — its metadata dir lives under
-    // `workspaces/<project>/agents/<id>`, so remove exactly that.
-    let project = {
-        let db = persistence.db().lock().unwrap();
-        db.get(&id)
-            .map(|r| r.map(|rec| rec.project).unwrap_or_default())
-            .map_err(|e| e.to_string())?
+    // `workspaces/<project>/agents/<id>`, so remove exactly that. The session
+    // MUST exist: `id` is caller-supplied, and `agent_dir` joins it into a path
+    // (an absolute/`..` id would escape the workspace — a bare delete primitive).
+    let record = {
+        let db = persistence
+            .db_tolerant()
+            .ok_or_else(|| "persistence unavailable".to_string())?;
+        db.get(&id).map_err(|e| e.to_string())?
     };
-    let dir = agent_dir(&project, &id);
-    if dir.exists() {
+    let Some(rec) = record else {
+        return Err(format!("Session not found: {id}"));
+    };
+    let dir = agent_dir(&rec.project, &id);
+    // Belt-and-braces: the resolved dir must stay under the workspace root.
+    if dir.starts_with(persistence::workspace_root()) && dir.exists() {
         let _ = std::fs::remove_dir_all(&dir);
     }
-    {
-        let db = persistence.db().lock().unwrap();
+    if let Some(db) = persistence.db_tolerant() {
         let _ = db.delete(&id);
     }
     dispatcher.unregister_worker(&id);
@@ -872,13 +952,20 @@ fn setting_get(
     db.get_setting(&key).map_err(|e| e.to_string())
 }
 
-/// Upsert a persisted app setting (`settings` KV table).
+/// Upsert a persisted app setting (`settings` KV table). Keys are allow-listed
+/// so a compromised frontend can't mint arbitrary settings (e.g. a key some
+/// future feature reads as a path).
 #[tauri::command]
 fn setting_set(
     persistence: tauri::State<'_, Arc<Persistence>>,
     key: String,
     value: String,
 ) -> Result<(), String> {
+    // Allow-listed setting keys. Add future settings here.
+    const ALLOWED: &[&str] = &[SESSION_END_MODE_KEY];
+    if !ALLOWED.contains(&key.as_str()) {
+        return Err(format!("unknown setting key: {}", key));
+    }
     let db = persistence.db().lock().unwrap();
     db.set_setting(&key, &value).map_err(|e| e.to_string())
 }
@@ -1394,6 +1481,21 @@ fn git_run(repo: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
 }
 
+/// Resolve a caller-supplied `repo` path and verify it is a real directory
+/// inside `$HOME`. `git_*` commands run arbitrary git in `repo`, so it must be
+/// pinned to the user's tree rather than accepting any path.
+fn validate_repo(repo: &str) -> Result<std::path::PathBuf, String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let home_path = std::path::PathBuf::from(&home);
+    let resolved = std::path::Path::new(repo)
+        .canonicalize()
+        .map_err(|e| format!("Invalid repo path: {}", e))?;
+    if !resolved.starts_with(&home_path) || !resolved.is_dir() {
+        return Err("repo path escapes allowed directories".to_string());
+    }
+    Ok(resolved)
+}
+
 /// Stream-count lines in a file without loading it into memory (a huge untracked
 /// file would otherwise be read whole just to report `+N`). Capped at 1M lines so
 /// a pathological file can't stall `git_status`.
@@ -1650,11 +1752,15 @@ async fn git_discard(repo: String, files: Vec<String>) -> Result<(), String> {
     if files.is_empty() {
         return Ok(());
     }
+    // `repo` is caller-supplied and feeds both `git restore` and raw file
+    // deletion — pin it to $HOME so a `../` repo can't delete arbitrary files.
+    let repo_path = validate_repo(&repo)?;
+    let repo_str = repo_path.to_string_lossy().into_owned();
     // `git ls-files -z -- <paths>` lists only the tracked ones; the rest are
     // untracked and get deleted from disk.
     let mut ls: Vec<&str> = vec!["ls-files", "-z", "--"];
     ls.extend(files.iter().map(String::as_str));
-    let tracked_out = git_run(&repo, &ls).unwrap_or_default();
+    let tracked_out = git_run(&repo_str, &ls).unwrap_or_default();
     let tracked: std::collections::HashSet<String> = tracked_out
         .split('\0')
         .map(|s| s.to_string())
@@ -1669,10 +1775,18 @@ async fn git_discard(repo: String, files: Vec<String>) -> Result<(), String> {
     if !tracked_files.is_empty() {
         let mut args: Vec<&str> = vec!["restore", "--"];
         args.extend(tracked_files.iter().copied());
-        git_run(&repo, &args)?;
+        git_run(&repo_str, &args)?;
     }
     for f in files.iter().filter(|f| !tracked.contains(*f)) {
-        let p = std::path::Path::new(&repo).join(f);
+        // Untracked file deletion: resolve the target and require it stays
+        // under the repo (no `..` escaping the validated root).
+        let raw = repo_path.join(f);
+        let p = raw
+            .canonicalize()
+            .map_err(|_| format!("无法解析删除路径: {}", f))?;
+        if !p.starts_with(&repo_path) {
+            return Err(format!("删除路径越界: {}", f));
+        }
         if p.is_file() {
             std::fs::remove_file(&p)
                 .map_err(|e| format!("删除未跟踪文件失败 {}: {}", f, e))?;
@@ -1837,6 +1951,7 @@ mod tests {
     use super::{
         create_project, delete_project, git_run, parse_branches, parse_log,
         parse_name_status, parse_porcelain, persistence, rename_project,
+        rename_project_inner,
     };
 
     #[test]
@@ -2085,7 +2200,9 @@ mod tests {
             updated_at: 0,
         };
         persistence::write_agent_meta_to_dir(&old_dir.join("agents/a1"), &meta).unwrap();
-        let db = persistence::SessionsDb::open(&old_dir.join("sessions.db")).unwrap();
+        // Sessions live in the SINGLE top-level `~/CaPilot/sessions.db`.
+        let pers = persistence::Persistence::open().unwrap();
+        let db = pers.db_tolerant().unwrap();
         db.insert(&persistence::AgentSessionRecord {
             id: "a1".into(),
             project: "oldproj".into(),
@@ -2104,7 +2221,7 @@ mod tests {
         .unwrap();
         drop(db);
 
-        let new_root = rename_project("oldproj".into(), "newproj".into()).unwrap();
+        let new_root = rename_project_inner(&pers, "oldproj", "newproj").unwrap();
         let new_dir = home.join("CaPilot/workspaces/newproj");
         assert_eq!(new_root, new_dir.to_string_lossy());
         assert!(!old_dir.exists());
@@ -2113,11 +2230,12 @@ mod tests {
         // Agent metadata cwd rewritten to the renamed dir.
         let meta2 = persistence::read_agent_meta("newproj", "a1").unwrap();
         assert_eq!(meta2.cwd, new_dir);
-        // Session row: project + cwd rewritten.
-        let db2 = persistence::SessionsDb::open(&new_dir.join("sessions.db")).unwrap();
+        // Session row (top-level DB): project + cwd rewritten.
+        let db2 = pers.db_tolerant().unwrap();
         let s = db2.get("a1").unwrap().unwrap();
         assert_eq!(s.project, "newproj");
         assert_eq!(s.cwd, new_dir);
+        drop(db2);
 
         std::env::remove_var("HOME");
         std::fs::remove_dir_all(&home).ok();

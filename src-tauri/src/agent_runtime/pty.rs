@@ -19,7 +19,6 @@ pub type OnExit = Arc<dyn Fn(String, i32) + Send + Sync>;
 
 /// Wrapper around a running PTY child process
 struct PtyChild {
-    #[allow(dead_code)]
     pid: u32,
     /// The master PTY handle — kept alive so we can resize (TIOCSWINSZ) later.
     master: Box<dyn MasterPty + Send>,
@@ -36,6 +35,11 @@ struct PtyChild {
     /// Set once the exit was intentional (kill / channel-gone), so the reader
     /// never fires `on_exit` for a deliberately stopped session.
     killed: Arc<AtomicBool>,
+    /// Monotonic generation for this entry — the spawn token that created it.
+    /// The reader task compares the live map entry's generation to its own
+    /// before reaping on EOF/read-error, so a stale reader left over from a
+    /// `kill()` + respawn never removes the NEW child's entry (Bug 5).
+    generation: u64,
 }
 
 /// RAII guard that keeps `agent_id` in `PtyManager.spawning` for the duration
@@ -74,6 +78,28 @@ fn reap_and_remove(children: &Arc<Mutex<HashMap<AgentId, PtyChild>>>, id: &Agent
     } else {
         -1
     }
+}
+
+/// True if the live map entry for `id` is the one this reader started — i.e.
+/// its generation still equals the token the reader captured at spawn time.
+///
+/// A stale reader can outlive its entry: `handle.abort()` cannot cancel a
+/// `spawn_blocking` task blocked in `reader.read()`, so after a
+/// `kill()`-then-respawn (e.g. `agent_resume` / `agent_switch_runtime`) the old
+/// reader eventually sees EOF and would otherwise `reap_and_remove` the NEW
+/// child's entry. Guarding with the generation keeps the new process alive and
+/// lets the stale reader just clean itself up by returning (Bug 5).
+fn is_own_entry(
+    children: &Arc<Mutex<HashMap<AgentId, PtyChild>>>,
+    id: &AgentId,
+    generation: u64,
+) -> bool {
+    children
+        .lock()
+        .unwrap()
+        .get(id)
+        .map(|c| c.generation == generation)
+        .unwrap_or(false)
 }
 
 /// Manages all PTY sessions. Stored as Tauri managed state (behind an Arc).
@@ -173,10 +199,24 @@ impl PtyManager {
         // frontend channel is dropped without an explicit kill.
         let mut killer = child.clone_killer();
 
-        // If `kill()` was called while this spawn was in flight, bail out now
-        // and reap the child so a stale PTY never lands in the map (Bug 4).
+        // The reader task needs the same `killed`/`on_exit` that go into the
+        // map entry, plus this spawn's unique token as its *generation*. Capture
+        // them up front (clones) so a concurrent `kill()` + respawn between the
+        // map insert and the reader starting can never make the reader bind
+        // itself to a DIFFERENT (newer) entry (Bug 5).
+        let generation = token;
+        let killed = Arc::new(AtomicBool::new(false));
+        let reader_killed = killed.clone();
+        let reader_on_exit = on_exit.clone();
+
+        // Cancel-check + insert happen under ONE lock acquisition, so there is
+        // no window where `kill()` can remove the `spawning` marker between the
+        // check and the insert and still have the live child land in the map
+        // (Bug 4 TOCTOU). The entry stores this spawn's token as `generation`,
+        // so later readers / stale readers can tell which spawn owns it.
         {
             let spawning = self.spawning.lock().unwrap();
+            let mut children = self.children.lock().unwrap();
             if spawning.get(&agent_id) != Some(&token) {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -185,13 +225,10 @@ impl PtyManager {
                     agent_id
                 )));
             }
-        }
-
-        // Insert into the map BEFORE starting the reader task, so the reader's
-        // EOF / channel-close cleanup can always find (and reap) the entry.
-        // (Bug 1 — without this, a fast-exiting child would leave a stale entry.)
-        {
-            let mut children = self.children.lock().unwrap();
+            // Insert into the map BEFORE starting the reader task, so the
+            // reader's EOF / channel-close cleanup can always find (and reap)
+            // the entry. (Bug 1 — without this, a fast-exiting child would
+            // leave a stale entry.)
             children.insert(
                 agent_id.clone(),
                 PtyChild {
@@ -201,39 +238,35 @@ impl PtyManager {
                     child,
                     reader_handle: None,
                     on_exit,
-                    killed: Arc::new(AtomicBool::new(false)),
+                    killed,
+                    generation,
                 },
             );
         }
 
         // Spawn a blocking reader task (PTY reads are blocking I/O). On EOF,
         // read error, or channel close it removes the map entry and reaps the
-        // child (Bug 1 + Bug 3), so no zombie and no stale state. Natural exit
-        // (EOF / read error) also fires `on_exit` so the session lifecycle can
-        // be persisted; intentional kills and channel-gone never do.
+        // child (Bug 1 + Bug 3), so no zombie and no stale state — but only if
+        // the live entry is still this reader's own generation (Bug 5). Natural
+        // exit (EOF / read error) also fires `on_exit` so the session lifecycle
+        // can be persisted; intentional kills and channel-gone never do.
         let children_clone = self.children.clone();
         let reader_agent_id = agent_id.clone();
-        let (killed, on_exit) = {
-            let children = self.children.lock().unwrap();
-            let entry = children.get(&reader_agent_id);
-            (
-                entry
-                    .map(|c| c.killed.clone())
-                    .unwrap_or_else(|| Arc::new(AtomicBool::new(true))),
-                entry.and_then(|c| c.on_exit.clone()),
-            )
-        };
         let reader_handle = tokio::task::spawn_blocking(move || {
             let mut buf = [0u8; 4096];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => {
-                        // EOF — child exited. Remove + reap (Bug 1), then report
-                        // the natural exit so the session row can be finalized.
-                        let exit_code = reap_and_remove(&children_clone, &reader_agent_id);
-                        if !killed.load(Ordering::SeqCst) {
-                            if let Some(cb) = &on_exit {
-                                cb(reader_agent_id.clone(), exit_code);
+                        // EOF — child exited. Remove + reap only our own entry
+                        // (a stale reader must not tear down a respawned child),
+                        // then report the natural exit so the session row can be
+                        // finalized.
+                        if is_own_entry(&children_clone, &reader_agent_id, generation) {
+                            let exit_code = reap_and_remove(&children_clone, &reader_agent_id);
+                            if !reader_killed.load(Ordering::SeqCst) {
+                                if let Some(cb) = &reader_on_exit {
+                                    cb(reader_agent_id.clone(), exit_code);
+                                }
                             }
                         }
                         break;
@@ -248,19 +281,23 @@ impl PtyManager {
                             // (Bug 3). The child is killed first so `wait()`
                             // below returns promptly. This is an intentional
                             // teardown, so `on_exit` is suppressed.
-                            killed.store(true, Ordering::SeqCst);
+                            reader_killed.store(true, Ordering::SeqCst);
                             let _ = killer.kill();
-                            reap_and_remove(&children_clone, &reader_agent_id);
+                            if is_own_entry(&children_clone, &reader_agent_id, generation) {
+                                reap_and_remove(&children_clone, &reader_agent_id);
+                            }
                             break;
                         }
                     }
                     Err(_) => {
-                        // Read error (e.g. master closed) — remove + reap, then
-                        // report the natural exit like EOF.
-                        let exit_code = reap_and_remove(&children_clone, &reader_agent_id);
-                        if !killed.load(Ordering::SeqCst) {
-                            if let Some(cb) = &on_exit {
-                                cb(reader_agent_id.clone(), exit_code);
+                        // Read error (e.g. master closed) — remove + reap only
+                        // our own entry, then report the natural exit like EOF.
+                        if is_own_entry(&children_clone, &reader_agent_id, generation) {
+                            let exit_code = reap_and_remove(&children_clone, &reader_agent_id);
+                            if !reader_killed.load(Ordering::SeqCst) {
+                                if let Some(cb) = &reader_on_exit {
+                                    cb(reader_agent_id.clone(), exit_code);
+                                }
                             }
                         }
                         break;
@@ -337,9 +374,17 @@ impl PtyManager {
         // kills + reaps its own child instead of inserting a stale entry.
         self.spawning.lock().unwrap().remove(agent_id);
 
+        // Remove the entry up front. The reader (if it wins the race to EOF)
+        // will see its own generation is gone and skip `reap_and_remove`
+        // (Bug 5), so a subsequent respawn's entry is never torn down.
         let pc = self.children.lock().unwrap().remove(agent_id);
         if let Some(mut pc) = pc {
             if let Some(handle) = pc.reader_handle.take() {
+                // Best-effort: aborting cannot cancel a `spawn_blocking` task
+                // blocked in `reader.read()`, but it marks the task cancelled
+                // so it cleans up once the blocking read returns. The real
+                // protection for a respawned entry is the generation check in
+                // the reader (Bug 5).
                 handle.abort();
             }
             // Intentional kill — the reader (if it wins the race to EOF) must

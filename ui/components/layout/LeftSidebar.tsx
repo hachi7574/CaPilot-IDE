@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
@@ -283,25 +283,32 @@ export function LeftSidebar() {
   };
 
   // Group agents by workspace project (keyed by project name → first cwd + agents).
-  const agentsByProject = new Map<
-    string,
-    {
-      cwd: string;
-      agents: { id: string; title: string; status: AgentStatus; role: AgentInfo["role"] }[];
-    }
-  >();
-  agents.forEach((a, id) => {
-    const projName = projectOf(a.cwd, projectRoots);
-    if (!agentsByProject.has(projName)) {
-      agentsByProject.set(projName, { cwd: a.cwd, agents: [] });
-    }
-    agentsByProject.get(projName)!.agents.push({
-      id,
-      title: a.title || `agent-${id.slice(0, 4)}`,
-      status: a.status,
-      role: a.role,
+  // Memoized: this sidebar is resident and subscribes to agents/tabs/activeTabId,
+  // so any store change re-renders the whole tree — rebuilding this group on every
+  // render (agents.forEach + projectOf per agent) was needless work. It only
+  // depends on the agents map and the project-root map.
+  const agentsByProject = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        cwd: string;
+        agents: { id: string; title: string; status: AgentStatus; role: AgentInfo["role"] }[];
+      }
+    >();
+    agents.forEach((a, id) => {
+      const projName = projectOf(a.cwd, projectRoots);
+      if (!map.has(projName)) {
+        map.set(projName, { cwd: a.cwd, agents: [] });
+      }
+      map.get(projName)!.agents.push({
+        id,
+        title: a.title || `agent-${id.slice(0, 4)}`,
+        status: a.status,
+        role: a.role,
+      });
     });
-  });
+    return map;
+  }, [agents, projectRoots]);
 
   // The tree is DRIVEN BY the store's project list (which includes empty
   // projects). Any project that only exists via an agent's cwd — e.g. before

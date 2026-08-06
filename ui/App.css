@@ -253,8 +253,6 @@ body::after {
 }
 .tab-add:hover { color: var(--brand); }
 
-@keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
-
 /* ── Content Area ─────────────────────────────────────────────── */
 
 .content-area { flex: 1; display: flex; overflow: hidden; background: var(--bg); }

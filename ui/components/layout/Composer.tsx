@@ -593,7 +593,19 @@ export function Composer() {
       // Resumed/restored sessions may not have a channel yet.
       const resumed = await ensureAgentChannel(agentId);
       // Give a freshly-spawned/resumed CLI TUI time to attach its input loop
-      // before injecting the message.
+      // before injecting the message. A fixed 800ms can be too short on slow
+      // machines / cold claude starts (first instruction typed before the TUI
+      // is reading stdin → dropped or eaten by the shell prompt).
+      //
+      // Why not "wait until the PTY buffer holds the first output" instead?
+      // In exactly the cases this wait applies to (justSpawned || resumed) the
+      // target agent's tab is the ACTIVE tab, so its XTermPanel has already
+      // attached to the channel and drains the store's agentOutputs buffer
+      // (output goes straight to xterm). The buffer is therefore empty at this
+      // point, and polling it would either spin until a timeout (adding seconds
+      // of latency to every first send) or never fire. Detecting readiness
+      // reliably would require wiring into the channel/terminal or a new store
+      // flag — both out of scope here. So the fixed heuristic stays.
       if (justSpawned || resumed) {
         await new Promise((r) => setTimeout(r, 800));
       }

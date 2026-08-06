@@ -1151,6 +1151,7 @@ function InlineMergeDiff({ oldText, newText }: { oldText: string; newText: strin
 
 function GitPanel() {
   const root = useProjectRoot();
+  const rightSidebarOpen = useStore((s) => s.rightSidebarOpen);
   const [repoInfo, setRepoInfo] = useState<RepoInfo | null>(null);
   const [entries, setEntries] = useState<GitEntry[]>([]);
   const [branch, setBranch] = useState("");
@@ -1242,11 +1243,41 @@ function GitPanel() {
   // is active) so changes agents make on disk appear without a manual ↻ — the
   // key behaviour VS Code gets from its file watcher. A ref guarantees the
   // interval always calls the latest refresh closure (no stale state).
+  //
+  // Cost control: each refresh spawns ~10-11 git subprocesses (git_repo_info +
+  // git_status + git_branches + git_log, plus any open inline diff). To keep
+  // that from hammering the disk/CPU:
+  //  - interval raised 2.5s → 3s;
+  //  - skip ticks while the document is hidden (backgrounded) or the right
+  //    sidebar is collapsed (panel not visible), resuming on the next visible
+  //    tick;
+  //  - a `running` guard keeps slow ticks from overlapping.
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
+  const rightSidebarOpenRef = useRef(rightSidebarOpen);
+  rightSidebarOpenRef.current = rightSidebarOpen;
   useEffect(() => {
-    const t = setInterval(() => refreshRef.current(), 2500);
-    return () => clearInterval(t);
+    let running = false;
+    const tick = () => {
+      if (running) return;
+      if (!rightSidebarOpenRef.current) return;
+      if (document.visibilityState === "hidden") return;
+      running = true;
+      refreshRef
+        .current()
+        .catch(() => {})
+        .finally(() => {
+          running = false;
+        });
+    };
+    const t = setInterval(tick, 3000);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") tick();
+    });
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", tick);
+    };
   }, []);
 
   const runAction = async (fn: () => Promise<unknown>, okMsg: string) => {
