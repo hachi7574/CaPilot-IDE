@@ -69,6 +69,10 @@ pub struct AgentSession {
     pub role: AgentRole,
     pub rows: u16,
     pub cols: u16,
+    /// Provider session id to resume (`None` = start fresh). Each adapter builds
+    /// its own resume argv from this, so `claude` uses `--resume <id>` while
+    /// other runtimes use their own flag.
+    pub resume_key: Option<String>,
 }
 
 /// Handle to a running PTY process
@@ -81,6 +85,12 @@ pub struct AgentInfo {
     pub title: String,
     pub cwd: PathBuf,
     pub pid: Option<u32>,
+    /// Permission mode this session runs under ("ask" | "auto" | "yolo").
+    pub mode: String,
+    /// Speed tier this session runs under ("high" | "mid" | "fast" | "auto").
+    pub speed: String,
+    /// Selected model id, or None for the runtime default.
+    pub model: Option<String>,
 }
 
 /// Result of a headless (non-interactive) agent run
@@ -131,6 +141,19 @@ pub trait AgentRuntimeAdapter: Send + Sync {
 
     /// Build args to resume an existing session
     fn resume_args(&self, session: &AgentSession) -> Vec<String>;
+
+    /// Does this runtime have a resumable session concept? `false` runtimes
+    /// (e.g. bash) skip resume-key capture after a fresh spawn.
+    fn supports_resume(&self) -> bool {
+        false
+    }
+
+    /// Best-effort: after a fresh interactive spawn, discover the provider
+    /// session the just-started process created, so a later `agent_resume` can
+    /// continue it. `None` when nothing is detectable yet / not applicable.
+    fn capture_resume_key(&self, _cwd: &std::path::Path) -> Option<String> {
+        None
+    }
 
     /// Map speed tier to CLI arguments
     fn speed_args(&self, speed: Speed) -> Vec<String>;

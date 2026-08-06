@@ -63,9 +63,9 @@ export function Composer() {
 
   const toggleComposer = useStore((s) => s.toggleComposer);
   const setComposerTarget = useStore((s) => s.setComposerTarget);
-  const setPermissionMode = useStore((s) => s.setPermissionMode);
-  const setSpeed = useStore((s) => s.setSpeed);
-  const setSelectedModel = useStore((s) => s.setSelectedModel);
+  const composerH = useStore((s) => s.composerH);
+  const masterReportH = useStore((s) => s.masterReportH);
+  const setComposerH = useStore((s) => s.setComposerH);
   const toggleWorkerMode = useStore((s) => s.toggleWorkerMode);
   const pushDraft = useStore((s) => s.pushDraft);
   const navigateDraft = useStore((s) => s.navigateDraft);
@@ -77,6 +77,9 @@ export function Composer() {
   const [isBangInput, setIsBangInput] = useState(false);
   // Non-empty input → enables the send button (`.ul-send-btn`).
   const [hasInput, setHasInput] = useState(false);
+  // Root ref + dragging flag for the height-resize divider above the composer.
+  const composerRef = useRef<HTMLDivElement>(null);
+  const [composerResizing, setComposerResizing] = useState(false);
 
   // Composer popover menus (向上弹出)：模型选择 + 文件/引用.
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
@@ -106,10 +109,56 @@ export function Composer() {
     };
   }, []);
 
+  // Keep the textarea in the right mode when the composer switches between
+  // auto-height and a fixed height (e.g. the master report height lands on
+  // mount, or the user drags the divider).
+  const fixedHeight = composerH !== null || masterReportH > 0;
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    if (fixedHeight) {
+      el.style.height = "100%";
+    } else {
+      el.style.height = "auto";
+      el.style.height = Math.min(el.scrollHeight, 200) + "px";
+    }
+  }, [fixedHeight]);
+
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const targetAgentId =
     composerTarget === "agent" ? activeTab?.agentId : undefined;
-  const currentModel = models.find((m) => m.id === selectedModel) ?? null;
+
+  // ── Per-session composer config ────────────────────────────────
+  // The permission/speed/model controls show and edit the CURRENT target
+  // session's own values (falling back to the global "next spawn" defaults when
+  // no session is targeted). Changing one applies to that session (persisted,
+  // takes effect on next resume) and remembers the choice for new sessions.
+  const configAgentId =
+    composerTarget === "master" ? masterAgentId ?? undefined : activeTab?.agentId;
+  const configAgent = configAgentId ? agents.get(configAgentId) : undefined;
+  const shownMode =
+    (configAgent?.mode as (typeof PERMISSION_MODES)[number]) ?? permissionMode;
+  const shownSpeed =
+    (configAgent?.speed as "high" | "mid" | "fast" | "auto") ?? speed;
+  const shownModel = configAgent?.model ?? selectedModel;
+  const currentModel = models.find((m) => m.id === shownModel) ?? null;
+
+  const applyConfig = useCallback(
+    (patch: { mode?: string; speed?: string; model?: string | null }) => {
+      const s = useStore.getState();
+      // Remember for the next spawned session.
+      if (patch.mode !== undefined) s.setPermissionMode(patch.mode as never);
+      if (patch.speed !== undefined) s.setSpeed(patch.speed as never);
+      if (patch.model !== undefined) s.setSelectedModel(patch.model);
+      // Apply to the current session (persisted; takes effect on next resume).
+      const id =
+        composerTarget === "master" ? s.masterAgentId : activeTab?.agentId;
+      if (!id || !s.agents.has(id)) return;
+      s.addAgent({ ...s.agents.get(id)!, ...patch }, null);
+      invoke("agent_set_session_config", { id, ...patch }).catch(() => {});
+    },
+    [composerTarget, activeTab?.agentId]
+  );
 
   // DevPlan §4.6: worker terminals lock the composer input to prevent
   // orchestration conflicts. Locked → readOnly + 仍然发送/解锁 affordance.
@@ -117,6 +166,16 @@ export function Composer() {
   const workerLocked = composerTarget === "agent" && activeAgent?.role === "worker";
   const unlocked = workerUnlockId === activeTab?.agentId;
   const locked = workerLocked && !unlocked;
+
+  // ── Esc → abort the target agent's current operation ──────────
+  // Sends a raw ESC byte to the agent's PTY — the same path the terminal uses
+  // (xterm keydown → agent_write raw:true), so the CLI aborts its in-flight
+  // turn exactly like pressing Esc inside the terminal.
+  const abortAgentOperation = useCallback(() => {
+    const id = composerTarget === "agent" ? activeTab?.agentId : masterAgentId;
+    if (!id || !agents.has(id)) return;
+    invoke("agent_write", { id, data: "\u001b", raw: true }).catch(() => {});
+  }, [composerTarget, activeTab?.agentId, masterAgentId, agents]);
 
   // ── Model list (composer `[模型↑]`) ────────────────────────────
   useEffect(() => {
@@ -175,6 +234,14 @@ export function Composer() {
 
   // ── Text helpers ──────────────────────────────────────────────
   const resizeTextarea = useCallback((el: HTMLTextAreaElement) => {
+    // Fixed-height composer (default = master report height, or user-dragged):
+    // the textarea fills the input area and scrolls internally. In the default
+    // auto-height mode it grows with its content instead (capped at 200px).
+    const s = useStore.getState();
+    if (s.composerH !== null || s.masterReportH > 0) {
+      el.style.height = "100%";
+      return;
+    }
     el.style.height = "auto";
     el.style.height = Math.min(el.scrollHeight, 200) + "px";
   }, []);
@@ -495,7 +562,8 @@ export function Composer() {
     // Clear the textarea synchronously before any await so a second Enter can't
     // read the same value (Bug 3).
     el.value = "";
-    el.style.height = "auto";
+    // Fixed-height composer keeps the textarea filled; auto-height collapses it.
+    resizeTextarea(el);
     setIsBangInput(false);
     setHasInput(false);
 
@@ -548,6 +616,7 @@ export function Composer() {
     workerMode,
     masterAgentId,
     agents,
+    resizeTextarea,
     pushDraft,
     setWorkerUnlock,
   ]);
@@ -618,8 +687,8 @@ export function Composer() {
       } else if (e.key === "Tab") {
         e.preventDefault();
         if (e.shiftKey) {
-          const idx = PERMISSION_MODES.indexOf(permissionMode);
-          setPermissionMode(PERMISSION_MODES[(idx + 1) % 3]);
+          const idx = PERMISSION_MODES.indexOf(shownMode);
+          applyConfig({ mode: PERMISSION_MODES[(idx + 1) % 3] });
         } else {
           setComposerTarget(composerTarget === "agent" ? "master" : "agent");
         }
@@ -635,18 +704,27 @@ export function Composer() {
         if (draft !== null) {
           e.currentTarget.value = draft;
         }
+      } else if (e.key === "Escape") {
+        // 终端式中断：向目标 agent 的 PTY 发原始 ESC 字节。worker 锁定期间
+        // 与终端一致不转发（终端在 lock 状态下同样吞掉所有按键）；模型/文件
+        // 弹出菜单打开时，这次 Esc 只负责关菜单（窗口级监听），不中断。
+        e.preventDefault();
+        if (!locked && !modelMenuOpen && !refMenuOpen) abortAgentOperation();
       }
     },
     [
       atMenu,
       insertAtItem,
       handleSend,
-      permissionMode,
+      shownMode,
+      applyConfig,
       composerTarget,
-      setPermissionMode,
       setComposerTarget,
       navigateDraft,
       locked,
+      modelMenuOpen,
+      refMenuOpen,
+      abortAgentOperation,
     ]
   );
 
@@ -664,8 +742,55 @@ export function Composer() {
     [resizeTextarea, handleAtAuto]
   );
 
+  // ── Height resize (drag the divider above the composer) ───────
+  const startComposerResize = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startY = e.clientY;
+      const startH = composerRef.current?.getBoundingClientRect().height ?? 0;
+      setComposerResizing(true);
+      const onMove = (ev: MouseEvent) => {
+        // Dragging up grows the composer. Clamp so it can't swallow the whole
+        // content area or collapse to nothing.
+        const h = Math.max(
+          80,
+          Math.min(window.innerHeight * 0.6, startH + (startY - ev.clientY))
+        );
+        setComposerH(Math.round(h));
+      };
+      const onUp = () => {
+        setComposerResizing(false);
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    },
+    [setComposerH]
+  );
+
+  const resetComposerH = useCallback(() => setComposerH(null), [setComposerH]);
+
+  // Effective composer height: user-dragged value wins; otherwise follow the
+  // master report's measured height; otherwise stay auto-sized.
+  const effH = composerH ?? (masterReportH > 0 ? masterReportH : null);
+
   return (
-    <div className={`composer${!composerOpen ? " composer-collapsed" : ""}`}>
+    <div
+      ref={composerRef}
+      className={`composer${!composerOpen ? " composer-collapsed" : ""}`}
+      style={composerOpen && effH ? { height: effH } : undefined}
+    >
+      {/* Height divider: drag to resize, double-click to reset to the default
+          (master-report) height. */}
+      {composerOpen && (
+        <div
+          className={`composer-resize${composerResizing ? " active" : ""}`}
+          title="拖拽调整高度 · 双击恢复默认高度"
+          onMouseDown={startComposerResize}
+          onDoubleClick={resetComposerH}
+        />
+      )}
       {/* Target line */}
       <div className="composer-target">
         {composerTarget === "master" ? (
@@ -817,14 +942,14 @@ export function Composer() {
               {models.map((m) => (
                 <div
                   key={m.id}
-                  className={`cmp-menu-item${m.id === selectedModel ? " current" : ""}`}
+                  className={`cmp-menu-item${m.id === shownModel ? " current" : ""}`}
                   onClick={() => {
-                    setSelectedModel(m.id);
+                    applyConfig({ model: m.id });
                     setModelMenuOpen(false);
                   }}
                 >
                   <span className="cmp-menu-name">{m.name}</span>
-                  {m.id === selectedModel && (
+                  {m.id === shownModel && (
                     <span className="cmp-menu-check">✓</span>
                   )}
                 </div>
@@ -837,11 +962,11 @@ export function Composer() {
           className="act-btn"
           onClick={() => {
             const s = ["high", "mid", "fast", "auto"] as const;
-            const idx = s.indexOf(speed);
-            setSpeed(s[(idx + 1) % 4]);
+            const idx = s.indexOf(shownSpeed);
+            applyConfig({ speed: s[(idx + 1) % 4] });
           }}
         >
-          速度: {SPEED_LABELS[speed]}
+          速度: {SPEED_LABELS[shownSpeed]}
         </span>
         <span className="act-sep" />
         <span
@@ -856,8 +981,8 @@ export function Composer() {
           {PERMISSION_MODES.map((m) => (
             <span
               key={m}
-              className={`act-mode-btn${permissionMode === m ? " active" : ""}`}
-              onClick={() => setPermissionMode(m)}
+              className={`act-mode-btn${shownMode === m ? " active" : ""}`}
+              onClick={() => applyConfig({ mode: m })}
             >
               {m}
             </span>

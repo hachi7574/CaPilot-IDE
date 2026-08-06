@@ -6,7 +6,7 @@ import { Onboarding } from "./components/onboarding/Onboarding";
 import { useEspSync } from "./state/esp";
 import { useOrchestrationSync } from "./state/orchestration";
 import { useResourceSync } from "./state/resource";
-import { useSessionRestore } from "./state/session";
+import { useSessionRestore, useAgentEvents } from "./state/session";
 import { useNotifications } from "./state/notifications";
 import { useStore } from "./state/store";
 import "./App.css";
@@ -16,6 +16,7 @@ function App() {
   useOrchestrationSync();
   useResourceSync();
   useSessionRestore();
+  useAgentEvents();
   useNotifications();
   const onboarded = useStore((s) => s.onboarded);
   return (

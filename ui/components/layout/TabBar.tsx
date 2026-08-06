@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { useStore, Tab, AgentInfo } from "../../state/store";
-import { spawnAgent, closeAgent as closeAgentAction } from "../../state/agentActions";
+import { closeAgent as closeAgentAction, MASTER_PROJECT } from "../../state/agentActions";
+import { TerminalTemplatePicker } from "./TerminalTemplatePicker";
 
 function projectOf(cwd: string): string {
   const m = cwd.match(/workspaces\/([^/]+)/);
@@ -63,7 +65,11 @@ export function TabBar() {
   const setActiveTab = useStore((s) => s.setActiveTab);
   const setDraggedTabId = useStore((s) => s.setDraggedTabId);
   const toggleLeftSidebar = useStore((s) => s.toggleLeftSidebar);
+  const leftSidebarOpen = useStore((s) => s.leftSidebarOpen);
+  const rightSidebarOpen = useStore((s) => s.rightSidebarOpen);
+  const toggleRightSidebar = useStore((s) => s.toggleRightSidebar);
   const closeTab = useStore((s) => s.closeTab);
+  const dropAgentChannel = useStore((s) => s.dropAgentChannel);
 
   // Project-scoped view: when a project is focused, show only its tabs. Tabs
   // whose project can't be determined (e.g. mid-spawn) stay visible, and tabs
@@ -75,33 +81,24 @@ export function TabBar() {
       })
     : tabs;
 
-  // Project badge shows the focused project; fall back to the active tab's
-  // project when nothing is focused.
-  const activeTab = tabs.find((t) => t.id === activeTabId);
-  const projectName = focusedProject
-    ? focusedProject
-    : activeTab
-      ? (tabProject(activeTab, agents, projectRoots) ?? "Agent")
-      : "";
-
-  const handleNew = async () => {
-    try {
-      await spawnAgent(workerMode ? "worker" : "standalone");
-    } catch (err) {
-      console.error("Failed to spawn agent:", err);
-    }
+  // New-terminal template picker (the "+" button), anchored at the button.
+  const [termPicker, setTermPicker] = useState<{ x: number; y: number } | null>(
+    null
+  );
+  const openPicker = (e: React.MouseEvent) => {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setTermPicker({ x: r.right, y: r.bottom });
   };
 
   return (
     <div className="tab-bar">
-      <button className="tab-btn-icon" onClick={toggleLeftSidebar} title="折叠侧栏">
-        ☰
+      <button
+        className="tab-btn-icon"
+        onClick={toggleLeftSidebar}
+        title={leftSidebarOpen ? "折叠左侧栏" : "展开左侧栏"}
+      >
+        {leftSidebarOpen ? "«" : "»"}
       </button>
-      {projectName && (
-        <span className="tab-proj-badge">
-          {projectName}
-        </span>
-      )}
       {visibleTabs.map((tab) => {
         const agent = tab.agentId ? agents.get(tab.agentId) : undefined;
         const status = agent?.status || "idle";
@@ -109,7 +106,7 @@ export function TabBar() {
         return (
           <div
             key={tab.id}
-            className={`tab-item${tab.id === activeTabId ? " active" : ""}${draggedTabId === tab.id ? " dragging" : ""}`}
+            className={`tab-item${tab.id === activeTabId ? " active" : ""}${draggedTabId === tab.id ? " dragging" : ""}${status === "done" ? " tab-done" : ""}`}
             draggable
             onDragStart={(e) => {
               e.dataTransfer.setData("text/plain", tab.id);
@@ -130,25 +127,54 @@ export function TabBar() {
               className="tab-close"
               onClick={(e) => {
                 e.stopPropagation();
-                // Closing a terminal tab terminates the agent (kills the PTY and
-                // removes the sidebar row too); editor tabs / the master
-                // placeholder just close the view.
+                // Closing an ENDED (done) agent tab only closes the view — its
+                // record stays recoverable in the sidebar "已结束" group. Closing
+                // a live agent terminates it (kills the PTY + removes the row).
+                // Editor tabs / the master placeholder just close the view.
                 if (tab.type === "agent" && tab.agentId) {
-                  closeAgentAction(tab.agentId);
+                  if (agent?.status === "done") {
+                    closeTab(tab.id);
+                    dropAgentChannel(tab.agentId);
+                  } else {
+                    closeAgentAction(tab.agentId);
+                  }
                 } else {
                   closeTab(tab.id);
                 }
               }}
-              title={tab.type === "agent" && tab.agentId ? "关闭并终止" : "关闭标签"}
+              title={
+                tab.type === "agent" && tab.agentId
+                  ? agent?.status === "done"
+                    ? "关闭（已结束，可从侧栏找回）"
+                    : "关闭并终止"
+                  : "关闭标签"
+              }
             >
               ×
             </button>
           </div>
         );
       })}
-      <button className="tab-add" title="新建终端" onClick={handleNew}>
+      <button className="tab-add" title="新建终端" onClick={openPicker}>
         +
       </button>
+      {/* Collapse / expand the right sidebar (mirrors the ☰ left-toggle, pinned
+          to the right edge; glyph flips to show the sidebar's state). */}
+      <button
+        className="tab-btn-icon tab-btn-right"
+        onClick={toggleRightSidebar}
+        title={rightSidebarOpen ? "折叠右侧栏" : "展开右侧栏"}
+      >
+        {rightSidebarOpen ? "»" : "«"}
+      </button>
+      {termPicker && (
+        <TerminalTemplatePicker
+          project={MASTER_PROJECT}
+          anchor={termPicker}
+          role={workerMode ? "worker" : "standalone"}
+          onClose={() => setTermPicker(null)}
+        />
+      )}
     </div>
   );
 }

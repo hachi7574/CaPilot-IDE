@@ -3,13 +3,18 @@ use crate::agent_runtime::adapter::{
 };
 use std::process::Command;
 
-/// Minimal shell runtime — useful for testing the PTY loop and for plain
-/// terminal tabs. Also acts as a fallback when no agent CLI is installed.
-pub struct BashAdapter;
+/// Shell runtime in two flavours:
+/// - `"bash"` (norc: true) — minimal shell, skips `~/.bashrc` (clean, fast).
+/// - `"bash-rc"` (norc: false) — full interactive bash that sources the user's
+///   `~/.bashrc`, so the prompt / aliases / PATH match the system terminal.
+pub struct BashAdapter {
+    id: &'static str,
+    norc: bool,
+}
 
 impl BashAdapter {
-    pub fn new() -> Self {
-        Self
+    pub fn new(id: &'static str, norc: bool) -> Self {
+        Self { id, norc }
     }
 
     fn check_available() -> bool {
@@ -23,11 +28,15 @@ impl BashAdapter {
 
 impl AgentRuntimeAdapter for BashAdapter {
     fn id(&self) -> &str {
-        "bash"
+        self.id
     }
 
     fn name(&self) -> &str {
-        "Bash"
+        if self.norc {
+            "Bash"
+        } else {
+            "Bash (rc)"
+        }
     }
 
     fn is_available(&self) -> bool {
@@ -43,7 +52,14 @@ impl AgentRuntimeAdapter for BashAdapter {
     }
 
     fn spawn_interactive(&self, _session: &AgentSession) -> Result<(String, Vec<String>), String> {
-        Ok(("bash".to_string(), vec!["--norc".to_string()]))
+        // `--norc` for the minimal shell; the full variant just runs `bash`
+        // (interactive), which sources /etc/bash.bashrc + ~/.bashrc.
+        let args = if self.norc {
+            vec!["--norc".to_string()]
+        } else {
+            vec![]
+        };
+        Ok(("bash".to_string(), args))
     }
 
     fn spawn_headless(&self, _session: &AgentSession, prompt: &str) -> Result<(String, Vec<String>), String> {

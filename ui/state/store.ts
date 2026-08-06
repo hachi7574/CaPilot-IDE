@@ -22,6 +22,12 @@ export interface AgentInfo {
   title: string;
   cwd: string;
   pid: number | null;
+  /** Permission mode this session runs under ("ask" | "auto" | "yolo"). */
+  mode?: string;
+  /** Speed tier this session runs under ("high" | "mid" | "fast" | "auto"). */
+  speed?: string;
+  /** Selected model id, or null/undefined for the runtime default. */
+  model?: string | null;
 }
 
 export interface RuntimeInfo {
@@ -55,6 +61,9 @@ export interface RestoredSession {
   cwd: string;
   title: string;
   status: string;
+  mode: string;
+  speed: string;
+  model: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -110,6 +119,10 @@ const MAX_OUTPUT_BUFFER = 2_000_000;
 function projectOfCwd(cwd: string): string {
   const m = cwd.match(/workspaces\/([^/]+)/);
   if (m) return m[1];
+  // Master-group terminals live in ~/CaPilot/Master.
+  if (cwd.endsWith("/CaPilot/Master") || cwd.includes("/CaPilot/Master/")) {
+    return "master";
+  }
   const parts = cwd.split("/").filter(Boolean);
   return parts[parts.length - 1] || cwd;
 }
@@ -142,6 +155,29 @@ export function createBufferedChannel(): {
   };
 }
 
+// ── Agent activity (last-activity timestamps) ───────────────────
+// Kept OUT of the reactive Zustand state on purpose: PTY output calls
+// appendAgentOutput on every chunk, and a reactive timestamp the sidebar
+// subscribes to would re-render it on each chunk (WebKitGTK repaint cost).
+// A plain module-level Map + a coarse poll tick in the sidebar keeps reads
+// cheap; touchAgentActivity is safe to call on hot paths.
+const agentLastActivity = new Map<string, number>();
+
+/** Record an agent's activity (default: now). */
+export function touchAgentActivity(id: string, ts: number = Date.now()): void {
+  agentLastActivity.set(id, ts);
+}
+
+/** Last-activity epoch-ms for an agent, or undefined if never recorded. */
+export function getAgentActivity(id: string): number | undefined {
+  return agentLastActivity.get(id);
+}
+
+/** Drop an agent's activity record (called on removeAgent). */
+function clearAgentActivity(id: string): void {
+  agentLastActivity.delete(id);
+}
+
 // ── Store ────────────────────────────────────────────────────────
 
 interface AppState {
@@ -151,6 +187,9 @@ interface AppState {
   /** Output buffered before a terminal attached (and between mounts). */
   agentOutputs: Map<string, number[]>;
   masterAgentId: string | null;
+  /** Agent ids whose next terminal mount should force a resume (sidebar
+   *  "已结束" reopen). Ended (`done`) sessions never auto-resume otherwise. */
+  resumeOnOpen: Set<string>;
 
   // Runtimes
   runtimes: RuntimeInfo[];
@@ -202,6 +241,12 @@ interface AppState {
   leftWidth: number;
   rightWidth: number;
 
+  // Composer height
+  /** Composer height (px); null = follow the right sidebar's master report. */
+  composerH: number | null;
+  /** Measured height of the master report card in the right sidebar (px). */
+  masterReportH: number;
+
   // ESP
   espStatus: EspStatus;
   espConnecting: boolean;
@@ -214,11 +259,16 @@ interface AppState {
   onboarded: boolean;
 
   // Actions
-  addAgent: (info: AgentInfo, channel: Channel<number[]> | null) => void;
+  addAgent: (info: AgentInfo, channel: Channel<number[]> | null, activityTs?: number) => void;
   removeAgent: (id: string) => void;
   updateAgentStatus: (id: string, status: AgentStatus) => void;
   appendAgentOutput: (id: string, data: number[]) => void;
   clearAgentOutput: (id: string) => void;
+  requestResume: (id: string) => void;
+  consumeResume: (id: string) => void;
+  /** Drop a finished agent's dead channel, keeping its record + output so the
+   *  sidebar "已结束" group can reopen (resume) it. */
+  dropAgentChannel: (id: string) => void;
   setMasterAgentId: (id: string | null) => void;
   setRuntimes: (runtimes: RuntimeInfo[]) => void;
   setWorkerInfos: (infos: WorkerInfo[]) => void;
@@ -248,12 +298,25 @@ interface AppState {
   toggleRightSidebar: () => void;
   setLeftWidth: (width: number) => void;
   setRightWidth: (width: number) => void;
+  setComposerH: (height: number | null) => void;
+  setMasterReportH: (height: number) => void;
   setProjects: (projects: string[]) => void;
   setProjectRoots: (roots: Record<string, string>) => void;
   setFocusedProject: (name: string | null) => void;
   projectRoot: (name: string) => string | undefined;
   addProject: (name: string, root?: string) => void;
   removeProject: (name: string) => void;
+  /** Move `name` to `targetName`'s position in the sidebar project list
+   *  (drag-to-reorder). The pinned master group is never in `projects`. */
+  moveProject: (name: string, targetName: string) => void;
+  /** Sleep a project: kill all its agent processes + close its tabs/panels to
+   *  free CPU/memory. Sessions stay in the DB, so reopening a terminal resumes. */
+  sleepProject: (name: string) => void;
+  renameProject: (oldName: string, newName: string) => Promise<string>;
+  termTemplates: TermTemplate[];
+  addTermTemplate: (t: TermTemplate) => void;
+  updateTermTemplate: (id: string, patch: Partial<Pick<TermTemplate, "name" | "command">>) => void;
+  removeTermTemplate: (id: string) => void;
   setEspStatus: (status: Partial<EspStatus>) => void;
   setEspConnecting: (connecting: boolean) => void;
   applyResourceSample: (resources: AgentResource[]) => void;
@@ -271,11 +334,62 @@ function loadOnboarded(): boolean {
   }
 }
 
+// ── New-terminal templates ──────────────────────────────────────
+// The project "+" button opens a picker: bash (fixed, always first) / claude /
+// user-defined quick-start commands. Custom templates persist to localStorage.
+
+/** A new-terminal template shown in the project "+" picker. `command` is run
+ *  after the shell starts (bash / bash-rc) / ignored for claude; `fixed` (bash)
+ *  can't be renamed or removed. */
+export interface TermTemplate {
+  id: string;
+  name: string;
+  command: string;
+  runtime: "bash" | "bash-rc" | "claude";
+  fixed?: boolean;
+}
+
+const TERM_TEMPLATES_KEY = "capilot.termTemplates";
+const DEFAULT_TEMPLATES: TermTemplate[] = [
+  { id: "bash-rc", name: "bash", command: "", runtime: "bash-rc", fixed: true },
+  { id: "claude", name: "claude", command: "", runtime: "claude" },
+];
+function loadTermTemplates(): TermTemplate[] {
+  try {
+    const raw = localStorage.getItem(TERM_TEMPLATES_KEY);
+    const stored: TermTemplate[] = raw ? (JSON.parse(raw) as TermTemplate[]) : [];
+    // Drop the old minimal `--norc` "bash" template (superseded by the full
+    // bash), and re-label the old "正常 bash" default to just "bash".
+    const list = stored.filter((t) => t.id !== "bash");
+    for (const t of list) {
+      if (t.id === "bash-rc" && t.name === "正常 bash") t.name = "bash";
+    }
+    const ids = new Set(list.map((t) => t.id));
+    for (const b of DEFAULT_TEMPLATES) {
+      if (!ids.has(b.id)) list.push(b);
+    }
+    // Fixed templates (bash) always come first.
+    return list.sort(
+      (a, b) => Number(b.fixed ?? false) - Number(a.fixed ?? false)
+    );
+  } catch {
+    return DEFAULT_TEMPLATES;
+  }
+}
+function saveTermTemplates(list: TermTemplate[]) {
+  try {
+    localStorage.setItem(TERM_TEMPLATES_KEY, JSON.stringify(list));
+  } catch {
+    // ignore storage errors
+  }
+}
+
 export const useStore = create<AppState>((set, get) => ({
   agents: new Map(),
   agentChannels: new Map(),
   agentOutputs: new Map(),
   masterAgentId: null,
+  resumeOnOpen: new Set(),
   runtimes: [],
   workerInfos: [],
   reports: [],
@@ -294,6 +408,8 @@ export const useStore = create<AppState>((set, get) => ({
   rightSidebarOpen: true,
   leftWidth: 248,
   rightWidth: 340,
+  composerH: null,
+  masterReportH: 0,
   splitPaneA: null,
   splitPaneB: null,
   splitDirection: null,
@@ -317,8 +433,9 @@ export const useStore = create<AppState>((set, get) => ({
   projectRoots: {},
   focusedProject: null,
   onboarded: loadOnboarded(),
+  termTemplates: loadTermTemplates(),
 
-  addAgent: (info, channel) =>
+  addAgent: (info, channel, activityTs) =>
     set((s) => {
       const agents = new Map(s.agents);
       agents.set(info.id, info);
@@ -328,6 +445,11 @@ export const useStore = create<AppState>((set, get) => ({
       // no live PTY yet — in that case preserve the agent's existing live
       // channel so XTermPanel doesn't lose it and fall into the resume path.
       if (channel) channels.set(info.id, channel);
+      // Touch activity on a fresh spawn / runtime switch (live channel), and on
+      // session restore (explicit activityTs from the DB). Role-only updates
+      // (channel === null and no activityTs) keep the existing timestamp.
+      if (activityTs !== undefined) touchAgentActivity(info.id, activityTs);
+      else if (channel) touchAgentActivity(info.id);
       return { agents, agentChannels: channels };
     }),
 
@@ -343,6 +465,9 @@ export const useStore = create<AppState>((set, get) => ({
       resources.delete(id);
       const history = new Map(s.resourceHistory);
       history.delete(id);
+      const resumeOnOpen = new Set(s.resumeOnOpen);
+      resumeOnOpen.delete(id);
+      clearAgentActivity(id);
       // If the removed agent was the master, clear masterAgentId so the composer
       // doesn't see a stale master and spawn a duplicate (Bug 4).
       return {
@@ -351,6 +476,7 @@ export const useStore = create<AppState>((set, get) => ({
         agentOutputs: outputs,
         agentResources: resources,
         resourceHistory: history,
+        resumeOnOpen,
         ...(s.masterAgentId === id ? { masterAgentId: null } : {}),
       };
     }),
@@ -360,6 +486,7 @@ export const useStore = create<AppState>((set, get) => ({
       const agents = new Map(s.agents);
       const a = agents.get(id);
       if (a) agents.set(id, { ...a, status });
+      touchAgentActivity(id);
       return { agents };
     }),
 
@@ -369,6 +496,7 @@ export const useStore = create<AppState>((set, get) => ({
       const prev = outputs.get(id) || [];
       const next = prev.length + data.length > MAX_OUTPUT_BUFFER ? data : [...prev, ...data];
       outputs.set(id, next);
+      touchAgentActivity(id);
       return { agentOutputs: outputs };
     }),
 
@@ -377,6 +505,25 @@ export const useStore = create<AppState>((set, get) => ({
       const outputs = new Map(s.agentOutputs);
       outputs.delete(id);
       return { agentOutputs: outputs };
+    }),
+
+  requestResume: (id) =>
+    set((s) => ({ resumeOnOpen: new Set(s.resumeOnOpen).add(id) })),
+
+  consumeResume: (id) =>
+    set((s) => {
+      if (!s.resumeOnOpen.has(id)) return {};
+      const resumeOnOpen = new Set(s.resumeOnOpen);
+      resumeOnOpen.delete(id);
+      return { resumeOnOpen };
+    }),
+
+  dropAgentChannel: (id) =>
+    set((s) => {
+      if (!s.agentChannels.has(id)) return {};
+      const agentChannels = new Map(s.agentChannels);
+      agentChannels.delete(id);
+      return { agentChannels };
     }),
 
   setMasterAgentId: (id) => set({ masterAgentId: id }),
@@ -539,6 +686,8 @@ export const useStore = create<AppState>((set, get) => ({
   toggleRightSidebar: () => set((s) => ({ rightSidebarOpen: !s.rightSidebarOpen })),
   setLeftWidth: (width) => set({ leftWidth: width }),
   setRightWidth: (width) => set({ rightWidth: width }),
+  setComposerH: (height) => set({ composerH: height }),
+  setMasterReportH: (height) => set({ masterReportH: height }),
 
   setProjects: (projects) => set({ projects }),
 
@@ -572,9 +721,8 @@ export const useStore = create<AppState>((set, get) => ({
     // `projects` and its agents live under the "master" project group, so a
     // stray call must not kill the master session or its terminals.
     if (name === "master") return;
-    // Remove the project from the list (disk files are kept — DevPlan §3.3).
-    // Drop its root mapping and clear focus when the removed project was the
-    // focused one (tab bar then falls back to showing all tabs).
+    // Remove the project from the list and drop its root mapping; clear focus
+    // when the removed project was the focused one (tab bar then shows all tabs).
     const projectRoots = { ...s.projectRoots };
     delete projectRoots[name];
     set({
@@ -610,6 +758,115 @@ export const useStore = create<AppState>((set, get) => ({
         if (s.tabs.some((t) => t.id === "master")) s.closeTab("master");
       }
     }
+
+    // Delete the project's workspace dir (sessions / agent metadata / context).
+    // Custom-rooted projects only lose this metadata dir — the real folder
+    // (picked / cloned) is never touched by the backend command.
+    invoke("delete_project", { name }).catch(() => {});
+  },
+
+  // Move a project to another project's position in the sidebar list
+  // (drag-to-reorder). No-op when either name is missing or they're the same.
+  moveProject: (name, targetName) =>
+    set((s) => {
+      const projects = [...s.projects];
+      const from = projects.indexOf(name);
+      const to = projects.indexOf(targetName);
+      if (from === -1 || to === -1 || from === to) return {};
+      projects.splice(from, 1);
+      const toIdx = projects.indexOf(targetName);
+      projects.splice(toIdx, 0, name);
+      return { projects };
+    }),
+
+  // Sleep a project (free CPU/memory): kill every agent's PTY process, close its
+  // terminal + editor/diff tabs. The agent stays in the store as idle (reopening
+  // the terminal resumes the session) and the DB rows persist for restart.
+  sleepProject: (name) => {
+    const s = get();
+    if (name === "master") return;
+    const root = s.projectRoots[name];
+    const doomed: string[] = [];
+    s.agents.forEach((a, id) => {
+      if (projectOfCwd(a.cwd) === name) doomed.push(id);
+    });
+    const channels = new Map(s.agentChannels);
+    for (const id of doomed) {
+      invoke("agent_kill", { id }).catch(() => {});
+      s.closeTab(id);
+      channels.delete(id);
+    }
+    set({ agentChannels: channels });
+    for (const id of doomed) s.updateAgentStatus(id, "idle");
+    // Close editor / diff tabs whose file lives under the project root.
+    if (root) {
+      const base = root.endsWith("/") ? root : root + "/";
+      for (const t of [...s.tabs]) {
+        if (t.filePath && (t.filePath === root || t.filePath.startsWith(base))) {
+          s.closeTab(t.id);
+        }
+      }
+    }
+  },
+
+  addTermTemplate: (t) =>
+    set((s) => {
+      const list = [...s.termTemplates, t];
+      saveTermTemplates(list);
+      return { termTemplates: list };
+    }),
+
+  updateTermTemplate: (id, patch) =>
+    set((s) => {
+      const list = s.termTemplates.map((t) =>
+        t.id === id ? { ...t, ...patch } : t
+      );
+      saveTermTemplates(list);
+      return { termTemplates: list };
+    }),
+
+  removeTermTemplate: (id) =>
+    set((s) => {
+      // The fixed bash template can't be removed.
+      const list = s.termTemplates.filter((t) => t.id !== id && !t.fixed);
+      saveTermTemplates(list);
+      return { termTemplates: list };
+    }),
+
+  // Rename a workspace project: the backend renames the `workspaces/<old>` dir
+  // (and rewrites sessions.db + agent-meta cwds). Here we keep the store in
+  // sync — re-key projectRoots with the returned root, replace the name in the
+  // list, move focus, and rewrite agent cwds that pointed into the old dir.
+  renameProject: async (oldName, newName) => {
+    const s = get();
+    const newRoot = await invoke<string>("rename_project", {
+      old: oldName,
+      new: newName,
+    });
+    const projectRoots = { ...s.projectRoots };
+    delete projectRoots[oldName];
+    projectRoots[newName] = newRoot;
+    const projects = s.projects.map((p) => (p === oldName ? newName : p));
+    const focusedProject = s.focusedProject === oldName ? newName : s.focusedProject;
+    const agents = new Map(s.agents);
+    agents.forEach((a, id) => {
+      // Rewrite agent cwds pointing into the old workspace dir. The boundary
+      // check (old name followed by `/` or end) keeps `foo` from corrupting a
+      // sibling project whose name merely starts with `foo` (e.g. `foobar`).
+      const marker = `workspaces/${oldName}`;
+      const idx = a.cwd.indexOf(marker);
+      if (idx !== -1) {
+        const after = a.cwd.slice(idx + marker.length);
+        if (after === "" || after.startsWith("/")) {
+          agents.set(id, {
+            ...a,
+            cwd: a.cwd.slice(0, idx) + `workspaces/${newName}` + after,
+          });
+        }
+      }
+    });
+    set({ projects, projectRoots, focusedProject, agents });
+    return newName;
   },
 
   setEspStatus: (status) =>

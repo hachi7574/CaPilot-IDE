@@ -1,20 +1,20 @@
 # CaPilot IDE 开发计划
 
-> **版本:** v2.0（自建 Tauri 路线）
-> **日期:** 2026-08-04
+> **版本:** v2.1（实施进度同步）
+> **日期:** 2026-08-06
 > **作者:** HaChi + Claude
-> **关联:** [CaPilot-PRD.md](CaPilot-PRD.md) v3.0
-> **状态:** Draft
+> **关联:** [CaPilot-PRD.md](CaPilot-PRD.md) v3.1
+> **状态:** 实施中（P0–P2 完成，P3 进行中）
 
 ---
 
 ## 1. 背景与决策
 
-CaPilot IDE 是 CaPilot v3.0 的产品主体（AI Agent 编排工作台）。核心产品约束：
+CaPilot IDE 是 CaPilot v3.0 的产品主体（AI Agent 编排工作台；PRD 文档版本现为 v3.1）。核心产品约束：
 
 - worktree-per-agent **不重要**，不需要 branch 隔离（改为 contexts 目录模型）
 - agent 运行时**必须可替换**：不局限于 Claude Code CLI，claude/codex/opencode/reasonix/zcode 皆可
-- 不捆绑 Chromium（轻内存），但必须是**真桌面应用**（双击启动、独立窗口、托盘，不依赖打开浏览器）
+- 不捆绑 Chromium（轻内存），但必须是**真桌面应用**（双击启动、独立窗口、托盘目标，不依赖打开浏览器；托盘常驻尚未实现）
 - Monaco 非硬性依赖，选更适配 webview 框架的编辑器（CodeMirror 6）
 
 ### 1.1 决策表
@@ -28,7 +28,7 @@ CaPilot IDE 是 CaPilot v3.0 的产品主体（AI Agent 编排工作台）。核
 | **编排** | **PATH shim `capilot` 命令 + Unix socket** | master 在任何 runtime 的 shell 里可用；不依赖 CLI 内部格式；见 §5 |
 | **ESP 传输** | **蓝牙 BLE-NUS 默认优先** + USB CDC + WiFi WS | `EspTransport` 三实现；BLE 免线缆、低功耗、够遥测+低码率音频；见 §8 |
 | **语音** | **Opus → sherpa-onnx 流式 STT → 实时文字**（无波形、不过 webview） | 中文流式识别质量好、边听边出字、免 C++ 构建链、预编译二进制；回复文本帧下行，ESP 侧 TTS 播报；见 §9 |
-| **进程模型** | 托盘常驻 + 单实例锁 | 关窗不杀 worker；见 3.5 |
+| **进程模型** | 单实例锁（已启用）；托盘常驻未实现 | 关窗即退出（`pty.kill_all()` 清扫，会话可恢复）；托盘见 §3.5 |
 | **安全** | capabilities 权限 + CSP + 路径白名单 + 本地 WS/BLE token | 见 2.4 / §12 |
 
 ### 1.2 借鉴参考
@@ -45,11 +45,13 @@ CaPilot IDE 是 CaPilot v3.0 的产品主体（AI Agent 编排工作台）。核
 
 ```
 capilot-ide/
-├─ src/             Rust 核心（Tauri 命令/PTY/编排/ESP/资源/STT）
-├─ ui/              React + Vite 前端（CM6 / xterm / Composer）
-├─ capabilities/    Tauri v2 权限声明
-├─ tauri.conf.json  窗口/打包/更新/CSP
-└─ docs/            本开发计划与架构决策
+├─ src-tauri/        Rust 核心（Tauri 命令/PTY/编排/ESP/资源/persistence）
+│  └─ src/           agent_runtime / orchestration / esp / persistence.rs / resource.rs / lib.rs
+├─ ui/               React + Vite 前端（CM6 / xterm / Composer / 侧栏）
+├─ src-tauri/capabilities/   Tauri v2 权限声明
+├─ src-tauri/tauri.conf.json 窗口/打包/更新/CSP
+├─ docs/             本开发计划与交接文档
+└─ public/           字体 + logo（LUCY styleguide 资产）
 ```
 
 ESP 固件在 CaPilot 主仓库 `Firmware/PlatformIO/` 维护，经 ESP bridge 与 IDE 通信（不混进 IDE 仓库）。
@@ -57,53 +59,47 @@ ESP 固件在 CaPilot 主仓库 `Firmware/PlatformIO/` 维护，经 ESP bridge �
 ### 2.2 模块划分
 
 ```
-capilot-ide/
-├─ src/ (Rust)
-│  ├─ agent_runtime/
-│  │  ├─ adapter.rs       AgentRuntimeAdapter trait（见 §6）
-│  │  ├─ pty.rs           PTY 会话管理（portable-pty）
-│  │  └─ runtimes/        claude.rs / codex.rs / opencode.rs / reasonix.rs / zcode.rs
-│  ├─ orchestration/
-│  │  ├─ session.rs       会话模型、状态机
-│  │  ├─ dispatcher.rs    PATH shim 接收、worker 派发、指令注入
-│  │  └─ smart_return.rs  智能返回分级
-│  ├─ editor_fs/
-│  │  ├─ workspace.rs     路径白名单、文件 CRUD
-│  │  ├─ watch.rs         notify → 前端事件
-│  │  └─ git.rs           git CLI 封装
-│  ├─ esp/
-│  │  ├─ transport.rs     EspTransport trait（见 §8）
-│  │  ├─ usb.rs / wifi.rs / ble.rs
-│  │  ├─ protocol.rs      帧编解码
-│  │  └─ audio.rs         Opus 解码、播放
-│  ├─ voice/
-│  │  └─ stt.rs           sherpa-onnx 流式 STT
-│  ├─ resource.rs         CPU/内存采集（Win Job Object / Unix 进程树）
-│  ├─ persistence.rs      sqlite（会话/设置/草稿/汇报）
-│  └─ settings.rs
-└─ ui/ (React)
-   ├─ components/
-   │  ├─ editor/          CM6 封装、autosave
-   │  ├─ terminal/        xterm 封装、Channel 流
-   │  ├─ composer/        输入区 + 功能区（见 §4）
-   │  ├─ leftbar/         左栏 3 区：品牌→操作栏（4 键：👁☰📁+⚙）→项目/终端树（置顶可折叠 Master）
-   │  ├─ rightbar/        右栏上下分屏：上半部 3 Tab（概览仪表盘/文件树/Git）/ 下半部 Master Report
-   │  ├─ resource/        资源曲线弹层
-   │  ├─ statusbar/       ESP/电量/汇报/worker/模式
-   │  └─ onboarding/      首次引导
-   └─ state/              zustand（agent 状态、composer、设置）
+src-tauri/src/ (Rust)
+├─ agent_runtime/
+│  ├─ adapter.rs        AgentRuntimeAdapter trait（见 §6）+ AgentInfo/AgentSession/枚举
+│  ├─ pty.rs            PTY 会话管理（portable-pty）：spawn/流式/输入/resize/kill/kill_all
+│  ├─ cat_breeds.rs     新终端随机猫品种命名（TICA）
+│  └─ runtimes/         claude.rs / bash.rs / mod.rs（registry）
+├─ orchestration/
+│  ├─ dispatcher.rs     PATH shim 接收、worker 派发、指令注入、worker 池
+│  ├─ shim.rs           `capilot` PATH shim 安装
+│  └─ smart_return.rs   智能返回分级
+├─ esp/
+│  ├─ transport.rs      EspTransport trait + TransportKind（见 §8）
+│  ├─ ble.rs            BLE-NUS 实现（btleplug）
+│  ├─ protocol.rs       帧编解码
+│  └─ manager.rs        EspManager（BLE 连接/事件转发）
+├─ persistence.rs       sqlite（sessions 表 + settings KV 表）+ workspace 布局 + .agent-meta.json
+├─ resource.rs          CPU/内存采集（sysinfo 进程树）
+├─ lib.rs               全部 Tauri 命令 + 插件注册 + run()（含退出清扫）
+└─ main.rs / bin/ble_test.rs
+ui/ (React)
+├─ components/
+│  ├─ editor/           EditorPanel (CM6) / DiffPanel (merge diff)
+│  ├─ layout/           TabBar / ContentArea / MainArea / LeftSidebar / RightSidebar / Composer / StatusBar / SettingsModal / TerminalTemplatePicker
+│  ├─ terminal/         XTermPanel（xterm.js）
+│  └─ onboarding/       Onboarding
+├─ state/               zustand：store.ts + agentActions / session / orchestration / esp / resource / notifications
+└─ App.tsx / main.tsx / App.css
 ```
 
-contexts 目录模型：
+contexts 目录模型（实际落地）：
 
 ```
 ~/CaPilot/workspaces/<项目>/
 ├─ context/              # 共享上下文（README、规则、设计稿）
 ├─ agents/
 │  └─ <agent-id>/        # 每 agent 工作区（PTY cwd）
-│     └─ .agent-meta.json  # role / runtime / resume_key / 状态
-└─ sessions.db           # sqlite
+│     └─ .agent-meta.json  # role / runtime / resume_key / mode / speed / model / 状态
+└─ project.json          # 定制根项目（git clone / 选文件夹）的真实根路径
 ```
+
+> 注：sessions 数据库实际放在**顶层** `~/CaPilot/sessions.db`（单库，见 §6.3），不在每个项目目录下。定制根项目（git clone / 选文件夹）会额外记录 `project.json` 真实根。
 
 ### 2.3 关键数据流
 
@@ -113,7 +109,7 @@ contexts 目录模型：
           master 编排：capilot dispatch → shim → Unix socket → 编排器 → worker PTY/headless
 【音频流】 ESP mic → Opus → transport → Rust 解码 → sherpa-onnx STT → 实时文字 → composer
           回复 → 文本帧下行 → ESP TTS 播报（音频不过 webview）
-【资源流】 agent pid/Job Object → resource → 状态栏 + 弹层
+【资源流】 agent pid 进程树 → resource → 状态栏 + 弹层
 ```
 
 ### 2.4 技术选型表
@@ -121,18 +117,18 @@ contexts 目录模型：
 | 层 | 选型 | 理由 |
 | --- | --- | --- |
 | 壳 | **Tauri v2** + wry（系统 webview） | 真桌面、不捆绑 Chromium、生态齐全 |
-| 前端 | React 18 + TS + Vite | 生态最大 |
+| 前端 | **React 19** + TS + Vite 7 | 生态最大（v2.1 同步：实际已用 React 19） |
 | 编辑器 | **CodeMirror 6** | 轻量（~300–500KB）、webview 稳、Vite 零配置；Monaco 可替换 |
-| 终端 | xterm.js + addon-fit | 渲染 CLI TUI |
-| PTY | `portable-pty`（Rust） | Win=ConPTY / mac、Linux=PTY，wezterm 同款 |
-| 串口/BLE/WS | `serialport` / `btleplug` / `tokio-tungstenite` | BLE 走 NUS GATT（默认优先） |
-| 资源 | `sysinfo` + Windows Job Object | 整棵进程树统计 |
-| 文件监视 | `notify` | 外部/agent 改动推前端 |
-| 持久化 | `rusqlite` | 会话/草稿/汇报 |
-| 音频 | `cpal` + `rodio`（Rust 侧）+ `opus` crate | 全程不过 webview |
-| STT | **sherpa-onnx**（流式中文模型） | 中文质量 + 实时出字 + 免 C++ 构建链 |
+| 终端 | xterm.js 6 + addon-fit | 渲染 CLI TUI |
+| PTY | `portable-pty` 0.9 | Win=ConPTY / mac、Linux=PTY，wezterm 同款 |
+| 串口/BLE/WS | `btleplug`（BLE-NUS，默认）；USB/WiFi 待接入 | BLE 走 NUS GATT（默认优先） |
+| 资源 | `sysinfo`（进程树） | 整棵进程树统计（未用 Windows Job Object） |
+| 文件监视 | **前端 2.5s 轮询**（Git 面板） | 未引入 notify 原生依赖；编辑器标签页磁盘改动监听待做 |
+| 持久化 | `rusqlite`（bundled） | sessions 表 + settings KV 表 |
+| 音频 | `cpal` + `rodio` + `opus`（Rust 侧） | 全程不过 webview（P3 语音链路，未实现） |
+| STT | **sherpa-onnx**（流式中文模型） | 中文质量 + 实时出字 + 免 C++ 构建链（P3 未实现） |
 | git | 调 git CLI | 解析 `git status --porcelain` 等，不引 libgit2 |
-| Tauri 插件 | updater / notification / dialog / store / log / tray-icon / single-instance | 产品化必备 |
+| Tauri 插件 | opener / notification / dialog / store / log / single-instance / process / updater | 产品化必备（无 tray-icon，见 §3.5） |
 | 状态 | zustand | 轻量 |
 
 ---
@@ -144,7 +140,7 @@ contexts 目录模型：
 ### 3.1 整体布局
 
 ```
-┌─ 标题栏（窗口拖拽 / 托盘常驻）──────────────────────────────────────────────────────────┐
+┌─ 标题栏（窗口拖拽）──────────────────────────────────────────────────────────────────────┐
 ├───────────┬──────────────────────────────────────────────────────────┬──────────────────┤
 │ 左侧边栏   │  主区（三层）                                             │ 右栏              │
 │ ←拖拽→    │                                            ←拖拽→         │                  │
@@ -430,9 +426,10 @@ Tab 切换：`∿ 概览` | `📄 文件` | `⚒ Git`
 
 ### 3.5 浮层与常驻
 
-- **资源监视器**：弹窗/浮层按需展开（每 agent CPU/内存曲线），不占用常驻面板
-- **ESP 详情 / 配对向导**：浮层，含蓝牙配对、WiFi 配网、USB 枚举流程
-- **托盘常驻**：关窗最小化到托盘，worker 继续运行，系统通知唤醒；**单实例锁**防止多开抢占 PTY/串口/BLE
+- **资源监视器**：已实现（`resource.rs` sysinfo 采样，状态栏 + 每 agent 曲线弹层）
+- **ESP 详情 / 配对向导**：浮层，含蓝牙配对、WiFi 配网、USB 枚举流程（配对/配网向导未实现）
+- **单实例锁**：`tauri-plugin-single-instance` 已启用
+- **托盘常驻**：❌ **未实现**（无 tray-icon 插件）。当前关窗即退出。v2.1 补充：退出时 `RunEvent::ExitRequested` → `pty.kill_all()` 清扫所有 agent 进程（会话保持 running，下次打开可恢复）。"关窗最小化到托盘、worker 继续跑"仍是 P3 后待办。
 
 ### 3.6 布局约束
 
@@ -474,7 +471,7 @@ Tab 切换：`∿ 概览` | `📄 文件` | `⚒ Git`
 | `↑` / `↓` | 草稿历史（最近 N 条） |
 | `Tab` | 切换发送目标：agent 终端 ⇄ master 终端（composer 聚焦时） |
 | `Shift+Tab` | 循环 `[[Ask]\|Auto\|Yolo]` 模式 |
-| `Esc` | **无效**（不响应） |
+| `Esc` | **终端式中断**：向目标 agent 的 PTY 发原始 ESC 字节（同 xterm 内按 Esc，中止其当前 turn）；worker 锁定 / 弹出菜单打开时不转发 |
 | `@` | 文件路径补全 → chip |
 | `!` | `!命令` 直发终端（绕过 agent 会话） |
 | 拖拽 | 入输入区 → chip；入终端区 → 路径粘贴；OS 拖入窗口 → 同管线 |
@@ -499,8 +496,9 @@ idle(灰) → running(蓝·脉冲) → waiting_input(黄) / busy(橙)
 ```
 
 - running/busy 区分：headless 任务由 Rust 直接跟踪；交互会话用启发式（进程存活 + 输出特征），**UI 标注"仅供参考"，以终端画面为准**
+- **v2.1 实施同步**：会话状态目前是简单 `idle|running|busy|done|failed` 字符串（store `AgentStatus`），没有 pulse/黄橙渐变动画；`done` 表示进程自然退出（PTY EOF），会话结束处理可在设置里选「保留+侧栏可找回」或「直接删除」（见 §6.3）
 - 完成/失败 → 状态点变色 + 系统通知（worker 完成 / ESP 断连 / 汇报就绪）
-- 关窗最小化到托盘后状态点持续更新，回来一眼看到谁干完了
+- 关窗即退出并清扫 agent 进程（无托盘；托盘常驻后状态点持续更新待实现）
 
 ### 4.6 worker 锁定与冲突处理
 
@@ -517,14 +515,17 @@ idle(灰) → running(蓝·脉冲) → waiting_input(黄) / busy(橙)
 
 ### 4.8 runtime 切换（发送目标与引擎）
 
+**v2.1 实施同步**：实际没有"tab 顶部 runtime 选择器"，切换入口在左侧栏终端标签右键菜单「切换 runtime」；`[模型↑]`/权限/速度选择在 Composer 功能区。机制一致：
+
 ```
-当前 tab 顶部 runtime 选择器 [claude ▾]
-  → kill 旧 PTY（SIGTERM→SIGKILL，清僵尸）
-  → 同一 context 目录 spawn 所选 runtime 的 PTY
-  → 按该 runtime 的 resume key 恢复会话历史
+左栏终端右键 → 切换 runtime
+  → 先校验目标 runtime is_available()（失败不改动，防 brick）
+  → kill 旧 PTY
+  → 同一 context 目录 + 原 resume_key + 持久化的 mode/speed/model spawn 新 runtime PTY
+  → 按该 runtime 的 resume key 恢复会话历史（resume 参数由各 adapter 构造）
 ```
 
-- 会话历史按 `(tab, runtime)` 隔离，切换互不串
+- 会话历史按 `(tab, runtime)` 隔离，切换互不串；切换后该会话的 mode/speed/model 沿用持久化值
 - 一个 tab = 一个工作位；想同时用 claude + codex → 新建 tab
 - 新建面板 `is_available()` 探测：装了亮 / 没装置灰 + 引导链接 / 未登录标"未登录"
 
@@ -552,10 +553,10 @@ shim 经 **Unix socket** 直连 Rust 编排器，可靠一个量级，且 claude
 
 ### 5.3 编排器（Rust `orchestration/dispatcher.rs`）
 
-- 维护 worker 池（role=worker 的会话 + 状态）
-- `dispatch`：选 idle worker → 交互模式 `pty_write(指令+\r)` / headless 模式 `spawn_headless` → 置 busy
+- 维护 worker 池（role=worker 的会话 + 状态）：busy 原子标记 + 3s 过期清扫；PTY 消失（离线）→ 撤销 busy
+- `dispatch`：`resolve_worker` 前缀匹配 → 选 idle worker → `pty_write(指令+\r)` 注入其交互 TUI → 置 busy（headless 分支未实现）
 - 完成事件 → 汇报聚合 → master 会话收"worker X 完成：摘要"
-- worker 取消标记 → 立即移出 worker 池
+- worker 取消标记 → 立即移出 worker 池（`unregister_worker`）
 
 ### 5.4 智能返回
 
@@ -566,8 +567,8 @@ shim 经 **Unix socket** 直连 Rust 编排器，可靠一个量级，且 claude
 
 ### 5.5 角色切换 UI
 
-- IDE：composer `[🤖worker 开|关]` 功能区按键 / 左侧栏终端标签右键「设置为 worker」（即时生效，写 `.agent-meta.json`）
-- ESP：列表模式长按 agent 标签 →「设为 worker / 取消」→ 与 IDE 实时同步
+- IDE：composer `[🤖worker 开|关]` 功能区按键 = **"下一个新建终端默认角色"**（title：开启后新终端进编排池）；左侧栏终端标签右键「设为 worker / 取消 worker」= **即时切换**（`agent_set_role` 写 `.agent-meta.json` + DB，worker 进/出编排池）
+- ESP：列表模式长按 agent 标签 →「设为 worker / 取消」→ 与 IDE 实时同步（未实现）
 
 ---
 
@@ -575,42 +576,63 @@ shim 经 **Unix socket** 直连 Rust 编排器，可靠一个量级，且 claude
 
 ### 6.1 AgentRuntimeAdapter（Rust trait）
 
+**v2.1 实施同步**：实际 trait（`src-tauri/src/agent_runtime/adapter.rs`）为：
+
 ```rust
-trait AgentRuntimeAdapter {
-    fn id(&self) -> &str;                                  // "claude" | "codex" | ...
+pub trait AgentRuntimeAdapter: Send + Sync {
+    fn id(&self) -> &str;                                  // "claude" | "bash" | ...
+    fn name(&self) -> &str;                                // 显示名（"Claude Code" / "Bash"）
     fn is_available(&self) -> bool;                        // CLI 已安装？
-    fn is_authenticated(&self) -> bool;                    // 登录态？（未登录时提前显示，避免神秘报错）
+    fn is_authenticated(&self) -> bool;                    // 登录态？
     fn list_models(&self) -> Vec<ModelInfo>;               // 模型列表（composer [模型↑]）
-    fn spawn_interactive(&self, s: &AgentSession) -> Result<PTYHandle>;   // 交互 TUI
-    fn spawn_headless(&self, s: &AgentSession, prompt: &str)
-        -> Result<HeadlessRun>;                            // 结构化一次性任务
-    fn resume(&self, s: &AgentSession) -> Result<PTYHandle>;              // 续会话
-    fn speed(&self, s: &AgentSession, v: Speed) -> Vec<String>;           // 速度→启动/注入参数
-    fn mode(&self, s: &AgentSession, m: PermissionMode) -> Vec<String>;   // Ask/Auto/Yolo→注入命令
+    fn spawn_interactive(&self, s: &AgentSession) -> Result<(String, Vec<String>), String>;
+        // 交互 TUI → (cmd, args)
+    fn spawn_headless(&self, s: &AgentSession, prompt: &str) -> Result<(String, Vec<String>), String>;
+        // 结构化一次性任务 → (cmd, args)（当前只有 claude 实现，未接线）
+    fn resume_args(&self, s: &AgentSession) -> Vec<String>;      // 恢复参数（各 adapter 构造）
+    fn supports_resume(&self) -> bool { false }                  // 是否有可续会话（claude=true）
+    fn capture_resume_key(&self, cwd: &Path) -> Option<String> { None }  // 新建后探测会话 id
+    fn speed_args(&self, speed: Speed) -> Vec<String>;           // 速度→启动参数
+    fn mode_args(&self, mode: PermissionMode) -> Vec<String>;    // Ask/Auto/Yolo→注入命令
 }
-struct PTYHandle { write, resize, kill, on_data, exit_code }
-struct AgentSession { id, runtime, mode, cwd, context_dir, role }
+pub struct AgentSession { id, runtime, mode, speed, model: Option<String>, cwd, context_dir, role, rows, cols, resume_key: Option<String> }
+pub struct AgentInfo { id, runtime, role, status, title, cwd, pid, mode, speed, model }  // 返回给前端，会话自带配置
 ```
+
+- 设计差异：返回 `(cmd, args)` 字符串而非 `PTYHandle` 对象——**PTY 生命周期统一由 `PtyManager` 管理**，adapter 只负责"造命令"。这让 `pty.rs` 能统一处理 spawn/resume/kill、自然退出回调（`on_exit`）与退出清扫。
 
 ### 6.2 runtimes/ 每 CLI 一文件
 
 | runtime | 交互 | headless | resume | 备注 |
 | --- | --- | --- | --- | --- |
-| `claude.rs` | `claude`（TUI） | `claude -p --output-format stream-json` | `claude --resume` | |
-| `codex.rs` | `codex` | `codex exec` | `codex resume` | |
-| `opencode.rs` | `opencode` | `opencode run` | `opencode --continue` | 多 provider 运行时 |
-| `reasonix.rs` | `reasonix` | `reasonix run --events-jsonl` | `reasonix -c` | |
-| `zcode.rs` | `zcode` | 按其 `--help` 填写 | 同左 | 接入时以实际 CLI 为准 |
+| `claude.rs` ✅ | `claude --model … --permission-mode … --thinking-effort …` | `claude -p … --output-format stream-json` | `--resume <key>`（key 从 `~/.claude/projects/<cwd编码>/` 最新 jsonl 探测或 DB 持久化）| 已实现，唯一 resumable |
+| `bash.rs` ✅ | `bash`（全量）/ `bash --norc`（最小）| `bash -lc` | 无 | 两种风味：`bash-rc`（全量，新终端默认）/ `bash`（最小，仅兼容旧会话）|
+| `codex.rs` ⏳ | 计划 | `codex exec` | `codex resume` | 未实现 |
+| `opencode.rs` / `reasonix.rs` / `zcode.rs` ⏳ | 计划 | … | … | 未实现 |
 
-- **新增一个 CLI = 加一个文件**：这是"运行时可替换"的扩展点
+- **新增一个 CLI = 加一个文件**：这是"运行时可替换"的扩展点；`runtimes/mod.rs` 的 `get_adapter()` registry 目前实现 `claude` / `bash` / `bash-rc`（未知 id 默认回落 claude）
 - 参数表按各 CLI `--help` 容错解析（版本漂移防御）
 - 速度（high/mid/fast/auto）与权限模式（Ask/Auto/Yolo）在各 runtime 文件内维护映射表，不支持的档置灰
 
 ### 6.3 会话与生命周期
 
-- PTY 管理（`agent_runtime/pty.rs`）：spawn / 流式转发（Channel 二进制帧）/ 输入 / resize / 退出清理（SIGTERM→SIGKILL 防僵尸）
-- headless 会话渲染为 xterm 面板（复用同一 PTY/Channel 通道），Rust 解析结构化输出跟踪状态
-- 元数据 `runtime` + `role` 写 `.agent-meta.json`，sqlite 存会话与 resume_key
+**v2.1 实施同步**（2026-08-06 起）：
+
+- **PTY 管理**（`agent_runtime/pty.rs`）：spawn（并发串行化，token+guard）/ 流式转发（Tauri Channel 二进制帧）/ 输入 / resize / kill / `kill_all`；reader task 在 EOF/读错时 reap + 触发 `on_exit`（自然退出回调），channel 关闭/有意 kill 则抑制
+- **持久化**：
+  - 顶层单库 `~/CaPilot/sessions.db`（`sessions` 表：id/project/role/runtime/resume_key/cwd/title/status/**mode/speed/model**/时间戳 + `settings` KV 表）
+  - 每 agent 一个 `agents/<id>/.agent-meta.json`（`AgentMeta`，与 DB 双写同步）
+  - 老库启动时自动 `ensure_column` 迁移补列
+- **恢复管线**：
+  - `useSessionRestore`（前端）启动时 `sessions_list` → 全部会话进 store；`done` 的不自动开 tab、不进 master
+  - 点开 tab → XTermPanel 无 channel → `agent_resume` → 用 DB 里 resume_key + mode/speed/model 重建（`build_and_spawn`）
+  - 新建 claude 后后台轮询 `capture_resume_key` 填 resume_key（防同 cwd 多终端恢复撞同一会话）
+- **会话结束处理**（设置 `settings.session_end_mode`，默认 `keep`）：
+  - **keep**：进程自然退出 → DB `status=done` + 前端 tab 置灰 → 重启不自动恢复；侧栏项目内"已结束 (N)"分组可点击重新打开（resume 恢复会话）
+  - **delete**：进程自然退出 → 删 DB 行 + `agents/<id>` 目录 + 关 tab，彻底消失
+  - × 按钮 / 右键"终止并关闭"始终彻底删除（显式操作）；`sleepProject`/切 runtime/resume 前置 kill 不触发结束处理
+- **Composer per-session 配置**：权限/速度/模型跟随当前会话（`applyConfig`），改动写 DB（`agent_set_session_config`）+ 全局记忆；运行中改动不打断进程，下次 `agent_resume` 生效
+- **退出清扫**：`run()` 用 `Builder::build().run(回调)`，`RunEvent::ExitRequested` → `pty.kill_all()` 杀所有 agent 进程（有意 kill，不标 done，会话保持 running 可恢复）
 
 ---
 
@@ -624,10 +646,10 @@ struct AgentSession { id, runtime, mode, cwd, context_dir, role }
 
 ### 7.2 文件系统 API 与白名单
 
-- 前端不接触文件系统，全部经 Rust invoke：`fs_read` / `fs_write` / `fs_list` / `fs_watch`
-- **路径白名单**：必须落在 workspace 根内，拒绝 `..` 逃逸；中文/空格路径注入 PTY 前 shell 转义
-- autosave：`onDidChangeModel` → debounce 800ms → 写盘
-- 外部/agent 改动：`notify` → event → 对应 model 刷新/提示
+**v2.1 实施同步**：实际命令集为 `fs_read` / `fs_write` / `fs_list` / `fs_create_file` / `fs_create_dir` / `fs_paste` / `fs_delete` / `fs_rename`
+- **路径白名单**：所有 `fs_*` 命令先 `canonicalize` 父目录并校验必须落在 `$HOME` 内，拒绝 `..` 逃逸 / symlink 逃逸；中文/空格路径注入 PTY 前 shell 转义
+- autosave：编辑器内 debounce 写盘
+- 外部/agent 改动：**无 `notify`/`fs_watch`** —— Git 面板用前端 2.5s 轮询（VSCode 文件监听的对等实现）；编辑器标签页磁盘改动监听未实现（待办）
 
 ### 7.3 文件树与拖拽
 
@@ -636,10 +658,12 @@ struct AgentSession { id, runtime, mode, cwd, context_dir, role }
 
 ### 7.4 Git 源代码控制面板（右栏 `⚒ Git` tab）
 
-- 列出当前项目所有改动文件（`git status --porcelain`），显示 +/- 行数与改动类型（M/A/D/R）
-- 点开文件在编辑器以 diff 视图查看
-- 支持 stage/unstage（`git add`/`git reset`）、commit（输入 commit message → `git commit`）
-- 分支切换、pull/push 快捷操作
+**v2.1 实施同步**：已按 VSCode SCM 重构
+- 列出当前项目所有改动文件（`git status --porcelain`），按 **index/worktree 双状态**分组为「暂存的更改 / 更改」（MM 双状态同 VSCode 同时出现在两组）
+- 每文件 +/− 暂存/取消、⌫ 放弃更改（tracked→`git restore`，untracked→rm）；⋯ 菜单全部暂存/取消/放弃
+- 点开文件内联 side-by-side diff（`@codemirror/merge` MergeView）；「打开」→ 编辑器内全高 diff 标签页；「编辑」→ 直接开源文件
+- 分支切换、pull/push（无 upstream 自动 `push -u origin HEAD` 发布）、「↑ N 未推送」指示、提交框（message + staged gating、Ctrl+Enter 提交）、「提交并推送」
+- 自动刷新：面板挂载期间 2.5s 前端轮询（VSCode 文件监听的对等实现，无 notify 依赖）
 
 ### 7.5 git 封装
 
@@ -651,15 +675,23 @@ struct AgentSession { id, runtime, mode, cwd, context_dir, role }
 
 ### 8.1 EspTransport（三实现，BLE 默认优先）
 
+**v2.1 实施同步**：实际 `EspTransport`（`esp/transport.rs`）为：
+
 ```rust
-trait EspTransport { connect / read / write / status / kind }
-├─ UsbSerial   （serialport，USB CDC，供电+通信一体）
-├─ WifiWs      （tokio-tungstenite 内嵌 WS server，127.0.0.1:8789 + token）
-└─ BleUart     （btleplug，BLE UART/NUS GATT）   ← 默认优先（可能是主要连接方式）
+pub trait EspTransport: Send + Sync {
+    fn kind(&self) -> TransportKind;             // Ble | Usb | Wifi
+    async fn connect(&mut self, events: mpsc::Sender<EspEvent>) -> Result<(), EspError>;
+    async fn disconnect(&mut self) -> Result<(), EspError>;
+    async fn write_frame(&self, frame: &[u8]) -> Result<(), EspError>;
+    async fn send(&self, frame_type: FrameType, seq: u8, payload: &[u8]) -> Result<(), EspError>;  // 默认实现
+    async fn rssi(&self) -> Option<i16>;
+}
+├─ BleUart     （btleplug，BLE NUS GATT）   ← 已实现，默认优先
+├─ UsbSerial   （serialport，USB CDC）        ← 待实现
+└─ WifiWs      （tokio-tungstenite WS server）← 待实现
 ```
 
-- 控制/遥测/电池/状态走 BLE 数据通道（~10–30KB/s 实测吞吐，够遥测与低码率数据）
-- 音频走 Opus 低码率（16kbps ≈ 2KB/s，余量 6 倍）同通道
+- `EspManager`：管理 BLE 连接（`connect_ble`）、状态快照（kind/name/address/rssi/battery）、转发事件到前端 `esp://event`；断连自动清除状态
 - 平台注意：Win 打包加 Bluetooth capability manifest、mac 加蓝牙 entitlement、Linux 需 BlueZ 运行
 
 ### 8.2 协议（沿用 PRD H6，修订）
@@ -709,9 +741,10 @@ ESP mic → Opus(ESP-IDF, 16kHz/16-24kbps) → 传输(BLE 数据通道默认)
 
 ## 10. 资源监视
 
-- Rust 每秒 `sysinfo` 按 agent PID **整棵进程树**采集 CPU/内存 → event → 前端弹层曲线
-- Windows 上父子枚举不可靠 → 用 **Job Object** 统计整组；Linux/mac 用父进程遍历
-- 超限告警 → 状态栏 + 通知（可选 ESP 推送）
+**v2.1 实施同步**：已实现（P2）
+- Rust `resource.rs` 每 3s 用 `sysinfo` 按 agent PID **整棵进程树**采集 CPU/内存（`pty.pids()` 快照）→ emit `resource://sample` → 前端状态栏 + 每 agent 曲线弹层（60 点历史）
+- 整棵进程树统计用父进程遍历；未用 Windows Job Object
+- 超限告警未实现（无阈值告警/通知）
 
 ---
 
@@ -719,46 +752,47 @@ ESP mic → Opus(ESP-IDF, 16kHz/16-24kbps) → 传输(BLE 数据通道默认)
 
 > 每阶段可独立验证。估时为单人连续开发量。
 
-### P0 — 最小闭环（≈1 周）
+### P0 — 最小闭环（≈1 周）✅ 完成
 
-- [ ] Tauri v2 脚手架：React+Vite+TS、单实例锁、托盘常驻、窗口/布局骨架
-- [ ] Rust 核心：`AgentRuntimeAdapter` trait、PTY 管理（portable-pty）、invoke/event/Channel IPC 封装
-- [ ] 第一个适配器 `claude.rs`：spawn/headless/resume 参数表、`is_available`/`is_authenticated`、速度与模式映射
-- [ ] CodeMirror 6：fs_read/fs_write（路径白名单）+ autosave（debounce 800ms）
-- [ ] xterm.js：Channel 二进制流、resize、焦点管理（不劫持输入框快捷键）
-- [ ] Composer 完整规格落地（§3.2/§4：输入区 + 功能区、快捷键、折叠、拖拽、发送目标徽标、草稿）
+- [x] Tauri v2 脚手架：React+Vite+TS、单实例锁、窗口/布局骨架
+- [x] Rust 核心：`AgentRuntimeAdapter` trait、PTY 管理（portable-pty）、invoke/event/Channel IPC 封装
+- [x] 第一个适配器 `claude.rs`：spawn/headless/resume 参数表、`is_available`/`is_authenticated`、速度与模式映射
+- [x] CodeMirror 6：fs_read/fs_write（路径白名单）+ autosave（debounce 800ms）
+- [x] xterm.js：Channel 二进制流、resize、焦点管理（不劫持输入框快捷键）
+- [x] Composer 完整规格落地（§3.2/§4：输入区 + 功能区、快捷键、折叠、拖拽、发送目标徽标、草稿）
 
 **验证**：双击启动 → 输入框发消息 → claude 在 xterm 响应；全部快捷键/折叠/拖拽/发送目标切换生效。
 
-**内插 P0.5 — BLE 可行性 spike（0.5~1 天，P0 后即做）**
-- [ ] 一个 ESP32 跑通 BLE NUS 遥测（电池/状态帧）→ 验证 Opus-over-BLE 吞吐（24kbps 理论余量 6 倍，实机确认）
+**内插 P0.5 — BLE 可行性 spike（0.5~1 天，P0 后即做）✅ 完成**
+- [x] 一个 ESP32 跑通 BLE NUS 遥测（电池/状态帧）→ 验证 Opus-over-BLE 吞吐（24kbps 理论余量 6 倍，实机确认）
 - 理由：BLE 可能是主链路，平台坑（Win manifest/mac entitlement/BlueZ）早暴露
 
-### P1 — 编排骨架（≈1.5–2 周）
+### P1 — 编排骨架（≈1.5–2 周）✅ 完成
 
-- [ ] contexts 目录模型 + `.agent-meta.json` + sqlite 持久化 + 会话恢复（重启不丢）
-- [ ] 多 tab 与角色（master 固定/worker/standalone）、runtime 切换器（kill→同 context respawn→resume）、状态机+状态点
-- [ ] PATH shim `capilot`（dispatch/status/report）+ Unix socket + 编排器；worker 锁定+冲突提示
-- [ ] master 面板、worker 汇报聚合、智能返回（分级 + 开关）
-- [ ] 文件树 + `⚒ Git` 源码控制面板（stage/commit/分支/pull/push）
+- [x] contexts 目录模型 + `.agent-meta.json` + sqlite 持久化 + 会话恢复（重启不丢）
+- [x] 多 tab 与角色（master 固定/worker/standalone）、runtime 切换器（kill→同 context respawn→resume）、状态机+状态点
+- [x] PATH shim `capilot`（dispatch/status/report）+ Unix socket + 编排器；worker 锁定+冲突提示
+- [x] master 面板、worker 汇报聚合、智能返回（分级 + 开关）
+- [x] 文件树 + `⚒ Git` 源码控制面板（stage/commit/分支/pull/push）
 
 **验证**：master 派发给两个不同 runtime 的 worker 并行，完成汇报；切换 runtime 后会话可续。
 
-### P2 — 产品化（≈1–1.5 周）
+### P2 — 产品化（≈1–1.5 周）✅ 完成
 
-- [ ] 资源监视（Windows Job Object / Unix 进程树）+ 曲线弹层
-- [ ] 系统通知（worker 完成/ESP 断连/汇报就绪）、设置页、首次引导（runtime 检测/登录态/ESP 配对向导入口）
-- [ ] 自动更新（updater+签名）、三平台打包（Win 蓝牙 manifest / mac 公证 / Linux 次等支持）
-- [ ] capabilities/CSP 收紧 + security-review 审查
+- [x] 资源监视（sysinfo 进程树）+ 曲线弹层
+- [x] 系统通知（worker 完成/ESP 断连/汇报就绪）、设置页、首次引导（runtime 检测/登录态/ESP 配对向导入口）
+- [x] 自动更新（updater+签名）、打包（Windows 蓝牙 manifest / mac 公证 / Linux 次等支持）
+- [x] capabilities/CSP 收紧 + security-review 审查
 
-**验证**：三平台安装包可用、更新流程走通、全新机器引导全流程。
+**验证**：安装包可用、更新流程走通、全新机器引导全流程。（注：updater endpoint/pubkey 目前为占位，发布前需填真实签名。）
 
-### P3 — ESP 与语音（≈2 周）
+### P3 — ESP 与语音（≈2 周）🟡 部分
 
-- [ ] `EspTransport` 三实现（USB/WiFi/BLE-NUS 默认优先）+ 配对/配网向导
-- [ ] 协议帧（seq+ack 控制/音频 fire-and-forget、版本化）+ 心跳
+- [x] `EspTransport` trait + BLE-NUS 实现（btleplug）+ 连接/断开/状态/转发
+- [ ] `EspTransport` USB / WiFi 实现 + 配对/配网向导
+- [ ] 协议帧控制 ack/重试 + 心跳（协议已定义，帧编解码已实现）
 - [ ] Opus → Rust 解码 → sherpa-onnx 流式 STT → 实时文字进 composer（无波形、不过 webview）
-- [ ] ESP TTS 汇报播报 + 电池/状态遥测 + 三模式镜像
+- [ ] ESP TTS 汇报播报 + 电池/状态遥测完善 + 三模式镜像
 
 **验证**：ESP32 实机 BLE 连通、语音实时出字、汇报播报通、E2E ≤3s。
 
@@ -772,7 +806,7 @@ ESP mic → Opus(ESP-IDF, 16kHz/16-24kbps) → 传输(BLE 数据通道默认)
 | **BLE 吞吐/兼容性** | NUS 数据通道实测 ~10–30KB/s；Win/mac 平台权限坑 | P0.5 spike 最早验证；协议控制帧 ack/重试 |
 | **CLI 参数漂移/登录态** | claude/codex 各自更新 | 适配器对 `--help` 容错解析；`is_authenticated` 前置检测 |
 | **多 agent 并发改同一文件**（无 worktree） | 已知行为 | per-agent 子目录 + `⚒ Git` 面板 + git 兜底，文档写明 |
-| **音频端到端 ≤3s** | 硬指标 | P3 单独延迟测量；sherpa-onnx 流式 + 低延迟 TTS |
+| **音频端到端 ≤3s** | 硬指标 | P3 单独延迟测量；sherpa-onnx 流式 + 低延迟 TTS（语音链路未实现） |
 | **C5 硬件（ES8311）** | mic/喇叭需硬件验证 | P3 前置：先跑通录音/放音 demo |
 | **master 指代解析** | 自然语言指定 worker 会指错 | master 按名确认（"你是指 XX 吗？"） |
 | **Rust 生态陌生** | 编译慢、学习曲线 | 代码由 agent 编写，成本主要在编译；crate 均成熟 |
@@ -783,10 +817,10 @@ ESP mic → Opus(ESP-IDF, 16kHz/16-24kbps) → 传输(BLE 数据通道默认)
 
 | 里程碑 | 阶段 | 结果 |
 | --- | --- | --- |
-| M0 | P0 | 可双击启动，claude 会话在 xterm 跑通，Composer 全套交互可用 |
-| M1 | P1 | master/worker 编排 + 智能返回（**可内测**） |
-| M2 | P2 | 资源监视 + 产品化（更新/打包/引导/安全） |
-| M3 | P3 | ESP 蓝牙语音全链路 + 发布 |
+| M0 | P0 | ✅ 可双击启动，claude 会话在 xterm 跑通，Composer 全套交互可用 |
+| M1 | P1 | ✅ master/worker 编排 + 智能返回（**可内测**） |
+| M2 | P2 | ✅ 资源监视 + 产品化（更新/打包/引导/安全） |
+| M3 | P3 | 🟡 ESP 蓝牙已通（BLE-NUS）；语音链路 / USB / WiFi / 配对向导未完成 |
 
 **关键路径**：P1（master/worker 编排）是差异化核心，优先保质量；P0.5（BLE spike）前置验证主链路风险。
 
@@ -798,12 +832,12 @@ ESP mic → Opus(ESP-IDF, 16kHz/16-24kbps) → 传输(BLE 数据通道默认)
 | --- | --- | --- | --- |
 | D1 | IDE 底座 | ✅ 已定 | **Tauri v2 自建薄壳** |
 | D2 | 编辑器 | ✅ 已定 | **CodeMirror 6** 默认，Monaco 可替换（`EditorProvider`） |
-| D3 | Agent 运行时 | ✅ 已定 | **AgentRuntimeAdapter 可插拔**：claude/codex/opencode/reasonix/zcode，每 CLI 一文件 |
-| D4 | 工作区 | ✅ 已定 | **contexts 目录模型**（无 worktree/branch 隔离） |
+| D3 | Agent 运行时 | 🟡 部分 | **AgentRuntimeAdapter 可插拔**：已实现 claude/bash/bash-rc；codex/opencode/reasonix/zcode 待接入 |
+| D4 | 工作区 | ✅ 已定 | **contexts 目录模型**（无 worktree/branch 隔离）；sessions 库在顶层 `~/CaPilot/sessions.db` |
 | D5 | 编排机制 | ✅ 已定 | **PATH shim `capilot` 命令 + Unix socket** |
-| D6 | ESP 传输 | ✅ 已定 | **BLE-NUS 默认优先** + USB CDC + WiFi WS（`EspTransport`） |
-| D7 | 语音 | ✅ 已定 | Opus → **sherpa-onnx 流式 STT** → 实时文字；无波形、不过 webview |
-| D8 | 进程模型 | ✅ 已定 | 托盘常驻 + 单实例锁 |
+| D6 | ESP 传输 | 🟡 部分 | **BLE-NUS 已实现**；USB CDC / WiFi WS 待实现（`EspTransport`） |
+| D7 | 语音 | 🔜 待做 | Opus → **sherpa-onnx 流式 STT** → 实时文字；无波形、不过 webview（P3 未实现） |
+| D8 | 进程模型 | 🟡 部分 | 单实例锁已启用；**托盘常驻未实现**（关窗即退出，退出清扫 agent 进程） |
 | D9 | master 形态 | ✅ 已定 | 终端标签位于主区 tab 栏；概览面板显示 master 汇报卡片；左侧栏 `[👁]` 可过滤仅看 worker |
 | D10 | 智能返回阈值 | 🔜 待调 | 默认 600/3000，上线后按实际数据调优 |
 
@@ -818,7 +852,7 @@ ESP mic → Opus(ESP-IDF, 16kHz/16-24kbps) → 传输(BLE 数据通道默认)
 | H1 | 音频链路放错边（webview 播放/录音三平台脆） | 全部音频挪到 Rust（cpal/rodio + opus），webview 只收文字 |
 | H2 | master 语音 STT 未定义 | sherpa-onnx 本地流式 STT（隐私友好、离线） |
 | H3 | 蓝牙完全没设计 | `EspTransport` 三实现抽象，BLE 默认优先 |
-| H4 | 关窗即退出 | 托盘常驻，worker 继续跑 |
+| H4 | 关窗即退出 | 托盘常驻，worker 继续跑（**未实现**；当前关窗即退出并 `pty.kill_all()` 清扫，会话可恢复） |
 | H5 | agent 改动审查 UX 缺失 | 右栏 `⚒ Git` 源码控制面板（stage/commit/分支/pull/push） |
 | H6 | CLI 版本漂移 | 适配器对 `--help` 容错解析；PTY 生命周期清理防僵尸 |
 

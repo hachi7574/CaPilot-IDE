@@ -38,3 +38,7 @@ target/
 
 # Generated Tauri icons
 # (keep default icons committed)
+
+# Claude Code local config (machine-specific paths / run caches)
+reasonix.toml
+.reasonix/

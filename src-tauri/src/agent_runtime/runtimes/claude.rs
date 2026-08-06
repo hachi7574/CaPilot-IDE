@@ -12,6 +12,16 @@ impl ClaudeAdapter {
         Self
     }
 
+    /// Claude Code's per-cwd project dir name: every non-`[a-zA-Z0-9]` character
+    /// becomes `-` (the leading `/` included). Mirrored exactly so the scan finds
+    /// the same dir Claude writes to.
+    fn claude_project_key(cwd: &Path) -> String {
+        cwd.to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect()
+    }
+
     /// Run `claude --version` and check if it succeeds
     fn check_available() -> bool {
         Command::new("claude")
@@ -35,16 +45,13 @@ impl ClaudeAdapter {
     /// Detect the most recent Claude Code session id for a cwd.
     ///
     /// Claude Code stores sessions under `~/.claude/projects/<project-key>/`
-    /// where `<project-key>` is the cwd with `/` → `-` (e.g. `/home/x` →
-    /// `-home-x`). Return the newest `*.jsonl` stem, or None if the cwd has no
-    /// session yet (fresh agent).
+    /// where `<project-key>` is the cwd with **every** non-`[a-zA-Z0-9]`
+    /// character replaced by `-` (including the leading `/` and any dots/spaces,
+    /// e.g. `/home/x/my.proj` → `-home-x-my-proj`). Return the newest `*.jsonl`
+    /// stem, or None if the cwd has no session yet (fresh agent).
     fn detect_resume_key(cwd: &Path) -> Option<String> {
         let home = std::env::var("HOME").ok()?;
-        let project_key = cwd
-            .to_string_lossy()
-            .trim_start_matches('/')
-            .replace('/', "-");
-        let dir = PathBuf::from(&home).join(".claude").join("projects").join(project_key);
+        let dir = PathBuf::from(&home).join(".claude").join("projects").join(Self::claude_project_key(cwd));
         let mut sessions: Vec<(SystemTime, String)> = Vec::new();
         let entries = std::fs::read_dir(dir).ok()?;
         for entry in entries.flatten() {
@@ -140,11 +147,23 @@ impl AgentRuntimeAdapter for ClaudeAdapter {
     }
 
     fn resume_args(&self, session: &AgentSession) -> Vec<String> {
-        // Resume the most recent Claude Code session in this context dir.
+        // An explicit stored key wins; otherwise fall back to detecting the most
+        // recent session in this context dir.
+        if let Some(key) = &session.resume_key {
+            return vec!["--resume".to_string(), key.clone()];
+        }
         match Self::detect_resume_key(&session.cwd) {
             Some(key) => vec!["--resume".to_string(), key],
             None => vec![], // no previous session — start fresh
         }
+    }
+
+    fn supports_resume(&self) -> bool {
+        true
+    }
+
+    fn capture_resume_key(&self, cwd: &Path) -> Option<String> {
+        Self::detect_resume_key(cwd)
     }
 
     fn speed_args(&self, speed: Speed) -> Vec<String> {
@@ -167,6 +186,32 @@ impl AgentRuntimeAdapter for ClaudeAdapter {
                 "--permission-mode".to_string(),
                 "bypassPermissions".to_string(),
             ],
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_project_key_matches_real_dir_encoding() {
+        // Claude Code encodes the cwd by replacing every non-[a-zA-Z0-9]
+        // character with '-', including the leading slash. These exact strings
+        // were verified against real ~/.claude/projects/ entries.
+        let cases = [
+            ("/home/hachi/CaPilot/workspaces/master", "-home-hachi-CaPilot-workspaces-master"),
+            ("/home/hachi/Project/CaPilot-Ide", "-home-hachi-Project-CaPilot-Ide"),
+            // Dots and spaces also collapse to '-'.
+            ("/home/x/my.proj", "-home-x-my-proj"),
+            ("/home/x/my dir", "-home-x-my-dir"),
+        ];
+        for (cwd, expected) in cases {
+            assert_eq!(
+                ClaudeAdapter::claude_project_key(Path::new(cwd)),
+                expected,
+                "cwd {cwd}"
+            );
         }
     }
 }

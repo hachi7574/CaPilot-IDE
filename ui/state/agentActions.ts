@@ -18,7 +18,8 @@ const DEFAULT_PROJECT = MASTER_PROJECT;
 /** Spawn a brand-new agent session and register it in the store. */
 export async function spawnAgent(
   role: "master" | "worker" | "standalone",
-  project?: string
+  project?: string,
+  runtime: string = DEFAULT_RUNTIME
 ): Promise<string> {
   const s = useStore.getState();
   const { channel, flush } = createBufferedChannel();
@@ -30,13 +31,14 @@ export async function spawnAgent(
   const projectRoot =
     proj === MASTER_PROJECT ? undefined : s.projectRoots[proj];
   const info = (await invoke("agent_spawn", {
-    runtime: DEFAULT_RUNTIME,
+    runtime,
     role,
     project: proj,
     projectRoot: projectRoot ?? null,
     resumeKey: null,
     model: s.selectedModel,
     speed: s.speed,
+    mode: s.permissionMode,
     onData: channel,
   })) as AgentInfo;
   flush(info.id);
@@ -45,10 +47,29 @@ export async function spawnAgent(
     id: info.id,
     type: "agent",
     agentId: info.id,
-    title: info.title || `${DEFAULT_RUNTIME}@${role}`,
+    title: info.title || `${runtime}@${role}`,
   });
   if (role === "master") s.setMasterAgentId(info.id);
   return info.id;
+}
+
+/** Spawn a terminal from a new-terminal template (project "+" / tab-bar "+"
+ *  picker): bash → plain shell, claude → claude code. Custom quick-start
+ *  commands run in a bash terminal after the shell reaches its prompt. */
+export async function spawnTerminal(
+  project: string,
+  template: { runtime: string; command: string },
+  role: "master" | "worker" | "standalone" = "standalone"
+): Promise<string> {
+  const id = await spawnAgent(role, project, template.runtime);
+  if (template.command && template.runtime.startsWith("bash")) {
+    // Wait for the shell prompt, then send the command (raw:false appends \r).
+    await new Promise((r) => setTimeout(r, 400));
+    await invoke("agent_write", { id, data: template.command, raw: false }).catch(
+      () => {}
+    );
+  }
+  return id;
 }
 
 /** Ensure the target agent has a live PTY channel (resume restored sessions).

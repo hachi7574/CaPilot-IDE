@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useStore } from "../../state/store";
 import { connectEsp, disconnectEsp } from "../../state/esp";
 import { setSmartReturn } from "../../state/orchestration";
@@ -27,6 +28,26 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
       return true;
     }
   });
+
+  // Session-end handling: "keep" (default) marks a naturally-exited session done
+  // (recoverable from the sidebar's "已结束" group); "delete" removes it.
+  const [sessionEndMode, setSessionEndMode] = useState<"keep" | "delete">("keep");
+  useEffect(() => {
+    invoke<string | null>("setting_get", { key: "session_end_mode" })
+      .then((v) => {
+        if (v) setSessionEndMode(v === "delete" ? "delete" : "keep");
+      })
+      .catch(() => {
+        // Backend not ready — keep default.
+      });
+  }, []);
+
+  const changeSessionEndMode = async (mode: "keep" | "delete") => {
+    setSessionEndMode(mode);
+    await invoke("setting_set", { key: "session_end_mode", value: mode }).catch(
+      () => {}
+    );
+  };
 
   const toggleNotifications = () => {
     const next = !notifEnabled;
@@ -165,6 +186,46 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               }}
             >
               {smartReturn ? "开" : "关"}
+            </button>
+          </div>
+        </div>
+
+        {/* Session end handling */}
+        <div className="modal-section" style={{ marginBottom: 20 }}>
+          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: 10, color: "var(--muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
+            会话
+          </div>
+          <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 8 }}>
+            进程自然退出后（终端里 exit / 任务跑完 / Ctrl+D，不是点 × 关闭）
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button
+              onClick={() => changeSessionEndMode("keep")}
+              style={{
+                fontFamily: "var(--pixel)",
+                fontSize: 10,
+                padding: "6px 12px",
+                border: `1px solid ${sessionEndMode === "keep" ? "var(--brand)" : "var(--rule2)"}`,
+                color: sessionEndMode === "keep" ? "var(--brand)" : "var(--muted)",
+                background: sessionEndMode === "keep" ? "rgba(139,92,246,.08)" : "transparent",
+                cursor: "pointer",
+              }}
+            >
+              保留并标记已结束（侧栏可找回）
+            </button>
+            <button
+              onClick={() => changeSessionEndMode("delete")}
+              style={{
+                fontFamily: "var(--pixel)",
+                fontSize: 10,
+                padding: "6px 12px",
+                border: `1px solid ${sessionEndMode === "delete" ? "var(--brand)" : "var(--rule2)"}`,
+                color: sessionEndMode === "delete" ? "var(--brand)" : "var(--muted)",
+                background: sessionEndMode === "delete" ? "rgba(139,92,246,.08)" : "transparent",
+                cursor: "pointer",
+              }}
+            >
+              直接删除
             </button>
           </div>
         </div>

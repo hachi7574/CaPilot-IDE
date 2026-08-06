@@ -30,6 +30,13 @@ pub struct AgentSessionRecord {
     pub cwd: PathBuf,
     pub title: String,
     pub status: String, // idle | running | busy | done | failed
+    /// Permission mode at spawn ("ask" | "auto" | "yolo"), persisted so a
+    /// resumed session keeps the composer's choice.
+    pub mode: String,
+    /// Speed tier at spawn ("high" | "mid" | "fast" | "auto").
+    pub speed: String,
+    /// Selected model id at spawn (None = runtime default).
+    pub model: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -44,6 +51,9 @@ pub struct AgentMeta {
     pub status: String,
     pub cwd: PathBuf,
     pub title: String,
+    pub mode: String,
+    pub speed: String,
+    pub model: Option<String>,
     pub updated_at: i64,
 }
 
@@ -56,6 +66,28 @@ pub fn workspace_root() -> PathBuf {
 
 pub fn project_dir(project: &str) -> PathBuf {
     workspace_root().join(project)
+}
+
+/// True when a project dir contains only scaffold (`.git`, empty `agents/`,
+/// `context/`, `sessions.db`) — no real agents or user files. Used to safely drop
+/// the legacy "default" project dir after its sessions DB was migrated up.
+fn is_pure_scaffold(dir: &std::path::Path) -> bool {
+    let Ok(mut entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.all(|entry| {
+        let Ok(entry) = entry else { return false };
+        let name = entry.file_name();
+        match name.to_str() {
+            Some(".git") | Some("context") | Some("sessions.db") => true,
+            Some("agents") => entry
+                .path()
+                .read_dir()
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(false),
+            _ => false,
+        }
+    })
 }
 
 /// Create the contexts workspace layout for a project. Also `git init`s the
@@ -78,6 +110,24 @@ pub fn agent_dir(project: &str, agent_id: &str) -> PathBuf {
     project_dir(project).join("agents").join(agent_id)
 }
 
+/// Persist a custom project root (picked folder / git clone) to
+/// `~/CaPilot/workspaces/<name>/project.json`. Written at create/clone time so
+/// the root survives even with zero agents (agent-meta recovery needs one).
+pub fn write_project_root(name: &str, root: &std::path::Path) -> std::io::Result<()> {
+    let dir = project_dir(name);
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(
+        dir.join("project.json"),
+        serde_json::json!({ "root": root }).to_string(),
+    )
+}
+
+fn persisted_project_root(name: &str) -> Option<PathBuf> {
+    let data = std::fs::read_to_string(project_dir(name).join("project.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&data).ok()?;
+    v.get("root").and_then(|r| r.as_str()).map(PathBuf::from)
+}
+
 /// Recover a custom-rooted project's real on-disk root from its agent metadata.
 ///
 /// Custom-rooted projects (git-cloned / picked folder) host their session
@@ -85,8 +135,12 @@ pub fn agent_dir(project: &str, agent_id: &str) -> PathBuf {
 /// `cwd` points at the real project root. When an agent's cwd is NOT its own
 /// workspace-scoped dir (nor the workspace project dir), that cwd is the root to
 /// surface — so after a restart the sidebar restores the correct root instead of
-/// the empty workspace dir.
+/// the empty workspace dir. A persisted `project.json` root (written at
+/// create/clone) takes precedence so the root survives a project with no agents.
 pub fn custom_project_root(name: &str) -> Option<PathBuf> {
+    if let Some(root) = persisted_project_root(name) {
+        return Some(root);
+    }
     let agents_dir = project_dir(name).join("agents");
     let entries = std::fs::read_dir(&agents_dir).ok()?;
     for entry in entries.flatten() {
@@ -105,9 +159,13 @@ pub fn custom_project_root(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Path to the single top-level sessions DB (`~/CaPilot/sessions.db`).
 #[allow(dead_code)]
-pub fn sessions_db_path(project: &str) -> PathBuf {
-    project_dir(project).join("sessions.db")
+pub fn sessions_db_path(_project: &str) -> PathBuf {
+    workspace_root()
+        .parent()
+        .map(|p| p.join("sessions.db"))
+        .unwrap_or_else(|| PathBuf::from("CaPilot").join("sessions.db"))
 }
 
 // ── .agent-meta.json ────────────────────────────────────────────
@@ -134,6 +192,25 @@ pub fn read_agent_meta(project: &str, agent_id: &str) -> std::io::Result<AgentMe
 
 // ── SQLite sessions DB ──────────────────────────────────────────
 
+/// Idempotent column migration: adds `column_def` (a `name TYPE ...` fragment)
+/// to `table` only when the column is missing — so pre-existing DBs pick up new
+/// columns without touching existing rows.
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    column_def: &str,
+) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let cols: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<_, _>>()?;
+    if !cols.iter().any(|c| c == column) {
+        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column_def};"))?;
+    }
+    Ok(())
+}
+
 pub struct SessionsDb {
     conn: Connection,
 }
@@ -151,22 +228,56 @@ impl SessionsDb {
                 cwd        TEXT NOT NULL,
                 title      TEXT NOT NULL DEFAULT '',
                 status     TEXT NOT NULL DEFAULT 'idle',
+                mode       TEXT NOT NULL DEFAULT 'ask',
+                speed      TEXT NOT NULL DEFAULT 'auto',
+                model      TEXT,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             );",
         )?;
+        // Migrate pre-existing DBs (created before mode/speed/model existed):
+        // ALTER TABLE only adds a missing column, so old rows default cleanly.
+        ensure_column(&conn, "sessions", "mode", "mode TEXT NOT NULL DEFAULT 'ask'")?;
+        ensure_column(&conn, "sessions", "speed", "speed TEXT NOT NULL DEFAULT 'auto'")?;
+        ensure_column(&conn, "sessions", "model", "model TEXT")?;
         Ok(Self { conn })
+    }
+
+    /// Read a persisted app setting, or None when unset.
+    pub fn get_setting(&self, key: &str) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    /// Upsert a persisted app setting.
+    pub fn set_setting(&self, key: &str, value: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
     }
 
     pub fn insert(&self, s: &AgentSessionRecord) -> rusqlite::Result<()> {
         self.conn.execute(
             "INSERT INTO sessions
-                (id, project, role, runtime, resume_key, cwd, title, status, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                (id, project, role, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET
                 project=excluded.project, role=excluded.role, runtime=excluded.runtime,
                 resume_key=excluded.resume_key, cwd=excluded.cwd, title=excluded.title,
-                status=excluded.status, updated_at=excluded.updated_at",
+                status=excluded.status, mode=excluded.mode, speed=excluded.speed,
+                model=excluded.model, updated_at=excluded.updated_at",
             params![
                 s.id,
                 s.project,
@@ -176,6 +287,9 @@ impl SessionsDb {
                 s.cwd.to_string_lossy(),
                 s.title,
                 s.status,
+                s.mode,
+                s.speed,
+                s.model,
                 s.created_at,
                 s.updated_at
             ],
@@ -216,10 +330,27 @@ impl SessionsDb {
         Ok(())
     }
 
+    /// Update a session's mode/speed/model (per-session composer config). Only
+    /// updates the DB + timestamps — the running PTY is left untouched.
+    pub fn update_config(
+        &self,
+        id: &str,
+        mode: &str,
+        speed: &str,
+        model: Option<&str>,
+        updated_at: i64,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET mode = ?1, speed = ?2, model = ?3, updated_at = ?4 WHERE id = ?5",
+            params![mode, speed, model, updated_at, id],
+        )?;
+        Ok(())
+    }
+
     pub fn get(&self, id: &str) -> rusqlite::Result<Option<AgentSessionRecord>> {
         self.conn
             .query_row(
-                "SELECT id, project, role, runtime, resume_key, cwd, title, status, created_at, updated_at
+                "SELECT id, project, role, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 params![id],
                 Self::row_to_session,
@@ -230,7 +361,7 @@ impl SessionsDb {
     pub fn list_all(&self) -> rusqlite::Result<Vec<AgentSessionRecord>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, project, role, runtime, resume_key, cwd, title, status, created_at, updated_at FROM sessions ORDER BY updated_at DESC")?;
+            .prepare("SELECT id, project, role, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at FROM sessions ORDER BY updated_at DESC")?;
         let rows = stmt.query_map([], Self::row_to_session)?;
         rows.collect()
     }
@@ -238,6 +369,37 @@ impl SessionsDb {
     pub fn delete(&self, id: &str) -> rusqlite::Result<()> {
         self.conn
             .execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Rewrite a project's sessions after its workspace dir was renamed: update
+    /// the `project` column, and rewrite `cwd` for default-rooted sessions
+    /// (cwd inside the old workspace prefix). Custom-rooted cwds are untouched.
+    pub fn rename_project(
+        &self,
+        old: &str,
+        new: &str,
+        old_prefix: &str,
+        new_prefix: &str,
+    ) -> rusqlite::Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, cwd FROM sessions WHERE project = ?1")?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map(params![old], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .filter_map(Result::ok)
+            .collect();
+        for (id, cwd) in rows {
+            let new_cwd = if cwd.starts_with(old_prefix) {
+                format!("{}{}", new_prefix, &cwd[old_prefix.len()..])
+            } else {
+                cwd
+            };
+            self.conn.execute(
+                "UPDATE sessions SET project = ?1, cwd = ?2 WHERE id = ?3",
+                params![new, new_cwd, id],
+            )?;
+        }
         Ok(())
     }
 
@@ -251,39 +413,52 @@ impl SessionsDb {
             cwd: PathBuf::from(row.get::<_, String>(5)?),
             title: row.get(6)?,
             status: row.get(7)?,
-            created_at: row.get(8)?,
-            updated_at: row.get(9)?,
+            mode: row.get(8)?,
+            speed: row.get(9)?,
+            model: row.get(10)?,
+            created_at: row.get(11)?,
+            updated_at: row.get(12)?,
         })
     }
 }
 
 // ── Managed state ───────────────────────────────────────────────
 
-/// Shared persistence handle. Holds the current project and its session DB.
+/// Shared persistence handle. Holds the single sessions DB.
 /// `rusqlite::Connection` is not Sync, so the DB sits behind a Mutex.
 pub struct Persistence {
-    project: String,
     db: Mutex<SessionsDb>,
 }
 
 impl Persistence {
-    pub fn open(project: &str) -> std::io::Result<Self> {
-        let project = if project.is_empty() {
-            DEFAULT_PROJECT.to_string()
-        } else {
-            project.to_string()
-        };
-        let dir = ensure_project(&project)?;
-        let db = SessionsDb::open(&dir.join("sessions.db"))
-            .map_err(std::io::Error::other)?;
+    /// Open the sessions store. Sessions live in a SINGLE top-level database
+    /// (`~/CaPilot/sessions.db`) — not inside a per-project (or "default")
+    /// workspace dir — so no scaffold project is created just for persistence.
+    /// A legacy `workspaces/default/sessions.db` (the old global store) is
+    /// migrated up once, then its empty scaffold dir is removed.
+    pub fn open() -> std::io::Result<Self> {
+        let ca_pilot = workspace_root()
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("CaPilot"));
+        std::fs::create_dir_all(&ca_pilot)?;
+        let db_path = ca_pilot.join("sessions.db");
+        // Migrate the old global sessions DB out of the "default" project dir.
+        let legacy = workspace_root().join(DEFAULT_PROJECT).join("sessions.db");
+        if !db_path.exists() && legacy.exists() {
+            let _ = std::fs::copy(&legacy, &db_path);
+        }
+        // Drop the legacy "default" scaffold dir (migrated sessions DB above) so
+        // it stops showing as a project — only when it's pure scaffold (no real
+        // agents / user files), so no user data is ever lost.
+        let legacy_dir = workspace_root().join(DEFAULT_PROJECT);
+        if is_pure_scaffold(&legacy_dir) {
+            let _ = std::fs::remove_dir_all(&legacy_dir);
+        }
+        let db = SessionsDb::open(&db_path).map_err(std::io::Error::other)?;
         Ok(Self {
-            project,
             db: Mutex::new(db),
         })
-    }
-
-    pub fn project(&self) -> &str {
-        &self.project
     }
 
     pub fn db(&self) -> &Mutex<SessionsDb> {
@@ -305,6 +480,9 @@ mod tests {
             cwd: PathBuf::from("/tmp/w/agents/abc"),
             title: "Claude@worker".into(),
             status: "running".into(),
+            mode: "yolo".into(),
+            speed: "fast".into(),
+            model: Some("claude-opus-5".into()),
             created_at: 1,
             updated_at: 2,
         }
@@ -319,6 +497,10 @@ mod tests {
         let all = db.list_all().unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].resume_key.as_deref(), Some("k1"));
+        // mode/speed/model survive the roundtrip.
+        assert_eq!(all[0].mode, "yolo");
+        assert_eq!(all[0].speed, "fast");
+        assert_eq!(all[0].model.as_deref(), Some("claude-opus-5"));
 
         db.update_status("abc", "done", 99).unwrap();
         let got = db.get("abc").unwrap().unwrap();
@@ -343,6 +525,9 @@ mod tests {
             status: "running".into(),
             cwd: target.clone(),
             title: "t".into(),
+            mode: "ask".into(),
+            speed: "auto".into(),
+            model: None,
             updated_at: 5,
         };
         let json = serde_json::to_vec_pretty(&meta).unwrap();
@@ -351,6 +536,90 @@ mod tests {
             serde_json::from_slice(&std::fs::read(target.join(".agent-meta.json")).unwrap()).unwrap();
         assert_eq!(read.id, "x");
         assert_eq!(read.role, "master");
+        assert_eq!(read.mode, "ask");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn settings_kv_roundtrip() {
+        let path = std::env::temp_dir().join(format!("capilot-settings-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let db = SessionsDb::open(&path).unwrap();
+        // Unset → None.
+        assert_eq!(db.get_setting("session_end_mode").unwrap(), None);
+        // Upsert + read back.
+        db.set_setting("session_end_mode", "delete").unwrap();
+        assert_eq!(
+            db.get_setting("session_end_mode").unwrap().as_deref(),
+            Some("delete")
+        );
+        // Upsert overwrites.
+        db.set_setting("session_end_mode", "keep").unwrap();
+        assert_eq!(
+            db.get_setting("session_end_mode").unwrap().as_deref(),
+            Some("keep")
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn update_config_persists_per_session_values() {
+        let path = std::env::temp_dir().join(format!("capilot-cfg-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let db = SessionsDb::open(&path).unwrap();
+        db.insert(&sample()).unwrap();
+
+        // Change mode + model, keep speed untouched (None).
+        db.update_config("abc", "yolo", "auto", Some("claude-opus-5"), 99)
+            .unwrap();
+        let got = db.get("abc").unwrap().unwrap();
+        assert_eq!(got.mode, "yolo");
+        assert_eq!(got.speed, "auto");
+        assert_eq!(got.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(got.updated_at, 99);
+
+        // Clearing model back to default.
+        db.update_config("abc", "ask", "fast", None, 100).unwrap();
+        let got = db.get("abc").unwrap().unwrap();
+        assert_eq!(got.mode, "ask");
+        assert_eq!(got.speed, "fast");
+        assert_eq!(got.model, None);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn old_schema_db_is_migrated() {
+        // Simulate a pre-mode/speed/model DB (created by an older build): open()
+        // must add the missing columns and keep old rows readable.
+        let path = std::env::temp_dir().join(format!("capilot-legacy-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE sessions (
+                    id         TEXT PRIMARY KEY,
+                    project    TEXT NOT NULL,
+                    role       TEXT NOT NULL,
+                    runtime    TEXT NOT NULL,
+                    resume_key TEXT,
+                    cwd        TEXT NOT NULL,
+                    title      TEXT NOT NULL DEFAULT '',
+                    status     TEXT NOT NULL DEFAULT 'idle',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );",
+            )
+            .unwrap();
+        }
+        let db = SessionsDb::open(&path).unwrap();
+        // Old rows (none here) would default to ask/auto; new inserts carry values.
+        assert_eq!(db.list_all().unwrap().len(), 0);
+        db.insert(&sample()).unwrap();
+        let got = db.get("abc").unwrap().unwrap();
+        assert_eq!(got.mode, "yolo");
+        assert_eq!(got.speed, "fast");
+        assert_eq!(got.model.as_deref(), Some("claude-opus-5"));
+        let _ = std::fs::remove_file(&path);
     }
 }

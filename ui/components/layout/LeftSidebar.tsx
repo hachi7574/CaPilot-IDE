@@ -2,17 +2,49 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { useStore, AgentInfo } from "../../state/store";
+import { useStore, AgentInfo, AgentStatus, getAgentActivity } from "../../state/store";
 import { setAgentRole } from "../../state/orchestration";
-import { spawnAgent, closeAgent as closeAgentAction, MASTER_PROJECT } from "../../state/agentActions";
+import {
+  spawnAgent,
+  closeAgent as closeAgentAction,
+  MASTER_PROJECT,
+} from "../../state/agentActions";
 import { SettingsModal } from "./SettingsModal";
+import { TerminalTemplatePicker } from "./TerminalTemplatePicker";
 
-/** Derive the workspace project name from an agent cwd. */
-function projectOf(cwd: string): string {
+/** Derive the workspace project name from an agent cwd. Prefers the
+ *  `workspaces/<name>` segment; for custom-rooted projects falls back to the
+ *  store's project-root map so an agent cwd inside a known root groups under
+ *  that project even when the picked folder's base name differs (and survives a
+ *  project rename, which keeps the folder path). */
+function projectOf(cwd: string, roots: Record<string, string>): string {
   const m = cwd.match(/workspaces\/([^/]+)/);
   if (m) return m[1];
+  // Master-group terminals live in a short top-level dir (~/CaPilot/Master).
+  if (cwd.endsWith("/CaPilot/Master") || cwd.includes("/CaPilot/Master/")) {
+    return "master";
+  }
+  for (const [name, root] of Object.entries(roots)) {
+    if (!root) continue;
+    const base = root.endsWith("/") ? root : root + "/";
+    if (cwd === root || cwd.startsWith(base)) return name;
+  }
   const parts = cwd.split("/").filter(Boolean);
   return parts[parts.length - 1] || cwd;
+}
+
+/** Chinese relative duration since last activity (matches the Preview's
+ *  `tm-time`: "刚刚" / "20分钟" / "3小时" / "4天"). */
+function fmtActivity(ms: number | undefined): string {
+  if (ms === undefined) return "—";
+  const diff = Math.max(0, Date.now() - ms);
+  const s = Math.floor(diff / 1000);
+  if (s < 60) return "刚刚";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}分钟`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}小时`;
+  return `${Math.floor(h / 24)}天`;
 }
 
 /** Derive a project name from a git clone URL (last path segment, strip .git).
@@ -21,6 +53,31 @@ function repoBaseName(url: string): string {
   const clean = url.split(/[?#]/)[0];
   const seg = clean.split("/").filter(Boolean).pop() ?? "";
   return seg.replace(/\.git$/i, "");
+}
+
+/** Copy text to the clipboard; falls back to the legacy execCommand path for
+ *  WebKitGTK builds without the async clipboard API. */
+async function copyText(text: string): Promise<void> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+  } catch {
+    // fall through to the legacy path
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  try {
+    document.execCommand("copy");
+  } catch {
+    // ignore
+  }
+  document.body.removeChild(ta);
 }
 
 interface CtxState {
@@ -39,8 +96,13 @@ export function LeftSidebar() {
   const tabs = useStore((s) => s.tabs);
   const activeTabId = useStore((s) => s.activeTabId);
   const masterAgentId = useStore((s) => s.masterAgentId);
+  const setMasterAgentId = useStore((s) => s.setMasterAgentId);
+  const requestResume = useStore((s) => s.requestResume);
+  const closeTab = useStore((s) => s.closeTab);
+  const dropAgentChannel = useStore((s) => s.dropAgentChannel);
   const projects = useStore((s) => s.projects);
   const setProjects = useStore((s) => s.setProjects);
+  const projectRoots = useStore((s) => s.projectRoots);
   const setProjectRoots = useStore((s) => s.setProjectRoots);
   const focusedProject = useStore((s) => s.focusedProject);
   const setFocusedProject = useStore((s) => s.setFocusedProject);
@@ -49,11 +111,31 @@ export function LeftSidebar() {
   const addTab = useStore((s) => s.addTab);
 
   const [collapsedProjs, setCollapsedProjs] = useState<Set<string>>(new Set());
+  // Per-project "已结束 (N)" group expansion (default collapsed).
+  const [endedOpen, setEndedOpen] = useState<Set<string>>(new Set());
+  const toggleEnded = (name: string) =>
+    setEndedOpen((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
   const [masterExpanded, setMasterExpanded] = useState(true);
   const [ctx, setCtx] = useState<CtxState | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [nprojOpen, setNprojOpen] = useState(false);
   const [nprojError, setNprojError] = useState<string | null>(null);
+  const [renameTarget, setRenameTarget] = useState<string | null>(null);
+  const renameProject = useStore((s) => s.renameProject);
+  const moveProject = useStore((s) => s.moveProject);
+  const sleepProject = useStore((s) => s.sleepProject);
+  const [draggedProj, setDraggedProj] = useState<string | null>(null);
+  // New-terminal template picker: open menu position (project + anchor).
+  const [termMenu, setTermMenu] = useState<{
+    x: number;
+    y: number;
+    project: string;
+  } | null>(null);
   const leftWidth = useStore((s) => s.leftWidth);
   const setLeftWidth = useStore((s) => s.setLeftWidth);
 
@@ -94,6 +176,15 @@ export function LeftSidebar() {
     };
   }, [ctx]);
 
+  // Coarse poll tick so the relative activity timestamps (`tm-time`) stay
+  // fresh. They live in a non-reactive module map (see store.ts) — re-rendering
+  // on every PTY chunk would be too hot, so a 30s React tick is the refresh.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setTick((v) => v + 1), 30000);
+    return () => clearInterval(t);
+  }, []);
+
   const toggleProj = (id: string) => {
     setCollapsedProjs((prev) => {
       const next = new Set(prev);
@@ -103,13 +194,25 @@ export function LeftSidebar() {
     });
   };
 
+  // Clicking a project label never clears focus. New project → focus + expand
+  // its terminals; clicking the already-focused project → toggle the terminal
+  // list collapsed/expanded (收起 / 展开), keeping focus.
   const focusProject = (id: string) => {
-    setFocusedProject(id === focusedProject ? null : id);
-    setCollapsedProjs((prev) => {
-      const next = new Set(prev);
-      next.delete(id);
-      return next;
-    });
+    if (focusedProject === id) {
+      setCollapsedProjs((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      });
+    } else {
+      setFocusedProject(id);
+      setCollapsedProjs((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
   };
 
   // Spawn a terminal under a project, expanding the project first so the new
@@ -135,6 +238,9 @@ export function LeftSidebar() {
         });
       }
       setActiveTab(id);
+      // Reopening an ended master (from the "已结束" group) re-promotes it.
+      const agentInfo = agents.get(id);
+      if (agentInfo?.role === "master") setMasterAgentId(id);
     },
     [tabs, agents, addTab, setActiveTab]
   );
@@ -143,10 +249,10 @@ export function LeftSidebar() {
     setFocusedProject(MASTER_PROJECT);
     const masterId = masterAgentId;
     if (masterId && agents.has(masterId)) {
-      openAgentTab(masterId, "⭐master");
+      openAgentTab(masterId, "master");
     } else {
       if (!tabs.find((t) => t.id === "master")) {
-        addTab({ id: "master", type: "agent", agentId: undefined, title: "⭐master" });
+        addTab({ id: "master", type: "agent", agentId: undefined, title: "master" });
       }
       setActiveTab("master");
     }
@@ -179,16 +285,21 @@ export function LeftSidebar() {
   // Group agents by workspace project (keyed by project name → first cwd + agents).
   const agentsByProject = new Map<
     string,
-    { cwd: string; agents: { id: string; title: string }[] }
+    {
+      cwd: string;
+      agents: { id: string; title: string; status: AgentStatus; role: AgentInfo["role"] }[];
+    }
   >();
   agents.forEach((a, id) => {
-    const projName = projectOf(a.cwd);
+    const projName = projectOf(a.cwd, projectRoots);
     if (!agentsByProject.has(projName)) {
       agentsByProject.set(projName, { cwd: a.cwd, agents: [] });
     }
     agentsByProject.get(projName)!.agents.push({
       id,
       title: a.title || `agent-${id.slice(0, 4)}`,
+      status: a.status,
+      role: a.role,
     });
   });
 
@@ -207,15 +318,11 @@ export function LeftSidebar() {
 
   // Terminals living in the Master group: standalone agents spawned via the
   // group's "＋ 新建终端" (cwd maps to the "master" project). The master session
-  // row itself is always rendered separately, so it is excluded here.
+  // row itself is rendered separately (when a master exists), so it is excluded
+  // here. The Master group may have zero terminals — every row is closable.
   const masterTerminals = (agentsByProject.get(MASTER_PROJECT)?.agents ?? []).filter(
     (a) => a.id !== masterAgentId
   );
-
-  // Master-group terminals are closable, but at least one must stay: the pinned
-  // ⭐ master row is always rendered, so closing is allowed once there is any
-  // extra terminal (group count > 1), and the last terminal keeps no ×.
-  const masterCloseable = masterTerminals.length >= 1;
 
   const toggleMaster = () => setMasterExpanded((v) => !v);
 
@@ -378,7 +485,13 @@ export function LeftSidebar() {
               <div className={`uj-master-group${masterExpanded ? "" : " collapsed"}${focusedProject === MASTER_PROJECT ? " uo-master-focused" : ""}`}>
                 <div
                   className={`u9-master-btn${activeTabId === (masterAgentId || "master") ? " active" : ""}`}
-                  onClick={toggleMaster}
+                  onClick={() => {
+                    if (!masterAgentId) {
+                      openMaster(); // no master — clicking the group reopens it
+                    } else {
+                      toggleMaster();
+                    }
+                  }}
                   onContextMenu={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
@@ -391,7 +504,6 @@ export function LeftSidebar() {
                   }}
                 >
                   <span className="uj-master-arrow">▾</span>
-                  <span className="u9-master-icon">🔄</span>
                   <span className="u9-master-name">Master</span>
                   <button
                     className="un-master-new"
@@ -407,25 +519,27 @@ export function LeftSidebar() {
                 </div>
                 {masterExpanded && (
                   <>
-                    {/* Master session terminal row — opens the master. */}
-                    <div
-                      className={`terminal-item uj-master-term${activeTabId === (masterAgentId || "master") ? " active" : ""}`}
-                      onClick={openMaster}
-                      onContextMenu={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        setCtx({
-                          x: e.clientX,
-                          y: e.clientY,
-                          agentId: masterAgentId ?? undefined,
-                          isMaster: true,
-                        });
-                      }}
-                    >
-                      <span className="tm-icon">🤖</span>
-                      <span className="tm-name">⭐ master</span>
-                      <span className="tm-time">—</span>
-                      {masterCloseable && masterAgentId && (
+                    {/* Master session terminal row — opens the master. Shown only
+                        when a master agent exists; closable, so master may end up
+                        with zero terminals. */}
+                    {masterAgentId && (
+                      <div
+                        className={`terminal-item uj-master-term${activeTabId === masterAgentId ? " active" : ""}`}
+                        onClick={openMaster}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setCtx({
+                            x: e.clientX,
+                            y: e.clientY,
+                            agentId: masterAgentId,
+                            isMaster: true,
+                          });
+                        }}
+                      >
+                        <span className="tm-icon">🤖</span>
+                        <span className="tm-name">master</span>
+                        <span className="tm-time">{fmtActivity(getAgentActivity(masterAgentId))}</span>
                         <button
                           className="tm-close"
                           title="关闭并终止"
@@ -436,8 +550,8 @@ export function LeftSidebar() {
                         >
                           ×
                         </button>
-                      )}
-                    </div>
+                      </div>
+                    )}
                     {/* Standalone terminals spawned into the Master group. */}
                     {masterTerminals.map((a) => (
                       <div
@@ -452,7 +566,7 @@ export function LeftSidebar() {
                       >
                         <span className="tm-icon">🤖</span>
                         <span className="tm-name">{a.title}</span>
-                        <span className="tm-time">—</span>
+                        <span className="tm-time">{fmtActivity(getAgentActivity(a.id))}</span>
                         <button
                           className="tm-close"
                           title="关闭并终止"
@@ -482,15 +596,38 @@ export function LeftSidebar() {
                   // A project with zero terminals has nothing to collapse: no
                   // triangle, and the header click does not toggle.
                   const hasAgents = projAgents.length > 0;
+                  // Ended sessions render dimmed under a per-project "已结束 (N)"
+                  // group; clicking one reopens (resumes) it.
+                  const endedAgents = projAgents.filter((a) => a.status === "done");
+                  const liveAgents = projAgents.filter((a) => a.status !== "done");
                   return (
                     <div
                       key={name}
                       className={`proj${hasAgents && collapsedProjs.has(name) ? " collapsed" : ""}${focusedProject === name ? " focused" : ""}`}
                     >
                       <div
-                        className="proj-header"
-                        onClick={() => hasAgents && toggleProj(name)}
-                        onDoubleClick={() => focusProject(name)}
+                        className={`proj-header${draggedProj === name ? " drag-over" : ""}`}
+                        onClick={() => focusProject(name)}
+                        draggable
+                        onDragStart={(e) => {
+                          e.stopPropagation();
+                          setDraggedProj(name);
+                          e.dataTransfer.effectAllowed = "move";
+                          e.dataTransfer.setData("text/plain", name);
+                        }}
+                        onDragOver={(e) => {
+                          if (draggedProj && draggedProj !== name) {
+                            e.preventDefault();
+                            e.dataTransfer.dropEffect = "move";
+                          }
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          const from = draggedProj || e.dataTransfer.getData("text/plain");
+                          if (from && from !== name) moveProject(from, name);
+                          setDraggedProj(null);
+                        }}
+                        onDragEnd={() => setDraggedProj(null)}
                         onContextMenu={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
@@ -502,53 +639,136 @@ export function LeftSidebar() {
                           });
                         }}
                       >
-                        {hasAgents && <span className="pj-arrow">▾</span>}
+                        {hasAgents ? (
+                          <span
+                            className="pj-arrow"
+                            title="展开 / 折叠"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              toggleProj(name);
+                            }}
+                          >
+                            ▾
+                          </span>
+                        ) : (
+                          // Empty projects get the same triangle for a unified
+                          // look, but it is decorative — the click falls through
+                          // to the header (focus).
+                          <span className="pj-arrow" aria-hidden>
+                            ▾
+                          </span>
+                        )}
                         <span className="pj-name">{name}</span>
                         <button
                           className="um-new-term"
                           title="新建终端"
                           onClick={(e) => {
                             e.stopPropagation();
-                            spawnInProject(name);
+                            const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                            setTermMenu({ x: r.right, y: r.bottom, project: name });
                           }}
                         >
                           +
                         </button>
                       </div>
-                      {projAgents.length === 0 ? (
-                        <div className="nproj-empty-row">（空）· 右键新建终端</div>
-                      ) : (
-                        projAgents.map((a) => (
-                          <div
-                            key={a.id}
-                            className={`terminal-item${activeTabId === a.id ? " active" : ""}`}
-                            onClick={() => openProjectTerminal(name, a.id)}
-                            onContextMenu={(e) => {
-                              e.preventDefault();
+                      {liveAgents.map((a) => (
+                        <div
+                          key={a.id}
+                          className={`terminal-item${activeTabId === a.id ? " active" : ""}`}
+                          onClick={() => openProjectTerminal(name, a.id)}
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setCtx({ x: e.clientX, y: e.clientY, agentId: a.id });
+                          }}
+                        >
+                          <span className="tm-icon">🤖</span>
+                          <span className="tm-name">{a.title}</span>
+                          <span className="tm-time">{fmtActivity(getAgentActivity(a.id))}</span>
+                          <button
+                            className="tm-close"
+                            title="关闭并终止"
+                            onClick={(e) => {
                               e.stopPropagation();
-                              setCtx({ x: e.clientX, y: e.clientY, agentId: a.id });
+                              closeAgentAction(a.id);
                             }}
                           >
-                            <span className="tm-icon">🤖</span>
-                            <span className="tm-name">{a.title}</span>
-                            <span className="tm-time">—</span>
-                            <button
-                              className="tm-close"
-                              title="关闭并终止"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                closeAgentAction(a.id);
-                              }}
-                            >
-                              ×
-                            </button>
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                      {endedAgents.length > 0 && (
+                        <>
+                          <div
+                            className="term-ended-head"
+                            onClick={() => toggleEnded(name)}
+                            title={endedOpen.has(name) ? "收起已结束" : "展开已结束"}
+                          >
+                            <span className="pj-arrow">{endedOpen.has(name) ? "▾" : "▸"}</span>
+                            <span className="tm-name">已结束 ({endedAgents.length})</span>
                           </div>
-                        ))
+                          {endedOpen.has(name) &&
+                            endedAgents.map((a) => (
+                              <div
+                                key={a.id}
+                                className={`terminal-item term-ended${activeTabId === a.id ? " active" : ""}`}
+                                onClick={() => {
+                                  // Ended sessions never auto-resume; force a
+                                  // fresh mount that resumes: drop the dead
+                                  // channel, close any open (dead) tab, flag the
+                                  // reopen, then open the terminal.
+                                  dropAgentChannel(a.id);
+                                  if (tabs.some((t) => t.id === a.id)) {
+                                    closeTab(a.id);
+                                  }
+                                  requestResume(a.id);
+                                  openProjectTerminal(name, a.id);
+                                }}
+                                onContextMenu={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setCtx({ x: e.clientX, y: e.clientY, agentId: a.id });
+                                }}
+                              >
+                                <span className="tm-icon">🕸</span>
+                                <span className="tm-name">{a.title}</span>
+                                <span className="tm-time">{fmtActivity(getAgentActivity(a.id))}</span>
+                                <button
+                                  className="tm-close"
+                                  title="删除已结束会话"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    closeAgentAction(a.id);
+                                  }}
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            ))}
+                        </>
                       )}
                     </div>
                   );
                 });
               })()}
+              {/* Drop-to-bottom zone: dropping a project onto the blank area
+                  below the list moves it to the end (master stays pinned). */}
+              <div
+                className={`proj-dropzone${draggedProj ? " dragging" : ""}`}
+                onDragOver={(e) => {
+                  if (draggedProj) {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = "move";
+                  }
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  const from = draggedProj || e.dataTransfer.getData("text/plain");
+                  const last = projects[projects.length - 1];
+                  if (from && last && from !== last) moveProject(from, last);
+                  setDraggedProj(null);
+                }}
+              />
             </div>
           </>
         )}
@@ -559,6 +779,15 @@ export function LeftSidebar() {
           ctx={ctx}
           onClose={() => setCtx(null)}
           onSpawnInProject={spawnInProject}
+          onRenameProject={setRenameTarget}
+          onSleepProject={sleepProject}
+        />
+      )}
+      {termMenu && (
+        <TerminalTemplatePicker
+          project={termMenu.project}
+          anchor={{ x: termMenu.x, y: termMenu.y }}
+          onClose={() => setTermMenu(null)}
         />
       )}
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
@@ -571,6 +800,19 @@ export function LeftSidebar() {
           }}
           onCreate={handleCreateProject}
           onGitClone={handleGitClone}
+        />
+      )}
+      {renameTarget && (
+        <RenameProjectModal
+          project={renameTarget}
+          onClose={() => setRenameTarget(null)}
+          onRename={async (newName) => {
+            const err = await renameProject(renameTarget, newName)
+              .then(() => null)
+              .catch((e) => String(e));
+            if (!err) setRenameTarget(null);
+            return err;
+          }}
         />
       )}
 
@@ -764,16 +1006,85 @@ function NewProjectModal({
   );
 }
 
+/* ── Rename-project modal ─────────────────────────────────────── */
+
+function RenameProjectModal({
+  project,
+  onClose,
+  onRename,
+}: {
+  project: string;
+  onClose: () => void;
+  onRename: (newName: string) => Promise<string | null>;
+}) {
+  const [name, setName] = useState(project);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  const submit = async () => {
+    const trimmed = name.trim();
+    if (!trimmed || busy || trimmed === project) return;
+    setBusy(true);
+    setError(null);
+    const err = await onRename(trimmed);
+    setBusy(false);
+    if (err) setError(err);
+  };
+
+  return (
+    <div className="nproj-overlay" onClick={onClose}>
+      <div className="nproj-card" onClick={(e) => e.stopPropagation()}>
+        <div className="nproj-title">✏ 重命名项目</div>
+        <div className="ug-nproj-label">新项目名称</div>
+        <input
+          ref={inputRef}
+          className="nproj-input"
+          placeholder="项目名称"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") submit();
+            if (e.key === "Escape") onClose();
+          }}
+        />
+        {error && <div className="nproj-error">{error}</div>}
+        <div className="nproj-actions">
+          <button className="nproj-btn" onClick={onClose}>
+            取消
+          </button>
+          <button
+            className="nproj-btn primary"
+            onClick={submit}
+            disabled={busy || !name.trim() || name.trim() === project}
+          >
+            {busy ? "重命名中…" : "重命名"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ── Right-click context menu ─────────────────────────────────── */
 
 function ContextMenu({
   ctx,
   onClose,
   onSpawnInProject,
+  onRenameProject,
+  onSleepProject,
 }: {
   ctx: CtxState;
   onClose: () => void;
   onSpawnInProject?: (project: string) => void;
+  onRenameProject?: (project: string) => void;
+  onSleepProject?: (project: string) => void;
 }) {
   // ── Project context ───────────────────────────────────────────
   if (ctx.project) {
@@ -785,7 +1096,6 @@ function ContextMenu({
         onClick={(e) => e.stopPropagation()}
         onContextMenu={(e) => e.stopPropagation()}
       >
-        <div className="ctx-label">{proj}</div>
         <div
           className="ctx-item"
           onClick={() => {
@@ -809,10 +1119,42 @@ function ContextMenu({
             📁 在文件管理器中显示
           </div>
         )}
+        {ctx.cwd && (
+          <div
+            className="ctx-item"
+            onClick={() => {
+              if (ctx.cwd) void copyText(ctx.cwd);
+              onClose();
+            }}
+          >
+            📋 复制路径
+          </div>
+        )}
         <div className="ctx-sep" />
-        <div className="ctx-item" onClick={onClose}>
-          ✏ 重命名项目（待开发）
+        <div
+          className="ctx-item"
+          onClick={() => {
+            if (onSleepProject) onSleepProject(proj);
+            onClose();
+          }}
+        >
+          💤 休眠
         </div>
+        {/* 重命名项目：功能已实现，暂时隐藏（改 `false` 为 `true` 恢复） */}
+        {false && (
+          <>
+            <div className="ctx-sep" />
+            <div
+              className="ctx-item"
+              onClick={() => {
+                if (onRenameProject) onRenameProject(proj);
+                onClose();
+              }}
+            >
+              ✏ 重命名项目
+            </div>
+          </>
+        )}
         <div className="ctx-sep" />
         <div
           className="ctx-item danger"
@@ -843,12 +1185,13 @@ function ContextMenu({
   // When it is the project's ONLY terminal, the context menu swaps the normal
   // "关闭并终止" for "关闭并移除项目" (removes the whole project). The Master
   // group is never a deletable project, so its terminals keep the plain close.
-  const project = agent ? projectOf(agent.cwd) : undefined;
+  const project = agent ? projectOf(agent.cwd, useStore.getState().projectRoots) : undefined;
   const isMasterProject = project === MASTER_PROJECT;
   let projCount = 0;
   if (project && !isMasterProject) {
+    const roots = useStore.getState().projectRoots;
     allAgents.forEach((a) => {
-      if (projectOf(a.cwd) === project) projCount++;
+      if (projectOf(a.cwd, roots) === project) projCount++;
     });
   }
 
@@ -971,7 +1314,7 @@ function MasterContextMenu({ ctx, onClose }: { ctx: CtxState; onClose: () => voi
       onClick={(e) => e.stopPropagation()}
       onContextMenu={(e) => e.stopPropagation()}
     >
-      <div className="ctx-item disabled">⭐ master 会话</div>
+      <div className="ctx-item disabled">master 会话</div>
       {id && (
         <>
           <div className="ctx-sep" />

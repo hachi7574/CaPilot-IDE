@@ -16,6 +16,9 @@
   --shadow-hard: 4px 4px 0 rgba(0, 0, 0, 0.4);
   --left-width: 248px;
   --right-width: 340px;
+  /* Shared height of the top bar in the main / left / right panes, so the
+     three columns start their content on the same line. */
+  --topbar-h: 42px;
 }
 
 @font-face { font-family: 'Silkscreen'; src: url('/fonts/Silkscreen-Regular.ttf') format('truetype'); }
@@ -80,9 +83,11 @@ body::after {
 
 .left-sidebar.collapsed { width: 0; min-width: 0; border-right: none; }
 
-/* Zone 1 — Brand */
+/* Zone 1 — Brand (fixed topbar height so its bottom edge lines up with the
+   main tab bar and the right sidebar's tab row) */
 .sidebar-brand {
-  padding: 10px 14px 8px; font-family: var(--pixel-body);
+  height: var(--topbar-h); display: flex; align-items: center;
+  padding: 0 14px; font-family: var(--pixel-body);
   font-size: 18px; font-weight: 700; color: var(--brand);
   letter-spacing: 1px; text-shadow: 0 0 20px rgba(139,92,246,.3);
   border-bottom: 2px solid var(--rule); cursor: default;
@@ -105,7 +110,11 @@ body::after {
 .sidebar-btn.active { color: var(--brand); }
 
 /* Zone 3 — Tree */
-.sidebar-tree { flex: 1; overflow-y: auto; padding: 2px 0; }
+.sidebar-tree { flex: 1; overflow-y: auto; padding: 2px 0; display: flex; flex-direction: column; }
+/* Drop target for "move project to the end": fills the blank space below the
+   project list, highlights while a project is being dragged over it. */
+.proj-dropzone { flex: 1; min-height: 40px; }
+.proj-dropzone.dragging { outline: 1px dashed var(--brand); background: rgba(139,92,246,.05); }
 
 /* Master pinned */
 .master-pinned { border-bottom: 2px solid var(--rule); }
@@ -129,11 +138,13 @@ body::after {
   color: var(--primary); transition: background .2s var(--ease-apple);
 }
 .proj-header:hover { background: var(--bg3); }
+/* Drag-and-drop reorder target highlight. */
+.proj-header.drag-over { background: var(--bg4); outline: 1px dashed var(--brand); }
 .proj-header .pj-icon { font-size: 14px; }
 .proj-header .pj-name { flex: 1; font-weight: 700; }
 .proj-header .pj-arrow { font-family: var(--pixel); font-size: 10px; color: var(--muted); transition: transform .2s var(--ease-apple); }
 .proj.collapsed .pj-arrow { transform: rotate(-90deg); }
-.proj.collapsed .terminal-item { display: none; }
+.proj.collapsed .terminal-item, .proj.collapsed .term-ended-head { display: none; }
 .proj.focused .proj-header { background: rgba(139,92,246,.1); border-left: 3px solid var(--brand); }
 .proj.focused { background: rgba(139,92,246,.04); }
 
@@ -149,6 +160,17 @@ body::after {
 .terminal-item .tm-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .terminal-item .tm-time { font-family: var(--mono); font-size: 10px; color: var(--muted); flex-shrink: 0; }
 
+/* "已结束" (ended) group: a collapsed header + dimmed rows. */
+.term-ended-head {
+  display: flex; align-items: center; gap: 6px; padding: 4px 10px 4px 22px;
+  cursor: pointer; font-family: var(--pixel); font-size: 10px; letter-spacing: 1px;
+  color: var(--muted); text-transform: uppercase; user-select: none;
+}
+.term-ended-head:hover { color: var(--ink2); }
+.term-ended { opacity: .55; }
+.term-ended:hover { opacity: .9; }
+.term-ended.active { opacity: 1; border-left-color: var(--brand); }
+
 /* ── Resize Handle ────────────────────────────────────────────── */
 
 .resize-handle { width: 4px; cursor: col-resize; background: transparent; flex-shrink: 0; transition: background .2s; position: relative; z-index: 10; }
@@ -161,7 +183,7 @@ body::after {
 /* ── Tab Bar ──────────────────────────────────────────────────── */
 
 .tab-bar {
-  height: 34px; min-height: 34px; background: var(--bg2);
+  height: var(--topbar-h); min-height: var(--topbar-h); background: var(--bg2);
   border-bottom: 2px solid var(--rule);
   display: flex; align-items: center; padding: 0 6px; gap: 2px;
   flex-shrink: 0; overflow-x: auto;
@@ -175,10 +197,10 @@ body::after {
 }
 .tab-btn-icon:hover { color: var(--brand); }
 
-.tab-proj-badge {
-  font-family: var(--pixel); font-size: 7px; color: var(--primary);
-  letter-spacing: 1px; margin-left: 2px; padding: 1px 5px;
-  border: 1px solid var(--primary-dim); background: rgba(139,92,246,.08);
+/* Right-sidebar collapse toggle — pinned to the right edge of the tab bar. */
+.tab-bar .tab-btn-right {
+  margin-left: auto;
+  margin-right: 2px;
 }
 
 .tab-item {
@@ -189,6 +211,10 @@ body::after {
 }
 .tab-item:hover { border-color: var(--brand); color: var(--ink); }
 .tab-item.active { background: var(--bg); border-color: var(--brand); color: var(--ink); border-bottom-color: transparent; }
+/* Ended (done) session tabs are dimmed — the process exited, the tab is a
+   frozen view; reopening from the sidebar "已结束" group resumes it. */
+.tab-item.tab-done { opacity: .5; color: var(--muted); }
+.tab-item.tab-done:hover { opacity: .8; color: var(--ink2); border-color: var(--rule2); }
 
 .tab-dot { width: 7px; height: 7px; flex-shrink: 0; }
 /* Static running dot. An infinite opacity pulse here makes WebKitGTK (software
@@ -262,28 +288,34 @@ body::after {
   flex-shrink: 0; overflow: hidden;
 }
 
+.right-sidebar.collapsed { width: 0; min-width: 0; border-left: none; }
+
 .right-tabs {
-  display: flex; border-bottom: 2px solid var(--rule); flex-shrink: 0;
+  height: var(--topbar-h); display: flex;
+  border-bottom: 2px solid var(--rule); flex-shrink: 0;
 }
 
 .right-tab {
-  flex: 1; text-align: center; padding: 10px 4px;
-  font-family: var(--pixel); font-size: 10px; letter-spacing: 1px;
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  padding: 0 4px; font-family: var(--pixel); font-size: 10px; letter-spacing: 1px;
   color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent;
   transition: all .2s var(--ease-apple); text-transform: uppercase;
 }
 .right-tab:hover { color: var(--ink2); }
 .right-tab.active { color: var(--brand); border-bottom-color: var(--brand); }
 
-.right-panel { flex: 1; overflow-y: auto; border-bottom: 2px solid var(--rule); }
+.right-panel {
+  flex: 1; overflow-y: auto; border-bottom: 2px solid var(--rule);
+  display: flex; flex-direction: column;
+}
 
 /* Master Report */
 .master-report {
   flex-shrink: 0; background: var(--bg2); max-height: 42%; overflow-y: auto;
 }
 .report-header {
-  display: flex; align-items: center; padding: 8px 14px;
-  font-family: var(--pixel); font-size: 10px; color: var(--ai);
+  display: flex; align-items: center; padding: 6px 14px;
+  font-family: var(--pixel); font-size: 10px; line-height: 1; color: var(--ai);
   letter-spacing: 1px; text-transform: uppercase; cursor: pointer;
   border-bottom: 1px solid var(--rule);
   transition: background .2s var(--ease-apple);
@@ -352,17 +384,25 @@ body::after {
   flex-shrink: 0; display: flex; flex-direction: column;
 }
 
+/* Height divider above the composer — drag to resize (mirrors the sidebar
+   resize-handle look, horizontal). */
+.composer-resize {
+  height: 4px; flex-shrink: 0; cursor: row-resize;
+  background: transparent; transition: background .2s; position: relative; z-index: 10;
+}
+.composer-resize:hover, .composer-resize.active { background: var(--brand); }
+
 .composer-target {
   display: flex; align-items: center; gap: 8px;
   padding: 6px 14px; border-bottom: 1px solid var(--rule);
-  font-family: var(--pixel); font-size: 10px; color: var(--primary);
+  font-family: var(--pixel); font-size: 10px; line-height: 1; color: var(--primary);
   letter-spacing: 1px; text-transform: uppercase;
 }
 
 .composer-input {
   padding: 8px 14px; font-family: var(--mono); font-size: 13px;
   color: var(--ink); background: transparent; border: none;
-  outline: none; width: 100%; resize: none;
+  outline: none; width: 100%; height: 100%; resize: none;
 }
 .composer-input::placeholder { color: var(--muted); }
 
@@ -411,7 +451,10 @@ body::after {
 
 /* Composer: drag & drop hint (DevPlan §3.2: 拖文件 → @路径 chip) */
 .composer { position: relative; }
-.composer-input-wrap { position: relative; }
+.composer-input-wrap {
+  flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; position: relative;
+}
 .composer-input-wrap.drop-hint {
   box-shadow: inset 0 0 0 1px var(--brand);
   border-radius: 4px;
@@ -519,7 +562,20 @@ body::after {
 
 /* ── Tab panels (right sidebar) ───────────────────────────────── */
 
-.tab-panel { padding: 0; }
+.tab-panel { padding: 0; flex: 1; }
+
+/* Git panel: a flex column so the commit history can be pinned to the bottom
+   while the groups above scroll in `.gv-scroll`. */
+#tab-git {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.gv-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
 
 /* Files tab */
 .files-search input {
@@ -601,6 +657,56 @@ body::after {
   font-family: var(--pixel);
 }
 
+/* ── New-terminal template picker (project "+" button) ────────── */
+.tt-backdrop { position: fixed; inset: 0; z-index: 998; background: transparent; }
+.tt-menu {
+  position: fixed;
+  min-width: 190px;
+  max-width: 280px;
+  background: var(--bg2);
+  border: 1px solid var(--rule2);
+  border-radius: 8px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  padding: 4px;
+  font-size: 12px;
+  z-index: 999;
+}
+.tt-label {
+  padding: 4px 10px 2px;
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-family: var(--pixel);
+}
+.tt-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  color: var(--ink2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tt-item:hover { background: var(--bg3); color: var(--ink); }
+.tt-item .tt-icon { flex-shrink: 0; }
+.tt-item .tt-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.tt-item .tt-cmd {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+}
+.tt-item.tt-add { color: var(--brand); }
+.tt-sep { height: 1px; background: var(--rule2); margin: 4px 6px; }
+
+/* Delete button in the terminal-template modal. */
+.nproj-btn.danger { color: var(--danger); border-color: var(--danger); }
+.nproj-btn.danger:hover { background: rgba(248, 113, 113, 0.1); color: var(--danger); }
+
 /* Worker toggle active state */
 .act-btn.active { border-color: var(--brand); background: rgba(139, 92, 246, 0.18); color: var(--brand); box-shadow: 0 0 8px rgba(139, 92, 246, 0.3); }
 
@@ -616,6 +722,43 @@ body::after {
   text-overflow: ellipsis;
 }
 .files-tree .dir:hover, .files-tree .file:hover { background: var(--bg3); color: var(--ink); }
+
+/* File tree create controls (new file / folder) */
+.files-tree .dir { display: flex; align-items: center; gap: 4px; }
+.files-tree .dir .dir-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.files-tree .dir .dir-actions { display: none; gap: 2px; flex-shrink: 0; }
+.files-tree .dir:hover .dir-actions { display: inline-flex; }
+.dir-actions button {
+  background: transparent; border: none; color: var(--muted);
+  cursor: pointer; font-size: 11px; padding: 0 3px; line-height: 1;
+}
+.dir-actions button:hover { color: var(--brand); }
+.files-new { display: flex; align-items: center; gap: 4px; padding: 3px 0; }
+.files-new input {
+  flex: 1; min-width: 0;
+  background: var(--bg3); border: 1px solid var(--brand);
+  color: var(--ink); font-family: var(--mono); font-size: 12px;
+  padding: 2px 6px; outline: none;
+}
+.files-new-error { color: var(--danger); font-size: 11px; padding: 2px 0; }
+.files-new-btn {
+  flex-shrink: 0;
+  background: var(--bg3); border: 1px solid var(--rule2);
+  color: var(--muted); cursor: pointer; font-family: var(--mono);
+  font-size: 11px; padding: 0 8px; border-radius: 4px;
+}
+.files-new-btn:hover { color: var(--brand); border-color: var(--brand); }
+/* Cut source in the tree is dimmed (VS Code style) until paste. */
+.files-ctx-cut { opacity: 0.45; }
+/* Transient operation result at the bottom of the Files panel. */
+.files-notice {
+  padding: 6px 12px;
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--muted);
+  border-top: 1px solid var(--rule);
+}
+.files-notice.err { color: var(--danger); }
 
 /* Git panel renamed/other rows */
 .git-changes .gr { color: var(--primary); }
@@ -1212,7 +1355,6 @@ body::after {
 .u9-master-btn.active {
   box-shadow: inset 0 0 0 2px rgba(245, 243, 255, 0.35);
 }
-.u9-master-icon { font-size: 13px; flex-shrink: 0; }
 .u9-master-name {
   flex: 1;
   overflow: hidden;
@@ -1231,8 +1373,10 @@ body::after {
 /* ── Composer send button (ul-*) ──────────────────────────────── */
 
 .ul-composer-input-row {
+  flex: 1;
+  min-height: 0;
   display: flex;
-  align-items: flex-end;
+  align-items: flex-start;
   gap: 8px;
 }
 .ul-composer-input-row .composer-input {
@@ -1244,6 +1388,9 @@ body::after {
   font-size: 10px;
   letter-spacing: 1px;
   padding: 4px 12px;
+  /* Align with the textarea's first line: the input has 8px top padding, the
+     button 4px, so a 4px offset lines their first text rows up. */
+  margin-top: 4px;
   color: var(--brand);
   border: 1px solid var(--brand);
   background: rgba(139, 92, 246, 0.06);
@@ -1400,8 +1547,8 @@ body::after {
 .gg-diff-open:hover { background: rgba(139,92,246,.14); color: var(--brand); }
 .gg-diff-wrap .git-diff { margin-left: 8px; }
 
-/* Commit history section (collapsible). */
-.gg-log { margin-top: 12px; border-top: 2px solid var(--rule); }
+/* Commit history section (collapsible), pinned at the panel bottom. */
+.gg-log { margin-top: 12px; border-top: 2px solid var(--rule); flex-shrink: 0; }
 .gg-log-head {
   display: flex; align-items: center; justify-content: space-between;
   padding: 7px 0 4px; font-family: var(--pixel); font-size: 10px;
@@ -1571,25 +1718,23 @@ body::after {
   padding: 2px 0 10px;
   font-family: var(--pixel);
 }
-.gv-title {
-  flex-shrink: 0;
-  font-size: 12px;
-  letter-spacing: 1px;
-  color: var(--ink);
-  text-transform: uppercase;
+/* Push the refresh + more icons to the right edge of the head row. */
+.gv-head > .gv-icon:not(.gv-more) {
+  margin-left: auto;
 }
 .gv-branch {
-  flex-shrink: 0;
+  flex-shrink: 1;
+  min-width: 0;
   font-size: 10px;
   letter-spacing: 0;
   color: var(--brand);
   border: 1px solid var(--brand-dim);
   background: rgba(139, 92, 246, 0.08);
   padding: 1px 6px;
-  max-width: 40%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* Show the full branch name; wrap (anywhere) only if it can't fit, so a long
+     name never pushes the refresh/more icons off the panel. */
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .gv-icon {
   flex-shrink: 0;
@@ -1667,12 +1812,12 @@ body::after {
 /* Commit box */
 .gv-commit {
   display: flex;
+  flex-direction: column;
   gap: 6px;
   margin-bottom: 10px;
 }
 .gv-commit-input {
-  flex: 1;
-  min-width: 0;
+  width: 100%;
   resize: none;
   background: var(--bg3);
   border: 1px solid var(--rule2);
@@ -1685,18 +1830,19 @@ body::after {
 }
 .gv-commit-input:focus { border-color: var(--brand); }
 .gv-commit-input::placeholder { color: var(--muted); }
+/* Standalone adaptive commit button: "+暂存全部" when nothing is staged but
+   changes exist, otherwise "提交". No hint bar — the label says the next step. */
 .gv-commit-btn {
-  flex-shrink: 0;
-  align-self: stretch;
-  width: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  width: 100%;
+  padding: 6px 0;
   border: 1px solid var(--brand);
   color: var(--brand);
   background: rgba(139, 92, 246, 0.1);
   cursor: pointer;
-  font-size: 15px;
+  font-family: var(--pixel);
+  font-size: 11px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
   transition: all 0.2s var(--ease-apple);
 }
 .gv-commit-btn:hover:not(:disabled) {
@@ -1705,12 +1851,6 @@ body::after {
   box-shadow: 0 0 8px rgba(139, 92, 246, 0.3);
 }
 .gv-commit-btn:disabled { opacity: 0.4; cursor: default; }
-.gv-commit-hint {
-  font-size: 11px;
-  color: var(--muted);
-  margin: -4px 0 8px;
-  font-family: var(--mono);
-}
 
 /* Message (error / feedback) rows */
 .gv-msg { font-size: 11px; margin-bottom: 8px; padding: 4px 8px; border: 1px solid var(--rule2); }

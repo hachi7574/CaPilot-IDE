@@ -18,6 +18,31 @@ export function RightSidebar() {
   const latest = reports[0];
   const rightWidth = useStore((s) => s.rightWidth);
   const setRightWidth = useStore((s) => s.setRightWidth);
+  const rightSidebarOpen = useStore((s) => s.rightSidebarOpen);
+  const reportRef = useRef<HTMLDivElement>(null);
+
+  // Keep the collapse state readable inside the ResizeObserver callback (the
+  // observer is created once on mount).
+  const reportCollapsedRef = useRef(reportCollapsed);
+  reportCollapsedRef.current = reportCollapsed;
+
+  // Measure the expanded master report so the composer can default to the same
+  // height (and stay in sync while it resizes). Updates only run while the
+  // report is expanded — collapsing it must not shrink the composer to the
+  // bare header row.
+  useEffect(() => {
+    const el = reportRef.current;
+    if (!el) return;
+    const update = () => {
+      if (!reportCollapsedRef.current) {
+        useStore.getState().setMasterReportH(el.offsetHeight);
+      }
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // Draggable right sidebar resize (drag right → narrower).
   const startRightResize = (e: React.MouseEvent) => {
@@ -38,8 +63,13 @@ export function RightSidebar() {
 
   return (
     <>
-      <div className="resize-handle" id="resize-right" onMouseDown={startRightResize} />
-      <div className="right-sidebar" style={{ width: rightWidth }}>
+      {rightSidebarOpen && (
+        <div className="resize-handle" id="resize-right" onMouseDown={startRightResize} />
+      )}
+      <div
+        className={`right-sidebar${!rightSidebarOpen ? " collapsed" : ""}`}
+        style={rightSidebarOpen ? { width: rightWidth } : undefined}
+      >
         {/* Tabs */}
         <div className="right-tabs">
           <div
@@ -70,7 +100,7 @@ export function RightSidebar() {
         </div>
 
         {/* Master Report (always visible) */}
-        <div className="master-report">
+        <div className="master-report" ref={reportRef}>
           <div
             className="report-header"
             onClick={() => setReportCollapsed(!reportCollapsed)}
@@ -438,12 +468,44 @@ function fileClass(name: string): { cls: string; icon: string } {
   return { cls: "file", icon: "📄" };
 }
 
+/** Copy text to the OS clipboard (navigator API with execCommand fallback). */
+async function copyText(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return;
+  } catch {
+    // WebKit webviews may reject the async API — fall back to a hidden textarea.
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+  }
+}
+
 function FilesPanel() {
   const root = useProjectRoot();
   const [dirs, setDirs] = useState<Map<string, FsEntry[]>>(new Map());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState("");
+  const [creating, setCreating] = useState<{ dir: string; kind: "file" | "dir" } | null>(null);
+  const [newName, setNewName] = useState("");
+  const [createError, setCreateError] = useState("");
+  // Right-click context menu: target kind + cursor position.
+  const [menu, setMenu] = useState<{ x: number; y: number; kind: "file" | "dir" | "space"; path?: string } | null>(null);
+  // App-internal clipboard (VS Code style): a single cut/copy source.
+  const [clip, setClip] = useState<{ path: string; mode: "copy" | "cut" } | null>(null);
+  // Transient operation result shown at the bottom of the panel.
+  const [notice, setNotice] = useState<{ text: string; err?: boolean } | null>(null);
+  // Inline rename: path of the entry being renamed + the input value.
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [renameError, setRenameError] = useState("");
   const addTab = useStore((s) => s.addTab);
+  const closeTab = useStore((s) => s.closeTab);
 
   useEffect(() => {
     loadChildren(root);
@@ -486,6 +548,77 @@ function FilesPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter, root]);
 
+  // Auto-refresh: while the Files tab is mounted, re-check the cached directory
+  // listings every 2 s and update only the ones whose on-disk listing actually
+  // changed. The map keeps its size (entries replaced in place, never grown) and
+  // a no-change tick returns the same state reference, so there is no re-render
+  // churn or unbounded memory use. A `running` guard keeps slow ticks from
+  // overlapping.
+  const dirsRef = useRef(dirs);
+  dirsRef.current = dirs;
+  useEffect(() => {
+    let running = false;
+    const t = setInterval(async () => {
+      if (running) return;
+      running = true;
+      const snapshot = [...dirsRef.current.keys()];
+      try {
+        for (const d of snapshot) {
+          let fresh: FsEntry[] = [];
+          try {
+            fresh = await invoke<FsEntry[]>("fs_list", { dir: d });
+          } catch {
+            fresh = [];
+          }
+          setDirs((prev) => {
+            const cur = prev.get(d);
+            if (
+              cur &&
+              cur.length === fresh.length &&
+              cur.every(
+                (e, i) => e.name === fresh[i].name && e.is_dir === fresh[i].is_dir
+              )
+            ) {
+              return prev;
+            }
+            return new Map(prev).set(d, fresh);
+          });
+        }
+      } finally {
+        running = false;
+      }
+    }, 2000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Close the context menu on any click / new right-click / Escape. The
+  // timestamp guard ignores events fired within 150 ms of opening — some
+  // compositors synthesize a click right after the contextmenu, which would
+  // otherwise close the menu instantly.
+  useEffect(() => {
+    if (!menu) return;
+    const openedAt = Date.now();
+    const close = () => {
+      if (Date.now() - openedAt > 150) setMenu(null);
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
+    window.addEventListener("click", close);
+    window.addEventListener("contextmenu", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("contextmenu", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
+
+  // Auto-dismiss the operation notice after 3 s.
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 3000);
+    return () => clearTimeout(t);
+  }, [notice]);
+
   const toggleDir = (dir: string) => {
     if (expanded.has(dir)) {
       setExpanded((prev) => {
@@ -503,6 +636,187 @@ function FilesPanel() {
     addTab({ id: `file:${path}`, type: "editor", filePath: path, title: name });
   };
 
+  const startCreate = (dir: string, kind: "file" | "dir") => {
+    // Keep the target visible so the inline input renders under the right dir.
+    setExpanded((prev) => new Set(prev).add(dir));
+    setCreating({ dir, kind });
+    setNewName("");
+    setCreateError("");
+  };
+
+  const cancelCreate = () => {
+    setCreating(null);
+    setNewName("");
+    setCreateError("");
+  };
+
+  const submitCreate = async () => {
+    if (!creating) return;
+    const name = newName.trim();
+    if (!name) return;
+    if (name.includes("/") || name === "." || name === "..") {
+      setCreateError("名称不能包含 / 或为 . / ..");
+      return;
+    }
+    const path = `${creating.dir}/${name}`;
+    try {
+      if (creating.kind === "file") {
+        await invoke("fs_create_file", { path });
+        loadChildren(creating.dir);
+        openFile(path, name);
+      } else {
+        await invoke("fs_create_dir", { path });
+        loadChildren(creating.dir);
+      }
+      setCreating(null);
+      setNewName("");
+      setCreateError("");
+    } catch (err) {
+      setCreateError(String(err));
+    }
+  };
+
+  const openCtx = (e: React.MouseEvent, kind: "file" | "dir" | "space", path?: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Clamp so the ~190px menu stays inside the viewport.
+    const x = Math.min(e.clientX, window.innerWidth - 200);
+    const y = Math.min(e.clientY, window.innerHeight - 140);
+    setMenu({ x, y, kind, path });
+  };
+
+  const closeMenu = () => setMenu(null);
+
+  /** Directory the current menu action operates on (paste / create targets). */
+  const menuDir = () => {
+    if (!menu) return root;
+    if (menu.kind !== "file") return menu.path || root;
+    const p = menu.path || "";
+    return p.slice(0, p.lastIndexOf("/")) || root;
+  };
+
+  const doCopy = () => {
+    if (!menu?.path) return;
+    setClip({ path: menu.path, mode: "copy" });
+    closeMenu();
+  };
+
+  const doCut = () => {
+    if (!menu?.path) return;
+    setClip({ path: menu.path, mode: "cut" });
+    closeMenu();
+  };
+
+  const doPaste = async () => {
+    if (!clip) return;
+    const dest = menuDir();
+    const isMove = clip.mode === "cut";
+    try {
+      const created = await invoke<string>("fs_paste", { src: clip.path, destDir: dest, isMove });
+      const name = created.slice(created.lastIndexOf("/") + 1);
+      setNotice({ text: `已${isMove ? "移动" : "复制"}为 ${name}` });
+      loadChildren(dest);
+      const srcParent = clip.path.slice(0, clip.path.lastIndexOf("/"));
+      if (srcParent !== dest) loadChildren(srcParent);
+      if (isMove) setClip(null);
+    } catch (err) {
+      setNotice({ text: String(err), err: true });
+    }
+    closeMenu();
+  };
+
+  const doOpen = () => {
+    if (!menu?.path) return;
+    if (menu.kind === "dir") toggleDir(menu.path);
+    else openFile(menu.path, menu.path.slice(menu.path.lastIndexOf("/") + 1));
+    closeMenu();
+  };
+
+  const doNew = (kind: "file" | "dir") => {
+    startCreate(menuDir(), kind);
+    closeMenu();
+  };
+
+  const doCopyPath = () => {
+    if (!menu?.path) return;
+    copyText(menu.path);
+    closeMenu();
+  };
+
+  const doDelete = async () => {
+    if (!menu?.path) return;
+    const name = menu.path.slice(menu.path.lastIndexOf("/") + 1);
+    const ok = await confirm(`确定删除「${name}」？此操作不可撤销。`, {
+      title: "删除",
+      kind: "warning",
+    });
+    closeMenu();
+    if (!ok) return;
+    const parent = menu.path.slice(0, menu.path.lastIndexOf("/"));
+    try {
+      await invoke("fs_delete", { path: menu.path });
+      loadChildren(parent);
+      setNotice({ text: `已删除 ${name}` });
+    } catch (err) {
+      setNotice({ text: String(err), err: true });
+    }
+  };
+
+  const startRename = (path: string) => {
+    setRenaming(path);
+    setRenameValue(path.slice(path.lastIndexOf("/") + 1));
+    setRenameError("");
+    setMenu(null);
+  };
+
+  const cancelRename = () => {
+    setRenaming(null);
+    setRenameValue("");
+    setRenameError("");
+  };
+
+  const submitRename = async () => {
+    if (!renaming) return;
+    const name = renameValue.trim();
+    if (!name || name.includes("/") || name === "." || name === "..") {
+      setRenameError("名称不能为空、包含 / 或为 . / ..");
+      return;
+    }
+    const parent = renaming.slice(0, renaming.lastIndexOf("/"));
+    try {
+      const newPath = await invoke<string>("fs_rename", { src: renaming, newName: name });
+      // Drop stale cached children of a renamed dir, then re-show it expanded.
+      setDirs((prev) => {
+        const next = new Map(prev);
+        for (const k of prev.keys()) {
+          if (k === renaming || k.startsWith(`${renaming}/`)) next.delete(k);
+        }
+        return next;
+      });
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        for (const k of prev) {
+          if (k === renaming || k.startsWith(`${renaming}/`)) next.delete(k);
+        }
+        next.add(newPath);
+        return next;
+      });
+      loadChildren(parent);
+      loadChildren(newPath);
+      // If the renamed file is open in an editor tab, point it at the new path.
+      if (useStore.getState().tabs.some((t) => t.id === `file:${renaming}`)) {
+        closeTab(`file:${renaming}`);
+        addTab({ id: `file:${newPath}`, type: "editor", filePath: newPath, title: name });
+      }
+      setRenaming(null);
+      setRenameValue("");
+      setRenameError("");
+      setNotice({ text: `已重命名为 ${name}` });
+    } catch (err) {
+      setRenameError(String(err));
+    }
+  };
+
   const isFiltering = filter.trim() !== "";
   const q = filter.trim().toLowerCase();
 
@@ -513,60 +827,229 @@ function FilesPanel() {
       // down stay reachable; files are matched by name.
       .filter((e) => q === "" || e.is_dir || e.name.toLowerCase().includes(q))
       .sort((a, b) => (a.is_dir === b.is_dir ? a.name.localeCompare(b.name) : a.is_dir ? -1 : 1));
-    return entries.map((e) => {
-      const path = `${dir}/${e.name}`;
-      if (e.is_dir) {
-        const open = isFiltering || expanded.has(path);
-        return (
-          <div key={path}>
+    return (
+      <>
+        {entries.map((e) => {
+          const path = `${dir}/${e.name}`;
+          const isCutSource = clip?.mode === "cut" && clip.path === path;
+          if (renaming === path) {
+            return (
+              <div key={path}>
+                <div className="files-new" style={{ paddingLeft: depth * 14 }}>
+                  <span>{e.is_dir ? "📁" : "📄"}</span>
+                  <input
+                    autoFocus
+                    value={renameValue}
+                    onChange={(ev) => {
+                      setRenameValue(ev.target.value);
+                      setRenameError("");
+                    }}
+                    onFocus={(ev) => ev.target.select()}
+                    onKeyDown={(ev) => {
+                      if (ev.key === "Enter") {
+                        ev.preventDefault();
+                        submitRename();
+                      } else if (ev.key === "Escape") {
+                        cancelRename();
+                      }
+                    }}
+                    onBlur={cancelRename}
+                  />
+                </div>
+                {renameError && (
+                  <div className="files-new-error" style={{ paddingLeft: (depth + 1) * 14 }}>
+                    {renameError}
+                  </div>
+                )}
+              </div>
+            );
+          }
+          if (e.is_dir) {
+            const open = isFiltering || expanded.has(path);
+            return (
+              <div key={path}>
+                <div
+                  className={`dir${isCutSource ? " files-ctx-cut" : ""}`}
+                  style={{ paddingLeft: depth * 14 }}
+                  onClick={() => toggleDir(path)}
+                  onContextMenu={(ev) => openCtx(ev, "dir", path)}
+                  draggable
+                  onDragStart={(ev) => {
+                    ev.dataTransfer.setData("text/plain", path);
+                    ev.dataTransfer.effectAllowed = "copy";
+                  }}
+                  title={path}
+                >
+                  <span>{open ? "▾" : "▸"} 📁</span>
+                  <span className="dir-label">{e.name}</span>
+                  <span
+                    className="dir-actions"
+                    onClick={(ev) => ev.stopPropagation()}
+                  >
+                    <button
+                      title="新建文件"
+                      onClick={() => startCreate(path, "file")}
+                    >
+                      ＋📄
+                    </button>
+                    <button
+                      title="新建文件夹"
+                      onClick={() => startCreate(path, "dir")}
+                    >
+                      ＋📁
+                    </button>
+                  </span>
+                </div>
+                {open && renderEntries(path, depth + 1)}
+              </div>
+            );
+          }
+          const { cls, icon } = fileClass(e.name);
+          return (
             <div
-              className="dir"
+              key={path}
+              className={`${cls}${isCutSource ? " files-ctx-cut" : ""}`}
               style={{ paddingLeft: depth * 14 }}
-              onClick={() => toggleDir(path)}
+              onClick={() => openFile(path, e.name)}
+              onContextMenu={(ev) => openCtx(ev, "file", path)}
+              title={path}
               draggable
               onDragStart={(ev) => {
                 ev.dataTransfer.setData("text/plain", path);
                 ev.dataTransfer.effectAllowed = "copy";
               }}
-              title={path}
             >
-              {open ? "▾" : "▸"} 📁 {e.name}
+              {icon} {e.name}
             </div>
-            {open && renderEntries(path, depth + 1)}
+          );
+        })}
+        {creating && creating.dir === dir && (
+          <div style={{ paddingLeft: (depth + 1) * 14 }}>
+            <div className="files-new">
+              <span>{creating.kind === "dir" ? "📁" : "📄"}</span>
+              <input
+                autoFocus
+                value={newName}
+                placeholder={creating.kind === "dir" ? "文件夹名…" : "文件名…"}
+                onChange={(e) => {
+                  setNewName(e.target.value);
+                  setCreateError("");
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    submitCreate();
+                  } else if (e.key === "Escape") {
+                    cancelCreate();
+                  }
+                }}
+                onBlur={cancelCreate}
+              />
+            </div>
+            {createError && <div className="files-new-error">{createError}</div>}
           </div>
-        );
-      }
-      const { cls, icon } = fileClass(e.name);
-      return (
-        <div
-          key={path}
-          className={cls}
-          style={{ paddingLeft: depth * 14 }}
-          onClick={() => openFile(path, e.name)}
-          title={path}
-          draggable
-          onDragStart={(ev) => {
-            ev.dataTransfer.setData("text/plain", path);
-            ev.dataTransfer.effectAllowed = "copy";
-          }}
-        >
-          {icon} {e.name}
-        </div>
-      );
-    });
+        )}
+      </>
+    );
   };
 
   return (
-    <div className="tab-panel" id="tab-files" style={{ padding: "8px 0" }}>
+    <div
+      className="tab-panel"
+      id="tab-files"
+      style={{ padding: "8px 0" }}
+      onContextMenu={(e) => openCtx(e, "space")}
+    >
       <div className="files-search" style={{ padding: "0 12px 8px" }}>
-        <input
-          type="text"
-          placeholder="🔍 搜索文件…"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-        />
+        <div style={{ display: "flex", gap: 6 }}>
+          <input
+            type="text"
+            placeholder="🔍 搜索文件…"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            style={{ flex: 1, minWidth: 0 }}
+          />
+          <button
+            className="files-new-btn"
+            title="新建文件"
+            onClick={() => startCreate(root, "file")}
+          >
+            ＋📄
+          </button>
+          <button
+            className="files-new-btn"
+            title="新建文件夹"
+            onClick={() => startCreate(root, "dir")}
+          >
+            ＋📁
+          </button>
+        </div>
       </div>
       <div className="files-tree">{renderEntries(root, 0)}</div>
+      {menu && (
+        <div
+          className="ctx-menu"
+          style={{ left: menu.x, top: menu.y }}
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.stopPropagation()}
+        >
+          {menu.kind !== "space" && (
+            <div className="ctx-item" onClick={doOpen}>
+              打开
+            </div>
+          )}
+          {menu.kind !== "file" && (
+            <>
+              <div className="ctx-item" onClick={() => doNew("file")}>
+                新建文件
+              </div>
+              <div className="ctx-item" onClick={() => doNew("dir")}>
+                新建文件夹
+              </div>
+            </>
+          )}
+          {menu.kind !== "space" ? (
+            <>
+              <div className="ctx-sep" />
+              <div className="ctx-item" onClick={doCopy}>
+                复制
+              </div>
+              <div className="ctx-item" onClick={doCut}>
+                剪切
+              </div>
+              {clip && (
+                <div className="ctx-item" onClick={doPaste}>
+                  粘贴
+                </div>
+              )}
+              <div className="ctx-sep" />
+              <div className="ctx-item" onClick={doCopyPath}>
+                复制路径
+              </div>
+              <div className="ctx-sep" />
+              <div className="ctx-item" onClick={() => menu?.path && startRename(menu.path)}>
+                ✏️ 重命名
+              </div>
+              <div className="ctx-sep" />
+              <div className="ctx-item danger" onClick={doDelete}>
+                🗑 删除
+              </div>
+            </>
+          ) : (
+            clip && (
+              <>
+                <div className="ctx-sep" />
+                <div className="ctx-item" onClick={doPaste}>
+                  粘贴
+                </div>
+              </>
+            )
+          )}
+        </div>
+      )}
+      {notice && (
+        <div className={notice.err ? "files-notice err" : "files-notice"}>{notice.text}</div>
+      )}
     </div>
   );
 }
@@ -598,6 +1081,10 @@ interface RepoInfo {
   is_repo: boolean;
   has_remote: boolean;
   branch: string | null;
+  /** Commits ahead of upstream → "↑ N 未推送" indicator. */
+  ahead: number;
+  /** Whether the branch has a configured upstream (else it needs publishing). */
+  has_upstream: boolean;
 }
 
 /** Status glyph for a single porcelain status char (M/A/D/R/?). */
@@ -815,6 +1302,18 @@ function GitPanel() {
       setMsg("");
     }, "提交成功");
 
+  /** Commit then push — one action so a local-only commit can't silently stay
+   *  off the remote (VS Code's "Commit & Push"). */
+  const commitAndPush = () =>
+    runAction(async () => {
+      const m = msg.trim();
+      if (!m) throw new Error("请输入 commit message");
+      if (staged.length === 0) throw new Error("没有已暂存的更改（请先暂存文件）");
+      await invoke("git_commit", { repo: root, message: m });
+      await invoke("git_push", { repo: root });
+      setMsg("");
+    }, "已提交并推送到远程");
+
   const pull = () => runAction(() => invoke("git_pull", { repo: root }), "Pull 完成");
   const push = () => runAction(() => invoke("git_push", { repo: root }), "Push 完成");
 
@@ -949,6 +1448,38 @@ function GitPanel() {
   // A repo with no `remote` configured: Pull/Push would fail, so hint at it but
   // keep the rest of the panel functional.
   const noRemote = isRepo && !repoInfo?.has_remote;
+  // "未推送" indicator: N commits ahead of upstream, or a branch that has never
+  // been pushed (needs publishing — click to push / set upstream).
+  const unpushedAhead = repoInfo?.ahead ?? 0;
+  const needsPublish =
+    isRepo && !!repoInfo?.has_remote && !repoInfo?.has_upstream && !!repoInfo?.branch;
+  // Whether unpushed commits exist — drives the adaptive "推送" button state.
+  const statusHintClickable = needsPublish || unpushedAhead > 0;
+  // Standalone commit button. With unstaged changes but nothing staged it turns
+  // into "+暂存全部" (one click stages everything) so the user can get to a
+  // commit in a single step; otherwise it stays "提交".
+  const noStagedWithChanges = staged.length === 0 && changes.length > 0;
+  // Adaptive commit-area button, no hint bar — the label says the next step:
+  //   unpushed commits → "推送"   (push)
+  //   nothing staged, changes exist → "+暂存全部"  (stage all)
+  //   otherwise → "提交"          (commit)
+  const canPush = statusHintClickable;
+  const commitButtonLabel = canPush ? "推送" : noStagedWithChanges ? "+暂存全部" : "提交";
+  const commitButtonEnabled = canPush
+    ? !busy
+    : noStagedWithChanges
+      ? !busy
+      : !!msg.trim() && staged.length > 0 && !busy;
+  const commitButtonTitle = canPush
+    ? "推送本地提交到远程"
+    : noStagedWithChanges
+      ? "暂存全部更改"
+      : "提交已暂存的更改";
+  const onCommitClick = () => {
+    if (canPush) return push();
+    if (noStagedWithChanges) return stageAll();
+    return commit();
+  };
 
   const renderFileRow = (e: GitEntry, kind: "staged" | "changes") => {
     const code = kind === "staged" ? e.index : e.worktree;
@@ -1079,20 +1610,22 @@ function GitPanel() {
   return (
     <div className="tab-panel" id="tab-git" style={{ padding: 12 }}>
       {repoInfo && !repoInfo.is_repo ? (
-        <div className="up-git-init">
-          <div className="up-git-init-text">该项目未初始化 git</div>
-          <span
-            className={`act-btn up-git-init-btn${busy ? " active" : ""}`}
-            onClick={initRepo}
-          >
-            {busy ? "初始化中…" : "git init"}
-          </span>
+        <div className="gv-scroll">
+          <div className="up-git-init">
+            <div className="up-git-init-text">该项目未初始化 git</div>
+            <span
+              className={`act-btn up-git-init-btn${busy ? " active" : ""}`}
+              onClick={initRepo}
+            >
+              {busy ? "初始化中…" : "git init"}
+            </span>
+          </div>
         </div>
       ) : (
         <>
-          {/* Header row: title + branch + refresh + more-menu */}
+          <div className="gv-scroll">
+          {/* Header row: branch + indicators left, refresh/more right */}
           <div className="gv-head">
-            <span className="gv-title">源代码管理</span>
             <span className="gv-branch" title={branch ? `当前分支: ${branch}` : "无分支"}>
               ⎇ {branch || "无分支"}
             </span>
@@ -1105,6 +1638,9 @@ function GitPanel() {
             {menuOpen && <div className="gv-backdrop" onClick={() => setMenuOpen(false)} />}
             {menuOpen && (
               <div className="gv-menu" onClick={(e) => e.stopPropagation()}>
+                <div className="gv-menu-item" onClick={commitAndPush}>
+                  提交并推送
+                </div>
                 <div className="gv-menu-item" onClick={pull}>
                   拉取
                 </div>
@@ -1142,7 +1678,7 @@ function GitPanel() {
             )}
           </div>
 
-          {/* Commit box: message textarea + check button */}
+          {/* Commit input + standalone adaptive button */}
           <div className="gv-commit">
             <textarea
               className="gv-commit-input"
@@ -1151,23 +1687,18 @@ function GitPanel() {
               value={msg}
               onChange={(e) => setMsg(e.target.value)}
               onKeyDown={(e) => {
-                if ((e.metaKey || e.ctrlKey) && e.key === "Enter") commit();
+                if ((e.metaKey || e.ctrlKey) && e.key === "Enter") onCommitClick();
               }}
             />
             <button
               className="gv-commit-btn"
-              title="提交"
-              disabled={!msg.trim() || busy || staged.length === 0}
-              onClick={commit}
+              title={commitButtonTitle}
+              disabled={!commitButtonEnabled}
+              onClick={onCommitClick}
             >
-              ✓
+              {commitButtonLabel}
             </button>
           </div>
-          {msg.trim() && staged.length === 0 && entries.length > 0 && (
-            <div className="gv-commit-hint">
-              没有已暂存的更改 — 先暂存文件，或点菜单「全部暂存」
-            </div>
-          )}
 
           {noRemote && (
             <div className="up-git-hint" title="未配置远程仓库">
@@ -1198,9 +1729,13 @@ function GitPanel() {
             "changes"
           )}
 
-          {entries.length === 0 && !error && <div className="gv-clean">工作区干净 ✅</div>}
+          {/* 「已提交的更改」组已按用户要求隐藏（git_committed 拉取一并移除，
+              恢复时从 git 历史找回 committed 组 JSX 即可）。 */}
 
-          {/* Commit history (DevPlan §7.4B) */}
+          {entries.length === 0 && !error && <div className="gv-clean">工作区干净 ✅</div>}
+          </div>
+
+          {/* Commit history (DevPlan §7.4B) — pinned at the panel bottom */}
           <div className="gg-log">
             <div className="gg-log-head" onClick={() => setLogOpen(!logOpen)}>
               <span>提交历史</span>

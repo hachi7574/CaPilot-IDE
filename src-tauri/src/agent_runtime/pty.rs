@@ -3,13 +3,19 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
 
 /// Monotonic counter used to give each spawn attempt a unique token so that a
 /// stale `kill()` can cancel only its *own* in-flight spawn (Bug 4).
 static NEXT_SPAWN_TOKEN: AtomicU64 = AtomicU64::new(0);
+
+/// Natural-exit callback: `(agent_id, exit_code)`. Fired by the reader task when
+/// the child exits on its own (EOF / read error). Intentional kills (`kill()`,
+/// channel-gone) clear/suppress it so a session that was deliberately stopped is
+/// never misreported as a natural "done".
+pub type OnExit = Arc<dyn Fn(String, i32) + Send + Sync>;
 
 /// Wrapper around a running PTY child process
 struct PtyChild {
@@ -25,6 +31,11 @@ struct PtyChild {
     child: Box<dyn Child + Send + Sync>,
     /// Background reader task streaming PTY output over the Tauri Channel.
     reader_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Natural-exit callback (see `OnExit`). `None` after an intentional kill.
+    on_exit: Option<OnExit>,
+    /// Set once the exit was intentional (kill / channel-gone), so the reader
+    /// never fires `on_exit` for a deliberately stopped session.
+    killed: Arc<AtomicBool>,
 }
 
 /// RAII guard that keeps `agent_id` in `PtyManager.spawning` for the duration
@@ -47,18 +58,21 @@ impl Drop for SpawnGuard {
     }
 }
 
-/// Remove a PTY entry from the map and reap (wait) the child process. Safe to
-/// call more than once: if the entry is already gone (e.g. `kill()` won the
-/// race), this is a no-op. The map lock is only held for the `remove` — the
-/// blocking `wait()` runs lock-free so other PTY ops are never stalled.
-fn reap_and_remove(children: &Arc<Mutex<HashMap<AgentId, PtyChild>>>, id: &AgentId) {
+/// Remove a PTY entry from the map and reap (wait) the child process, returning
+/// its exit code (-1 if unknown). Safe to call more than once: if the entry is
+/// already gone (e.g. `kill()` won the race), this is a no-op. The map lock is
+/// only held for the `remove` — the blocking `wait()` runs lock-free so other
+/// PTY ops are never stalled.
+fn reap_and_remove(children: &Arc<Mutex<HashMap<AgentId, PtyChild>>>, id: &AgentId) -> i32 {
     let pc = children.lock().unwrap().remove(id);
     if let Some(pc) = pc {
         // Drop the rest of the entry (master, writer, reader handle), then
         // reap the child to avoid a zombie process.
         let PtyChild { child, .. } = pc;
         let mut child = child;
-        let _ = child.wait();
+        child.wait().map(|s| s.exit_code() as i32).unwrap_or(-1)
+    } else {
+        -1
     }
 }
 
@@ -92,6 +106,7 @@ impl PtyManager {
         rows: u16,
         cols: u16,
         on_data: Channel<Vec<u8>>,
+        on_exit: Option<OnExit>,
         env_overrides: &[(String, String)],
     ) -> Result<AgentInfo, AgentError> {
         // Serialize concurrent spawn/resume for the same agent (Bug 4). The
@@ -185,22 +200,42 @@ impl PtyManager {
                     writer,
                     child,
                     reader_handle: None,
+                    on_exit,
+                    killed: Arc::new(AtomicBool::new(false)),
                 },
             );
         }
 
         // Spawn a blocking reader task (PTY reads are blocking I/O). On EOF,
         // read error, or channel close it removes the map entry and reaps the
-        // child (Bug 1 + Bug 3), so no zombie and no stale state.
+        // child (Bug 1 + Bug 3), so no zombie and no stale state. Natural exit
+        // (EOF / read error) also fires `on_exit` so the session lifecycle can
+        // be persisted; intentional kills and channel-gone never do.
         let children_clone = self.children.clone();
         let reader_agent_id = agent_id.clone();
+        let (killed, on_exit) = {
+            let children = self.children.lock().unwrap();
+            let entry = children.get(&reader_agent_id);
+            (
+                entry
+                    .map(|c| c.killed.clone())
+                    .unwrap_or_else(|| Arc::new(AtomicBool::new(true))),
+                entry.and_then(|c| c.on_exit.clone()),
+            )
+        };
         let reader_handle = tokio::task::spawn_blocking(move || {
             let mut buf = [0u8; 4096];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => {
-                        // EOF — child exited. Remove + reap (Bug 1).
-                        reap_and_remove(&children_clone, &reader_agent_id);
+                        // EOF — child exited. Remove + reap (Bug 1), then report
+                        // the natural exit so the session row can be finalized.
+                        let exit_code = reap_and_remove(&children_clone, &reader_agent_id);
+                        if !killed.load(Ordering::SeqCst) {
+                            if let Some(cb) = &on_exit {
+                                cb(reader_agent_id.clone(), exit_code);
+                            }
+                        }
                         break;
                     }
                     Ok(n) => {
@@ -211,15 +246,23 @@ impl PtyManager {
                             // with the Tauri Channel API, so treat a send error
                             // as "channel gone": kill the child AND clean up
                             // (Bug 3). The child is killed first so `wait()`
-                            // below returns promptly.
+                            // below returns promptly. This is an intentional
+                            // teardown, so `on_exit` is suppressed.
+                            killed.store(true, Ordering::SeqCst);
                             let _ = killer.kill();
                             reap_and_remove(&children_clone, &reader_agent_id);
                             break;
                         }
                     }
                     Err(_) => {
-                        // Read error (e.g. master closed) — remove + reap.
-                        reap_and_remove(&children_clone, &reader_agent_id);
+                        // Read error (e.g. master closed) — remove + reap, then
+                        // report the natural exit like EOF.
+                        let exit_code = reap_and_remove(&children_clone, &reader_agent_id);
+                        if !killed.load(Ordering::SeqCst) {
+                            if let Some(cb) = &on_exit {
+                                cb(reader_agent_id.clone(), exit_code);
+                            }
+                        }
                         break;
                     }
                 }
@@ -241,6 +284,9 @@ impl PtyManager {
             title: String::new(),
             cwd: cwd.clone(),
             pid: Some(pid),
+            mode: String::new(),
+            speed: String::new(),
+            model: None,
         })
     }
 
@@ -296,11 +342,25 @@ impl PtyManager {
             if let Some(handle) = pc.reader_handle.take() {
                 handle.abort();
             }
+            // Intentional kill — the reader (if it wins the race to EOF) must
+            // not fire `on_exit` and misreport this as a natural session end.
+            pc.killed.store(true, Ordering::SeqCst);
+            pc.on_exit = None;
             let _ = pc.child.kill();
             // Reap to avoid a zombie (Bug 1).
             let _ = pc.child.wait();
         }
         Ok(())
+    }
+
+    /// Kill every live PTY (used on app quit so no agent process is orphaned).
+    /// Same semantics as `kill`: intentional teardown, so `on_exit` is
+    /// suppressed and the session rows stay `running` (recoverable next launch).
+    pub fn kill_all(&self) {
+        let ids: Vec<AgentId> = self.children.lock().unwrap().keys().cloned().collect();
+        for id in ids {
+            let _ = self.kill(&id);
+        }
     }
 
     /// True if a live PTY exists for the agent.

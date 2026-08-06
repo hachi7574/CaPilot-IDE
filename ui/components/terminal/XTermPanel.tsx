@@ -138,7 +138,6 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(containerRef.current);
-    fitAddon.fit();
 
     termRef.current = term;
     fitAddonRef.current = fitAddon;
@@ -160,6 +159,35 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
       invoke("agent_resize", { id: agentId, rows, cols }).catch(() => {});
     };
 
+    /** Fit the terminal to its container and force a repaint. A terminal opened
+     *  during a tab switch can land in a 0×0 / not-yet-laid-out container, which
+     *  paints a blank canvas until something resizes it — fit() alone won't redraw
+     *  when the size didn't change, so refresh() forces the paint. */
+    const fitAndRefresh = () => {
+      if (disposed) return;
+      try {
+        fitAddon.fit();
+      } catch {
+        // Container has no dimensions yet — the deferred retry handles it.
+      }
+      if (term.rows > 0 && term.cols > 0) {
+        sendResize();
+        term.refresh(0, term.rows - 1);
+      }
+    };
+    // Defer the initial fit so the panel has its final size (a tab switch can
+    // mount mid-layout). Two frames cover layout/font settling; the ResizeObserver
+    // below then keeps it correct. Fonts: the first fit can measure before the
+    // pixel/mono font is ready → 0 rows; re-fit once fonts resolve.
+    const raf1 = requestAnimationFrame(() => fitAndRefresh());
+    const raf2 = requestAnimationFrame(() => fitAndRefresh());
+    const fontReady = document.fonts?.ready;
+    if (fontReady) {
+      fontReady.then(() => {
+        if (!disposed) fitAndRefresh();
+      });
+    }
+
     /** Attach a channel: drain buffered output, then stream live. */
     const attachChannel = (ch: Channel<number[]>) => {
       channelRef.current = ch;
@@ -174,30 +202,48 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
 
     if (channel) {
       attachChannel(channel);
-    } else if (resumeInFlight.has(agentId)) {
-      // StrictMode double-mount: the first mount's agent_resume is still running.
-      // Skip the invoke (don't spawn a second claude); when it resolves, addAgent
-      // stores the channel and this effect re-runs with a live channel to attach.
     } else {
-      // Restored session with no live PTY → resume it.
-      resumeInFlight.add(agentId);
-      const resumeChannel = new Channel<number[]>();
-      resumeChannel.onmessage = (data) =>
-        useStore.getState().appendAgentOutput(agentId, data);
-      invoke<AgentInfo>("agent_resume", { id: agentId, onData: resumeChannel })
-        .then((info) => {
-          resumeInFlight.delete(agentId);
-          // addAgent unconditionally (even if this mount is already disposed): the
-          // store write is what hands the channel to any concurrently-mounted tab.
-          useStore.getState().addAgent(info, resumeChannel);
-          if (disposed) return;
-          attachChannel(resumeChannel);
-        })
-        .catch((err) => {
-          resumeInFlight.delete(agentId);
-          const bytes = Array.from(new TextEncoder().encode(`[resume failed] ${err}\n`));
-          writeToTerm(bytes);
-        });
+      // Ended (`done`) sessions never auto-resume on their own — only an
+      // explicit sidebar "已结束" reopen (which sets resumeOnOpen) brings one
+      // back. Otherwise a finished session's tab would silently spawn a fresh
+      // process whenever its channel change re-runs this effect.
+      const state = useStore.getState();
+      const ended = state.agents.get(agentId)?.status === "done";
+      const wantsResume = state.resumeOnOpen.has(agentId);
+      if (wantsResume) state.consumeResume(agentId);
+      if (ended && !wantsResume) {
+        // Dead terminal reopened by mistake: render whatever was buffered, do
+        // not spawn a new process.
+        const buffered = state.agentOutputs.get(agentId);
+        if (buffered && buffered.length) {
+          writeToTerm(buffered);
+          state.clearAgentOutput(agentId);
+        }
+      } else if (resumeInFlight.has(agentId)) {
+        // StrictMode double-mount: the first mount's agent_resume is still running.
+        // Skip the invoke (don't spawn a second claude); when it resolves, addAgent
+        // stores the channel and this effect re-runs with a live channel to attach.
+      } else {
+        // Restored session with no live PTY → resume it.
+        resumeInFlight.add(agentId);
+        const resumeChannel = new Channel<number[]>();
+        resumeChannel.onmessage = (data) =>
+          useStore.getState().appendAgentOutput(agentId, data);
+        invoke<AgentInfo>("agent_resume", { id: agentId, onData: resumeChannel })
+          .then((info) => {
+            resumeInFlight.delete(agentId);
+            // addAgent unconditionally (even if this mount is already disposed): the
+            // store write is what hands the channel to any concurrently-mounted tab.
+            useStore.getState().addAgent(info, resumeChannel);
+            if (disposed) return;
+            attachChannel(resumeChannel);
+          })
+          .catch((err) => {
+            resumeInFlight.delete(agentId);
+            const bytes = Array.from(new TextEncoder().encode(`[resume failed] ${err}\n`));
+            writeToTerm(bytes);
+          });
+      }
     }
 
     // Forward user input to the PTY (raw keystroke passthrough). Worker agents
@@ -216,10 +262,7 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
 
     // Resize handler
     const handleResize = () => {
-      if (fitAddonRef.current) {
-        fitAddonRef.current.fit();
-        sendResize();
-      }
+      fitAndRefresh();
     };
 
     const observer = new ResizeObserver(handleResize);
@@ -227,6 +270,8 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
 
     return () => {
       disposed = true;
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
       observer.disconnect();
       term.dispose();
       // Route output back to the buffer so a reopened tab catches up.
