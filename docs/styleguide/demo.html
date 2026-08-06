@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LUCY · UI Style Guide</title>
+<style>
+:root{
+  --bg:#07090F;--bg2:#0D1117;--bg3:#161B22;--bg4:#1E2530;
+  --ink:#E8ECF1;--ink2:#C9D1D9;--muted:#7D8590;
+  --rule:#21262D;--rule2:#30363D;
+  --brand:#8B5CF6;--brand-dim:#5B21B6;
+  --primary:#A78BFA;--primary-dim:#6D28D9;
+  --ai:#C4B5FD;--ai-dim:#6D28D9;
+  --success:#4ADE80;--warn:#FACC15;--danger:#F87171;
+  --pixel:'Silkscreen',monospace;
+  --pixel-body:'PixelifySans',sans-serif;
+  --body:'Tektur',system-ui,sans-serif;
+  --mono:'JetBrainsMono',ui-monospace,monospace;
+  --ease-apple:cubic-bezier(0.25,0.1,0.25,1);
+  --ease-bounce:cubic-bezier(0.34,1.56,0.64,1);
+  --shadow-hard:4px 4px 0 rgba(0,0,0,.4);
+}
+@font-face{font-family:'Silkscreen';src:url('./_shared/fonts/Silkscreen-Regular.ttf') format('truetype');}
+@font-face{font-family:'PixelifySans';src:url('./_shared/fonts/PixelifySans-Medium.ttf') format('truetype');}
+@font-face{font-family:'Tektur';src:url('./_shared/fonts/Tektur-Regular.ttf') format('truetype');font-weight:400;}
+@font-face{font-family:'Tektur';src:url('./_shared/fonts/Tektur-Medium.ttf') format('truetype');font-weight:500;}
+@font-face{font-family:'JetBrainsMono';src:url('./_shared/fonts/JetBrainsMono-Regular.ttf') format('truetype');}
+@font-face{font-family:'JetBrainsMono';src:url('./_shared/fonts/JetBrainsMono-Bold.ttf') format('truetype');font-weight:700;}
+*{margin:0;padding:0;box-sizing:border-box;}
+body{
+  background:var(--bg);color:var(--ink);font-family:var(--body);font-size:15px;line-height:1.7;
+  -webkit-font-smoothing:antialiased;overflow-x:hidden;
+}
+body::before{
+  content:'';position:fixed;inset:0;pointer-events:none;z-index:9999;
+  background:repeating-linear-gradient(0deg,transparent 0px,transparent 2px,rgba(0,0,0,.08) 2px,rgba(0,0,0,.08) 4px);
+}
+body::after{
+  content:'';position:fixed;inset:0;pointer-events:none;z-index:9998;
+  background:radial-gradient(ellipse at center,transparent 50%,rgba(0,0,0,.4) 100%);
+}
+.container{max-width:1080px;margin:0 auto;padding:24px 24px 64px;position:relative;z-index:1;}
+
+/* ===== HERO ===== */
+.hero{text-align:center;padding:56px 0 40px;border-bottom:2px solid var(--rule);margin-bottom:48px;position:relative;}
+.hero::after{content:'';position:absolute;bottom:-2px;left:50%;transform:translateX(-50%);width:80px;height:2px;background:var(--brand);box-shadow:0 0 12px var(--brand);}
+.hero-logo{font-family:var(--pixel-body);font-size:clamp(3rem,10vw,4.6rem);font-weight:900;color:var(--brand);letter-spacing:0.14em;text-shadow:0 0 30px rgba(139,92,246,.4);animation:glow-pulse 3s ease-in-out infinite;}
+@keyframes glow-pulse{0%,100%{text-shadow:0 0 20px rgba(139,92,246,.4);}50%{text-shadow:0 0 40px rgba(139,92,246,.7),0 0 60px rgba(139,92,246,.3);}}
+.hero-sub{font-family:var(--pixel);font-size:12px;color:var(--muted);letter-spacing:3px;text-transform:uppercase;margin-top:12px;}
+.hero-tag{display:inline-block;font-family:var(--pixel);font-size:10px;color:var(--primary);border:1px solid var(--primary);padding:4px 12px;background:rgba(139,92,246,.08);letter-spacing:2px;margin-top:20px;text-transform:uppercase;}
+.hero-meta{display:flex;justify-content:center;gap:40px;margin-top:32px;flex-wrap:wrap;}
+.hero-meta-num{font-family:var(--pixel-body);font-size:28px;font-weight:700;color:var(--brand);line-height:1;}
+.hero-meta-label{font-family:var(--pixel);font-size:10px;color:var(--muted);letter-spacing:2px;text-transform:uppercase;margin-top:6px;}
+
+/* ===== SECTION ===== */
+.section{margin-bottom:48px;}
+.section-header{display:flex;align-items:baseline;gap:16px;margin-bottom:24px;padding-bottom:12px;border-bottom:2px solid var(--rule);}
+.section-num{font-family:var(--pixel);font-size:28px;color:var(--brand);line-height:1;}
+.section-title{font-family:var(--pixel-body);font-size:26px;font-weight:500;color:var(--ink);letter-spacing:1px;}
+.section-tag{font-family:var(--pixel);font-size:10px;color:var(--muted);letter-spacing:2px;margin-left:auto;text-transform:uppercase;}
+h3{font-family:var(--body);font-size:16px;font-weight:500;color:var(--ink);margin:20px 0 12px;letter-spacing:.5px;}
+h4{font-size:13px;color:var(--ink2);margin-bottom:8px;font-weight:500;}
+
+/* ===== SWATCHES ===== */
+.swatches{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;}
+.swatch{height:72px;display:flex;flex-direction:column;justify-content:flex-end;padding:8px 10px;border:1px solid var(--rule2);font-family:var(--mono);font-size:11px;color:var(--ink);}
+.swatch .sw-name{font-family:var(--pixel);font-size:10px;letter-spacing:1px;color:var(--muted);}
+.swatch .sw-hex{font-size:11px;color:var(--ink2);}
+.swatch.light{color:#07090F;}
+.swatch.light .sw-name{color:#1F2937;}
+.swatch.light .sw-hex{color:#0F172A;}
+.sw-bg{background:#07090F;} .sw-bg2{background:#0D1117;} .sw-bg3{background:#161B22;} .sw-bg4{background:#1E2530;}
+.sw-ink{background:#E8ECF1;} .sw-ink2{background:#C9D1D9;} .sw-muted{background:#7D8590;}
+.sw-brand{background:#8B5CF6;} .sw-brand-dim{background:#5B21B6;} .sw-primary{background:#A78BFA;} .sw-ai{background:#C4B5FD;}
+.sw-success{background:#4ADE80;} .sw-warn{background:#FACC15;} .sw-danger{background:#F87171;}
+
+/* ===== FONT SPECIMEN ===== */
+.font-row{display:flex;gap:16px;align-items:baseline;border-bottom:1px solid var(--rule);padding:14px 0;}
+.font-sample{font-size:28px;flex:1;}
+.f-pixel{font-family:var(--pixel);} .f-pixelbody{font-family:var(--pixel-body);}
+.f-body{font-family:var(--body);} .f-mono{font-family:var(--mono);}
+.font-meta{font-family:var(--pixel);font-size:10px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;}
+
+/* ===== BADGES ===== */
+.badges{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0;}
+.badge{font-family:var(--pixel);font-size:10px;padding:5px 12px;border:1px solid var(--rule2);color:var(--muted);letter-spacing:1px;text-transform:uppercase;background:var(--bg);}
+.badge.brand{border-color:var(--brand-dim);color:var(--brand);}
+.badge.primary{border-color:var(--primary-dim);color:var(--primary);}
+.badge.ai{border-color:var(--ai-dim);color:var(--ai);}
+.badge.danger{border-color:#7f1d1d;color:var(--danger);}
+.badge.success{border-color:#14532d;color:var(--success);background:rgba(74,222,128,.08);box-shadow:0 0 12px rgba(74,222,128,.3);}
+.status{font-family:var(--pixel);font-size:9px;padding:3px 8px;letter-spacing:1px;text-transform:uppercase;display:inline-block;}
+.status-done{color:var(--success);background:rgba(74,222,128,.08);border:1px solid var(--success);}
+.status-progress{color:var(--primary);background:rgba(139,92,246,.08);border:1px solid var(--primary);}
+.status-pending{color:var(--muted);background:var(--bg4);border:1px solid var(--rule);}
+.status-blocked{color:var(--danger);background:rgba(248,113,113,.08);border:1px solid var(--danger);}
+
+/* ===== BUTTONS ===== */
+.btn-row{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:12px 0;}
+.btn{font-family:var(--pixel);font-size:12px;letter-spacing:1px;padding:10px 18px;border:2px solid var(--brand);color:var(--brand);background:transparent;cursor:pointer;text-transform:uppercase;transition:all .2s var(--ease-apple);}
+.btn:hover{background:var(--brand);color:#F5F3FF;box-shadow:var(--shadow-hard);transform:translate(-2px,-2px);}
+.btn-primary{background:var(--brand);color:#F5F3FF;}
+.btn-primary:hover{background:var(--brand-dim);color:#F5F3FF;}
+.btn-ghost{border-color:var(--rule2);color:var(--ink2);}
+.btn-ghost:hover{border-color:var(--primary);color:var(--primary);background:rgba(139,92,246,.06);}
+.btn-danger{border-color:var(--danger);color:var(--danger);}
+.btn-danger:hover{background:var(--danger);color:#07090f;}
+
+/* ===== CARDS ===== */
+.card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin:16px 0;}
+.card{background:var(--bg2);border:2px solid var(--rule);padding:16px;position:relative;transition:all .3s var(--ease-apple);}
+.card:hover{border-color:var(--brand);transform:translateY(-2px);box-shadow:var(--shadow-hard);}
+.card-status{position:absolute;top:12px;right:12px;}
+.card-icon{font-family:var(--pixel);font-size:18px;color:var(--primary);margin-bottom:10px;}
+.card-title{font-family:var(--pixel-body);font-size:16px;font-weight:700;color:var(--ink);margin-bottom:6px;}
+.card-desc{font-size:13px;color:var(--muted);line-height:1.6;}
+.card-tech{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px;}
+.tech-tag{font-family:var(--pixel);font-size:10px;color:var(--muted);border:1px solid var(--rule);padding:3px 8px;letter-spacing:.5px;text-transform:uppercase;}
+
+/* ===== CALLOUT ===== */
+.callout{display:flex;gap:12px;align-items:flex-start;padding:14px 18px;margin:18px 0;background:var(--bg2);border-left:3px solid var(--rule2);}
+.callout-icon{font-size:20px;line-height:1.4;}
+.callout-info{border-left-color:var(--primary);} .callout-info .callout-icon{color:var(--primary);}
+.callout-warn{border-left-color:var(--warn);} .callout-warn .callout-icon{color:var(--warn);}
+.callout-critical{border-left-color:var(--danger);} .callout-critical .callout-icon{color:var(--danger);}
+.callout-text{color:var(--muted);font-size:13px;line-height:1.6;flex:1;}
+.callout-text strong{color:var(--ink);}
+
+/* ===== KPI ===== */
+.kpi-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:20px 0;}
+.kpi-card{background:var(--bg2);border:2px solid var(--rule);padding:18px;text-align:center;transition:all .3s var(--ease-apple);}
+.kpi-card:hover{border-color:var(--brand);transform:translateY(-2px);}
+.kpi-value{font-family:var(--pixel-body);font-size:32px;font-weight:700;line-height:1;}
+.kpi-label{font-family:var(--pixel);font-size:10px;color:var(--muted);letter-spacing:2px;margin-top:8px;text-transform:uppercase;}
+.kpi-sub{font-size:12px;color:var(--muted);margin-top:4px;}
+
+/* ===== PROGRESS ===== */
+.progress-row{display:flex;align-items:center;gap:12px;margin-bottom:12px;}
+.progress-label{font-family:var(--pixel);font-size:11px;color:var(--muted);min-width:140px;letter-spacing:1px;text-transform:uppercase;}
+.progress-bar{flex:1;height:8px;background:var(--bg3);border:1px solid var(--rule);}
+.progress-fill{height:100%;transition:width .8s var(--ease-apple);}
+.progress-fill-green{background:var(--success);} .progress-fill-blue{background:var(--primary);}
+.progress-fill-cyan{background:var(--brand);} .progress-fill-muted{background:var(--muted);}
+.progress-pct{font-family:var(--mono);font-size:12px;color:var(--muted);min-width:36px;text-align:right;}
+
+/* ===== TIMELINE ===== */
+.timeline{position:relative;padding-left:32px;margin-top:16px;}
+.timeline::before{content:'';position:absolute;left:8px;top:0;bottom:0;width:2px;background:var(--rule);}
+.phase{position:relative;margin-bottom:28px;padding-bottom:28px;border-bottom:1px solid var(--rule);}
+.phase:last-child{border-bottom:none;margin-bottom:0;padding-bottom:0;}
+.phase-dot{position:absolute;left:-32px;top:4px;width:18px;height:18px;background:var(--bg);border:2px solid var(--brand);display:flex;align-items:center;justify-content:center;z-index:1;}
+.phase-dot-inner{width:8px;height:8px;background:var(--brand);}
+.phase-header{display:flex;align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap;}
+.phase-name{font-family:var(--pixel-body);font-size:16px;font-weight:700;color:var(--brand);letter-spacing:1px;}
+.phase-label{font-family:var(--pixel);font-size:10px;color:var(--primary);border:1px solid var(--primary);background:rgba(139,92,246,.08);padding:3px 8px;letter-spacing:1px;text-transform:uppercase;}
+.phase-time{font-family:var(--pixel);font-size:11px;color:var(--muted);margin-left:auto;letter-spacing:1px;}
+.phase-desc{font-size:13px;color:var(--muted);margin-bottom:12px;}
+.task-list{display:flex;flex-direction:column;gap:8px;}
+.task-item{display:flex;align-items:flex-start;gap:10px;padding:8px 12px;background:var(--bg2);border:1px solid var(--rule);transition:border-color .2s var(--ease-apple);}
+.task-item:hover{border-color:var(--brand);}
+.task-item.done .task-title{color:var(--muted);text-decoration:line-through;}
+.task-check{width:16px;height:16px;border:2px solid var(--rule);display:flex;align-items:center;justify-content:center;font-family:var(--pixel);font-size:10px;color:var(--success);flex-shrink:0;margin-top:2px;}
+.task-item.done .task-check{border-color:var(--success);background:rgba(74,222,128,.08);}
+.task-content{flex:1;}
+.task-title{font-size:13px;color:var(--ink);font-weight:500;}
+.task-detail{font-size:12px;color:var(--muted);margin-top:2px;}
+.task-prio{font-family:var(--pixel);font-size:9px;padding:3px 6px;letter-spacing:1px;flex-shrink:0;}
+.prio-p0{color:var(--danger);border:1px solid var(--danger);}
+.prio-p1{color:var(--brand);border:1px solid var(--brand);}
+.prio-p2{color:var(--primary);border:1px solid var(--primary);}
+.prio-p3{color:var(--muted);border:1px solid var(--rule);}
+
+/* ===== RISK TABLE ===== */
+.tbl-wrap{overflow-x:auto;}
+.risk-table{width:100%;border-collapse:collapse;font-size:13px;}
+.risk-table th{font-family:var(--pixel);font-size:10px;color:var(--muted);text-align:left;padding:8px 12px;border-bottom:2px solid var(--rule);letter-spacing:1px;text-transform:uppercase;}
+.risk-table td{padding:10px 12px;border-bottom:1px solid var(--rule);vertical-align:top;color:var(--ink2);}
+.risk-table tr:hover td{background:var(--bg2);}
+.risk-level{font-family:var(--pixel);font-size:10px;padding:3px 8px;display:inline-block;letter-spacing:1px;text-transform:uppercase;}
+.risk-high{color:var(--danger);border:1px solid var(--danger);}
+.risk-med{color:var(--warn);border:1px solid var(--warn);}
+.risk-low{color:var(--success);border:1px solid var(--success);}
+
+/* ===== MVP BOXES ===== */
+.mvp-box{border:2px solid;padding:14px 18px;margin:12px 0;}
+.mvp-box h4{font-family:var(--mono);font-size:12px;margin-bottom:8px;}
+.mvp-box ul{padding-left:18px;font-size:13px;color:var(--ink2);}
+.mvp-box li{margin-bottom:4px;}
+.mvp-yes{border-color:var(--success);background:rgba(74,222,128,.04);} .mvp-yes h4{color:var(--success);}
+.mvp-no{border-color:var(--danger);background:rgba(248,113,113,.04);} .mvp-no h4{color:var(--danger);}
+.mvp-maybe{border-color:var(--warn);background:rgba(250,204,21,.04);} .mvp-maybe h4{color:var(--warn);}
+
+/* ===== STAMP ===== */
+.stamp{display:inline-block;font-family:var(--pixel);font-size:14px;color:var(--success);border:3px solid var(--success);padding:8px 20px;transform:rotate(-3deg);letter-spacing:3px;text-transform:uppercase;background:rgba(74,222,128,.05);box-shadow:0 0 20px rgba(74,222,128,.2);margin:8px 0 12px;}
+
+/* ===== CODE ===== */
+.code-block{background:#0a0e14;border:1px solid var(--rule2);padding:14px 16px;margin:14px 0;overflow-x:auto;}
+.code-block pre{font-family:var(--mono);font-size:12px;line-height:1.6;color:var(--ink2);}
+.code-block .cmt{color:var(--muted);font-style:italic;}
+.code-block .kw{color:var(--primary);}
+.code-block .fn{color:var(--brand);}
+.code-block .str{color:var(--success);}
+.code-block .op{color:var(--danger);}
+
+/* ===== FILE TREE ===== */
+.file-tree{font-family:var(--mono);font-size:12px;background:var(--bg2);border:1px solid var(--rule);padding:14px;line-height:1.9;color:var(--muted);overflow-x:auto;}
+.file-tree .dir{color:var(--primary);}
+.file-tree .file-done{color:var(--success);}
+.file-tree .file-todo{color:var(--muted);}
+.file-tree .file-new{color:var(--brand);}
+
+/* ===== ARCH ===== */
+.arch-box{background:var(--bg2);border:2px solid var(--rule);padding:20px;overflow-x:auto;margin:14px 0;}
+.arch-layer{display:flex;gap:10px;margin-bottom:10px;align-items:stretch;}
+.arch-layer:last-child{margin-bottom:0;}
+.arch-layer-label{font-family:var(--pixel);font-size:10px;color:var(--muted);letter-spacing:1px;padding:6px 8px;border-right:1px solid var(--rule);min-width:52px;display:flex;align-items:center;text-transform:uppercase;}
+.arch-modules{display:flex;gap:8px;flex-wrap:wrap;flex:1;}
+.arch-module{font-family:var(--pixel);font-size:11px;padding:6px 10px;border:1px solid var(--rule);background:var(--bg3);color:var(--muted);min-width:88px;text-align:center;letter-spacing:.5px;}
+.arch-module.done{border-color:var(--success);color:var(--success);background:rgba(74,222,128,.06);}
+.arch-module.wip{border-color:var(--primary);color:var(--primary);background:rgba(139,92,246,.06);animation:blink-cyan 2s step-end infinite;}
+.arch-module.todo{border-color:var(--muted);color:var(--muted);background:var(--bg);}
+@keyframes blink-cyan{0%,100%{box-shadow:none;}50%{box-shadow:0 0 8px var(--primary);}}
+
+/* ===== MARK ===== */
+mark{background:transparent;color:var(--success);border-bottom:2px solid var(--success);padding:0 2px;}
+mark.danger{color:var(--danger);border-bottom-color:var(--danger);}
+mark.primary{color:var(--primary);border-bottom-color:var(--primary);}
+mark.brand{color:var(--brand);border-bottom-color:var(--brand);}
+
+/* ===== FOOTER ===== */
+.footer{text-align:center;padding:40px 0 8px;border-top:1px solid var(--rule);margin-top:48px;}
+.footer-text{font-family:var(--pixel);font-size:11px;color:var(--muted);letter-spacing:2px;}
+.footer-blink{animation:blink 1s step-end infinite;color:var(--brand);}
+@keyframes blink{0%,100%{opacity:1;}50%{opacity:0;}}
+
+@media (max-width:640px){
+  .hero-meta{gap:24px;}
+  .section-title{font-size:22px;}
+  .font-sample{font-size:22px;}
+  .phase-time{margin-left:0;width:100%;}
+}
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <!-- ===== HERO ===== -->
+  <header class="hero">
+    <div class="hero-logo">LUCY</div>
+    <div class="hero-sub">8-bit Pixel × Apple Smooth · UI STYLE GUIDE</div>
+    <div class="hero-tag">DESIGN SYSTEM · v1.0</div>
+    <div class="hero-meta">
+      <div class="hero-meta-item">
+        <div class="hero-meta-num">13</div>
+        <div class="hero-meta-label">色板令牌</div>
+      </div>
+      <div class="hero-meta-item">
+        <div class="hero-meta-num">4</div>
+        <div class="hero-meta-label">字体家族</div>
+      </div>
+      <div class="hero-meta-item">
+        <div class="hero-meta-num">17</div>
+        <div class="hero-meta-label">组件</div>
+      </div>
+      <div class="hero-meta-item">
+        <div class="hero-meta-num">0</div>
+        <div class="hero-meta-label">圆角</div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ===== 01 色彩令牌 ===== -->
+  <section class="section">
+    <div class="section-header">
+      <span class="section-num">01</span>
+      <h2 class="section-title">色彩令牌</h2>
+      <span class="section-tag">COLOR TOKENS</span>
+    </div>
+    <div class="swatches">
+      <div class="swatch sw-bg"><div class="sw-name">--bg</div><div class="sw-hex">#07090F</div></div>
+      <div class="swatch sw-bg2"><div class="sw-name">--bg2</div><div class="sw-hex">#0D1117</div></div>
+      <div class="swatch sw-bg3"><div class="sw-name">--bg3</div><div class="sw-hex">#161B22</div></div>
+      <div class="swatch sw-bg4"><div class="sw-name">--bg4</div><div class="sw-hex">#1E2530</div></div>
+      <div class="swatch sw-ink light"><div class="sw-name">--ink</div><div class="sw-hex">#E8ECF1</div></div>
+      <div class="swatch sw-ink2 light"><div class="sw-name">--ink2</div><div class="sw-hex">#C9D1D9</div></div>
+      <div class="swatch sw-muted light"><div class="sw-name">--muted</div><div class="sw-hex">#7D8590</div></div>
+      <div class="swatch sw-brand"><div class="sw-name">--brand</div><div class="sw-hex">#8B5CF6</div></div>
+      <div class="swatch sw-brand-dim"><div class="sw-name">--brand-dim</div><div class="sw-hex">#5B21B6</div></div>
+      <div class="swatch sw-primary light"><div class="sw-name">--primary</div><div class="sw-hex">#A78BFA</div></div>
+      <div class="swatch sw-ai light"><div class="sw-name">--ai</div><div class="sw-hex">#C4B5FD</div></div>
+      <div class="swatch sw-success light"><div class="sw-name">--success</div><div class="sw-hex">#4ADE80</div></div>
+      <div class="swatch sw-warn light"><div class="sw-name">--warn</div><div class="sw-hex">#FACC15</div></div>
+      <div class="swatch sw-danger light"><div class="sw-name">--danger</div><div class="sw-hex">#F87171</div></div>
+    </div>
+  </section>
+
+  <!-- ===== 02 字体 ===== -->
+  <section class="section">
+    <div class="section-header">
+      <span class="section-num">02</span>
+      <h2 class="section-title">字体</h2>
+      <span class="section-tag">TYPOGRAPHY</span>
+    </div>
+    <div class="font-row">
+      <div class="font-sample f-pixel">Silkscreen 0123</div>
+      <div class="font-meta">--pixel · 标签/编号</div>
+    </div>
+    <div class="font-row">
+      <div class="font-sample f-pixelbody">PixelifySans 0123</div>
+      <div class="font-meta">--pixel-body · 显示标题</div>
+    </div>
+    <div class="font-row">
+      <div class="font-sample f-body">Tektur 0123</div>
+      <div class="font-meta">--body · 正文</div>
+    </div>
+    <div class="font-row">
+      <div class="font-sample f-mono">JetBrainsMono 0123</div>
+      <div class="font-meta">--mono · 代码/技术值</div>
+    </div>
+  </section>
+
+  <!-- ===== 03 徽标 & 按钮 ===== -->
+  <section class="section">
+    <div class="section-header">
+      <span class="section-num">03</span>
+      <h2 class="section-title">徽标 & 按钮</h2>
+      <span class="section-tag">BADGES & BUTTONS</span>
+    </div>
+    <h3>语义徽标</h3>
+    <div class="badges">
+      <span class="badge">NEUTRAL</span>
+      <span class="badge brand">ENGINEERING LOCKED</span>
+      <span class="badge primary">AI ENABLED</span>
+      <span class="badge ai">COPILOT</span>
+      <span class="badge danger">HIGH RISK</span>
+      <span class="badge success">APPROVED</span>
+    </div>
+    <h3>状态徽标</h3>
+    <div class="badges">
+      <span class="status status-done">DONE</span>
+      <span class="status status-progress">IN PROGRESS</span>
+      <span class="status status-pending">PENDING</span>
+      <span class="status status-blocked">BLOCKED</span>
+    </div>
+    <h3>像素按钮</h3>
+    <div class="btn-row">
+      <button class="btn btn-primary">执行命令</button>
+      <button class="btn">确认操作</button>
+      <button class="btn btn-ghost">下载报告</button>
+      <button class="btn btn-danger">删除</button>
+    </div>
+    <p style="color:var(--muted);font-size:12px;margin-top:8px;">hover 时：硬阴影 + 位移 -2px，无圆角、无柔和模糊。</p>
+  </section>
+
+  <!-- ===== 04 卡片 ===== -->
+  <section class="section">
+    <div class="section-header">
+      <span class="section-num">04</span>
+      <h2 class="section-title">模块卡片</h2>
+      <span class="section-tag">CARD GRID</span>
+    </div>
+    <div class="card-grid">
+      <div class="card">
+        <span class="card-status status-done">DONE</span>
+        <div class="card-icon">[NFC]</div>
+        <div class="card-title">NFC 模块</div>
+        <div class="card-desc">扫描脉冲动画，卡片 UID/类型/厂商/RSSI 展示，已知卡类型数据库与历史记录。</div>
+        <div class="card-tech"><span class="tech-tag">Pulse Rings</span><span class="tech-tag">Card DB</span></div>
+      </div>
+      <div class="card">
+        <span class="card-status status-done">DONE</span>
+        <div class="card-icon">[~]</div>
+        <div class="card-title">Sub-GHz 模块</div>
+        <div class="card-desc">Canvas 频谱分析仪，3 频段切换，信号捕获表与协议匹配，合规警告。</div>
+        <div class="card-tech"><span class="tech-tag">Spectrum</span><span class="tech-tag">Protocol DB</span></div>
+      </div>
+      <div class="card">
+        <span class="card-status status-progress">WIP</span>
+        <div class="card-icon">[USB]</div>
+        <div class="card-title">BadUSB 模块</div>
+        <div class="card-desc">DuckyScript 编辑器，AST 风险分析器检测危险模式，三阶段执行。</div>
+        <div class="card-tech"><span class="tech-tag">AST</span><span class="tech-tag">Risk Analyzer</span></div>
+      </div>
+      <div class="card">
+        <span class="card-status status-blocked">BLOCKED</span>
+        <div class="card-icon">[FW]</div>
+        <div class="card-title">固件 OTA</div>
+        <div class="card-desc">六阶段 OTA 进度条，双分区回滚。当前等待真实硬件验证。</div>
+        <div class="card-tech"><span class="tech-tag">Dual Partition</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== 05 Callout & KPI ===== -->
+  <section class="section">
+    <div class="section-header">
+      <span class="section-num">05</span>
+      <h2 class="section-title">Callout & KPI</h2>
+      <span class="section-tag">ALERTS & METRICS</span>
+    </div>
+    <div class="callout callout-info">
+      <div class="callout-icon">ℹ</div>
+      <div class="callout-text"><strong>开发提示：</strong>前端已可在虚拟设备模式下独立运行。无需插入硬件即可调试全部 10 个模块。</div>
+    </div>
+    <div class="callout callout-warn">
+      <div class="callout-icon">!</div>
+      <div class="callout-text"><strong>合规警告：</strong>Sub-GHz 发射前将进行地区策略校验，非法频率会被拒绝执行。</div>
+    </div>
+    <div class="callout callout-critical">
+      <div class="callout-icon">⚠</div>
+      <div class="callout-text"><strong>危险操作：</strong>BadUSB 执行必须经过 validate → preview → confirm 三阶段，且需要用户手动确认。</div>
+    </div>
+    <div class="kpi-strip">
+      <div class="kpi-card">
+        <div class="kpi-value" style="color:var(--success)">171</div>
+        <div class="kpi-label">Rust 测试</div>
+        <div class="kpi-sub">全部通过</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-value" style="color:var(--primary)">1058</div>
+        <div class="kpi-label">i18n Keys</div>
+        <div class="kpi-sub">中英对等</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-value" style="color:var(--ai)">100</div>
+        <div class="kpi-label">Tauri 命令</div>
+        <div class="kpi-sub">风险标注</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-value" style="color:var(--brand)">485KB</div>
+        <div class="kpi-label">打包体积</div>
+        <div class="kpi-sub">gzip 136KB</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== 06 进度 ===== -->
+  <section class="section">
+    <div class="section-header">
+      <span class="section-num">06</span>
+      <h2 class="section-title">进度条</h2>
+      <span class="section-tag">PROGRESS</span>
+    </div>
+    <div class="progress-row">
+      <div class="progress-label">前端 UI 框架</div>
+      <div class="progress-bar"><div class="progress-fill progress-fill-green" style="width:95%"></div></div>
+      <div class="progress-pct">95%</div>
+    </div>
+    <div class="progress-row">
+      <div class="progress-label">Rust 后端骨架</div>
+      <div class="progress-bar"><div class="progress-fill progress-fill-blue" style="width:72%"></div></div>
+      <div class="progress-pct">72%</div>
+    </div>
+    <div class="progress-row">
+      <div class="progress-label">真实硬件通信</div>
+      <div class="progress-bar"><div class="progress-fill progress-fill-cyan" style="width:34%"></div></div>
+      <div class="progress-pct">34%</div>
+    </div>
+    <div class="progress-row">
+      <div class="progress-label">打包发布</div>
+      <div class="progress-bar"><div class="progress-fill progress-fill-muted" style="width:8%"></div></div>
+      <div class="progress-pct">8%</div>
+    </div>
+  </section>
+
+  <!-- ===== 07 时间轴 ===== -->
+  <section class="section">
+    <div class="section-header">
+      <span class="section-num">07</span>
+      <h2 class="section-title">阶段时间轴</h2>
+      <span class="section-tag">TIMELINE</span>
+    </div>
+    <div class="timeline">
+      <div class="phase">
+        <div class="phase-dot"><div class="phase-dot-inner"></div></div>
+        <div class="phase-header">
+          <div class="phase-name">PHASE 1</div>
+          <div class="phase-label">USB BRIDGE</div>
+          <div class="phase-time">P0 · 3-5 天</div>
+        </div>
+        <div class="phase-desc">打通 Rust 后端与真实 ESP32-S3 设备的 USB CDC 通信，是所有硬件功能的基础。</div>
+        <div class="task-list">
+          <div class="task-item done">
+            <div class="task-check">X</div>
+            <div class="task-content">
+              <div class="task-title">添加 nusb/serialport 依赖，实现 UsbTransport</div>
+              <div class="task-detail">实现 DeviceTransport trait for 真实 USB 设备</div>
+            </div>
+            <div class="task-prio prio-p0">P0</div>
+          </div>
+          <div class="task-item">
+            <div class="task-check"></div>
+            <div class="task-content">
+              <div class="task-title">设备连接/断开/重连状态机</div>
+              <div class="task-detail">热插拔检测对接真实 USB 枚举，状态变化推送到前端</div>
+            </div>
+            <div class="task-prio prio-p1">P1</div>
+          </div>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="phase-dot"><div class="phase-dot-inner" style="background:var(--primary)"></div></div>
+        <div class="phase-header">
+          <div class="phase-name">PHASE 2</div>
+          <div class="phase-label">HARDWARE MODULES</div>
+          <div class="phase-time">P0 · 7-10 天</div>
+        </div>
+        <div class="phase-desc">逐个打通 NFC、Sub-GHz、IR、BadUSB、GPIO 五大硬件模块。</div>
+        <div class="task-list">
+          <div class="task-item">
+            <div class="task-check"></div>
+            <div class="task-content">
+              <div class="task-title">SubGHz 频谱扫描 + 信号接收</div>
+              <div class="task-detail">RSSI 数据流实时推送前端 Canvas 渲染</div>
+            </div>
+            <div class="task-prio prio-p2">P2</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== 08 表格 & 判定 ===== -->
+  <section class="section">
+    <div class="section-header">
+      <span class="section-num">08</span>
+      <h2 class="section-title">风险表格 & 判定框</h2>
+      <span class="section-tag">TABLE & VERDICT</span>
+    </div>
+    <div class="tbl-wrap">
+      <table class="risk-table">
+        <thead>
+          <tr><th style="width:80px">等级</th><th style="width:200px">风险</th><th>对策</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="risk-level risk-high">HIGH</span></td>
+            <td>USB CDC 通信不稳定</td>
+            <td>滑动窗口 + ACK 重传；独立读写线程；通信质量指标实时显示。</td>
+          </tr>
+          <tr>
+            <td><span class="risk-level risk-med">MED</span></td>
+            <td>屏幕镜像帧率不足</td>
+            <td>差分传输 + 降色深选项 + 可配置帧率。</td>
+          </tr>
+          <tr>
+            <td><span class="risk-level risk-low">LOW</span></td>
+            <td>OTA 更新刷写失败</td>
+            <td>双 OTA 分区，3 次启动失败自动回滚；电量低于 20% 拒绝更新。</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="mvp-box mvp-yes">
+      <h4>// MVP 必须交付（绿色 = 承诺）</h4>
+      <ul>
+        <li>Sub-GHz (CC1101 + <mark>收发</mark>) 基础读卡能力</li>
+        <li>虚拟设备模拟器，无硬件可开发</li>
+      </ul>
+    </div>
+    <div class="mvp-box mvp-no">
+      <h4>// 明确否决（红色 = 拒绝）</h4>
+      <ul>
+        <li>PA/LNA 放大：433MHz +20dBm <mark class="danger">违法</mark>，过不了认证</li>
+      </ul>
+    </div>
+    <div class="mvp-box mvp-maybe">
+      <h4>// 后移考虑（黄色 = 可选）</h4>
+      <ul>
+        <li>iButton 接口、逻辑分析仪模式</li>
+      </ul>
+    </div>
+    <div style="text-align:center;margin:24px 0;">
+      <span class="stamp">ENGINEERING LOCKED</span>
+    </div>
+  </section>
+
+  <!-- ===== 09 代码 & 文件树 & 架构 ===== -->
+  <section class="section">
+    <div class="section-header">
+      <span class="section-num">09</span>
+      <h2 class="section-title">代码 / 文件树 / 架构</h2>
+      <span class="section-tag">TECHNICAL</span>
+    </div>
+    <div class="code-block">
+<pre><span class="cmt">// CommandGateway — 五级安全管线</span>
+<span class="kw">pub async fn</span> <span class="fn">gateway_check</span>(
+    command: &amp;str,
+    source: &amp;<span class="fn">CommandSource</span>,
+    frequency: <span class="kw">Option</span>&lt;u32&gt;,
+) -&gt; <span class="fn">LucyResult</span>&lt;<span class="fn">GatewayResult</span>&gt; {
+    <span class="cmt">// classify → region_check → approve → execute → audit</span>
+    <span class="kw">let</span> result = <span class="fn">classify</span>(command)?;
+    <span class="kw">if</span> source == &amp;<span class="fn">CommandSource</span>::AiApproved {
+        <span class="fn">check_ai_allowed</span>(command)?;
+    }
+    <span class="fn">Ok</span>(result)
+}</pre>
+    </div>
+    <div class="file-tree">
+<pre>src-tauri/src/
+├── <span class="dir">gateway.rs</span>        <span class="file-done">安全执行网关（五级管线）</span>
+├── <span class="dir">database.rs</span>      <span class="file-done">SQLite 资产库，11 张表</span>
+├── <span class="dir">reliability.rs</span>   <span class="file-done">超时/重试/心跳/自动重连</span>
+├── <span class="dir">freeze.rs</span>        <span class="file-done">RC1 命令冻结 + 风险标记</span>
+└── <span class="dir">device/</span>
+    ├── <span class="dir">transport.rs</span>   <span class="file-done">Transport trait（统一接口）</span>
+    └── <span class="dir">usb_transport.rs</span> <span class="file-new">真实 USB 通信（待接入）</span></pre>
+    </div>
+    <div class="arch-box">
+      <div class="arch-layer">
+        <div class="arch-layer-label">UI</div>
+        <div class="arch-modules">
+          <span class="arch-module done">BootScreen</span>
+          <span class="arch-module done">Sidebar</span>
+          <span class="arch-module wip">StatusBar</span>
+          <span class="arch-module todo">CmdPalette</span>
+        </div>
+      </div>
+      <div class="arch-layer">
+        <div class="arch-layer-label">RUST</div>
+        <div class="arch-modules">
+          <span class="arch-module done">Gateway</span>
+          <span class="arch-module done">Database</span>
+          <span class="arch-module wip">UsbTransport</span>
+          <span class="arch-module todo">OtaBackend</span>
+        </div>
+      </div>
+      <div class="arch-layer">
+        <div class="arch-layer-label">HW</div>
+        <div class="arch-modules">
+          <span class="arch-module todo">ESP32-S3</span>
+          <span class="arch-module todo">CC1101</span>
+          <span class="arch-module todo">ST25R3916</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== FOOTER ===== -->
+  <footer class="footer">
+    <div class="footer-text">
+      LUCY UI STYLE GUIDE · GENERATED FROM DOCS/<br>
+      <span class="footer-blink">█</span> READY FOR PROMPTING
+    </div>
+  </footer>
+
+</div>
+
+</body>
+</html>

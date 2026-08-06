@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CaPilot · Logo Variants</title>
+<style>
+:root{
+  --bg:#07090F;--bg2:#0D1117;--bg3:#161B22;--bg4:#1E2530;
+  --ink:#E8ECF1;--ink2:#C9D1D9;--muted:#7D8590;
+  --rule:#21262D;--rule2:#30363D;
+  --brand:#8B5CF6;--brand-dim:#5B21B6;
+  --primary:#A78BFA;--primary-dim:#6D28D9;
+  --ai:#C4B5FD;--ai-dim:#6D28D9;
+  --success:#4ADE80;--warn:#FACC15;--danger:#F87171;
+  --pixel:'Silkscreen',monospace;
+  --pixel-body:'PixelifySans',sans-serif;
+  --body:'Tektur',system-ui,sans-serif;
+  --mono:'JetBrainsMono',ui-monospace,monospace;
+  --ease-apple:cubic-bezier(0.25,0.1,0.25,1);
+  --shadow-hard:4px 4px 0 rgba(0,0,0,.4);
+}
+@font-face{font-family:'Silkscreen';src:url('./_shared/fonts/Silkscreen-Regular.ttf') format('truetype');}
+@font-face{font-family:'PixelifySans';src:url('./_shared/fonts/PixelifySans-Medium.ttf') format('truetype');}
+@font-face{font-family:'Tektur';src:url('./_shared/fonts/Tektur-Regular.ttf') format('truetype');font-weight:400;}
+@font-face{font-family:'Tektur';src:url('./_shared/fonts/Tektur-Medium.ttf') format('truetype');font-weight:500;}
+@font-face{font-family:'JetBrainsMono';src:url('./_shared/fonts/JetBrainsMono-Regular.ttf') format('truetype');}
+@font-face{font-family:'JetBrainsMono';src:url('./_shared/fonts/JetBrainsMono-Bold.ttf') format('truetype');font-weight:700;}
+*{margin:0;padding:0;box-sizing:border-box;}
+body{
+  background:
+    repeating-linear-gradient(0deg, transparent, transparent 2px,
+      rgba(139,92,246,.015) 2px, rgba(139,92,246,.015) 4px),
+    radial-gradient(ellipse at top, rgba(139,92,246,.05), transparent 60%),
+    var(--bg);
+  color:var(--ink);font-family:var(--body);font-size:15px;line-height:1.7;
+  -webkit-font-smoothing:antialiased;overflow-x:hidden;
+  min-height:100vh;
+}
+body::before{
+  content:'';position:fixed;inset:0;pointer-events:none;z-index:9999;
+  background:repeating-linear-gradient(0deg,transparent 0px,transparent 2px,rgba(0,0,0,.06) 2px,rgba(0,0,0,.06) 4px);
+}
+body::after{
+  content:'';position:fixed;inset:0;pointer-events:none;z-index:9998;
+  background:radial-gradient(ellipse at center,transparent 50%,rgba(0,0,0,.4) 100%);
+}
+.container{max-width:1080px;margin:0 auto;padding:24px 24px 64px;position:relative;z-index:1;}
+
+/* Hero */
+.hero{text-align:center;padding:56px 0 40px;border-bottom:2px solid var(--rule);margin-bottom:40px;position:relative;}
+.hero::after{content:'';position:absolute;bottom:-2px;left:50%;transform:translateX(-50%);width:80px;height:2px;background:var(--brand);box-shadow:0 0 12px var(--brand);}
+.hero-logo{font-family:var(--pixel-body);font-size:clamp(2.2rem,8vw,3.6rem);font-weight:900;color:var(--brand);letter-spacing:0.12em;text-shadow:0 0 30px rgba(139,92,246,.4);animation:glow-pulse 3s ease-in-out infinite;}
+@keyframes glow-pulse{0%,100%{text-shadow:0 0 20px rgba(139,92,246,.4);}50%{text-shadow:0 0 40px rgba(139,92,246,.7),0 0 60px rgba(139,92,246,.3);}}
+.hero-sub{font-family:var(--pixel);font-size:12px;color:var(--muted);letter-spacing:3px;text-transform:uppercase;margin-top:12px;}
+.hero-tag{display:inline-block;font-family:var(--pixel);font-size:10px;color:var(--primary);border:1px solid var(--primary);padding:4px 12px;background:rgba(139,92,246,.08);letter-spacing:2px;margin-top:16px;text-transform:uppercase;}
+
+/* Section */
+.section{margin-bottom:48px;}
+.section-header{display:flex;align-items:baseline;gap:16px;margin-bottom:24px;padding-bottom:12px;border-bottom:2px solid var(--rule);}
+.section-num{font-family:var(--pixel);font-size:28px;color:var(--brand);line-height:1;}
+.section-title{font-family:var(--pixel-body);font-size:26px;font-weight:500;color:var(--ink);letter-spacing:1px;}
+.section-tag{font-family:var(--pixel);font-size:10px;color:var(--muted);letter-spacing:2px;margin-left:auto;text-transform:uppercase;}
+
+/* Logo Card Grid */
+.logo-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;}
+.logo-card{
+  background:var(--bg2);border:2px solid var(--rule);padding:20px;
+  display:flex;flex-direction:column;align-items:center;gap:12px;
+  transition:all .3s var(--ease-apple);
+}
+.logo-card:hover{border-color:var(--brand);transform:translateY(-2px);box-shadow:var(--shadow-hard);}
+.logo-card .thumb{
+  width:140px;height:140px;
+  display:flex;align-items:center;justify-content:center;
+  position:relative;
+}
+.logo-card .thumb img{max-width:100%;max-height:100%;object-fit:contain;}
+.logo-card .label{
+  font-family:var(--pixel);font-size:10px;color:var(--muted);letter-spacing:1px;
+  text-transform:uppercase;text-align:center;
+}
+.logo-card .filename{
+  font-family:var(--mono);font-size:10px;color:var(--muted);
+  word-break:break-all;text-align:center;opacity:.6;
+}
+
+/* Color-specific card accents */
+.logo-card.card-brand:hover{border-color:var(--brand);}
+.logo-card.card-primary:hover{border-color:var(--primary);}
+.logo-card.card-ai:hover{border-color:var(--ai);}
+.logo-card.card-success:hover{border-color:var(--success);}
+.logo-card.card-warn:hover{border-color:var(--warn);}
+.logo-card.card-danger:hover{border-color:var(--danger);}
+
+/* Usage table */
+.use-table{width:100%;border-collapse:collapse;font-size:13px;margin-top:16px;}
+.use-table th{font-family:var(--pixel);font-size:10px;color:var(--muted);text-align:left;padding:8px 12px;border-bottom:2px solid var(--rule);letter-spacing:1px;text-transform:uppercase;}
+.use-table td{padding:10px 12px;border-bottom:1px solid var(--rule);vertical-align:top;color:var(--ink2);}
+.use-table tr:hover td{background:var(--bg2);}
+.use-table td:last-child{font-family:var(--mono);font-size:11px;}
+
+/* Color preview badge */
+.color-dot{display:inline-block;width:12px;height:12px;border:1px solid var(--rule2);margin-right:6px;vertical-align:middle;}
+.color-name{font-family:var(--mono);font-size:12px;color:var(--ink2);}
+
+/* Footer */
+.footer{text-align:center;padding:40px 0 8px;border-top:1px solid var(--rule);margin-top:48px;}
+.footer-text{font-family:var(--pixel);font-size:11px;color:var(--muted);letter-spacing:2px;}
+.footer-blink{animation:blink 1s step-end infinite;color:var(--brand);}
+@keyframes blink{0%,100%{opacity:1;}50%{opacity:0;}}
+
+@media(max-width:640px){
+  .logo-grid{grid-template-columns:repeat(2,1fr);}
+  .logo-card .thumb{width:100px;height:100px;}
+}
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <!-- Hero -->
+  <header class="hero">
+    <div class="hero-logo">CAPILOT</div>
+    <div class="hero-sub">Logo Variants · LUCY Styleguide Colors</div>
+    <div class="hero-tag">DESIGN ASSETS · v1.0</div>
+  </header>
+
+  <!-- 01 Brand Purple -->
+  <section class="section">
+    <div class="section-header">
+      <span class="section-num">01</span>
+      <h2 class="section-title">品牌紫</h2>
+      <span class="section-tag">BRAND · #8B5CF6</span>
+    </div>
+    <div class="logo-grid">
+      <div class="logo-card card-brand">
+        <div class="thumb"><img src="../Assets/CaPilot-logo-brand.png" alt="brand"></div>
+        <div class="label">STANDARD</div>
+        <div class="filename">CaPilot-logo-brand.png</div>
+      </div>
+      <div class="logo-card card-brand">
+        <div class="thumb"><img src="../Assets/CaPilot-logo-brand-glow.png" alt="brand glow"></div>
+        <div class="label">GLOW</div>
+        <div class="filename">CaPilot-logo-brand-glow.png</div>
+      </div>
+      <div class="logo-card card-brand">
+        <div class="thumb"><img src="../Assets/CaPilot-logo-brand-bg2.png" alt="brand bg2"></div>
+        <div class="label">ON CARD BG</div>
+        <div class="filename">CaPilot-logo-brand-bg2.png</div>
+      </div>
+      <div class="logo-card card-brand">
+        <div class="thumb"><img src="../Assets/CaPilot-logo-brand-rounded.png" alt="brand rounded"></div>
+        <div class="label">ROUNDED</div>
+        <div class="filename">CaPilot-logo-brand-rounded.png</div>
+      </div>
+      <div class="logo-card card-brand">
+        <div class="thumb" style="background:#0D1117;border-radius:4px;"><img src="../Assets/CaPilot-logo-brand-transparent.png" alt="brand transparent"></div>
+        <div class="label">TRANSPARENT</div>
+        <div class="filename">CaPilot-logo-brand-transparent.png</div>
+      </div>
+      <div class="logo-card card-brand">
+        <div class="thumb"><img src="../Assets/CaPilot-logo-inverted-brand.png" alt="inverted brand"></div>
+        <div class="label">INVERTED</div>
+        <div class="filename">CaPilot-logo-inverted-brand.png</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 02 Primary Light Purple -->
+  <section class="section">
+    <div class="section-header">
+      <span class="section-num">02</span>
+      <h2 class="section-title">浅紫</h2>
+      <span class="section-tag">PRIMARY · #A78BFA</span>
+    </div>
+    <div class="logo-grid">
+      <div class="logo-card card-primary">
+        <div class="thumb"><img src="../Assets/CaPilot-logo-primary.png" alt="primary"></div>
+        <div class="label">STANDARD</div>
+        <div class="filename">CaPilot-logo-primary.png</div>
+      </div>
+      <div class="logo-card card-primary">
+        <div class="thumb"><img src="../Assets/CaPilot-logo-primary-glow.png" alt="primary glow"></div>
+        <div class="label">GLOW</div>
+        <div class="filename">CaPilot-logo-primary-glow.png</div>
+      </div>
+      <div class="logo-card card-primary">
+        <div class="thumb"><img src="../Assets/CaPilot-logo-primary-rounded.png" alt="primary rounded"></div>
+        <div class="label">ROUNDED</div>
+        <div class="filename">CaPilot-logo-primary-rounded.png</div>
+      </div>
+      <div class="logo-card card-primary">
+        <div class="thumb" style="background:#0D1117;border-radius:4px;"><img src="../Assets/CaPilot-logo-primary-transparent.png" alt="primary transparent"></div>
+        <div class="label">TRANSPARENT</div>
+        <div class="filename">CaPilot-logo-primary-transparent.png</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 03 AI Pale Purple -->
+  <section class="section">
+    <div class="section-header">
+      <span class="section-num">03</span>
+      <h2 class="section-title">淡紫</h2>
+      <span class="section-tag">AI · #C4B5FD</span>
+    </div>
+    <div class="logo-grid">
+      <div class="logo-card card-ai">
+        <div class="thumb"><img src="../Assets/CaPilot-logo-ai.png" alt="ai"></div>
+        <div class="label">STANDARD</div>
+        <div class="filename">CaPilot-logo-ai.png</div>
+      </div>
+      <div class="logo-card card-ai">
+        <div class="thumb"><img src="../Assets/CaPilot-logo-ai-glow.png" alt="ai glow"></div>
+        <div class="label">GLOW</div>
+        <div class="filename">CaPilot-logo-ai-glow.png</div>
+      </div>
+      <div class="logo-card card-ai">
+        <div class="thumb"><img src="../Assets/CaPilot-logo-ai-rounded.png" alt="ai rounded"></div>
+        <div class="label">ROUNDED</div>
+        <div class="filename">CaPilot-logo-ai-rounded.png</div>
+      </div>
+      <div class="logo-card card-ai">
+        <div class="thumb" style="background:#0D1117;border-radius:4px;"><img src="../Assets/CaPilot-logo-ai-transparent.png" alt="ai transparent"></div>
+        <div class="label">TRANSPARENT</div>
+        <div class="filename">CaPilot-logo-ai-transparent.png</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 04 Semantic Colors -->
+  <section class="section">
+    <div class="section-header">
+      <span class="section-num">04</span>
+      <h2 class="section-title">语义色</h2>
+      <span class="section-tag">SEMANTIC</span>
+    </div>
+    <div class="logo-grid">
+      <div class="logo-card card-success">
+        <div class="thumb"><img src="../Assets/CaPilot-logo-success.png" alt="success"></div>
+        <div class="label">SUCCESS</div>
+        <div class="filename">CaPilot-logo-success.png</div>
+      </div>
+      <div class="logo-card card-success">
+        <div class="thumb"><img src="../Assets/CaPilot-logo-success-glow.png" alt="success glow"></div>
+        <div class="label">SUCCESS GLOW</div>
+        <div class="filename">CaPilot-logo-success-glow.png</div>
+      </div>
+      <div class="logo-card card-warn">
+        <div class="thumb"><img src="../Assets/CaPilot-logo-warn.png" alt="warn"></div>
+        <div class="label">WARNING</div>
+        <div class="filename">CaPilot-logo-warn.png</div>
+      </div>
+      <div class="logo-card card-danger">
+        <div class="thumb"><img src="../Assets/CaPilot-logo-danger.png" alt="danger"></div>
+        <div class="label">DANGER</div>
+        <div class="filename">CaPilot-logo-danger.png</div>
+      </div>
+      <div class="logo-card">
+        <div class="thumb"><img src="../Assets/CaPilot-logo-ink.png" alt="ink"></div>
+        <div class="label">WHITE / INK</div>
+        <div class="filename">CaPilot-logo-ink.png</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 05 Usage Guide -->
+  <section class="section">
+    <div class="section-header">
+      <span class="section-num">05</span>
+      <h2 class="section-title">使用指引</h2>
+      <span class="section-tag">USAGE</span>
+    </div>
+    <table class="use-table">
+      <thead>
+        <tr>
+          <th>场景</th>
+          <th>推荐 Logo</th>
+          <th>文件名</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Hero / 首页标题旁</td>
+          <td><span class="color-dot" style="background:var(--brand)"></span>品牌紫 + 发光</td>
+          <td>CaPilot-logo-brand-glow.png</td>
+        </tr>
+        <tr>
+          <td>导航栏 / Sidebar</td>
+          <td><span class="color-dot" style="background:var(--ink)"></span>白色 / Ink</td>
+          <td>CaPilot-logo-ink.png</td>
+        </tr>
+        <tr>
+          <td>卡片内 / 面板</td>
+          <td><span class="color-dot" style="background:var(--brand)"></span>品牌紫 on bg2</td>
+          <td>CaPilot-logo-brand-bg2.png</td>
+        </tr>
+        <tr>
+          <td>AI / Copilot 功能</td>
+          <td><span class="color-dot" style="background:var(--ai)"></span>淡紫 AI</td>
+          <td>CaPilot-logo-ai.png</td>
+        </tr>
+        <tr>
+          <td>进行中 / 加载态</td>
+          <td><span class="color-dot" style="background:var(--primary)"></span>浅紫 Primary</td>
+          <td>CaPilot-logo-primary.png</td>
+        </tr>
+        <tr>
+          <td>成功 / 完成页</td>
+          <td><span class="color-dot" style="background:var(--success)"></span>Success 绿</td>
+          <td>CaPilot-logo-success.png</td>
+        </tr>
+        <tr>
+          <td>警告 / 需确认</td>
+          <td><span class="color-dot" style="background:var(--warn)"></span>Warning 黄</td>
+          <td>CaPilot-logo-warn.png</td>
+        </tr>
+        <tr>
+          <td>危险 / 拒绝</td>
+          <td><span class="color-dot" style="background:var(--danger)"></span>Danger 红</td>
+          <td>CaPilot-logo-danger.png</td>
+        </tr>
+        <tr>
+          <td>叠加到其他背景</td>
+          <td><span class="color-dot" style="background:var(--brand)"></span>透明底版本</td>
+          <td>CaPilot-logo-*-transparent.png</td>
+        </tr>
+        <tr>
+          <td>圆角容器内</td>
+          <td><span class="color-dot" style="background:var(--brand)"></span>Rounded 版本</td>
+          <td>CaPilot-logo-*-rounded.png</td>
+        </tr>
+        <tr>
+          <td>亮色背景下反转</td>
+          <td><span class="color-dot" style="background:var(--brand)"></span>Inverted</td>
+          <td>CaPilot-logo-inverted-brand.png</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <footer class="footer">
+    <div class="footer-text">
+      CAPILOT LOGO SYSTEM · LUCY STYLEGUIDE COLORS<br>
+      <span class="footer-blink">█</span> 19 VARIANTS GENERATED
+    </div>
+  </footer>
+
+</div>
+
+</body>
+</html>

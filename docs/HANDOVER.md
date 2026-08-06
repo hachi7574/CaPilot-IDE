@@ -96,6 +96,17 @@ CaPilot-Ide/
 - `EspManager` 转发事件到前端 `esp://event`；状态栏/概览显示连接+电量
 - 固件在 CaPilot 主仓库 `Firmware/PlatformIO/`（见 `docs/ESP-Firmware-Design.md`）
 
+### 4.5 源代码管理（Git，按 VSCode SCM 重构）
+
+- 面板（`RightSidebar.tsx` GitPanel）：头部（标题/当前分支/刷新/⋯ 菜单）+ 提交框 + 两组（暂存的更改 / 更改）
+- **分组**：`git_status` 的 index vs worktree 字段拆分 —— staged = `index != ' ' && != '?'`，changes = `worktree != ' '`（MM 双状态会同时出现在两组，同 VSCode）
+- **暂存/取消**：每文件 +/− 按钮；⋯ 菜单「全部暂存 / 全部取消暂存」；`git_stage`/`git_unstage`
+- **放弃更改**：每文件 ⌫（confirm 后 `git_discard`：tracked→`git restore`，untracked→rm）；菜单「全部放弃更改」→ `git_discard_all`（`git restore .`，不动已暂存）
+- **diff**：点文件行展开内联侧并 diff（`@codemirror/merge` MergeView）。内容来源：staged = `HEAD:` vs `:0:`，unstaged = `:0:` vs worktree，untracked = 空 vs worktree；「打开」→ 编辑器内全高 diff 标签页（`DiffPanel.tsx`，tab.type=`diff`），「编辑」→ 直接开源文件
+- **提交**：提交框 Ctrl+Enter 提交；按钮 gating `msg.trim() && staged.length>0`；有 message 但未暂存时显示提示条
+- **自动刷新**：面板挂载期间 2.5s 前端轮询 `refresh()`（VSCode 文件监听的对等实现，避免引入 Rust notify 原生依赖）；agents 落盘改动自动出现
+- 后端：`git_discard`/`git_discard_all` 命令；`git_status` 未跟踪大文件改为流式数行数（`count_lines`）
+
 ## 5. 功能进度（对照 DevPlan）
 
 | 阶段 | 内容 | 状态 |
@@ -128,14 +139,14 @@ IDE UI 遵循 CaPilot 主仓库 `Doc/styleguide/ui-style-guide.md` 的 LUCY 风�
 - **动效**：Apple 曲线 `cubic-bezier(0.25,0.1,0.25,1)`
 - 字体已内嵌在 `public/fonts/`；颜色令牌在 `ui/App.css :root`
 
-> 注：styleguide 与 logo 资产仍在 CaPilot 主仓库 `Doc/styleguide/`、`Doc/Assets/`（IDE 引用其字体/色板，改设计需两边同步）。
+> 注：styleguide 与 logo 资产已复制到本仓库 `docs/styleguide/`、`docs/Assets/`（与主仓库 `Doc/styleguide/`、`Doc/Assets/` 保持同步）。运行时字体/logo 在 `public/fonts/`、`public/*.png`，应用图标由主仓库 logo 生成于 `src-tauri/icons/`；改设计需两边同步。
 
 ## 8. 已知问题 / 待办
 
 ### 待开发（DevPlan P3 剩余）
 - ESP：USB (`UsbSerial`) / WiFi (`WifiWs`) 传输、配对向导、5s 心跳/15s 超时、控制帧 ack/重试
 - **语音链路**（最重）：ESP mic → Opus → BLE → Rust 解码 → sherpa-onnx 流式 STT → 实时字幕 → 回复 TTS
-- 编辑器外部改动监视（notify → 前端刷新）
+- 编辑器外部改动监视（notify → 前端刷新）：Git 面板已用 2.5s 轮询实现（见 §4.5），编辑器标签页本身仍未监听磁盘改动
 
 ### 已知技术债（Medium/Low）
 - `.lock().unwrap()` 毒化处理（多处 std Mutex）
@@ -159,7 +170,7 @@ IDE UI 遵循 CaPilot 主仓库 `Doc/styleguide/ui-style-guide.md` 的 LUCY 风�
 | 开发计划 | `docs/CaPilot-IDE-DevPlan.md` | DevPlan v2.0（架构/布局/里程碑）|
 | 界面预览 | `docs/CaPilot-IDE-Preview.html` | 参考 UI 设计（浏览器打开）|
 | 安全审查 | `docs/security-review.md` | CSP/权限/路径审查 |
-| ESP 固件设计 | CaPilot 主仓库 `Doc/ESP-Firmware-Design.md` | 固件架构 + 协议 |
-| ESP UI 对比 | CaPilot 主仓库 `Doc/ESP-UI-Framework-Comparison.md` | WouoUI vs LVGL |
-| 产品 PRD | CaPilot 主仓库 `Doc/CaPilot-PRD.md` | 产品整体需求 |
-| LUCY 风格 | CaPilot 主仓库 `Doc/styleguide/` | 设计规范 |
+| ESP 固件设计 | `docs/ESP-Firmware-Design.md`（源：主仓库 `Doc/ESP-Firmware-Design.md`）| 固件架构 + 协议 |
+| ESP UI 对比 | `docs/ESP-UI-Framework-Comparison.md`（源：主仓库 `Doc/`）| WouoUI vs LVGL |
+| 产品 PRD | `docs/CaPilot-PRD.md`（源：主仓库 `Doc/CaPilot-PRD.md`）| 产品整体需求 |
+| LUCY 风格 | `docs/styleguide/`（源：主仓库 `Doc/styleguide/`）| 设计规范 |
