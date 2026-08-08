@@ -315,6 +315,8 @@ impl PtyManager {
 
         Ok(AgentInfo {
             id: agent_id,
+            workspace_id: None,
+            project: None,
             runtime: String::new(),
             role: crate::agent_runtime::adapter::AgentRole::Standalone,
             status: AgentStatus::Running,

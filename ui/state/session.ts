@@ -27,6 +27,8 @@ export function useSessionRestore() {
           s.addAgent(
             {
               id: rec.id,
+              workspace_id: rec.workspace_id,
+              project: rec.project,
               runtime: rec.runtime,
               role: rec.role,
               status,

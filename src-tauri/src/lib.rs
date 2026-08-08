@@ -224,6 +224,7 @@ fn build_and_spawn(
     app: &tauri::AppHandle,
     id: &str,
     project: &str,
+    workspace_id: Option<String>,
     role: AgentRole,
     runtime: &str,
     resume: bool,
@@ -234,6 +235,8 @@ fn build_and_spawn(
     cwd: PathBuf,
     on_data: Channel<Vec<u8>>,
 ) -> Result<AgentInfo, String> {
+    let workspace_id = workspace_id
+        .unwrap_or_else(|| format!("wks_{}", uuid::Uuid::new_v4().simple()));
     let adapter = get_adapter(runtime);
     if !adapter.is_available() {
         return Err(format!("Runtime '{}' is not available", runtime));
@@ -286,6 +289,8 @@ fn build_and_spawn(
         )
         .map_err(|e| e.to_string())?;
     info.runtime = runtime.to_string();
+    info.workspace_id = Some(workspace_id.clone());
+    info.project = Some(project.to_string());
     info.role = role.clone();
     info.mode = mode_str(&session.mode).to_string();
     info.speed = speed_str(&session.speed).to_string();
@@ -309,6 +314,7 @@ fn build_and_spawn(
         .or_else(|| detected_key.clone());
     let meta = AgentMeta {
         id: id.to_string(),
+        workspace_id: Some(workspace_id.clone()),
         role: role_str(&role).to_string(),
         runtime: runtime.to_string(),
         resume_key: persisted_key.clone(),
@@ -329,6 +335,7 @@ fn build_and_spawn(
     }
     let record = AgentSessionRecord {
         id: id.to_string(),
+        workspace_id: Some(workspace_id),
         project: project.to_string(),
         role: role_str(&role).to_string(),
         runtime: runtime.to_string(),
@@ -450,6 +457,7 @@ async fn agent_spawn(
         &app,
         &agent_id,
         &project,
+        None,
         role,
         &runtime,
         resume,
@@ -530,6 +538,7 @@ async fn agent_resume(
         &app,
         &id,
         &rec.project,
+        rec.workspace_id.clone(),
         role,
         &rec.runtime,
         true, // resume — continue the stored/detected conversation
@@ -644,6 +653,7 @@ async fn agent_switch_runtime(
         &app,
         &id,
         &project,
+        rec.workspace_id.clone(),
         role,
         &runtime,
         true, // runtime switch resumes session history in the same context dir
@@ -2184,6 +2194,7 @@ mod tests {
 
         let meta = persistence::AgentMeta {
             id: "a1".into(),
+            workspace_id: Some("wks_a1".into()),
             role: "worker".into(),
             runtime: "claude".into(),
             resume_key: None,
@@ -2201,6 +2212,7 @@ mod tests {
         let db = pers.db_tolerant().unwrap();
         db.insert(&persistence::AgentSessionRecord {
             id: "a1".into(),
+            workspace_id: Some("wks_a1".into()),
             project: "oldproj".into(),
             role: "worker".into(),
             runtime: "claude".into(),

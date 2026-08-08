@@ -23,6 +23,8 @@ pub const DEFAULT_PROJECT: &str = "default";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSessionRecord {
     pub id: String,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
     pub project: String,
     pub role: String, // master | worker | standalone
     pub runtime: String,
@@ -45,6 +47,8 @@ pub struct AgentSessionRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentMeta {
     pub id: String,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
     pub role: String,
     pub runtime: String,
     pub resume_key: Option<String>,
@@ -212,6 +216,7 @@ impl SessionsDb {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS sessions (
                 id         TEXT PRIMARY KEY,
+                workspace_id TEXT,
                 project    TEXT NOT NULL,
                 role       TEXT NOT NULL,
                 runtime    TEXT NOT NULL,
@@ -235,6 +240,7 @@ impl SessionsDb {
         ensure_column(&conn, "sessions", "mode", "mode TEXT NOT NULL DEFAULT 'ask'")?;
         ensure_column(&conn, "sessions", "speed", "speed TEXT NOT NULL DEFAULT 'auto'")?;
         ensure_column(&conn, "sessions", "model", "model TEXT")?;
+        ensure_column(&conn, "sessions", "workspace_id", "workspace_id TEXT")?;
         Ok(Self { conn })
     }
 
@@ -262,15 +268,16 @@ impl SessionsDb {
     pub fn insert(&self, s: &AgentSessionRecord) -> rusqlite::Result<()> {
         self.conn.execute(
             "INSERT INTO sessions
-                (id, project, role, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                (id, workspace_id, project, role, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(id) DO UPDATE SET
-                project=excluded.project, role=excluded.role, runtime=excluded.runtime,
+                workspace_id=excluded.workspace_id, project=excluded.project, role=excluded.role, runtime=excluded.runtime,
                 resume_key=excluded.resume_key, cwd=excluded.cwd, title=excluded.title,
                 status=excluded.status, mode=excluded.mode, speed=excluded.speed,
                 model=excluded.model, updated_at=excluded.updated_at",
             params![
                 s.id,
+                s.workspace_id,
                 s.project,
                 s.role,
                 s.runtime,
@@ -341,7 +348,7 @@ impl SessionsDb {
     pub fn get(&self, id: &str) -> rusqlite::Result<Option<AgentSessionRecord>> {
         self.conn
             .query_row(
-                "SELECT id, project, role, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at
+                "SELECT id, workspace_id, project, role, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 params![id],
                 Self::row_to_session,
@@ -352,7 +359,7 @@ impl SessionsDb {
     pub fn list_all(&self) -> rusqlite::Result<Vec<AgentSessionRecord>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, project, role, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at FROM sessions ORDER BY updated_at DESC")?;
+            .prepare("SELECT id, workspace_id, project, role, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at FROM sessions ORDER BY updated_at DESC")?;
         let rows = stmt.query_map([], Self::row_to_session)?;
         rows.collect()
     }
@@ -397,18 +404,19 @@ impl SessionsDb {
     fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentSessionRecord> {
         Ok(AgentSessionRecord {
             id: row.get(0)?,
-            project: row.get(1)?,
-            role: row.get(2)?,
-            runtime: row.get(3)?,
-            resume_key: row.get(4)?,
-            cwd: PathBuf::from(row.get::<_, String>(5)?),
-            title: row.get(6)?,
-            status: row.get(7)?,
-            mode: row.get(8)?,
-            speed: row.get(9)?,
-            model: row.get(10)?,
-            created_at: row.get(11)?,
-            updated_at: row.get(12)?,
+            workspace_id: row.get(1)?,
+            project: row.get(2)?,
+            role: row.get(3)?,
+            runtime: row.get(4)?,
+            resume_key: row.get(5)?,
+            cwd: PathBuf::from(row.get::<_, String>(6)?),
+            title: row.get(7)?,
+            status: row.get(8)?,
+            mode: row.get(9)?,
+            speed: row.get(10)?,
+            model: row.get(11)?,
+            created_at: row.get(12)?,
+            updated_at: row.get(13)?,
         })
     }
 }
@@ -472,6 +480,7 @@ mod tests {
     fn sample() -> AgentSessionRecord {
         AgentSessionRecord {
             id: "abc".into(),
+            workspace_id: Some("wks_test".into()),
             project: "test".into(),
             role: "worker".into(),
             runtime: "claude".into(),
@@ -496,6 +505,7 @@ mod tests {
         let all = db.list_all().unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].resume_key.as_deref(), Some("k1"));
+        assert_eq!(all[0].workspace_id.as_deref(), Some("wks_test"));
         // mode/speed/model survive the roundtrip.
         assert_eq!(all[0].mode, "yolo");
         assert_eq!(all[0].speed, "fast");
@@ -518,6 +528,7 @@ mod tests {
         std::fs::create_dir_all(&target).unwrap();
         let meta = AgentMeta {
             id: "x".into(),
+            workspace_id: Some("wks_meta".into()),
             role: "master".into(),
             runtime: "claude".into(),
             resume_key: None,

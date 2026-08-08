@@ -42,7 +42,7 @@ export async function spawnAgent(
     onData: channel,
   })) as AgentInfo;
   flush(info.id);
-  s.addAgent(info, channel);
+  s.addAgent({ ...info, project: proj }, channel);
   s.addTab({
     id: info.id,
     type: "agent",

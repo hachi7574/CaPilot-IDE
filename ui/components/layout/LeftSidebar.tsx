@@ -304,7 +304,11 @@ export function LeftSidebar() {
       }
     >();
     agents.forEach((a, id) => {
-      const projName = projectOf(a.cwd, projectRoots);
+      // New sessions carry an explicit persisted project/workspace identity;
+      // cwd inference remains only for legacy rows without workspace_id.
+      const projName = a.workspace_id && a.project
+        ? a.project
+        : projectOf(a.cwd, projectRoots);
       if (!map.has(projName)) {
         map.set(projName, { cwd: a.cwd, agents: [] });
       }
@@ -1219,13 +1223,20 @@ function ContextMenu({
   // When it is the project's ONLY terminal, the context menu swaps the normal
   // "关闭并终止" for "关闭并移除项目" (removes the whole project). The Master
   // group is never a deletable project, so its terminals keep the plain close.
-  const project = agent ? projectOf(agent.cwd, useStore.getState().projectRoots) : undefined;
+  const project = agent
+    ? (agent.workspace_id && agent.project
+        ? agent.project
+        : projectOf(agent.cwd, useStore.getState().projectRoots))
+    : undefined;
   const isMasterProject = project === MASTER_PROJECT;
   let projCount = 0;
   if (project && !isMasterProject) {
     const roots = useStore.getState().projectRoots;
     allAgents.forEach((a) => {
-      if (projectOf(a.cwd, roots) === project) projCount++;
+      const owningProject = a.workspace_id && a.project
+        ? a.project
+        : projectOf(a.cwd, roots);
+      if (owningProject === project) projCount++;
     });
   }
 

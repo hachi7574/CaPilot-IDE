@@ -79,6 +79,8 @@ pub struct AgentSession {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
     pub id: AgentId,
+    pub workspace_id: Option<String>,
+    pub project: Option<String>,
     pub runtime: RuntimeId,
     pub role: AgentRole,
     pub status: AgentStatus,

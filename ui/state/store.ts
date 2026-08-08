@@ -19,6 +19,9 @@ export type FontScale = "s" | "m" | "l" | "xl" | "xxl";
 
 export interface AgentInfo {
   id: string;
+  workspace_id?: string | null;
+  /** Stable owning project supplied from persistence; cwd is execution-only. */
+  project?: string;
   runtime: string;
   role: AgentRole;
   status: AgentStatus;
@@ -61,6 +64,7 @@ export interface Tab {
 /** Matches the Rust `AgentSessionRecord` (snake_case keys). */
 export interface RestoredSession {
   id: string;
+  workspace_id: string | null;
   project: string;
   role: AgentRole;
   runtime: string;
@@ -468,7 +472,13 @@ export const useStore = create<AppState>((set, get) => ({
         info.createdAt ??
         (agents.has(info.id) ? agents.get(info.id)!.createdAt : undefined) ??
         (createdAtTs !== undefined ? createdAtTs : Date.now());
-      agents.set(info.id, { ...info, createdAt: created });
+      const previous = agents.get(info.id);
+      agents.set(info.id, {
+        ...info,
+        project: info.project ?? previous?.project,
+        workspace_id: info.workspace_id ?? previous?.workspace_id,
+        createdAt: created,
+      });
       const channels = new Map(s.agentChannels);
       // Only overwrite the PTY channel when a new one is supplied. `channel ===
       // null` means a role-only update (setAgentRole) or a restored session with
