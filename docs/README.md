@@ -21,5 +21,6 @@ Linux 系统依赖（一次性）：`libwebkit2gtk-4.1-dev librsvg2-dev libgtk-3
 - `CaPilot-IDE-DevPlan.md` — 开发计划 v2.1（架构 / 模块 / 交互 / 里程碑 / 决策清单，已同步实施进度）
 - `CaPilot-PRD.md` — 产品需求 v3.1（源：主仓库 `Doc/CaPilot-PRD.md`，改文档需两边同步）
 - `security-review.md` — 安全审查
+- `Paseo-Borrowing.md` — Paseo 对标分析 + 借鉴实施方案（①②③⑤⑥⑧ + ④attention，已确认，未实施）
 - `styleguide/` / `Assets/` — LUCY 设计规范与 logo 资产（源：主仓库 `Doc/`，改设计需两边同步）
 - `CaPilot-IDE-Preview.html` — 界面参考（浏览器打开）

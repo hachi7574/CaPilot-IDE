@@ -10,9 +10,42 @@ interface XTermPanelProps {
   agentId: string;
 }
 
+/** Terminal PTY font size (px) per UI font-size preset. Base preset "s" keeps
+ *  the historic 13px; larger presets scale it step-for-step with the CSS tokens. */
+const TERMINAL_FONT_SIZES: Record<string, number> = {
+  s: 13,
+  m: 14,
+  l: 15,
+  xl: 16,
+  xxl: 17,
+};
+
 /** Shell-escape a path so spaces / quotes survive (single-quote wrap, `'` → `'\''`). */
 function shellEscape(path: string): string {
   return `'${path.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Copy text to the OS clipboard (navigator API with execCommand fallback —
+ *  matches the sidebar's `copyText`; WebKitGTK may reject the async API). */
+async function copyText(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return;
+  } catch {
+    // fall through to the legacy path
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  try {
+    document.execCommand("copy");
+  } catch {
+    // ignore
+  }
+  document.body.removeChild(ta);
 }
 
 /**
@@ -44,6 +77,7 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
   // every mounted XTermPanel re-render whenever ANY agent's channel changed
   // (e.g. a different agent spawning/resuming elsewhere in the app).
   const channel = useStore((s) => s.agentChannels.get(agentId));
+  const fontScale = useStore((s) => s.fontScale);
 
   // DevPlan §4.6 — worker lock: input typed while the agent is a worker is
   // intercepted instead of silently forwarded; the user picks 仍然发送/解锁.
@@ -113,7 +147,7 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
       // Claude's TUI draws its own cursor inside the PTY, so a static xterm
       // cursor is barely visible. cursorBlink:false costs nothing perceptible.
       cursorBlink: false,
-      fontSize: 13,
+      fontSize: TERMINAL_FONT_SIZES[fontScale] ?? 13,
       fontFamily: "'JetBrainsMono', ui-monospace, monospace",
       theme: {
         background: "#05070D",
@@ -144,23 +178,70 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
     term.loadAddon(fitAddon);
     term.open(containerRef.current);
 
+    // Keyboard copy: xterm.js maps Ctrl+C to a PTY SIGINT (^C), so the browser's
+    // default Ctrl+Shift+C — which terminals use for copy — is never produced,
+    // and WebKitGTK has no native menu fallback. Intercept the chord and copy the
+    // selection (matches the sidebar's clipboard helper). Plain Ctrl+C (no shift)
+    // is left alone so the PTY still receives SIGINT. Returning false stops the
+    // event reaching xterm's own key handling.
+    term.attachCustomKeyEventHandler((ev) => {
+      if (
+        ev.type === "keydown" &&
+        ev.ctrlKey &&
+        ev.shiftKey &&
+        !ev.altKey &&
+        !ev.metaKey &&
+        ev.key.toLowerCase() === "c"
+      ) {
+        const text = term.hasSelection() ? term.getSelection() : "";
+        if (text) copyText(text);
+        return false; // swallow — don't send ^C
+      }
+      return true;
+    });
+
     termRef.current = term;
     fitAddonRef.current = fitAddon;
 
     let disposed = false;
+    let pendingChunks: Uint8Array[] = [];
+    let pendingBytes = 0;
+    let flushRaf: number | null = null;
 
-    const writeToTerm = (data: number[]) => {
-      if (disposed) return;
+    const flushPending = () => {
+      flushRaf = null;
+      if (disposed || pendingBytes === 0) return;
+      const merged = new Uint8Array(pendingBytes);
+      let offset = 0;
+      for (const chunk of pendingChunks) {
+        merged.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      pendingChunks = [];
+      pendingBytes = 0;
       try {
-        term.write(new Uint8Array(data));
+        term.write(merged);
       } catch {
         // terminal disposed
       }
     };
 
+    const writeToTerm = (data: number[]) => {
+      if (disposed) return;
+      const chunk = new Uint8Array(data);
+      pendingChunks.push(chunk);
+      pendingBytes += chunk.byteLength;
+      // Coalesce all PTY packets arriving in one paint cycle. This keeps the
+      // WebKitGTK/xterm hot path to at most one write and repaint per frame.
+      if (flushRaf === null) flushRaf = requestAnimationFrame(flushPending);
+    };
+
+    let lastResize = { rows: 0, cols: 0 };
     const sendResize = () => {
       const rows = term.rows || 24;
       const cols = term.cols || 80;
+      if (rows === lastResize.rows && cols === lastResize.cols) return;
+      lastResize = { rows, cols };
       invoke("agent_resize", { id: agentId, rows, cols }).catch(() => {});
     };
 
@@ -274,6 +355,9 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
     observer.observe(containerRef.current);
 
     return () => {
+      // Do not strand the final packet behind a cancelled animation frame.
+      if (flushRaf !== null) cancelAnimationFrame(flushRaf);
+      flushPending();
       disposed = true;
       cancelAnimationFrame(raf1);
       cancelAnimationFrame(raf2);

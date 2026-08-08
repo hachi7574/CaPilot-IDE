@@ -36,9 +36,14 @@ export function useSessionRestore() {
               mode: rec.mode,
               speed: rec.speed,
               model: rec.model,
+              // Session-creation timestamp: anchors the sidebar `tm-time` count-up
+              // to the real session start (survives restart). The old code passed
+              // `updated_at`, which a stale `.agent-meta.json` / keep-alive could
+              // bump forward — the label then looked wrong.
+              createdAt: rec.created_at,
             },
             null,
-            rec.updated_at
+            rec.created_at
           );
           // Ended sessions are recoverable from the sidebar but are not
           // auto-reopened as tabs / not re-promoted to master.

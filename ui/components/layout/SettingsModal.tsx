@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { useStore } from "../../state/store";
+import { useStore, FontScale } from "../../state/store";
 import { connectEsp, disconnectEsp } from "../../state/esp";
 import { setSmartReturn } from "../../state/orchestration";
 
@@ -20,6 +20,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const smartReturn = useStore((s) => s.smartReturn);
   const setSmartReturnState = useStore((s) => s.setSmartReturn);
   const setOnboarded = useStore((s) => s.setOnboarded);
+  const fontScale = useStore((s) => s.fontScale);
+  const setFontScale = useStore((s) => s.setFontScale);
 
   const [notifEnabled, setNotifEnabled] = useState(() => {
     try {
@@ -107,26 +109,26 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
         }}
       >
         <div className="modal-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-          <h3 style={{ fontFamily: "var(--pixel-body)", fontSize: 18, color: "var(--brand)", letterSpacing: 1 }}>
+          <h3 style={{ fontFamily: "var(--pixel-body)", fontSize: "var(--fs-xl)", color: "var(--brand)", letterSpacing: 1 }}>
             ⚙ Settings
           </h3>
-          <button className="modal-close" onClick={onClose} style={{ background: "none", border: "none", color: "var(--muted)", fontSize: 20, cursor: "pointer" }}>
+          <button className="modal-close" onClick={onClose} style={{ background: "none", border: "none", color: "var(--muted)", fontSize: "var(--fs-lg)", cursor: "pointer" }}>
             ×
           </button>
         </div>
 
         {/* Runtime management */}
         <div className="modal-section" style={{ marginBottom: 20 }}>
-          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: 10, color: "var(--muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
+          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-2xs)", color: "var(--muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
             Runtime 管理
           </div>
           {runtimes.length === 0 && (
-            <div style={{ fontSize: 12, color: "var(--muted)" }}>No runtimes detected</div>
+            <div style={{ fontSize: "var(--fs-sm)", color: "var(--muted)" }}>No runtimes detected</div>
           )}
           {runtimes.map((rt) => (
-            <div key={rt.id} className="modal-row" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: "1px solid var(--rule)", fontSize: 12 }}>
+            <div key={rt.id} className="modal-row" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: "1px solid var(--rule)", fontSize: "var(--fs-sm)" }}>
               <span style={{ color: "var(--ink2)" }}>{rt.name}</span>
-              <span style={{ color: rt.available ? "var(--success)" : "var(--danger)", fontFamily: "var(--mono)", fontSize: 11 }}>
+              <span style={{ color: rt.available ? "var(--success)" : "var(--danger)", fontFamily: "var(--mono)", fontSize: "var(--fs-xs)" }}>
                 {rt.available ? (rt.authenticated ? "✓ 已登录" : "✓ 已安装") : "✕ 未安装"}
               </span>
             </div>
@@ -135,10 +137,10 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
 
         {/* ESP pairing */}
         <div className="modal-section" style={{ marginBottom: 20 }}>
-          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: 10, color: "var(--muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
+          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-2xs)", color: "var(--muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
             ESP 设备
           </div>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: "var(--fs-sm)" }}>
             <span style={{ color: "var(--ink2)" }}>
               {espStatus.connected ? (espStatus.name ?? "ESP32-C5") : "未连接"}
             </span>
@@ -147,7 +149,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               className="modal-btn"
               style={{
                 fontFamily: "var(--pixel)",
-                fontSize: 10,
+                fontSize: "var(--fs-2xs)",
                 padding: "5px 12px",
                 border: "1px solid var(--brand)",
                 color: "var(--brand)",
@@ -159,7 +161,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             </button>
           </div>
           {espStatus.connected && (
-            <div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--mono)", marginTop: 4 }}>
+            <div style={{ fontSize: "var(--fs-xs)", color: "var(--muted)", fontFamily: "var(--mono)", marginTop: 4 }}>
               {espStatus.address}
               {espStatus.battery_pct !== null && ` · 🔋 ${espStatus.battery_pct}%`}
             </div>
@@ -168,16 +170,16 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
 
         {/* Preferences */}
         <div className="modal-section">
-          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: 10, color: "var(--muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
+          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-2xs)", color: "var(--muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
             通用偏好
           </div>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: "var(--fs-sm)" }}>
             <span style={{ color: "var(--ink2)" }}>Master 智能返回</span>
             <button
               onClick={toggleSmart}
               style={{
                 fontFamily: "var(--pixel)",
-                fontSize: 10,
+                fontSize: "var(--fs-2xs)",
                 padding: "4px 10px",
                 border: `1px solid ${smartReturn ? "var(--success)" : "var(--rule2)"}`,
                 color: smartReturn ? "var(--success)" : "var(--muted)",
@@ -188,14 +190,44 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               {smartReturn ? "开" : "关"}
             </button>
           </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: "var(--fs-sm)" }}>
+            <span style={{ color: "var(--ink2)" }}>界面字体大小</span>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {(
+              [
+                { key: "s", label: "小" },
+                { key: "m", label: "中" },
+                { key: "l", label: "大" },
+                { key: "xl", label: "特大" },
+                { key: "xxl", label: "巨大" },
+              ] as { key: FontScale; label: string }[]
+            ).map((opt) => (
+              <button
+                key={opt.key}
+                onClick={() => setFontScale(opt.key)}
+                style={{
+                  fontFamily: "var(--pixel)",
+                  fontSize: "var(--fs-2xs)",
+                  padding: "4px 10px",
+                  border: `1px solid ${fontScale === opt.key ? "var(--brand)" : "var(--rule2)"}`,
+                  color: fontScale === opt.key ? "var(--brand)" : "var(--muted)",
+                  background: fontScale === opt.key ? "rgba(139,92,246,.08)" : "transparent",
+                  cursor: "pointer",
+                }}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* Session end handling */}
         <div className="modal-section" style={{ marginBottom: 20 }}>
-          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: 10, color: "var(--muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
+          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-2xs)", color: "var(--muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
             会话
           </div>
-          <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 8 }}>
+          <div style={{ fontSize: "var(--fs-xs)", color: "var(--muted)", marginBottom: 8 }}>
             进程自然退出后（终端里 exit / 任务跑完 / Ctrl+D，不是点 × 关闭）
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -203,7 +235,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               onClick={() => changeSessionEndMode("keep")}
               style={{
                 fontFamily: "var(--pixel)",
-                fontSize: 10,
+                fontSize: "var(--fs-2xs)",
                 padding: "6px 12px",
                 border: `1px solid ${sessionEndMode === "keep" ? "var(--brand)" : "var(--rule2)"}`,
                 color: sessionEndMode === "keep" ? "var(--brand)" : "var(--muted)",
@@ -217,7 +249,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               onClick={() => changeSessionEndMode("delete")}
               style={{
                 fontFamily: "var(--pixel)",
-                fontSize: 10,
+                fontSize: "var(--fs-2xs)",
                 padding: "6px 12px",
                 border: `1px solid ${sessionEndMode === "delete" ? "var(--brand)" : "var(--rule2)"}`,
                 color: sessionEndMode === "delete" ? "var(--brand)" : "var(--muted)",
@@ -232,16 +264,16 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
 
         {/* Notifications */}
         <div className="modal-section" style={{ marginBottom: 20 }}>
-          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: 10, color: "var(--muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
+          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-2xs)", color: "var(--muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
             通知
           </div>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: "var(--fs-sm)" }}>
             <span style={{ color: "var(--ink2)" }}>系统通知（Worker 完成 / ESP 断连）</span>
             <button
               onClick={toggleNotifications}
               style={{
                 fontFamily: "var(--pixel)",
-                fontSize: 10,
+                fontSize: "var(--fs-2xs)",
                 padding: "4px 10px",
                 border: `1px solid ${notifEnabled ? "var(--success)" : "var(--rule2)"}`,
                 color: notifEnabled ? "var(--success)" : "var(--muted)",
@@ -256,17 +288,17 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
 
         {/* First-run onboarding */}
         <div className="modal-section" style={{ marginBottom: 20 }}>
-          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: 10, color: "var(--muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
+          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-2xs)", color: "var(--muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
             首次引导
           </div>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: "var(--fs-sm)" }}>
             <span style={{ color: "var(--ink2)" }}>重新显示引导流程</span>
             <button
               onClick={reShowOnboarding}
               className="modal-btn"
               style={{
                 fontFamily: "var(--pixel)",
-                fontSize: 10,
+                fontSize: "var(--fs-2xs)",
                 padding: "5px 12px",
                 border: "1px solid var(--brand)",
                 color: "var(--brand)",
@@ -281,13 +313,13 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
 
         {/* About */}
         <div className="modal-section">
-          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: 10, color: "var(--muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
+          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-2xs)", color: "var(--muted)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
             关于
           </div>
-          <div style={{ fontSize: 12, color: "var(--ink2)" }}>
+          <div style={{ fontSize: "var(--fs-sm)", color: "var(--ink2)" }}>
             CaPilot IDE <span style={{ fontFamily: "var(--mono)", color: "var(--muted)" }}>v{APP_VERSION}</span>
           </div>
-          <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4, fontFamily: "var(--mono)" }}>
+          <div style={{ fontSize: "var(--fs-xs)", color: "var(--muted)", marginTop: 4, fontFamily: "var(--mono)" }}>
             AI Agent Orchestration Workbench · Master/Worker
           </div>
         </div>

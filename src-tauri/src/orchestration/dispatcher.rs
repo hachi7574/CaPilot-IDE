@@ -5,7 +5,7 @@
 
 use crate::agent_runtime::pty::PtyManager;
 use crate::orchestration::smart_return;
-use crate::persistence::Persistence;
+use crate::persistence::{agent_dir, read_agent_meta, write_agent_meta, Persistence};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
@@ -66,6 +66,12 @@ pub struct WorkerReport {
     pub summary: String,
     pub level: String, // full | summary | title | failure
     pub ts: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CascadeMode {
+    Keep,
+    Delete,
 }
 
 pub struct Dispatcher {
@@ -165,6 +171,103 @@ impl Dispatcher {
     fn set_worker_idle(&self, id: &str, app: &AppHandle) {
         if self.mark_idle(id) {
             self.emit_worker_status(id, app);
+        }
+    }
+
+    /// A Busy worker that exits without `capilot report` has violated the
+    /// completion contract. Report the failure before returning it to idle.
+    pub fn worker_ended_naturally(&self, id: &str, exit_code: i32, app: &AppHandle) {
+        let was_busy = self
+            .workers
+            .lock()
+            .unwrap()
+            .get(id)
+            .is_some_and(|worker| worker.status == WorkerStatus::Busy);
+        if !was_busy {
+            return;
+        }
+        self.publish_report(unreported_exit_report(id, exit_code), app);
+        self.set_worker_idle(id, app);
+    }
+
+    /// End all non-finished workers in the master's project.
+    pub fn cascade_master(&self, master_id: &str, mode: CascadeMode, app: &AppHandle) {
+        let (project, workers) = {
+            let Ok(db) = self.persistence.db().lock() else {
+                log::warn!("cannot cascade master {master_id}: persistence lock poisoned");
+                return;
+            };
+            let Ok(Some(master)) = db.get(master_id) else {
+                return;
+            };
+            let workers = db
+                .list_all()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|session| {
+                    session.project == master.project
+                        && session.role == "worker"
+                        && session.status != "done"
+                })
+                .collect::<Vec<_>>();
+            (master.project, workers)
+        };
+        if workers.is_empty() {
+            return;
+        }
+        log::info!(
+            "cascading {} worker(s) for master {master_id} in project {project} ({mode:?})",
+            workers.len()
+        );
+        for worker in workers {
+            let _ = self.pty.kill(&worker.id);
+            match mode {
+                CascadeMode::Keep => {
+                    let now = chrono_now_ms();
+                    if let Ok(db) = self.persistence.db().lock() {
+                        let _ = db.update_status(&worker.id, "done", now);
+                    }
+                    if let Ok(mut meta) = read_agent_meta(&project, &worker.id) {
+                        meta.status = "done".to_string();
+                        meta.updated_at = now;
+                        let _ = write_agent_meta(&project, &meta);
+                    }
+                    let _ = app.emit(
+                        "agent://exited",
+                        serde_json::json!({ "id": worker.id, "exit_code": 0 }),
+                    );
+                }
+                CascadeMode::Delete => {
+                    if let Ok(db) = self.persistence.db().lock() {
+                        let _ = db.delete(&worker.id);
+                    }
+                    let dir = agent_dir(&project, &worker.id);
+                    if dir.starts_with(crate::persistence::workspace_root()) && dir.exists() {
+                        if let Err(error) = std::fs::remove_dir_all(&dir) {
+                            log::warn!("failed to remove cascaded worker {}: {error}", worker.id);
+                        }
+                    }
+                    let _ = app.emit(
+                        "agent://removed",
+                        serde_json::json!({ "id": worker.id }),
+                    );
+                }
+            }
+            self.unregister_worker(&worker.id);
+        }
+    }
+
+    fn publish_report(&self, report: WorkerReport, app: &AppHandle) {
+        self.reports.lock().unwrap().push(report.clone());
+        let _ = app.emit("orchestration://report", report.clone());
+        if let Some(master) = self.master_id.lock().unwrap().clone() {
+            if self.pty.is_alive(&master) {
+                let msg = format!(
+                    "\r\n[编排] worker {} 完成：{}\r\n",
+                    report.worker, report.summary
+                );
+                let _ = self.pty.write(&master, msg.as_bytes());
+            }
         }
     }
 
@@ -454,18 +557,7 @@ impl Dispatcher {
             level: level.clone(),
             ts: chrono_now_ms(),
         };
-        self.reports.lock().unwrap().push(report.clone());
-
-        let _ = app.emit("orchestration://report", report.clone());
-
-        // Notify the master session PTY (if live) so it sees the aggregated result.
-        let master = self.master_id.lock().unwrap().clone();
-        if let Some(mid) = master {
-            if self.pty.is_alive(&mid) {
-                let msg = format!("\r\n[编排] worker {worker} 完成：{}\r\n", report.summary);
-                let _ = self.pty.write(&mid, msg.as_bytes());
-            }
-        }
+        self.publish_report(report, app);
 
         // Worker completed its task — return it to idle so it can be dispatched
         // again (the frontend is notified via the status event).
@@ -505,4 +597,27 @@ fn chrono_now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+fn unreported_exit_report(worker: &str, exit_code: i32) -> WorkerReport {
+    WorkerReport {
+        worker: worker.to_string(),
+        summary: format!("worker 意外退出(exit={exit_code})，未回传结果"),
+        level: "failure".to_string(),
+        ts: chrono_now_ms(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unreported_exit_report;
+
+    #[test]
+    fn natural_busy_exit_becomes_failure_report() {
+        let report = unreported_exit_report("worker-7", 137);
+        assert_eq!(report.worker, "worker-7");
+        assert_eq!(report.level, "failure");
+        assert!(report.summary.contains("exit=137"));
+        assert!(report.summary.contains("未回传结果"));
+    }
 }

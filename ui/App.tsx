@@ -19,6 +19,10 @@ function App() {
   useAgentEvents();
   useNotifications();
   const onboarded = useStore((s) => s.onboarded);
+  const fontScale = useStore((s) => s.fontScale);
+  // Reflect the chosen font-size preset on <html> so the CSS `html[data-fs=…]`
+  // rules can rescale every `--fs-*` token.
+  document.documentElement.dataset.fs = fontScale;
   return (
     <div className="app">
       <div className="app-body">

@@ -21,6 +21,19 @@
   --topbar-h: 42px;
 }
 
+/* ── Font scale presets (Settings → 字体大小) ─────────────────────
+   Base `--fs-*` tokens are the SMALLEST set. Each `data-fs` preset on <html>
+   overrides them so every element (CSS + inline TSX styles that reference the
+   tokens) scales together. */
+:root {
+  --fs-2xs: 10px; --fs-xs: 11px; --fs-sm: 12px;
+  --fs-base: 13px; --fs-md: 14px; --fs-lg: 16px; --fs-xl: 18px;
+}
+html[data-fs="m"] { --fs-2xs: 11px; --fs-xs: 12px; --fs-sm: 13px; --fs-base: 14px; --fs-md: 15px; --fs-lg: 17px; --fs-xl: 19px; }
+html[data-fs="l"] { --fs-2xs: 12px; --fs-xs: 13px; --fs-sm: 14px; --fs-base: 15px; --fs-md: 16px; --fs-lg: 18px; --fs-xl: 20px; }
+html[data-fs="xl"] { --fs-2xs: 13px; --fs-xs: 14px; --fs-sm: 15px; --fs-base: 16px; --fs-md: 17px; --fs-lg: 19px; --fs-xl: 21px; }
+html[data-fs="xxl"] { --fs-2xs: 14px; --fs-xs: 15px; --fs-sm: 16px; --fs-base: 17px; --fs-md: 18px; --fs-lg: 20px; --fs-xl: 22px; }
+
 @font-face { font-family: 'Silkscreen'; src: url('/fonts/Silkscreen-Regular.ttf') format('truetype'); }
 @font-face { font-family: 'PixelifySans'; src: url('/fonts/PixelifySans-Medium.ttf') format('truetype'); }
 @font-face { font-family: 'Tektur'; src: url('/fonts/Tektur-Regular.ttf') format('truetype'); font-weight: 400; }
@@ -33,7 +46,7 @@
 html, body, #root {
   height: 100%; overflow: hidden;
   background: var(--bg); color: var(--ink);
-  font-family: var(--body); font-size: 14px; line-height: 1.6;
+  font-family: var(--body); font-size: var(--fs-md); line-height: 1.6;
   user-select: none;
 }
 
@@ -63,13 +76,13 @@ body::after {
   height: 32px; min-height: 32px;
   background: var(--bg2); border-bottom: 2px solid var(--rule);
   display: flex; align-items: center; padding: 0 12px;
-  font-family: var(--pixel); font-size: 10px; color: var(--muted);
+  font-family: var(--pixel); font-size: var(--fs-2xs); color: var(--muted);
   letter-spacing: 2px; text-transform: uppercase;
   -webkit-app-region: drag; flex-shrink: 0;
 }
 
 .titlebar-logo {
-  font-family: var(--pixel-body); font-size: 12px; color: var(--brand);
+  font-family: var(--pixel-body); font-size: var(--fs-sm); color: var(--brand);
   letter-spacing: 1px;
 }
 
@@ -88,7 +101,7 @@ body::after {
 .sidebar-brand {
   height: var(--topbar-h); display: flex; align-items: center;
   padding: 0 14px; font-family: var(--pixel-body);
-  font-size: 18px; font-weight: 700; color: var(--brand);
+  font-size: var(--fs-xl); font-weight: 700; color: var(--brand);
   letter-spacing: 1px; text-shadow: 0 0 20px rgba(139,92,246,.3);
   border-bottom: 2px solid var(--rule); cursor: default;
 }
@@ -101,7 +114,7 @@ body::after {
 
 .sidebar-btn {
   width: 36px; height: 28px; display: flex; align-items: center;
-  justify-content: center; font-family: var(--pixel); font-size: 15px;
+  justify-content: center; font-family: var(--pixel); font-size: var(--fs-md);
   color: var(--muted); cursor: pointer; background: none; border: none;
   transition: all .2s var(--ease-apple);
 }
@@ -120,13 +133,13 @@ body::after {
 .master-pinned { border-bottom: 2px solid var(--rule); }
 .master-header {
   display: flex; align-items: center; gap: 6px; padding: 7px 10px;
-  font-family: var(--mono); font-size: 12px; color: var(--ai);
+  font-family: var(--mono); font-size: var(--fs-sm); color: var(--ai);
   cursor: pointer; transition: background .2s var(--ease-apple);
 }
 .master-header:hover { background: var(--bg3); }
-.master-header .m-icon { font-size: 14px; }
+.master-header .m-icon { font-size: var(--fs-md); }
 .master-header .m-name { flex: 1; font-weight: 700; }
-.master-header .m-arrow { font-family: var(--pixel); font-size: 10px; color: var(--muted); transition: transform .2s var(--ease-apple); }
+.master-header .m-arrow { font-family: var(--pixel); font-size: var(--fs-2xs); color: var(--muted); transition: transform .2s var(--ease-apple); }
 .master-pinned.collapsed .m-arrow { transform: rotate(-90deg); }
 .master-pinned.collapsed .terminal-item { display: none; }
 
@@ -134,15 +147,15 @@ body::after {
 .proj { border-bottom: 1px solid var(--rule); }
 .proj-header {
   display: flex; align-items: center; gap: 6px; padding: 7px 10px;
-  cursor: pointer; font-family: var(--mono); font-size: 12px;
+  cursor: pointer; font-family: var(--mono); font-size: var(--fs-sm);
   color: var(--primary); transition: background .2s var(--ease-apple);
 }
 .proj-header:hover { background: var(--bg3); }
 /* Drag-and-drop reorder target highlight. */
 .proj-header.drag-over { background: var(--bg4); outline: 1px dashed var(--brand); }
-.proj-header .pj-icon { font-size: 14px; }
+.proj-header .pj-icon { font-size: var(--fs-md); }
 .proj-header .pj-name { flex: 1; font-weight: 700; }
-.proj-header .pj-arrow { font-family: var(--pixel); font-size: 10px; color: var(--muted); transition: transform .2s var(--ease-apple); }
+.proj-header .pj-arrow { font-family: var(--pixel); font-size: var(--fs-2xs); color: var(--muted); transition: transform .2s var(--ease-apple); }
 .proj.collapsed .pj-arrow { transform: rotate(-90deg); }
 .proj.collapsed .terminal-item, .proj.collapsed .term-ended-head { display: none; }
 .proj.focused .proj-header { background: rgba(139,92,246,.1); border-left: 3px solid var(--brand); }
@@ -151,19 +164,19 @@ body::after {
 /* Terminal items */
 .terminal-item {
   display: flex; align-items: center; gap: 6px; padding: 5px 10px 5px 22px;
-  cursor: pointer; font-family: var(--mono); font-size: 11px; color: var(--ink2);
+  cursor: pointer; font-family: var(--mono); font-size: var(--fs-xs); color: var(--ink2);
   transition: all .2s var(--ease-apple); border-left: 2px solid transparent;
 }
 .terminal-item:hover { background: var(--bg3); color: var(--ink); }
 .terminal-item.active { border-left-color: var(--brand); background: rgba(139,92,246,.06); color: var(--ink); }
-.terminal-item .tm-icon { font-size: 13px; width: 18px; text-align: center; flex-shrink: 0; }
+.terminal-item .tm-icon { font-size: var(--fs-base); width: 18px; text-align: center; flex-shrink: 0; }
 .terminal-item .tm-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.terminal-item .tm-time { font-family: var(--mono); font-size: 10px; color: var(--muted); flex-shrink: 0; }
+.terminal-item .tm-time { font-family: var(--mono); font-size: var(--fs-2xs); color: var(--muted); flex-shrink: 0; }
 
 /* "已结束" (ended) group: a collapsed header + dimmed rows. */
 .term-ended-head {
   display: flex; align-items: center; gap: 6px; padding: 4px 10px 4px 22px;
-  cursor: pointer; font-family: var(--pixel); font-size: 10px; letter-spacing: 1px;
+  cursor: pointer; font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 1px;
   color: var(--muted); text-transform: uppercase; user-select: none;
 }
 .term-ended-head:hover { color: var(--ink2); }
@@ -191,7 +204,7 @@ body::after {
 
 .tab-btn-icon {
   width: 28px; height: 26px; display: flex; align-items: center;
-  justify-content: center; font-family: var(--pixel); font-size: 14px;
+  justify-content: center; font-family: var(--pixel); font-size: var(--fs-md);
   color: var(--muted); cursor: pointer; flex-shrink: 0;
   transition: color .2s var(--ease-apple); background: none; border: none;
 }
@@ -205,7 +218,7 @@ body::after {
 
 .tab-item {
   display: flex; align-items: center; gap: 5px; padding: 5px 14px;
-  height: 26px; flex-shrink: 0; font-family: var(--mono); font-size: 12px;
+  height: 26px; flex-shrink: 0; font-family: var(--mono); font-size: var(--fs-sm);
   color: var(--ink2); background: var(--bg3); border: 1px solid var(--rule2);
   cursor: pointer; transition: all .2s var(--ease-apple);
 }
@@ -234,19 +247,19 @@ body::after {
 .xterm .xterm-cursor.xterm-cursor-blink { animation: none !important; }
 
 .tab-runtime {
-  font-family: var(--pixel); font-size: 8px; color: var(--brand);
+  font-family: var(--pixel); font-size: var(--fs-2xs); color: var(--brand);
   letter-spacing: 1px;
 }
 
 .tab-close {
   background: none; border: none; color: var(--muted); cursor: pointer;
-  font-size: 14px; padding: 0 2px; line-height: 1; margin-left: 2px;
+  font-size: var(--fs-md); padding: 0 2px; line-height: 1; margin-left: 2px;
 }
 .tab-close:hover { color: var(--danger); }
 
 .tab-add {
   width: 28px; height: 26px; display: flex; align-items: center;
-  justify-content: center; font-family: var(--pixel); font-size: 14px;
+  justify-content: center; font-family: var(--pixel); font-size: var(--fs-md);
   color: var(--muted); cursor: pointer; flex-shrink: 0;
   background: none; border: none; margin-left: 4px;
   transition: color .2s var(--ease-apple);
@@ -264,7 +277,7 @@ body::after {
   height: 24px; min-height: 24px; background: var(--bg2);
   border-bottom: 1px solid var(--rule);
   display: flex; align-items: center; padding: 0 10px;
-  font-family: var(--pixel); font-size: 9px; color: var(--muted);
+  font-family: var(--pixel); font-size: var(--fs-2xs); color: var(--muted);
   letter-spacing: 1px; text-transform: uppercase; flex-shrink: 0;
 }
 
@@ -276,7 +289,7 @@ body::after {
   background: #05070D;
 }
 .empty-state img { width: 64px; height: 64px; opacity: 0.3; }
-.empty-state h3 { font-family: var(--pixel-body); font-size: 18px; color: var(--ink2); }
+.empty-state h3 { font-family: var(--pixel-body); font-size: var(--fs-xl); color: var(--ink2); }
 
 /* ── Right Sidebar ────────────────────────────────────────────── */
 
@@ -295,7 +308,7 @@ body::after {
 
 .right-tab {
   flex: 1; display: flex; align-items: center; justify-content: center;
-  padding: 0 4px; font-family: var(--pixel); font-size: 10px; letter-spacing: 1px;
+  padding: 0 4px; font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 1px;
   color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent;
   transition: all .2s var(--ease-apple); text-transform: uppercase;
 }
@@ -313,20 +326,20 @@ body::after {
 }
 .report-header {
   display: flex; align-items: center; padding: 6px 14px;
-  font-family: var(--pixel); font-size: 10px; line-height: 1; color: var(--ai);
+  font-family: var(--pixel); font-size: var(--fs-2xs); line-height: 1; color: var(--ai);
   letter-spacing: 1px; text-transform: uppercase; cursor: pointer;
   border-bottom: 1px solid var(--rule);
   transition: background .2s var(--ease-apple);
 }
 .report-header:hover { background: var(--bg3); }
-.report-toggle { margin-left: auto; font-size: 14px; color: var(--muted); }
-.report-body { padding: 10px 14px; font-size: 13px; }
-.report-time { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+.report-toggle { margin-left: auto; font-size: var(--fs-md); color: var(--muted); }
+.report-body { padding: 10px 14px; font-size: var(--fs-base); }
+.report-time { font-family: var(--mono); font-size: var(--fs-xs); color: var(--muted); margin-bottom: 6px; }
 .report-quote { color: var(--ai); font-style: italic; margin-bottom: 8px; line-height: 1.6; }
-.report-meta { font-family: var(--mono); font-size: 11px; color: var(--muted); line-height: 1.7; }
+.report-meta { font-family: var(--mono); font-size: var(--fs-xs); color: var(--muted); line-height: 1.7; }
 .report-actions { display: flex; gap: 6px; margin-top: 10px; }
 .report-actions .rbtn {
-  font-family: var(--pixel); font-size: 9px; letter-spacing: 1px; padding: 5px 10px;
+  font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 1px; padding: 5px 10px;
   color: var(--ai); border: 1px solid var(--ai-dim); background: rgba(196,181,253,.04);
   cursor: pointer; text-transform: uppercase; transition: all .2s var(--ease-apple);
 }
@@ -337,25 +350,25 @@ body::after {
 .ov-section { border-bottom: 1px solid var(--rule); }
 .ov-section-header {
   display: flex; align-items: center; padding: 7px 12px;
-  font-family: var(--pixel); font-size: 10px; color: var(--ink2);
+  font-family: var(--pixel); font-size: var(--fs-2xs); color: var(--ink2);
   letter-spacing: 1px; text-transform: uppercase; cursor: pointer;
   transition: background .2s var(--ease-apple);
   /* Lighter title-bar background than the (tinted) section body below it. */
   background: rgba(139, 92, 246, 0.10);
 }
 .ov-section-header:hover { background: rgba(139, 92, 246, 0.16); }
-.ov-toggle { margin-left: auto; color: var(--muted); font-size: 12px; }
+.ov-toggle { margin-left: auto; color: var(--muted); font-size: var(--fs-sm); }
 .ov-section-body { padding: 8px 12px 10px; }
 .ov-section.collapsed .ov-section-body { display: none; }
-.ov-section.collapsed .ov-summary { display: block; padding: 5px 12px; font-size: 12px; color: var(--muted); }
+.ov-section.collapsed .ov-summary { display: block; padding: 5px 12px; font-size: var(--fs-sm); color: var(--muted); }
 .ov-summary { display: none; }
 .ov-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; }
-.ov-label { font-family: var(--mono); font-size: 11px; color: var(--muted); }
-.ov-value { font-family: var(--mono); font-size: 11px; color: var(--ink2); }
+.ov-label { font-family: var(--mono); font-size: var(--fs-xs); color: var(--muted); }
+.ov-value { font-family: var(--mono); font-size: var(--fs-xs); color: var(--ink2); }
 .ov-value.gr { color: var(--success); }
 .ov-value.pu { color: var(--primary); }
 .ov-bar-row { margin: 5px 0; }
-.ov-bar-label { font-family: var(--mono); font-size: 10px; color: var(--muted); margin-bottom: 3px; }
+.ov-bar-label { font-family: var(--mono); font-size: var(--fs-2xs); color: var(--muted); margin-bottom: 3px; }
 .ov-bar { height: 7px; background: var(--bg3); border: 1px solid var(--rule); }
 /* No width transition: the overview re-polls CPU/MEM every 2 s, and a .6s
    width animation on each update keeps WebKitGTK repainting ~30% of the time
@@ -365,15 +378,15 @@ body::after {
 .ov-bar-fill.pu { background: var(--brand); }
 .ov-bar-fill.ye { background: var(--warn); }
 .ov-bar-fill.ai { background: var(--ai); }
-.ov-bar-stats { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10px; color: var(--muted); margin-top: 3px; }
+.ov-bar-stats { display: flex; justify-content: space-between; font-family: var(--mono); font-size: var(--fs-2xs); color: var(--muted); margin-top: 3px; }
 .ov-divider { border-top: 1px solid var(--rule); margin: 6px 0; }
 .ov-usage-item { margin: 7px 0; }
-.ov-usage-label { font-family: var(--mono); font-size: 11px; color: var(--ink2); margin-bottom: 3px; }
-.ov-usage-stats { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10px; color: var(--muted); margin-top: 3px; }
+.ov-usage-label { font-family: var(--mono); font-size: var(--fs-xs); color: var(--ink2); margin-bottom: 3px; }
+.ov-usage-stats { display: flex; justify-content: space-between; font-family: var(--mono); font-size: var(--fs-2xs); color: var(--muted); margin-top: 3px; }
 .ov-esp-status { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
 .ov-esp-dot { width: 8px; height: 8px; background: var(--success); border: 1px solid var(--success); }
-.ov-esp-name { font-family: var(--mono); font-size: 11px; color: var(--ink2); }
-.ov-esp-conn { font-family: var(--pixel); font-size: 9px; color: var(--primary); letter-spacing: 1px; text-transform: uppercase; padding: 2px 8px; border: 1px solid var(--primary-dim); background: rgba(139,92,246,.06); }
+.ov-esp-name { font-family: var(--mono); font-size: var(--fs-xs); color: var(--ink2); }
+.ov-esp-conn { font-family: var(--pixel); font-size: var(--fs-2xs); color: var(--primary); letter-spacing: 1px; text-transform: uppercase; padding: 2px 8px; border: 1px solid var(--primary-dim); background: rgba(139,92,246,.06); }
 
 /* ── Composer ─────────────────────────────────────────────────── */
 
@@ -393,12 +406,12 @@ body::after {
 .composer-target {
   display: flex; align-items: center; gap: 8px;
   padding: 6px 14px; border-bottom: 1px solid var(--rule);
-  font-family: var(--pixel); font-size: 10px; line-height: 1; color: var(--primary);
+  font-family: var(--pixel); font-size: var(--fs-2xs); line-height: 1; color: var(--primary);
   letter-spacing: 1px; text-transform: uppercase;
 }
 
 .composer-input {
-  padding: 8px 14px; font-family: var(--mono); font-size: 13px;
+  padding: 8px 14px; font-family: var(--mono); font-size: var(--fs-base);
   color: var(--ink); background: transparent; border: none;
   outline: none; width: 100%; height: 100%; resize: none;
 }
@@ -410,7 +423,7 @@ body::after {
 }
 
 .act-btn {
-  font-family: var(--pixel); font-size: 10px; letter-spacing: 1px;
+  font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 1px;
   padding: 4px 10px; color: var(--muted); border: 1px solid var(--rule2);
   background: var(--bg3); cursor: pointer; text-transform: uppercase;
   transition: all .2s var(--ease-apple);
@@ -422,7 +435,7 @@ body::after {
 
 .act-mode-group { display: flex; gap: 0; border: 1px solid var(--rule2); margin-left: auto; }
 .act-mode-btn {
-  font-family: var(--pixel); font-size: 9px; letter-spacing: 1px;
+  font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 1px;
   padding: 4px 10px; color: var(--muted); background: transparent;
   border: none; cursor: pointer; text-transform: uppercase;
   transition: all .2s var(--ease-apple);
@@ -431,14 +444,14 @@ body::after {
 .act-mode-btn.active { background: var(--brand); color: #F5F3FF; }
 
 .collapse-btn {
-  font-family: var(--pixel); font-size: 14px; color: var(--muted);
+  font-family: var(--pixel); font-size: var(--fs-md); color: var(--muted);
   cursor: pointer; margin-left: 8px; transition: color .2s var(--ease-apple);
   background: none; border: none;
 }
 .collapse-btn:hover { color: var(--brand); }
 
 .send-btn {
-  font-family: var(--pixel); font-size: 10px; letter-spacing: 1px;
+  font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 1px;
   padding: 4px 14px; color: var(--brand); border: 1px solid var(--brand);
   background: rgba(139,92,246,.06); cursor: pointer; text-transform: uppercase;
   transition: all .2s var(--ease-apple); margin-left: auto;
@@ -461,7 +474,7 @@ body::after {
 .composer-input-wrap.drop-hint::after {
   content: "拖入 → @路径 chip";
   position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-  font-family: var(--pixel); font-size: 10px; letter-spacing: 1px;
+  font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 1px;
   color: var(--brand); background: var(--bg3);
   padding: 6px 14px; border: 1px dashed var(--brand);
   pointer-events: none; z-index: 10; white-space: nowrap;
@@ -471,7 +484,7 @@ body::after {
 /* Composer: `!` 终端直发 badge (DevPlan §3.2) */
 .composer-bang {
   margin-left: auto;
-  font-family: var(--pixel); font-size: 9px; letter-spacing: 1px;
+  font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 1px;
   color: var(--warn); border: 1px solid var(--warn);
   padding: 1px 6px; text-transform: uppercase;
 }
@@ -486,7 +499,7 @@ body::after {
 }
 .composer-at-item {
   display: flex; align-items: center; gap: 8px;
-  font-family: var(--mono); font-size: 12px; color: var(--ink);
+  font-family: var(--mono); font-size: var(--fs-sm); color: var(--ink);
   padding: 5px 12px; cursor: pointer;
 }
 .composer-at-item:hover { background: var(--bg4); }
@@ -503,7 +516,7 @@ body::after {
 }
 
 .sb-item {
-  font-family: var(--pixel); font-size: 9px; color: var(--muted);
+  font-family: var(--pixel); font-size: var(--fs-2xs); color: var(--muted);
   letter-spacing: 1px; text-transform: uppercase;
   display: flex; align-items: center; gap: 4px;
 }
@@ -534,7 +547,7 @@ body::after {
   user-select: text;
 }
 .resource-popover-title {
-  font-family: var(--pixel); font-size: 9px; letter-spacing: 2px;
+  font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 2px;
   text-transform: uppercase; color: var(--brand);
 }
 .resource-list {
@@ -543,17 +556,17 @@ body::after {
 }
 .resource-row {
   display: flex; align-items: center; gap: 10px;
-  font-family: var(--mono); font-size: 11px;
+  font-family: var(--mono); font-size: var(--fs-xs);
 }
 .resource-name {
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  color: var(--ink2); font-family: var(--pixel); font-size: 9px; letter-spacing: 1px;
+  color: var(--ink2); font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 1px;
 }
 .resource-val { color: var(--muted); white-space: nowrap; }
-.resource-empty { font-size: 11px; color: var(--muted); font-family: var(--mono); }
+.resource-empty { font-size: var(--fs-xs); color: var(--muted); font-family: var(--mono); }
 .resource-curve { border-top: 1px solid var(--rule); padding-top: 8px; }
 .resource-curve-label {
-  font-family: var(--pixel); font-size: 9px; color: var(--muted);
+  font-family: var(--pixel); font-size: var(--fs-2xs); color: var(--muted);
   letter-spacing: 1px; margin-bottom: 4px;
 }
 .resource-spark { display: block; width: 100%; }
@@ -578,11 +591,11 @@ body::after {
 /* Files tab */
 .files-search input {
   width: 100%; background: var(--bg3); border: 1px solid var(--rule2);
-  color: var(--ink); font-family: var(--mono); font-size: 12px;
+  color: var(--ink); font-family: var(--mono); font-size: var(--fs-sm);
   padding: 8px 10px; outline: none;
 }
 .files-tree {
-  font-family: var(--mono); font-size: 12px; color: var(--muted);
+  font-family: var(--mono); font-size: var(--fs-sm); color: var(--muted);
   line-height: 2; padding: 0 12px;
 }
 .files-tree .dir { color: var(--primary); }
@@ -593,10 +606,10 @@ body::after {
 
 /* Git tab */
 .git-title {
-  font-family: var(--pixel); font-size: 10px; color: var(--muted);
+  font-family: var(--pixel); font-size: var(--fs-2xs); color: var(--muted);
   letter-spacing: 1px; text-transform: uppercase; margin-bottom: 10px;
 }
-.git-changes { font-family: var(--mono); font-size: 12px; line-height: 2; }
+.git-changes { font-family: var(--mono); font-size: var(--fs-sm); line-height: 2; }
 .git-changes .gm { color: var(--warn); }
 .git-changes .ga { color: var(--success); }
 .git-changes .gd { color: var(--danger); }
@@ -612,11 +625,11 @@ body::after {
 .git-row .git-toggle { color: var(--muted); cursor: pointer; flex-shrink: 0; }
 .git-row .git-glyph { width: 14px; flex-shrink: 0; }
 .git-row .git-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.git-row .git-counts { color: var(--muted); font-size: 11px; flex-shrink: 0; }
+.git-row .git-counts { color: var(--muted); font-size: var(--fs-xs); flex-shrink: 0; }
 .git-diff {
   margin: 4px 0 8px 20px; padding: 8px;
   background: var(--bg); border: 1px solid var(--rule2);
-  font-family: var(--mono); font-size: 11px; color: var(--ink2);
+  font-family: var(--mono); font-size: var(--fs-xs); color: var(--ink2);
   line-height: 1.5; white-space: pre-wrap; word-break: break-word;
   max-height: 240px; overflow-y: auto; overflow-x: auto;
 }
@@ -632,7 +645,7 @@ body::after {
   border-radius: 8px;
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
   padding: 4px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   z-index: 1000;
 }
 .ctx-item {
@@ -648,7 +661,7 @@ body::after {
 .ctx-sep { height: 1px; background: var(--rule2); margin: 4px 6px; }
 .ctx-label {
   padding: 4px 10px 2px;
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   letter-spacing: 1px;
   text-transform: uppercase;
   color: var(--muted);
@@ -666,12 +679,12 @@ body::after {
   border-radius: 8px;
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
   padding: 4px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   z-index: 999;
 }
 .tt-label {
   padding: 4px 10px 2px;
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   letter-spacing: 1px;
   text-transform: uppercase;
   color: var(--muted);
@@ -693,7 +706,7 @@ body::after {
 .tt-item .tt-cmd {
   color: var(--muted);
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 120px;
@@ -728,22 +741,22 @@ body::after {
 .files-tree .dir:hover .dir-actions { display: inline-flex; }
 .dir-actions button {
   background: transparent; border: none; color: var(--muted);
-  cursor: pointer; font-size: 11px; padding: 0 3px; line-height: 1;
+  cursor: pointer; font-size: var(--fs-xs); padding: 0 3px; line-height: 1;
 }
 .dir-actions button:hover { color: var(--brand); }
 .files-new { display: flex; align-items: center; gap: 4px; padding: 3px 0; }
 .files-new input {
   flex: 1; min-width: 0;
   background: var(--bg3); border: 1px solid var(--brand);
-  color: var(--ink); font-family: var(--mono); font-size: 12px;
+  color: var(--ink); font-family: var(--mono); font-size: var(--fs-sm);
   padding: 2px 6px; outline: none;
 }
-.files-new-error { color: var(--danger); font-size: 11px; padding: 2px 0; }
+.files-new-error { color: var(--danger); font-size: var(--fs-xs); padding: 2px 0; }
 .files-new-btn {
   flex-shrink: 0;
   background: var(--bg3); border: 1px solid var(--rule2);
   color: var(--muted); cursor: pointer; font-family: var(--mono);
-  font-size: 11px; padding: 0 8px; border-radius: 4px;
+  font-size: var(--fs-xs); padding: 0 8px; border-radius: 4px;
 }
 .files-new-btn:hover { color: var(--brand); border-color: var(--brand); }
 /* Cut source in the tree is dimmed (VS Code style) until paste. */
@@ -751,7 +764,7 @@ body::after {
 /* Transient operation result at the bottom of the Files panel. */
 .files-notice {
   padding: 6px 12px;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-family: var(--mono);
   color: var(--muted);
   border-top: 1px solid var(--rule);
@@ -776,13 +789,13 @@ body::after {
 
 .panel-close {
   background: none; border: none; color: var(--muted); cursor: pointer;
-  font-size: 14px; padding: 0 2px; line-height: 1; margin-left: 6px;
+  font-size: var(--fs-md); padding: 0 2px; line-height: 1; margin-left: 6px;
 }
 .panel-close:hover { color: var(--danger); }
 
 .panel-placeholder {
   flex: 1; display: flex; align-items: center; justify-content: center;
-  color: var(--muted); font-family: var(--mono); font-size: 12px;
+  color: var(--muted); font-family: var(--mono); font-size: var(--fs-sm);
 }
 
 .split-container { flex: 1; display: flex; overflow: hidden; min-width: 0; min-height: 0; }
@@ -811,12 +824,12 @@ body::after {
 .lock-banner {
   display: flex; align-items: center; gap: 8px;
   padding: 5px 14px; border-bottom: 1px solid var(--rule);
-  background: rgba(250, 204, 21, 0.06); font-size: 12px; color: var(--warn);
+  background: rgba(250, 204, 21, 0.06); font-size: var(--fs-sm); color: var(--warn);
 }
 .lock-banner.unlocked { background: rgba(74, 222, 128, 0.06); color: var(--success); }
 .lock-banner-text { flex: 1; font-family: var(--mono); }
 .lock-btn {
-  font-family: var(--pixel); font-size: 9px; letter-spacing: 1px;
+  font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 1px;
   padding: 3px 8px; color: var(--warn); border: 1px solid rgba(250, 204, 21, 0.4);
   background: transparent; cursor: pointer; text-transform: uppercase;
 }
@@ -829,11 +842,11 @@ body::after {
   z-index: 30; display: flex; align-items: center; gap: 8px;
   padding: 6px 12px; background: rgba(250, 204, 21, 0.1);
   border: 1px solid rgba(250, 204, 21, 0.5); color: var(--warn);
-  font-size: 12px; max-width: 90%;
+  font-size: var(--fs-sm); max-width: 90%;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
 .term-lock-banner button {
-  font-family: var(--pixel); font-size: 9px; letter-spacing: 1px;
+  font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 1px;
   padding: 3px 8px; color: var(--warn); border: 1px solid rgba(250, 204, 21, 0.4);
   background: transparent; cursor: pointer; text-transform: uppercase;
 }
@@ -872,6 +885,27 @@ body::after {
   padding-bottom: 16px;
   border-bottom: 2px solid var(--rule);
   margin-bottom: 18px;
+  position: relative;
+}
+
+/* Skip-guide button (top-right of the onboarding card). */
+.onboarding-skip {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 4px 8px;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.onboarding-skip:hover {
+  color: var(--ink2);
+  border-color: var(--rule2);
 }
 
 .onboarding-logo {
@@ -881,7 +915,7 @@ body::after {
 
 .onboarding-header h2 {
   font-family: var(--pixel-body);
-  font-size: 22px;
+  font-size: var(--fs-xl);
   font-weight: 700;
   color: var(--brand);
   letter-spacing: 1px;
@@ -890,7 +924,7 @@ body::after {
 
 .onboarding-step-title {
   font-family: var(--pixel-body);
-  font-size: 17px;
+  font-size: var(--fs-lg);
   font-weight: 700;
   color: var(--ink);
   margin-bottom: 10px;
@@ -898,7 +932,7 @@ body::after {
 
 .onboarding-step-desc {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.7;
   color: var(--ink2);
   margin: 0 0 14px;
@@ -919,14 +953,14 @@ body::after {
   background: var(--bg);
   border: 1px solid var(--rule);
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
 .onboarding-runtime-name { color: var(--ink2); }
 
 .onboarding-runtime-status {
   font-family: var(--pixel);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   letter-spacing: 1px;
 }
 .onboarding-runtime-status[data-ok="true"] { color: var(--success); }
@@ -934,7 +968,7 @@ body::after {
 
 .onboarding-guide {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--muted);
   padding: 8px 10px;
   border-left: 3px solid var(--brand-dim);
@@ -958,25 +992,25 @@ body::after {
 
 .onboarding-esp-ok {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--success);
 }
 
 .onboarding-esp-msg {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--warn);
 }
 
 .onboarding-esp-addr {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--muted);
 }
 
 .onboarding-btn {
   font-family: var(--pixel);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   letter-spacing: 1px;
   padding: 8px 16px;
   border: 1px solid var(--rule2);
@@ -1021,6 +1055,54 @@ body::after {
 }
 .onboarding-dot.active { background: var(--brand); }
 
+/* ── Onboarding "创建 Master" step ────────────────────────────── */
+.onboarding-master {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  background: var(--bg);
+  border: 1px solid var(--rule);
+}
+.onboarding-master-err {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--danger);
+}
+.onboarding-master-hint {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+/* ── LeftSidebar Master-group empty state ("创建 Master 开始编排") ── */
+.uj-master-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+  border: 1px dashed var(--brand-dim);
+  border-radius: 6px;
+  margin: 4px 8px 6px;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.uj-master-empty:hover {
+  background: rgba(139, 92, 246, 0.08);
+  border-color: var(--brand);
+}
+.uj-master-empty .tm-name {
+  flex: 1;
+  color: var(--brand);
+  font-size: var(--fs-sm);
+}
+.uj-master-empty .tm-time {
+  font-family: var(--pixel);
+  font-size: var(--fs-sm);
+  color: var(--brand);
+}
+
 .onboarding-nav { display: flex; gap: 10px; }
 
 /* ── Terminal-item close button (hover/focus reveals) ─────────── */
@@ -1034,7 +1116,7 @@ body::after {
   margin-left: 2px;
   flex-shrink: 0;
   font-family: var(--pixel);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1;
   color: var(--muted);
   background: none;
@@ -1126,13 +1208,13 @@ body::after {
   border-radius: 8px;
   box-shadow: var(--shadow-hard), 0 8px 30px rgba(0, 0, 0, 0.45);
   padding: 4px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   z-index: 100;
 }
 
 .cmp-menu-label {
   padding: 4px 10px 2px;
-  font-size: 9px;
+  font-size: var(--fs-2xs);
   letter-spacing: 1px;
   text-transform: uppercase;
   color: var(--muted);
@@ -1165,7 +1247,7 @@ body::after {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 
 .cmp-menu-check {
@@ -1183,7 +1265,7 @@ body::after {
 .cmp-menu-empty {
   padding: 6px 10px;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--muted);
 }
 
@@ -1213,7 +1295,7 @@ body::after {
 
 .nproj-title {
   font-family: var(--pixel-body);
-  font-size: 16px;
+  font-size: var(--fs-lg);
   font-weight: 700;
   color: var(--brand);
   letter-spacing: 1px;
@@ -1224,7 +1306,7 @@ body::after {
   border: 1px solid var(--rule2);
   color: var(--ink);
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: var(--fs-base);
   padding: 8px 10px;
   outline: none;
 }
@@ -1232,7 +1314,7 @@ body::after {
 
 .nproj-error {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--danger);
 }
 
@@ -1244,7 +1326,7 @@ body::after {
 
 .nproj-btn {
   font-family: var(--pixel);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   letter-spacing: 1px;
   padding: 6px 14px;
   color: var(--muted);
@@ -1266,7 +1348,7 @@ body::after {
 .nproj-empty-row {
   padding: 5px 10px 5px 26px;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--muted);
   font-style: italic;
 }
@@ -1285,7 +1367,7 @@ body::after {
 
 .ug-nproj-label {
   font-family: var(--pixel);
-  font-size: 9px;
+  font-size: var(--fs-2xs);
   letter-spacing: 1px;
   text-transform: uppercase;
   color: var(--muted);
@@ -1293,7 +1375,7 @@ body::after {
 
 .ug-nproj-folder {
   font-family: var(--pixel);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   letter-spacing: 1px;
   padding: 8px 12px;
   color: var(--primary);
@@ -1341,7 +1423,7 @@ body::after {
   background: var(--brand);
   color: #F5F3FF;
   font-family: var(--pixel);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   letter-spacing: 1px;
   text-transform: uppercase;
   cursor: pointer;
@@ -1383,7 +1465,7 @@ body::after {
 }
 .ul-send-btn {
   font-family: var(--pixel);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   letter-spacing: 1px;
   padding: 4px 12px;
   /* Align with the textarea's first line: the input has 8px top padding, the
@@ -1422,7 +1504,7 @@ body::after {
    states. Ellipsis/nowrap from .uf-ov-summary is preserved. */
 .ov-section.collapsed .ov-summary.uk-summary {
   font-family: var(--pixel);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   letter-spacing: 1px;
   text-transform: uppercase;
   color: var(--muted);
@@ -1444,7 +1526,7 @@ body::after {
 
 .uj-master-group .uj-master-arrow {
   font-family: var(--pixel);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   color: rgba(245, 243, 255, 0.7);
   flex-shrink: 0;
   transition: transform 0.2s var(--ease-apple);
@@ -1459,7 +1541,7 @@ body::after {
   gap: 6px;
   padding: 5px 10px 5px 22px;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--muted);
   cursor: pointer;
   transition: all 0.2s var(--ease-apple);
@@ -1480,7 +1562,7 @@ body::after {
   margin-left: 2px;
   flex-shrink: 0;
   font-family: var(--pixel);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1;
   color: var(--muted);
   background: none;
@@ -1512,13 +1594,13 @@ body::after {
   display: flex; align-items: center; gap: 6px; margin-bottom: 10px;
 }
 .gg-branch-label {
-  font-family: var(--pixel); font-size: 9px; letter-spacing: 1px;
+  font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 1px;
   color: var(--muted); text-transform: uppercase; flex-shrink: 0;
 }
 .gg-branch-select {
   flex: 1; min-width: 0; background: var(--bg3);
   border: 1px solid var(--rule2); color: var(--ink);
-  font-family: var(--mono); font-size: 12px; padding: 4px 6px;
+  font-family: var(--mono); font-size: var(--fs-sm); padding: 4px 6px;
   outline: none; cursor: pointer;
 }
 .gg-branch-select:focus { border-color: var(--brand); }
@@ -1534,10 +1616,10 @@ body::after {
 }
 .gg-diff-path {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
-  white-space: nowrap; font-family: var(--mono); font-size: 11px; color: var(--muted);
+  white-space: nowrap; font-family: var(--mono); font-size: var(--fs-xs); color: var(--muted);
 }
 .gg-diff-open {
-  flex-shrink: 0; font-family: var(--pixel); font-size: 9px; letter-spacing: 1px;
+  flex-shrink: 0; font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 1px;
   color: var(--primary); border: 1px solid var(--primary-dim);
   background: rgba(139,92,246,.06); padding: 2px 6px; cursor: pointer;
   text-transform: uppercase; transition: all .2s var(--ease-apple);
@@ -1549,15 +1631,15 @@ body::after {
 .gg-log { margin-top: 12px; border-top: 2px solid var(--rule); flex-shrink: 0; }
 .gg-log-head {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 7px 0 4px; font-family: var(--pixel); font-size: 10px;
+  padding: 7px 0 4px; font-family: var(--pixel); font-size: var(--fs-2xs);
   letter-spacing: 1px; color: var(--ink2); text-transform: uppercase;
   cursor: pointer; transition: color .2s var(--ease-apple);
 }
 .gg-log-head:hover { color: var(--brand); }
-.gg-log-toggle { color: var(--muted); font-size: 10px; }
+.gg-log-toggle { color: var(--muted); font-size: var(--fs-2xs); }
 .gg-log-body {
   max-height: 220px; overflow-y: auto; margin-top: 2px;
-  font-family: var(--mono); font-size: 11px; line-height: 1.7;
+  font-family: var(--mono); font-size: var(--fs-xs); line-height: 1.7;
 }
 .gg-log-row {
   display: flex; gap: 8px; padding: 2px 0; cursor: default;
@@ -1568,14 +1650,14 @@ body::after {
 .gg-log-subject {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
 }
-.gg-log-empty { color: var(--muted); font-family: var(--mono); font-size: 11px; padding: 4px 0; }
+.gg-log-empty { color: var(--muted); font-family: var(--mono); font-size: var(--fs-xs); padding: 4px 0; }
 
 /* ── Overview collapsed inline summary (same title bar, values on the right) ── */
 .ov-summary-inline {
   margin-left: auto;
   margin-right: 10px;
   font-family: var(--pixel);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   letter-spacing: 1px;
   text-transform: uppercase;
   color: var(--muted);
@@ -1598,7 +1680,7 @@ body::after {
   margin-left: 2px;
   flex-shrink: 0;
   font-family: var(--pixel);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1;
   color: rgba(245, 243, 255, 0.85);
   background: none;
@@ -1639,7 +1721,7 @@ body::after {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--muted);
 }
 
@@ -1664,7 +1746,7 @@ body::after {
 }
 .up-git-init-text {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--warn);
 }
 .up-git-init-btn {
@@ -1681,7 +1763,7 @@ body::after {
 /* Is a repo but has no remote: muted, non-blocking hint near the top. */
 .up-git-hint {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--muted);
   padding: 6px 10px;
   margin-bottom: 10px;
@@ -1723,7 +1805,7 @@ body::after {
 .gv-branch {
   flex-shrink: 1;
   min-width: 0;
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   letter-spacing: 0;
   color: var(--brand);
   border: 1px solid var(--brand-dim);
@@ -1736,7 +1818,7 @@ body::after {
 }
 .gv-icon {
   flex-shrink: 0;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--muted);
   cursor: pointer;
   transition: color 0.2s var(--ease-apple);
@@ -1772,7 +1854,7 @@ body::after {
 }
 .gv-menu-item {
   padding: 6px 12px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--ink2);
   cursor: pointer;
   font-family: var(--mono);
@@ -1783,7 +1865,7 @@ body::after {
 .gv-menu-danger:hover { background: var(--bg4); color: var(--danger); }
 .gv-menu-label {
   padding: 6px 12px 3px;
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   letter-spacing: 1px;
   text-transform: uppercase;
   color: var(--muted);
@@ -1795,7 +1877,7 @@ body::after {
 }
 .gv-menu-branch {
   padding: 4px 12px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--ink2);
   cursor: pointer;
   font-family: var(--mono);
@@ -1821,7 +1903,7 @@ body::after {
   border: 1px solid var(--rule2);
   color: var(--ink);
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.5;
   padding: 5px 8px;
   outline: none;
@@ -1838,7 +1920,7 @@ body::after {
   background: rgba(139, 92, 246, 0.1);
   cursor: pointer;
   font-family: var(--pixel);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   letter-spacing: 1px;
   text-transform: uppercase;
   transition: all 0.2s var(--ease-apple);
@@ -1851,7 +1933,7 @@ body::after {
 .gv-commit-btn:disabled { opacity: 0.4; cursor: default; }
 
 /* Message (error / feedback) rows */
-.gv-msg { font-size: 11px; margin-bottom: 8px; padding: 4px 8px; border: 1px solid var(--rule2); }
+.gv-msg { font-size: var(--fs-xs); margin-bottom: 8px; padding: 4px 8px; border: 1px solid var(--rule2); }
 .gv-error { color: var(--danger); border-color: rgba(248, 113, 113, 0.4); background: rgba(248, 113, 113, 0.06); }
 .gv-feedback { color: var(--muted); }
 
@@ -1863,7 +1945,7 @@ body::after {
   gap: 6px;
   padding: 5px 0 4px;
   font-family: var(--pixel);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   letter-spacing: 1px;
   color: var(--ink2);
   text-transform: uppercase;
@@ -1872,7 +1954,7 @@ body::after {
   transition: color 0.2s var(--ease-apple);
 }
 .gv-group-header:hover { color: var(--brand); }
-.gv-arrow { color: var(--muted); font-size: 10px; flex-shrink: 0; }
+.gv-arrow { color: var(--muted); font-size: var(--fs-2xs); flex-shrink: 0; }
 .gv-group-title {
   flex: 1;
   min-width: 0;
@@ -1883,7 +1965,7 @@ body::after {
 .gv-group-action {
   flex-shrink: 0;
   font-family: var(--pixel);
-  font-size: 9px;
+  font-size: var(--fs-2xs);
   letter-spacing: 1px;
   color: var(--muted);
   padding: 1px 5px;
@@ -1906,7 +1988,7 @@ body::after {
   padding: 2px 0 2px 12px;
   cursor: pointer;
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .gv-file:hover { background: var(--bg3); }
 .gv-file-glyph { width: 14px; flex-shrink: 0; text-align: center; }
@@ -1940,7 +2022,7 @@ body::after {
   cursor: pointer;
   border: 1px solid var(--rule2);
   background: var(--bg3);
-  font-size: 13px;
+  font-size: var(--fs-base);
   line-height: 1;
   transition: all 0.15s var(--ease-apple);
 }
@@ -1955,7 +2037,7 @@ body::after {
   cursor: pointer;
   border: 1px solid var(--rule2);
   background: var(--bg3);
-  font-size: 13px;
+  font-size: var(--fs-base);
   line-height: 1;
   transition: all 0.15s var(--ease-apple);
 }
@@ -1963,7 +2045,7 @@ body::after {
 .gv-file-diff {
   flex-shrink: 0;
   font-family: var(--pixel);
-  font-size: 9px;
+  font-size: var(--fs-2xs);
   letter-spacing: 1px;
   text-transform: uppercase;
   color: var(--brand);
@@ -1978,12 +2060,12 @@ body::after {
 /* Empty / clean rows */
 .gv-empty {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--muted);
   padding: 3px 0 3px 12px;
 }
 .gv-clean {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--muted);
   padding: 8px 0;
   font-family: var(--mono);
@@ -2011,13 +2093,13 @@ body::after {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--muted);
 }
 .gv-diff-open {
   flex-shrink: 0;
   font-family: var(--pixel);
-  font-size: 9px;
+  font-size: var(--fs-2xs);
   letter-spacing: 1px;
   text-transform: uppercase;
   color: var(--brand);
@@ -2037,7 +2119,7 @@ body::after {
 .gv-diff-loading {
   padding: 10px 8px;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--muted);
 }
 .gv-diff-cm { height: 240px; background: var(--bg); }
@@ -2057,7 +2139,7 @@ body::after {
 .gv-diff-cm .cm-activeLineGutter { background: transparent; }
 .gv-diff-cm .cm-scroller {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 .gv-diff-cm .cm-mergeSpacer { background: var(--bg3); }
 
@@ -2081,5 +2163,5 @@ body::after {
 .diff-panel .cm-activeLineGutter { background: transparent; }
 .diff-panel .cm-scroller {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }

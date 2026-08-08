@@ -13,6 +13,9 @@ export type AgentStatus =
   | "failed";
 export type PermissionMode = "ask" | "auto" | "yolo";
 export type Speed = "high" | "mid" | "fast" | "auto";
+/** UI font size preset. Base `"s"` is the smallest; larger presets scale the
+ *  CSS `--fs-*` tokens. */
+export type FontScale = "s" | "m" | "l" | "xl" | "xxl";
 
 export interface AgentInfo {
   id: string;
@@ -28,6 +31,10 @@ export interface AgentInfo {
   speed?: string;
   /** Selected model id, or null/undefined for the runtime default. */
   model?: string | null;
+  /** Session creation epoch-ms — the sidebar `tm-time` count-up is anchored to
+   *  this real timestamp (NOT the activity heartbeat). Restored sessions carry
+   *  the DB `created_at`; fresh spawns get `Date.now()` at spawn. */
+  createdAt?: number;
 }
 
 export interface RuntimeInfo {
@@ -155,28 +162,13 @@ export function createBufferedChannel(): {
   };
 }
 
-// ── Agent activity (last-activity timestamps) ───────────────────
-// Kept OUT of the reactive Zustand state on purpose: PTY output calls
-// appendAgentOutput on every chunk, and a reactive timestamp the sidebar
-// subscribes to would re-render it on each chunk (WebKitGTK repaint cost).
-// A plain module-level Map + a coarse poll tick in the sidebar keeps reads
-// cheap; touchAgentActivity is safe to call on hot paths.
-const agentLastActivity = new Map<string, number>();
-
-/** Record an agent's activity (default: now). */
-export function touchAgentActivity(id: string, ts: number = Date.now()): void {
-  agentLastActivity.set(id, ts);
-}
-
-/** Last-activity epoch-ms for an agent, or undefined if never recorded. */
-export function getAgentActivity(id: string): number | undefined {
-  return agentLastActivity.get(id);
-}
-
-/** Drop an agent's activity record (called on removeAgent). */
-function clearAgentActivity(id: string): void {
-  agentLastActivity.delete(id);
-}
+// ── Agent count-up anchor ────────────────────────────────────────
+// The sidebar `tm-time` is a "time since session creation" counter anchored to
+// the agent's `createdAt` (the persisted DB `created_at` on restore, `Date.now()`
+// on a fresh spawn). It deliberately is NOT a last-activity heartbeat: Claude's
+// TUI repaints and buffered output would keep resetting a "last activity" stamp
+// to "刚刚" even for a session idle for hours. createdAt is a real, monotonic,
+// persisted timestamp, so the count-up always advances.
 
 // ── Store ────────────────────────────────────────────────────────
 
@@ -264,8 +256,11 @@ interface AppState {
   // Onboarding
   onboarded: boolean;
 
+  // UI font size preset ("s" | "m" | "l" | "xl" | "xxl"); base = smallest.
+  fontScale: FontScale;
+
   // Actions
-  addAgent: (info: AgentInfo, channel: Channel<number[]> | null, activityTs?: number) => void;
+  addAgent: (info: AgentInfo, channel: Channel<number[]> | null, createdAtTs?: number) => void;
   removeAgent: (id: string) => void;
   updateAgentStatus: (id: string, status: AgentStatus) => void;
   appendAgentOutput: (id: string, data: number[]) => void;
@@ -328,6 +323,7 @@ interface AppState {
   applyResourceSample: (resources: AgentResource[]) => void;
   setResourceHistory: (agentId: string, points: ResourcePoint[]) => void;
   setOnboarded: (onboarded: boolean) => void;
+  setFontScale: (scale: FontScale) => void;
 }
 
 /** Persisted preference: has the user completed first-run onboarding? */
@@ -338,6 +334,19 @@ function loadOnboarded(): boolean {
   } catch {
     return false;
   }
+}
+
+/** Persisted UI font size preset. Fallback: the smallest ("s"). */
+const FONT_SCALE_KEY = "capilot.fontScale";
+const FONT_SCALES: FontScale[] = ["s", "m", "l", "xl", "xxl"];
+function loadFontScale(): FontScale {
+  try {
+    const v = localStorage.getItem(FONT_SCALE_KEY);
+    if (v && (FONT_SCALES as string[]).includes(v)) return v as FontScale;
+  } catch {
+    // storage unavailable — use base
+  }
+  return "s";
 }
 
 // ── New-terminal templates ──────────────────────────────────────
@@ -441,8 +450,9 @@ export const useStore = create<AppState>((set, get) => ({
   focusedProject: null,
   onboarded: loadOnboarded(),
   termTemplates: loadTermTemplates(),
+  fontScale: loadFontScale(),
 
-  addAgent: (info, channel, activityTs) =>
+  addAgent: (info, channel, createdAtTs) =>
     set((s) => {
       // Dead-session guard (close/resume race): an in-flight `agent_resume` can
       // resolve AFTER the user closed & deleted the session. `removeAgent` put
@@ -451,18 +461,20 @@ export const useStore = create<AppState>((set, get) => ({
       // unclosable.
       if (s.closedAgentIds.has(info.id)) return {};
       const agents = new Map(s.agents);
-      agents.set(info.id, info);
+      // Anchor the count-up to a real timestamp: fresh spawns get now; restored
+      // sessions carry the DB `created_at` via `createdAtTs`. An existing agent
+      // (role-only update) keeps its original `createdAt`.
+      const created =
+        info.createdAt ??
+        (agents.has(info.id) ? agents.get(info.id)!.createdAt : undefined) ??
+        (createdAtTs !== undefined ? createdAtTs : Date.now());
+      agents.set(info.id, { ...info, createdAt: created });
       const channels = new Map(s.agentChannels);
       // Only overwrite the PTY channel when a new one is supplied. `channel ===
       // null` means a role-only update (setAgentRole) or a restored session with
       // no live PTY yet — in that case preserve the agent's existing live
       // channel so XTermPanel doesn't lose it and fall into the resume path.
       if (channel) channels.set(info.id, channel);
-      // Touch activity on a fresh spawn / runtime switch (live channel), and on
-      // session restore (explicit activityTs from the DB). Role-only updates
-      // (channel === null and no activityTs) keep the existing timestamp.
-      if (activityTs !== undefined) touchAgentActivity(info.id, activityTs);
-      else if (channel) touchAgentActivity(info.id);
       return { agents, agentChannels: channels };
     }),
 
@@ -482,7 +494,6 @@ export const useStore = create<AppState>((set, get) => ({
       resumeOnOpen.delete(id);
       const closedAgentIds = new Set(s.closedAgentIds);
       closedAgentIds.add(id);
-      clearAgentActivity(id);
       // If the removed agent was the master, clear masterAgentId so the composer
       // doesn't see a stale master and spawn a duplicate (Bug 4).
       return {
@@ -502,7 +513,6 @@ export const useStore = create<AppState>((set, get) => ({
       const agents = new Map(s.agents);
       const a = agents.get(id);
       if (a) agents.set(id, { ...a, status });
-      touchAgentActivity(id);
       return { agents };
     }),
 
@@ -525,7 +535,6 @@ export const useStore = create<AppState>((set, get) => ({
         prev.splice(0, prev.length - MAX_OUTPUT_BUFFER);
       }
       outputs.set(id, prev);
-      touchAgentActivity(id);
       return { agentOutputs: outputs };
     }),
 
@@ -931,6 +940,15 @@ export const useStore = create<AppState>((set, get) => ({
       // ignore storage errors
     }
     set({ onboarded });
+  },
+
+  setFontScale: (scale) => {
+    try {
+      localStorage.setItem(FONT_SCALE_KEY, scale);
+    } catch {
+      // ignore storage errors
+    }
+    set({ fontScale: scale });
   },
 }));
 

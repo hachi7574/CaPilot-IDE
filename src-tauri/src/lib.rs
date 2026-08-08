@@ -8,6 +8,7 @@ use agent_runtime::adapter::{AgentRole, AgentSession, AgentInfo, PermissionMode,
 use agent_runtime::pty::{OnExit, PtyManager};
 use agent_runtime::runtimes::{get_adapter, known_runtimes};
 use esp::manager::EspManager;
+use orchestration::dispatcher::CascadeMode;
 use orchestration::Dispatcher;
 use persistence::{agent_dir, ensure_project, project_dir, read_agent_meta, write_agent_meta, AgentMeta, AgentSessionRecord, Persistence, DEFAULT_PROJECT};
 use serde::Serialize;
@@ -134,9 +135,17 @@ struct AgentRemoved {
 /// applies without an app restart.
 fn build_on_exit(
     persistence: Arc<Persistence>,
+    dispatcher: Arc<Dispatcher>,
     app: tauri::AppHandle,
 ) -> OnExit {
     Arc::new(move |agent_id, exit_code| {
+        dispatcher.worker_ended_naturally(&agent_id, exit_code, &app);
+        let is_master = persistence
+            .db()
+            .lock()
+            .ok()
+            .and_then(|db| db.get(&agent_id).ok().flatten())
+            .is_some_and(|record| record.role == "master");
         // Poisoned lock / read error → default to "keep" so a session is never
         // silently dropped because of a transient DB failure.
         let keep = persistence
@@ -172,11 +181,17 @@ fn build_on_exit(
             let _ = app.emit(
                 "agent://exited",
                 AgentExited {
-                    id: agent_id,
+                    id: agent_id.clone(),
                     exit_code,
                 },
             );
+            if is_master {
+                dispatcher.cascade_master(&agent_id, CascadeMode::Keep, &app);
+            }
         } else {
+            if is_master {
+                dispatcher.cascade_master(&agent_id, CascadeMode::Delete, &app);
+            }
             // Delete mode: read the row's CURRENT project (not a value captured
             // at spawn — a project rename moves the agent dir, and the stale
             // name would leave the new dir orphaned).
@@ -204,7 +219,7 @@ fn build_on_exit(
 fn build_and_spawn(
     pty: &Arc<PtyManager>,
     persistence: &Arc<Persistence>,
-    dispatcher: &Dispatcher,
+    dispatcher: &Arc<Dispatcher>,
     app: &tauri::AppHandle,
     id: &str,
     project: &str,
@@ -261,7 +276,11 @@ fn build_and_spawn(
             24,
             80,
             on_data,
-            Some(build_on_exit(persistence.clone(), app.clone())),
+            Some(build_on_exit(
+                persistence.clone(),
+                dispatcher.clone(),
+                app.clone(),
+            )),
             &capilot_path_env(),
         )
         .map_err(|e| e.to_string())?;
@@ -909,6 +928,7 @@ async fn sessions_delete(
     pty: tauri::State<'_, Arc<PtyManager>>,
     persistence: tauri::State<'_, Arc<Persistence>>,
     dispatcher: tauri::State<'_, Arc<Dispatcher>>,
+    app: tauri::AppHandle,
     id: String,
 ) -> Result<(), String> {
     // Best-effort end to end: a failed kill (e.g. the PTY was already reaped by
@@ -928,6 +948,9 @@ async fn sessions_delete(
     let Some(rec) = record else {
         return Err(format!("Session not found: {id}"));
     };
+    if rec.role == "master" {
+        dispatcher.cascade_master(&id, CascadeMode::Delete, &app);
+    }
     let dir = agent_dir(&rec.project, &id);
     // Belt-and-braces: the resolved dir must stay under the workspace root.
     if dir.starts_with(persistence::workspace_root()) && dir.exists() {

@@ -141,7 +141,7 @@ export function ContentArea() {
         <div className="empty-state">
           <img src="/logo.png" alt="CaPilot" />
           <h3>CaPilot IDE</h3>
-          <p style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--muted)" }}>
+          <p style={{ fontFamily: "var(--mono)", fontSize: "var(--fs-sm)", color: "var(--muted)" }}>
             Press + to start a new agent session
           </p>
         </div>

@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { useStore, AgentInfo, AgentStatus, getAgentActivity } from "../../state/store";
+import { useStore, AgentInfo, AgentStatus } from "../../state/store";
 import { setAgentRole } from "../../state/orchestration";
 import {
   spawnAgent,
@@ -33,11 +33,13 @@ function projectOf(cwd: string, roots: Record<string, string>): string {
   return parts[parts.length - 1] || cwd;
 }
 
-/** Chinese relative duration since last activity (matches the Preview's
- *  `tm-time`: "刚刚" / "20分钟" / "3小时" / "4天"). */
-function fmtActivity(ms: number | undefined): string {
-  if (ms === undefined) return "—";
-  const diff = Math.max(0, Date.now() - ms);
+/** Chinese relative age since a timestamp (matches the Preview's `tm-time`:
+ *  "刚刚" / "20分钟" / "3小时" / "4天"). Anchored to the agent's real session
+ *  creation time (`createdAt`), so the counter always advances and never
+ *  "resets to 刚刚" just because the TUI redrew. */
+function fmtAge(ts: number | undefined): string {
+  if (ts === undefined) return "—";
+  const diff = Math.max(0, Date.now() - ts);
   const s = Math.floor(diff / 1000);
   if (s < 60) return "刚刚";
   const m = Math.floor(s / 60);
@@ -292,7 +294,13 @@ export function LeftSidebar() {
       string,
       {
         cwd: string;
-        agents: { id: string; title: string; status: AgentStatus; role: AgentInfo["role"] }[];
+        agents: {
+          id: string;
+          title: string;
+          status: AgentStatus;
+          role: AgentInfo["role"];
+          createdAt?: number;
+        }[];
       }
     >();
     agents.forEach((a, id) => {
@@ -305,6 +313,7 @@ export function LeftSidebar() {
         title: a.title || `agent-${id.slice(0, 4)}`,
         status: a.status,
         role: a.role,
+        createdAt: a.createdAt,
       });
     });
     return map;
@@ -546,7 +555,7 @@ export function LeftSidebar() {
                       >
                         <span className="tm-icon">🤖</span>
                         <span className="tm-name">master</span>
-                        <span className="tm-time">{fmtActivity(getAgentActivity(masterAgentId))}</span>
+                        <span className="tm-time">{fmtAge(agents.get(masterAgentId)?.createdAt)}</span>
                         <button
                           className="tm-close"
                           title="关闭并终止"
@@ -573,7 +582,7 @@ export function LeftSidebar() {
                       >
                         <span className="tm-icon">🤖</span>
                         <span className="tm-name">{a.title}</span>
-                        <span className="tm-time">{fmtActivity(getAgentActivity(a.id))}</span>
+                        <span className="tm-time">{fmtAge(a.createdAt)}</span>
                         <button
                           className="tm-close"
                           title="关闭并终止"
@@ -586,6 +595,24 @@ export function LeftSidebar() {
                         </button>
                       </div>
                     ))}
+                    {/* No master yet — a one-click create affordance. The composer
+                        can also auto-create on send, but a discoverable button here
+                        makes the orchestrator's first-run action obvious. */}
+                    {!masterAgentId && (
+                      <div
+                        className="uj-master-empty"
+                        onClick={() =>
+                          spawnAgent("master").catch((e) =>
+                            console.error("master create failed:", e)
+                          )
+                        }
+                        role="button"
+                      >
+                        <span className="tm-icon">🤖</span>
+                        <span className="tm-name">创建 Master 开始编排</span>
+                        <span className="tm-time">+</span>
+                      </div>
+                    )}
                   </>
                 )}
               </div>
@@ -691,7 +718,7 @@ export function LeftSidebar() {
                         >
                           <span className="tm-icon">🤖</span>
                           <span className="tm-name">{a.title}</span>
-                          <span className="tm-time">{fmtActivity(getAgentActivity(a.id))}</span>
+                          <span className="tm-time">{fmtAge(a.createdAt)}</span>
                           <button
                             className="tm-close"
                             title="关闭并终止"
@@ -739,7 +766,7 @@ export function LeftSidebar() {
                               >
                                 <span className="tm-icon">🕸</span>
                                 <span className="tm-name">{a.title}</span>
-                                <span className="tm-time">{fmtActivity(getAgentActivity(a.id))}</span>
+                                <span className="tm-time">{fmtAge(a.createdAt)}</span>
                                 <button
                                   className="tm-close"
                                   title="删除已结束会话"
