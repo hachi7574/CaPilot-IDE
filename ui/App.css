@@ -237,6 +237,18 @@ body::after {
 .tab-dot.done { background: var(--success); }
 .tab-dot.idle { background: var(--muted); }
 .tab-dot.failed { background: var(--danger); }
+.tab-attention {
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--warn);
+  color: #090b10;
+  font-size: 10px;
+  font-weight: 800;
+}
+.tab-attention.error { background: var(--danger); color: white; }
 
 /* xterm's cursor blink is an injected infinite CSS keyframe animation (option
    or DEC mode 12 both enable it). WebKitGTK's software compositor repaints the

@@ -300,6 +300,7 @@ export function LeftSidebar() {
           status: AgentStatus;
           role: AgentInfo["role"];
           createdAt?: number;
+          attentionReason?: AgentInfo["attention_reason"];
         }[];
       }
     >();
@@ -318,6 +319,7 @@ export function LeftSidebar() {
         status: a.status,
         role: a.role,
         createdAt: a.createdAt,
+        attentionReason: a.requires_attention ? a.attention_reason : null,
       });
     });
     return map;
@@ -721,6 +723,12 @@ export function LeftSidebar() {
                           }}
                         >
                           <span className="tm-icon">🤖</span>
+                          {a.attentionReason && (
+                            <span
+                              className={`tab-attention ${a.attentionReason}`}
+                              title={a.attentionReason === "error" ? "需要处理：异常退出" : "任务已完成"}
+                            >!</span>
+                          )}
                           <span className="tm-name">{a.title}</span>
                           <span className="tm-time">{fmtAge(a.createdAt)}</span>
                           <button

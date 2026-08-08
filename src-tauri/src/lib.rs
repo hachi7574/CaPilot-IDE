@@ -140,13 +140,16 @@ fn build_on_exit(
     app: tauri::AppHandle,
 ) -> OnExit {
     Arc::new(move |agent_id, exit_code| {
-        dispatcher.worker_ended_naturally(&agent_id, exit_code, &app);
-        let is_master = persistence
+        let failed_without_report = dispatcher.worker_ended_naturally(&agent_id, exit_code, &app);
+        let record = persistence
             .db()
             .lock()
             .ok()
-            .and_then(|db| db.get(&agent_id).ok().flatten())
-            .is_some_and(|record| record.role == "master");
+            .and_then(|db| db.get(&agent_id).ok().flatten());
+        let is_master = record.as_ref().is_some_and(|record| record.role == "master");
+        if !failed_without_report && record.as_ref().is_some_and(|record| record.role == "worker") {
+            dispatcher.mark_attention(&agent_id, "finished", &app);
+        }
         // Poisoned lock / read error → default to "keep" so a session is never
         // silently dropped because of a transient DB failure.
         let keep = persistence
@@ -315,6 +318,8 @@ fn build_and_spawn(
     let meta = AgentMeta {
         id: id.to_string(),
         workspace_id: Some(workspace_id.clone()),
+        requires_attention: false,
+        attention_reason: None,
         role: role_str(&role).to_string(),
         runtime: runtime.to_string(),
         resume_key: persisted_key.clone(),
@@ -336,6 +341,8 @@ fn build_and_spawn(
     let record = AgentSessionRecord {
         id: id.to_string(),
         workspace_id: Some(workspace_id),
+        requires_attention: false,
+        attention_reason: None,
         project: project.to_string(),
         role: role_str(&role).to_string(),
         runtime: runtime.to_string(),
@@ -2195,6 +2202,8 @@ mod tests {
         let meta = persistence::AgentMeta {
             id: "a1".into(),
             workspace_id: Some("wks_a1".into()),
+            requires_attention: false,
+            attention_reason: None,
             role: "worker".into(),
             runtime: "claude".into(),
             resume_key: None,
@@ -2213,6 +2222,8 @@ mod tests {
         db.insert(&persistence::AgentSessionRecord {
             id: "a1".into(),
             workspace_id: Some("wks_a1".into()),
+            requires_attention: false,
+            attention_reason: None,
             project: "oldproj".into(),
             role: "worker".into(),
             runtime: "claude".into(),

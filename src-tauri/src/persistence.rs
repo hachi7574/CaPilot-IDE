@@ -25,6 +25,10 @@ pub struct AgentSessionRecord {
     pub id: String,
     #[serde(default)]
     pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub requires_attention: bool,
+    #[serde(default)]
+    pub attention_reason: Option<String>,
     pub project: String,
     pub role: String, // master | worker | standalone
     pub runtime: String,
@@ -49,6 +53,10 @@ pub struct AgentMeta {
     pub id: String,
     #[serde(default)]
     pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub requires_attention: bool,
+    #[serde(default)]
+    pub attention_reason: Option<String>,
     pub role: String,
     pub runtime: String,
     pub resume_key: Option<String>,
@@ -217,6 +225,8 @@ impl SessionsDb {
             "CREATE TABLE IF NOT EXISTS sessions (
                 id         TEXT PRIMARY KEY,
                 workspace_id TEXT,
+                requires_attention INTEGER NOT NULL DEFAULT 0,
+                attention_reason TEXT,
                 project    TEXT NOT NULL,
                 role       TEXT NOT NULL,
                 runtime    TEXT NOT NULL,
@@ -241,6 +251,8 @@ impl SessionsDb {
         ensure_column(&conn, "sessions", "speed", "speed TEXT NOT NULL DEFAULT 'auto'")?;
         ensure_column(&conn, "sessions", "model", "model TEXT")?;
         ensure_column(&conn, "sessions", "workspace_id", "workspace_id TEXT")?;
+        ensure_column(&conn, "sessions", "requires_attention", "requires_attention INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(&conn, "sessions", "attention_reason", "attention_reason TEXT")?;
         Ok(Self { conn })
     }
 
@@ -268,16 +280,19 @@ impl SessionsDb {
     pub fn insert(&self, s: &AgentSessionRecord) -> rusqlite::Result<()> {
         self.conn.execute(
             "INSERT INTO sessions
-                (id, workspace_id, project, role, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                (id, workspace_id, requires_attention, attention_reason, project, role, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
              ON CONFLICT(id) DO UPDATE SET
-                workspace_id=excluded.workspace_id, project=excluded.project, role=excluded.role, runtime=excluded.runtime,
+                workspace_id=excluded.workspace_id, requires_attention=excluded.requires_attention,
+                attention_reason=excluded.attention_reason, project=excluded.project, role=excluded.role, runtime=excluded.runtime,
                 resume_key=excluded.resume_key, cwd=excluded.cwd, title=excluded.title,
                 status=excluded.status, mode=excluded.mode, speed=excluded.speed,
                 model=excluded.model, updated_at=excluded.updated_at",
             params![
                 s.id,
                 s.workspace_id,
+                s.requires_attention,
+                s.attention_reason,
                 s.project,
                 s.role,
                 s.runtime,
@@ -299,6 +314,14 @@ impl SessionsDb {
         self.conn.execute(
             "UPDATE sessions SET status = ?1, updated_at = ?2 WHERE id = ?3",
             params![status, updated_at, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_attention(&self, id: &str, reason: Option<&str>, updated_at: i64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET requires_attention = ?1, attention_reason = ?2, updated_at = ?3 WHERE id = ?4",
+            params![reason.is_some(), reason, updated_at, id],
         )?;
         Ok(())
     }
@@ -348,7 +371,7 @@ impl SessionsDb {
     pub fn get(&self, id: &str) -> rusqlite::Result<Option<AgentSessionRecord>> {
         self.conn
             .query_row(
-                "SELECT id, workspace_id, project, role, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at
+                "SELECT id, workspace_id, requires_attention, attention_reason, project, role, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 params![id],
                 Self::row_to_session,
@@ -359,7 +382,7 @@ impl SessionsDb {
     pub fn list_all(&self) -> rusqlite::Result<Vec<AgentSessionRecord>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, workspace_id, project, role, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at FROM sessions ORDER BY updated_at DESC")?;
+            .prepare("SELECT id, workspace_id, requires_attention, attention_reason, project, role, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at FROM sessions ORDER BY updated_at DESC")?;
         let rows = stmt.query_map([], Self::row_to_session)?;
         rows.collect()
     }
@@ -405,18 +428,20 @@ impl SessionsDb {
         Ok(AgentSessionRecord {
             id: row.get(0)?,
             workspace_id: row.get(1)?,
-            project: row.get(2)?,
-            role: row.get(3)?,
-            runtime: row.get(4)?,
-            resume_key: row.get(5)?,
-            cwd: PathBuf::from(row.get::<_, String>(6)?),
-            title: row.get(7)?,
-            status: row.get(8)?,
-            mode: row.get(9)?,
-            speed: row.get(10)?,
-            model: row.get(11)?,
-            created_at: row.get(12)?,
-            updated_at: row.get(13)?,
+            requires_attention: row.get(2)?,
+            attention_reason: row.get(3)?,
+            project: row.get(4)?,
+            role: row.get(5)?,
+            runtime: row.get(6)?,
+            resume_key: row.get(7)?,
+            cwd: PathBuf::from(row.get::<_, String>(8)?),
+            title: row.get(9)?,
+            status: row.get(10)?,
+            mode: row.get(11)?,
+            speed: row.get(12)?,
+            model: row.get(13)?,
+            created_at: row.get(14)?,
+            updated_at: row.get(15)?,
         })
     }
 }
@@ -481,6 +506,8 @@ mod tests {
         AgentSessionRecord {
             id: "abc".into(),
             workspace_id: Some("wks_test".into()),
+            requires_attention: false,
+            attention_reason: None,
             project: "test".into(),
             role: "worker".into(),
             runtime: "claude".into(),
@@ -506,15 +533,20 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].resume_key.as_deref(), Some("k1"));
         assert_eq!(all[0].workspace_id.as_deref(), Some("wks_test"));
+        assert!(!all[0].requires_attention);
+        assert_eq!(all[0].attention_reason, None);
         // mode/speed/model survive the roundtrip.
         assert_eq!(all[0].mode, "yolo");
         assert_eq!(all[0].speed, "fast");
         assert_eq!(all[0].model.as_deref(), Some("claude-opus-5"));
 
         db.update_status("abc", "done", 99).unwrap();
+        db.update_attention("abc", Some("finished"), 100).unwrap();
         let got = db.get("abc").unwrap().unwrap();
         assert_eq!(got.status, "done");
-        assert_eq!(got.updated_at, 99);
+        assert!(got.requires_attention);
+        assert_eq!(got.attention_reason.as_deref(), Some("finished"));
+        assert_eq!(got.updated_at, 100);
 
         db.delete("abc").unwrap();
         assert!(db.get("abc").unwrap().is_none());
@@ -529,6 +561,8 @@ mod tests {
         let meta = AgentMeta {
             id: "x".into(),
             workspace_id: Some("wks_meta".into()),
+            requires_attention: false,
+            attention_reason: None,
             role: "master".into(),
             runtime: "claude".into(),
             resume_key: None,

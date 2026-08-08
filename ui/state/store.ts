@@ -20,6 +20,8 @@ export type FontScale = "s" | "m" | "l" | "xl" | "xxl";
 export interface AgentInfo {
   id: string;
   workspace_id?: string | null;
+  requires_attention?: boolean;
+  attention_reason?: "finished" | "error" | null;
   /** Stable owning project supplied from persistence; cwd is execution-only. */
   project?: string;
   runtime: string;
@@ -65,6 +67,8 @@ export interface Tab {
 export interface RestoredSession {
   id: string;
   workspace_id: string | null;
+  requires_attention: boolean;
+  attention_reason: "finished" | "error" | null;
   project: string;
   role: AgentRole;
   runtime: string;
@@ -267,6 +271,7 @@ interface AppState {
   addAgent: (info: AgentInfo, channel: Channel<number[]> | null, createdAtTs?: number) => void;
   removeAgent: (id: string) => void;
   updateAgentStatus: (id: string, status: AgentStatus) => void;
+  updateAgentAttention: (id: string, reason: "finished" | "error" | null) => void;
   appendAgentOutput: (id: string, data: number[]) => void;
   clearAgentOutput: (id: string) => void;
   requestResume: (id: string) => void;
@@ -523,6 +528,20 @@ export const useStore = create<AppState>((set, get) => ({
       const agents = new Map(s.agents);
       const a = agents.get(id);
       if (a) agents.set(id, { ...a, status });
+      return { agents };
+    }),
+
+  updateAgentAttention: (id, reason) =>
+    set((s) => {
+      const agents = new Map(s.agents);
+      const agent = agents.get(id);
+      if (agent) {
+        agents.set(id, {
+          ...agent,
+          requires_attention: reason !== null,
+          attention_reason: reason,
+        });
+      }
       return { agents };
     }),
 

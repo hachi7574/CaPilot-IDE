@@ -118,6 +118,14 @@ export function TabBar() {
             onClick={() => setActiveTab(tab.id)}
           >
             <span className={`tab-dot ${status}`} />
+            {agent?.requires_attention && (
+              <span
+                className={`tab-attention ${agent.attention_reason ?? "finished"}`}
+                title={agent.attention_reason === "error" ? "需要处理：异常退出" : "任务已完成"}
+              >
+                !
+              </span>
+            )}
             <span>
               {tab.type === "agent" ? "🤖" : "📄"}{tab.title}
             </span>

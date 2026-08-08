@@ -28,6 +28,8 @@ export function useSessionRestore() {
             {
               id: rec.id,
               workspace_id: rec.workspace_id,
+              requires_attention: rec.requires_attention,
+              attention_reason: rec.attention_reason,
               project: rec.project,
               runtime: rec.runtime,
               role: rec.role,
@@ -99,15 +101,21 @@ export function useAgentEvents() {
         s.closeTab(e.payload.id);
         s.removeAgent(e.payload.id);
       }),
+      listen<{ id: string; reason: "finished" | "error" }>(
+        "agent://attention",
+        (e) => useStore.getState().updateAgentAttention(e.payload.id, e.payload.reason)
+      ),
     ])
-      .then(([u1, u2]) => {
+      .then(([u1, u2, u3]) => {
         if (cancelled) {
           u1();
           u2();
+          u3();
         } else {
           unlisten = () => {
             u1();
             u2();
+            u3();
           };
         }
       })

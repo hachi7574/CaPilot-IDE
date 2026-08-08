@@ -12,7 +12,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
@@ -176,7 +176,7 @@ impl Dispatcher {
 
     /// A Busy worker that exits without `capilot report` has violated the
     /// completion contract. Report the failure before returning it to idle.
-    pub fn worker_ended_naturally(&self, id: &str, exit_code: i32, app: &AppHandle) {
+    pub fn worker_ended_naturally(&self, id: &str, exit_code: i32, app: &AppHandle) -> bool {
         let was_busy = self
             .workers
             .lock()
@@ -184,10 +184,42 @@ impl Dispatcher {
             .get(id)
             .is_some_and(|worker| worker.status == WorkerStatus::Busy);
         if !was_busy {
-            return;
+            return false;
         }
         self.publish_report(unreported_exit_report(id, exit_code), app);
+        self.mark_attention(id, "error", app);
         self.set_worker_idle(id, app);
+        true
+    }
+
+    pub fn mark_attention(&self, id: &str, reason: &str, app: &AppHandle) {
+        let now = chrono_now_ms();
+        let project = if let Ok(db) = self.persistence.db().lock() {
+            let _ = db.update_attention(id, Some(reason), now);
+            db.get(id).ok().flatten().map(|record| record.project)
+        } else {
+            None
+        };
+        if let Some(project) = project {
+            if let Ok(mut meta) = read_agent_meta(&project, id) {
+                meta.requires_attention = true;
+                meta.attention_reason = Some(reason.to_string());
+                meta.updated_at = now;
+                let _ = write_agent_meta(&project, &meta);
+            }
+        }
+        let payload = serde_json::json!({ "id": id, "reason": reason });
+        let _ = app.emit("agent://attention", &payload);
+        let handle = app.clone();
+        let esp_payload = serde_json::json!({ "op": "attention", "id": id, "reason": reason });
+        tauri::async_runtime::spawn(async move {
+            let manager = handle.state::<crate::esp::manager::EspManager>();
+            if let Err(error) = manager.send_json(&esp_payload).await {
+                if !matches!(error, crate::esp::transport::EspError::NotConnected) {
+                    log::warn!("failed to forward attention to ESP: {error}");
+                }
+            }
+        });
     }
 
     /// End all non-finished workers in the master's project.
