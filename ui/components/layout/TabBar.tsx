@@ -104,6 +104,17 @@ export function TabBar() {
         const agent = tab.agentId ? agents.get(tab.agentId) : undefined;
         const status = agent?.status || "idle";
         const roleBadge = agent?.role && agent.role !== "standalone" ? ` · ${agent.role}` : "";
+        // Agent records are the live source of truth for terminal names. A
+        // tab's title is only the snapshot taken when it was opened, so it can
+        // become stale after restoring/resuming a session (or any runtime
+        // update that replaces AgentInfo). The sidebar already renders from
+        // `agents`; doing the same here keeps both labels in lockstep. Master
+        // is intentionally named "master" in the pinned sidebar row.
+        const title = tab.type === "agent"
+          ? agent?.role === "master"
+            ? "master"
+            : agent?.title || tab.title
+          : tab.title;
         return (
           <div
             key={tab.id}
@@ -127,7 +138,7 @@ export function TabBar() {
               </span>
             )}
             <span>
-              {tab.type === "agent" ? "🤖" : "📄"}{tab.title}
+              {tab.type === "agent" ? "🤖" : "📄"}{title}
             </span>
             {agent?.runtime && (
               <span className="tab-runtime">{agent.runtime}{roleBadge}</span>

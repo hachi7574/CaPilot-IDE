@@ -430,11 +430,13 @@ body::after {
 .composer-input::placeholder { color: var(--muted); }
 
 .composer-actions {
+  --composer-action-h: calc(var(--fs-2xs) + 16px);
   display: flex; align-items: center; gap: 4px;
   padding: 4px 10px 6px; flex-wrap: wrap;
 }
 
 .act-btn {
+  display: inline-flex; align-items: center; height: var(--composer-action-h); line-height: 1;
   font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 1px;
   padding: 4px 10px; color: var(--muted); border: 1px solid var(--rule2);
   background: var(--bg3); cursor: pointer; text-transform: uppercase;
@@ -445,8 +447,9 @@ body::after {
 
 .act-sep { width: 1px; height: 16px; background: var(--rule); margin: 0 4px; }
 
-.act-mode-group { display: flex; gap: 0; border: 1px solid var(--rule2); margin-left: auto; }
+.act-mode-group { display: flex; align-items: stretch; height: var(--composer-action-h); gap: 0; border: 1px solid var(--rule2); margin-left: auto; }
 .act-mode-btn {
+  display: inline-flex; align-items: center; height: 100%; line-height: 1;
   font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 1px;
   padding: 4px 10px; color: var(--muted); background: transparent;
   border: none; cursor: pointer; text-transform: uppercase;
@@ -456,6 +459,8 @@ body::after {
 .act-mode-btn.active { background: var(--brand); color: #F5F3FF; }
 
 .collapse-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: var(--composer-action-h); height: var(--composer-action-h); line-height: 1;
   font-family: var(--pixel); font-size: var(--fs-md); color: var(--muted);
   cursor: pointer; margin-left: 8px; transition: color .2s var(--ease-apple);
   background: none; border: none;
@@ -1204,7 +1209,8 @@ body::after {
 
 .cmp-pop {
   position: relative;
-  display: inline-block;
+  display: inline-flex;
+  height: var(--composer-action-h);
 }
 
 .cmp-menu {
