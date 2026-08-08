@@ -1,5 +1,6 @@
 mod agent_runtime;
 pub mod esp;
+mod git_gate;
 mod orchestration;
 mod persistence;
 mod resource;
@@ -1488,12 +1489,7 @@ fn parse_porcelain(text: &str) -> Vec<GitEntry> {
 
 /// Run `git` in `repo`, returning trimmed stdout. Errors surface stderr.
 fn git_run(repo: &str, args: &[&str]) -> Result<String, String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .map_err(|e| format!("git failed: {}", e))?;
+    let out = git_gate::run(repo, args)?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         return Err(format!("git error: {}", err.trim()));
@@ -1508,15 +1504,7 @@ fn git_run(repo: &str, args: &[&str]) -> Result<String, String> {
 /// inside `$HOME`. `git_*` commands run arbitrary git in `repo`, so it must be
 /// pinned to the user's tree rather than accepting any path.
 fn validate_repo(repo: &str) -> Result<std::path::PathBuf, String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    let home_path = std::path::PathBuf::from(&home);
-    let resolved = std::path::Path::new(repo)
-        .canonicalize()
-        .map_err(|e| format!("Invalid repo path: {}", e))?;
-    if !resolved.starts_with(&home_path) || !resolved.is_dir() {
-        return Err("repo path escapes allowed directories".to_string());
-    }
-    Ok(resolved)
+    git_gate::validate_repo(repo)
 }
 
 /// Stream-count lines in a file without loading it into memory (a huge untracked
@@ -1717,11 +1705,7 @@ async fn git_init(repo: String) -> Result<(), String> {
 async fn git_repo_info(repo: String) -> Result<RepoInfo, String> {
     // `git rev-parse --is-inside-work-tree` succeeds inside a work tree (or bare
     // repo). A missing dir / not-a-repo simply fails → is_repo=false.
-    let is_repo = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&repo)
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .output()
+    let is_repo = git_gate::run(&repo, &["rev-parse", "--is-inside-work-tree"])
         .map(|o| o.status.success())
         .unwrap_or(false);
     // Non-empty `git remote` output ⇒ at least one remote is configured.
@@ -1878,13 +1862,7 @@ async fn git_log(repo: String, count: Option<i32>) -> Result<Vec<GitLogEntry>, S
 #[tauri::command]
 async fn git_show(repo: String, file: String, rev: String) -> Result<String, String> {
     let spec = format!("{}:{}", rev, file);
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&repo)
-        .arg("show")
-        .arg(&spec)
-        .output()
-        .map_err(|e| format!("git failed: {}", e))?;
+    let out = git_gate::run(&repo, &["show", &spec])?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         return Err(format!("git error: {}", err.trim()));
@@ -1935,12 +1913,7 @@ async fn git_clone(url: String, name: String, parent_dir: String) -> Result<Stri
     }
     let target_for_cmd = target.clone();
     let out = tauri::async_runtime::spawn_blocking(move || {
-        std::process::Command::new("git")
-            .arg("clone")
-            .arg("--")
-            .arg(&url)
-            .arg(&target_for_cmd)
-            .output()
+        git_gate::clone_into(&url, &target_for_cmd)
     })
     .await
     .map_err(|e| format!("git clone 任务失败: {}", e))?
