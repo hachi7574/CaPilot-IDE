@@ -744,6 +744,18 @@ export function LeftSidebar() {
                           >
                             <span className="pj-arrow">{endedOpen.has(name) ? "▾" : "▸"}</span>
                             <span className="tm-name">已结束 ({endedAgents.length})</span>
+                            <button
+                              className="tm-close"
+                              title="清理全部已结束会话"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void Promise.all(
+                                  endedAgents.map((agent) => closeAgentAction(agent.id))
+                                );
+                              }}
+                            >
+                              清理
+                            </button>
                           </div>
                           {endedOpen.has(name) &&
                             endedAgents.map((a) => (

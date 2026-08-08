@@ -41,6 +41,7 @@ function tabProject(
     if (tab.id === "master") return "master";
     if (tab.agentId) {
       const agent = agents.get(tab.agentId);
+      if (agent?.workspace_id && agent.project) return agent.project;
       if (agent?.cwd) return projectOf(agent.cwd);
     }
     return undefined;
@@ -127,14 +128,14 @@ export function TabBar() {
               className="tab-close"
               onClick={(e) => {
                 e.stopPropagation();
-                // Closing an ENDED (done) agent tab only closes the view — its
-                // record stays recoverable in the sidebar "已结束" group. Closing
-                // a live agent terminates it (kills the PTY + removes the row).
-                // Editor tabs / the master placeholder just close the view.
+                // A worker's home is the sidebar worker track: closing its tab
+                // only hides the view and leaves the task/PTY alive. Explicit
+                // archive/delete remains available from the sidebar. Ended
+                // sessions likewise stay recoverable.
                 if (tab.type === "agent" && tab.agentId) {
-                  if (agent?.status === "done") {
+                  if (agent?.status === "done" || agent?.role === "worker") {
                     closeTab(tab.id);
-                    dropAgentChannel(tab.agentId);
+                    if (agent?.status === "done") dropAgentChannel(tab.agentId);
                   } else {
                     closeAgentAction(tab.agentId);
                   }
@@ -146,6 +147,8 @@ export function TabBar() {
                 tab.type === "agent" && tab.agentId
                   ? agent?.status === "done"
                     ? "关闭（已结束，可从侧栏找回）"
+                    : agent?.role === "worker"
+                      ? "关闭视图（worker 继续运行）"
                     : "关闭并终止"
                   : "关闭标签"
               }
