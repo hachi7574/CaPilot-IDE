@@ -3,12 +3,7 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { useStore, AgentInfo, AgentStatus } from "../../state/store";
-import { setAgentRole } from "../../state/orchestration";
-import {
-  spawnAgent,
-  closeAgent as closeAgentAction,
-  MASTER_PROJECT,
-} from "../../state/agentActions";
+import { spawnAgent, closeAgent as closeAgentAction } from "../../state/agentActions";
 import { SettingsModal } from "./SettingsModal";
 import { TerminalTemplatePicker } from "./TerminalTemplatePicker";
 
@@ -20,10 +15,6 @@ import { TerminalTemplatePicker } from "./TerminalTemplatePicker";
 function projectOf(cwd: string, roots: Record<string, string>): string {
   const m = cwd.match(/workspaces\/([^/]+)/);
   if (m) return m[1];
-  // Master-group terminals live in a short top-level dir (~/CaPilot/Master).
-  if (cwd.endsWith("/CaPilot/Master") || cwd.includes("/CaPilot/Master/")) {
-    return "master";
-  }
   for (const [name, root] of Object.entries(roots)) {
     if (!root) continue;
     const base = root.endsWith("/") ? root : root + "/";
@@ -32,7 +23,6 @@ function projectOf(cwd: string, roots: Record<string, string>): string {
   const parts = cwd.split("/").filter(Boolean);
   return parts[parts.length - 1] || cwd;
 }
-
 /** Chinese relative age since a timestamp (matches the Preview's `tm-time`:
  *  "刚刚" / "20分钟" / "3小时" / "4天"). Anchored to the agent's real session
  *  creation time (`createdAt`), so the counter always advances and never
@@ -88,8 +78,6 @@ interface CtxState {
   agentId?: string;
   project?: string;
   cwd?: string;
-  /** Right-click was on the pinned Master terminal (not a deletable project agent). */
-  isMaster?: boolean;
 }
 
 export function LeftSidebar() {
@@ -97,9 +85,6 @@ export function LeftSidebar() {
   const agents = useStore((s) => s.agents);
   const tabs = useStore((s) => s.tabs);
   const activeTabId = useStore((s) => s.activeTabId);
-  const masterAgentId = useStore((s) => s.masterAgentId);
-  const sessionsRestored = useStore((s) => s.sessionsRestored);
-  const setMasterAgentId = useStore((s) => s.setMasterAgentId);
   const requestResume = useStore((s) => s.requestResume);
   const closeTab = useStore((s) => s.closeTab);
   const dropAgentChannel = useStore((s) => s.dropAgentChannel);
@@ -123,7 +108,6 @@ export function LeftSidebar() {
       else next.add(name);
       return next;
     });
-  const [masterExpanded, setMasterExpanded] = useState(true);
   const [ctx, setCtx] = useState<CtxState | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [nprojOpen, setNprojOpen] = useState(false);
@@ -226,7 +210,7 @@ export function LeftSidebar() {
       next.delete(proj);
       return next;
     });
-    spawnAgent("standalone", proj).catch(console.error);
+    spawnAgent(proj).catch(console.error);
   };
 
   const openAgentTab = useCallback(
@@ -241,25 +225,9 @@ export function LeftSidebar() {
         });
       }
       setActiveTab(id);
-      // Reopening an ended master (from the "已结束" group) re-promotes it.
-      const agentInfo = agents.get(id);
-      if (agentInfo?.role === "master") setMasterAgentId(id);
     },
     [tabs, agents, addTab, setActiveTab]
   );
-
-  const openMaster = () => {
-    setFocusedProject(MASTER_PROJECT);
-    const masterId = masterAgentId;
-    if (masterId && agents.has(masterId)) {
-      openAgentTab(masterId, "master");
-    } else {
-      if (!tabs.find((t) => t.id === "master")) {
-        addTab({ id: "master", type: "agent", agentId: undefined, title: "master" });
-      }
-      setActiveTab("master");
-    }
-  };
 
   // Open a terminal AND single-select its project (terminal clicks focus the
   // owning project — any other project loses focus).
@@ -299,9 +267,7 @@ export function LeftSidebar() {
           id: string;
           title: string;
           status: AgentStatus;
-          role: AgentInfo["role"];
           createdAt?: number;
-          attentionReason?: AgentInfo["attention_reason"];
         }[];
       }
     >();
@@ -318,9 +284,7 @@ export function LeftSidebar() {
         id,
         title: a.title || `agent-${id.slice(0, 4)}`,
         status: a.status,
-        role: a.role,
         createdAt: a.createdAt,
-        attentionReason: a.requires_attention ? a.attention_reason : null,
       });
     });
     return map;
@@ -329,46 +293,21 @@ export function LeftSidebar() {
   // The tree is DRIVEN BY the store's project list (which includes empty
   // projects). Any project that only exists via an agent's cwd — e.g. before
   // `list_projects` resolves on mount — is merged in so nothing regresses.
-  // The Master group's project ("master") is pinned and rendered separately, so
-  // it is always excluded here.
   const projectNames = [...projects];
   for (const name of agentsByProject.keys()) {
     if (!projectNames.includes(name)) projectNames.push(name);
   }
-  for (let i = projectNames.length - 1; i >= 0; i--) {
-    if (projectNames[i] === MASTER_PROJECT) projectNames.splice(i, 1);
-  }
-
-  // Terminals living in the Master group: standalone agents spawned via the
-  // group's "＋ 新建终端" (cwd maps to the "master" project). The master session
-  // row itself is rendered separately (when a master exists), so it is excluded
-  // here. The Master group may have zero terminals — every row is closable.
-  const masterTerminals = (agentsByProject.get(MASTER_PROJECT)?.agents ?? []).filter(
-    (a) => a.id !== masterAgentId
-  );
-
-  const toggleMaster = () => setMasterExpanded((v) => !v);
-
   // [☰] collapses / expands ALL project groups (sidebar stays visible).
   // Empty projects (zero terminals) are never collapsible — they have no
   // triangle and their header doesn't toggle — so they are excluded here.
   const expandableProjects = projectNames.filter(
     (n) => (agentsByProject.get(n)?.agents?.length ?? 0) > 0
   );
-  // [☰] now covers the Master group too: "all collapsed" means the master group
-  // is collapsed AND every expandable project is collapsed. Toggling collapses /
-  // expands both (`.every` on an empty list is vacuously true, so with no
-  // expandable projects the button still reflects / toggles the master).
-  const allCollapsed =
-    !masterExpanded && expandableProjects.every((n) => collapsedProjs.has(n));
+  const allCollapsed = expandableProjects.every((n) => collapsedProjs.has(n));
   const toggleAllProjects = () => {
     if (allCollapsed) {
-      // Expand everything: expand master + clear collapsed projects.
-      setMasterExpanded(true);
       setCollapsedProjs(new Set());
     } else {
-      // Collapse everything: collapse master + all expandable projects.
-      setMasterExpanded(false);
       setCollapsedProjs(new Set(expandableProjects));
     }
   };
@@ -407,7 +346,7 @@ export function LeftSidebar() {
       // activates the tab). Best-effort: a failed spawn must not block the
       // modal close or undo the created project.
       try {
-        await spawnAgent("standalone", trimmed);
+        await spawnAgent(trimmed);
       } catch (e) {
         console.error("自动打开终端失败:", e);
         setNprojError(`项目已创建，但自动打开终端失败：${String(e)}`);
@@ -462,7 +401,7 @@ export function LeftSidebar() {
       // Auto-open a fresh agent terminal in the clone. Best-effort: a failed
       // spawn must not block the modal close or undo the cloned project.
       try {
-        await spawnAgent("standalone", trimmedName);
+        await spawnAgent(trimmedName);
       } catch (e) {
         console.error("自动打开终端失败:", e);
         setNprojError(`项目已创建，但自动打开终端失败：${String(e)}`);
@@ -504,127 +443,6 @@ export function LeftSidebar() {
 
             {/* Zone 3: Tree */}
             <div className="sidebar-tree">
-              {/* Master (pinned, always first) — a collapsible purple group. */}
-              <div className={`uj-master-group${masterExpanded ? "" : " collapsed"}${focusedProject === MASTER_PROJECT ? " uo-master-focused" : ""}`}>
-                <div
-                  className={`u9-master-btn${activeTabId === (masterAgentId || "master") ? " active" : ""}`}
-                  onClick={() => {
-                    if (!masterAgentId) {
-                      openMaster(); // no master — clicking the group reopens it
-                    } else {
-                      toggleMaster();
-                    }
-                  }}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setCtx({
-                      x: e.clientX,
-                      y: e.clientY,
-                      agentId: masterAgentId ?? undefined,
-                      isMaster: true,
-                    });
-                  }}
-                >
-                  <span className="uj-master-arrow">▾</span>
-                  <span className="u9-master-name">Master</span>
-                  <button
-                    className="un-master-new"
-                    title="新建终端"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setMasterExpanded(true);
-                      spawnAgent("standalone", MASTER_PROJECT).catch(console.error);
-                    }}
-                  >
-                    +
-                  </button>
-                </div>
-                {masterExpanded && (
-                  <>
-                    {/* Master session terminal row — opens the master. Shown only
-                        when a master agent exists; closable, so master may end up
-                        with zero terminals. */}
-                    {masterAgentId && (
-                      <div
-                        className={`terminal-item uj-master-term${activeTabId === masterAgentId ? " active" : ""}`}
-                        onClick={openMaster}
-                        onContextMenu={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          setCtx({
-                            x: e.clientX,
-                            y: e.clientY,
-                            agentId: masterAgentId,
-                            isMaster: true,
-                          });
-                        }}
-                      >
-                        <span className="tm-icon">🤖</span>
-                        <span className="tm-name">master</span>
-                        <span className="tm-time">{fmtAge(agents.get(masterAgentId)?.createdAt)}</span>
-                        <button
-                          className="tm-close"
-                          title="关闭并终止"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            closeAgentAction(masterAgentId);
-                          }}
-                        >
-                          ×
-                        </button>
-                      </div>
-                    )}
-                    {/* Standalone terminals spawned into the Master group. */}
-                    {masterTerminals.map((a) => (
-                      <div
-                        key={a.id}
-                        className={`terminal-item${activeTabId === a.id ? " active" : ""}`}
-                        onClick={() => openProjectTerminal(MASTER_PROJECT, a.id)}
-                        onContextMenu={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          setCtx({ x: e.clientX, y: e.clientY, agentId: a.id });
-                        }}
-                      >
-                        <span className="tm-icon">🤖</span>
-                        <span className="tm-name">{a.title}</span>
-                        <span className="tm-time">{fmtAge(a.createdAt)}</span>
-                        <button
-                          className="tm-close"
-                          title="关闭并终止"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            closeAgentAction(a.id);
-                          }}
-                        >
-                          ×
-                        </button>
-                      </div>
-                    ))}
-                    {/* Truly empty Master group — a one-click create affordance.
-                        Any existing session row already gives the user an entry
-                        point, even when that session is a standalone terminal
-                        rather than the orchestration master itself. */}
-                    {sessionsRestored && !masterAgentId && masterTerminals.length === 0 && (
-                      <div
-                        className="uj-master-empty"
-                        onClick={() =>
-                          spawnAgent("master").catch((e) =>
-                            console.error("master create failed:", e)
-                          )
-                        }
-                        role="button"
-                      >
-                        <span className="tm-icon">🤖</span>
-                        <span className="tm-name">创建 Master 开始编排</span>
-                        <span className="tm-time">+</span>
-                      </div>
-                    )}
-                  </>
-                )}
-              </div>
-
               {/* Dynamic projects (driven by store.projects, includes empties) */}
               {(() => {
                 if (projectNames.length === 0) {
@@ -725,12 +543,6 @@ export function LeftSidebar() {
                           }}
                         >
                           <span className="tm-icon">🤖</span>
-                          {a.attentionReason && (
-                            <span
-                              className={`tab-attention ${a.attentionReason}`}
-                              title={a.attentionReason === "error" ? "需要处理：异常退出" : "任务已完成"}
-                            >!</span>
-                          )}
                           <span className="tm-name">{a.title}</span>
                           <span className="tm-time">{fmtAge(a.createdAt)}</span>
                           <button
@@ -812,7 +624,7 @@ export function LeftSidebar() {
                 });
               })()}
               {/* Drop-to-bottom zone: dropping a project onto the blank area
-                  below the list moves it to the end (master stays pinned). */}
+                  below the list moves it to the end. */}
               <div
                 className={`proj-dropzone${draggedProj ? " dragging" : ""}`}
                 onDragOver={(e) => {
@@ -847,7 +659,6 @@ export function LeftSidebar() {
         <TerminalTemplatePicker
           project={termMenu.project}
           anchor={{ x: termMenu.x, y: termMenu.y }}
-          role="standalone"
           onClose={() => setTermMenu(null)}
         />
       )}
@@ -1164,7 +975,7 @@ function ContextMenu({
             // project is immediately visible).
             if (onSpawnInProject) onSpawnInProject(proj);
             else {
-              spawnAgent("standalone", proj).catch(console.error);
+              spawnAgent(proj).catch(console.error);
             }
             onClose();
           }}
@@ -1233,11 +1044,6 @@ function ContextMenu({
     );
   }
 
-  // ── Master context ────────────────────────────────────────────
-  if (ctx.isMaster) {
-    return <MasterContextMenu ctx={ctx} onClose={onClose} />;
-  }
-
   // ── Agent context ─────────────────────────────────────────────
   const agent = useStore((s) => s.agents.get(ctx.agentId ?? ""));
   const allAgents = useStore((s) => s.agents);
@@ -1246,16 +1052,14 @@ function ContextMenu({
 
   // Count terminals in this project (same `projectOf` grouping as the tree).
   // When it is the project's ONLY terminal, the context menu swaps the normal
-  // "关闭并终止" for "关闭并移除项目" (removes the whole project). The Master
-  // group is never a deletable project, so its terminals keep the plain close.
+  // "关闭并终止" for "关闭并移除项目" (removes the whole project).
   const project = agent
     ? (agent.workspace_id && agent.project
         ? agent.project
         : projectOf(agent.cwd, useStore.getState().projectRoots))
     : undefined;
-  const isMasterProject = project === MASTER_PROJECT;
   let projCount = 0;
-  if (project && !isMasterProject) {
+  if (project) {
     const roots = useStore.getState().projectRoots;
     allAgents.forEach((a) => {
       const owningProject = a.workspace_id && a.project
@@ -1282,12 +1086,6 @@ function ContextMenu({
     onClose();
   };
 
-  const setRole = async (role: "worker" | "standalone") => {
-    if (!ctx.agentId) return;
-    await setAgentRole(ctx.agentId, role);
-    onClose();
-  };
-
   const closeAgent = async () => {
     if (!ctx.agentId) return;
     // Same path as the sidebar × button: closes the tab + row immediately,
@@ -1296,8 +1094,6 @@ function ContextMenu({
     onClose();
   };
 
-  const isWorker = agent?.role === "worker";
-
   return (
     <div
       className="ctx-menu"
@@ -1305,17 +1101,6 @@ function ContextMenu({
       onClick={(e) => e.stopPropagation()}
       onContextMenu={(e) => e.stopPropagation()}
     >
-      {!isWorker && (
-        <div className="ctx-item" onClick={() => setRole("worker")}>
-          🤖 设为 worker
-        </div>
-      )}
-      {isWorker && (
-        <div className="ctx-item" onClick={() => setRole("standalone")}>
-          🔓 取消 worker
-        </div>
-      )}
-      <div className="ctx-sep" />
       <div className="ctx-label">切换 runtime</div>
       {runtimes.map((rt) => (
         <div
@@ -1332,7 +1117,7 @@ function ContextMenu({
       <div className="ctx-item danger" onClick={closeAgent}>
         ✕ 终止并关闭
       </div>
-      {project && !isMasterProject && projCount === 1 && (
+      {project && projCount === 1 && (
         <div
           className="ctx-item danger"
           onClick={() => {
@@ -1344,63 +1129,6 @@ function ContextMenu({
         >
           🗑 关闭并移除项目
         </div>
-      )}
-    </div>
-  );
-}
-
-/* ── Master terminal context menu ────────────────────────────── */
-
-function MasterContextMenu({ ctx, onClose }: { ctx: CtxState; onClose: () => void }) {
-  const masterAgentId = useStore((s) => s.masterAgentId);
-  const runtimes = useStore((s) => s.runtimes);
-  const addAgent = useStore((s) => s.addAgent);
-  // The master terminal may be right-clicked before a master agent exists; fall
-  // back to the store's masterAgentId when the ctx didn't carry one.
-  const id = ctx.agentId ?? masterAgentId;
-  const agent = useStore((s) => s.agents.get(id ?? ""));
-
-  const switchRuntime = async (runtime: string) => {
-    if (!id) return;
-    try {
-      const channel = new Channel<number[]>();
-      channel.onmessage = (data) => useStore.getState().appendAgentOutput(id, data);
-      const info = (await invoke("agent_switch_runtime", {
-        id,
-        runtime,
-        onData: channel,
-      })) as AgentInfo;
-      addAgent(info, channel);
-    } catch (e) {
-      console.error("runtime switch failed:", e);
-    }
-    onClose();
-  };
-
-  return (
-    <div
-      className="ctx-menu"
-      style={{ position: "fixed", left: ctx.x, top: ctx.y, zIndex: 1000 }}
-      onClick={(e) => e.stopPropagation()}
-      onContextMenu={(e) => e.stopPropagation()}
-    >
-      <div className="ctx-item disabled">master 会话</div>
-      {id && (
-        <>
-          <div className="ctx-sep" />
-          <div className="ctx-label">切换 runtime</div>
-          {runtimes.map((rt) => (
-            <div
-              key={rt.id}
-              className={`ctx-item${rt.id === agent?.runtime ? " current" : ""}`}
-              onClick={() => switchRuntime(rt.id)}
-            >
-              {rt.name}
-              {!rt.available && " (未安装)"}
-              {rt.id === agent?.runtime && " · 当前"}
-            </div>
-          ))}
-        </>
       )}
     </div>
   );

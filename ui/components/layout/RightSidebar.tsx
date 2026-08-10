@@ -11,38 +11,9 @@ type RightTab = "overview" | "files" | "git";
 
 export function RightSidebar() {
   const [activeTab, setActiveTab] = useState<RightTab>("overview");
-  const [reportCollapsed, setReportCollapsed] = useState(false);
-  // The master-report's relative timestamp updates whenever a new report lands
-  // (the store re-renders this component), so no periodic re-render tick here.
-  const reports = useStore((s) => s.reports);
-  const latest = reports[0];
   const rightWidth = useStore((s) => s.rightWidth);
   const setRightWidth = useStore((s) => s.setRightWidth);
   const rightSidebarOpen = useStore((s) => s.rightSidebarOpen);
-  const reportRef = useRef<HTMLDivElement>(null);
-
-  // Keep the collapse state readable inside the ResizeObserver callback (the
-  // observer is created once on mount).
-  const reportCollapsedRef = useRef(reportCollapsed);
-  reportCollapsedRef.current = reportCollapsed;
-
-  // Measure the expanded master report so the composer can default to the same
-  // height (and stay in sync while it resizes). Updates only run while the
-  // report is expanded — collapsing it must not shrink the composer to the
-  // bare header row.
-  useEffect(() => {
-    const el = reportRef.current;
-    if (!el) return;
-    const update = () => {
-      if (!reportCollapsedRef.current) {
-        useStore.getState().setMasterReportH(el.offsetHeight);
-      }
-    };
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
 
   // Draggable right sidebar resize (drag right → narrower).
   const startRightResize = (e: React.MouseEvent) => {
@@ -98,51 +69,9 @@ export function RightSidebar() {
           {activeTab === "files" && <FilesPanel />}
           {activeTab === "git" && <GitPanel />}
         </div>
-
-        {/* Master Report (always visible) */}
-        <div className="master-report" ref={reportRef}>
-          <div
-            className="report-header"
-            onClick={() => setReportCollapsed(!reportCollapsed)}
-          >
-            🤖 Master Agent Report
-            <span className="report-toggle">{reportCollapsed ? "▲" : "▼"}</span>
-          </div>
-          {!reportCollapsed && (
-            <div className="report-body">
-              <div className="report-time">
-                {latest ? fmtRelTime(latest.ts) : "—"}
-              </div>
-              <div className="report-quote">
-                {latest ? `"${latest.summary}"` : "Waiting for agent activity…"}
-              </div>
-              <div className="report-meta">
-                Task: {latest ? latest.worker : "—"}
-                <br />
-                Status: {latest ? latest.level : "Idle"}
-              </div>
-              <div className="report-actions">
-                <span className="rbtn">展开任务详情</span>
-                <span className="rbtn">跳转到 Master 终端</span>
-              </div>
-            </div>
-          )}
-        </div>
       </div>
     </>
   );
-}
-
-/** Relative timestamp, e.g. "20s ago" / "3m ago" (matches the preview). */
-function fmtRelTime(ms: number): string {
-  const diff = Math.max(0, Date.now() - ms);
-  const s = Math.floor(diff / 1000);
-  if (s < 60) return `${s}s ago`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
 }
 
 /**
@@ -273,22 +202,11 @@ function OverviewDashboard() {
       </CollapsibleSection>
 
       {/* Usage */}
-      <CollapsibleSection title="📈 用量分析" summary="📈 用量分析 主模型— · 子代理—">
+      <CollapsibleSection title="📈 用量分析" summary="📈 用量分析 当前会话—">
         <div className="ov-usage-item">
-          <div className="ov-usage-label">主模型</div>
+          <div className="ov-usage-label">当前会话</div>
           <div className="ov-bar">
             <div className="ov-bar-fill pu" style={{ width: "0%" }} />
-          </div>
-          <div className="ov-usage-stats">
-            <span>0 Tokens</span>
-            <span>0%</span>
-            <span>Cache —</span>
-          </div>
-        </div>
-        <div className="ov-usage-item">
-          <div className="ov-usage-label">子代理</div>
-          <div className="ov-bar">
-            <div className="ov-bar-fill ai" style={{ width: "0%" }} />
           </div>
           <div className="ov-usage-stats">
             <span>0 Tokens</span>

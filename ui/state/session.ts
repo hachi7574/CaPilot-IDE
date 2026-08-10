@@ -10,7 +10,7 @@ import { useStore, RestoredSession } from "./store";
  *
  * Ended (`done`) sessions are kept in the store so the sidebar's "已结束" group
  * can surface them, but they are NOT re-opened as tabs and never re-promoted to
- * master — reopening a finished conversation is an explicit sidebar action.
+ * active — reopening a finished conversation is an explicit sidebar action.
  */
 export function useSessionRestore() {
   useEffect(() => {
@@ -28,11 +28,8 @@ export function useSessionRestore() {
             {
               id: rec.id,
               workspace_id: rec.workspace_id,
-              requires_attention: rec.requires_attention,
-              attention_reason: rec.attention_reason,
               project: rec.project,
               runtime: rec.runtime,
-              role: rec.role,
               status,
               title: rec.title,
               cwd: rec.cwd,
@@ -50,21 +47,20 @@ export function useSessionRestore() {
             rec.created_at
           );
           // Ended sessions are recoverable from the sidebar but are not
-          // auto-reopened as tabs / not re-promoted to master.
+          // auto-reopened as tabs.
           if (status === "done") continue;
-          if (rec.role === "master") s.setMasterAgentId(rec.id);
           s.addTabSilent({
             id: rec.id,
             type: "agent",
             agentId: rec.id,
-            title: rec.title || `${rec.runtime}@${rec.role}`,
+            title: rec.title || rec.runtime,
           });
         }
         s.setSessionsRestored();
       })
       .catch(() => {
         // Backend not ready: the lookup still settled, so reveal the genuine
-        // empty state and let the user create a Master manually.
+        // empty state and let the user create a session manually.
         if (!cancelled) useStore.getState().setSessionsRestored();
       });
     return () => {
@@ -93,32 +89,21 @@ export function useAgentEvents() {
         // its dead channel stays attached so the last output remains visible.
         // Reopening from the sidebar "已结束" group drops the channel and resumes.
         s.updateAgentStatus(e.payload.id, "done");
-        // A finished master must vacate the composer's master slot: with a stale
-        // masterAgentId the composer keeps agent_write-ing the dead process, and
-        // the frontend `.catch(()=>{})` swallows the error → the user's input
-        // silently vanishes.
-        if (s.masterAgentId === e.payload.id) s.setMasterAgentId(null);
       }),
       listen<{ id: string }>("agent://removed", (e) => {
         const s = useStore.getState();
         s.closeTab(e.payload.id);
         s.removeAgent(e.payload.id);
       }),
-      listen<{ id: string; reason: "finished" | "error" }>(
-        "agent://attention",
-        (e) => useStore.getState().updateAgentAttention(e.payload.id, e.payload.reason)
-      ),
     ])
-      .then(([u1, u2, u3]) => {
+      .then(([u1, u2]) => {
         if (cancelled) {
           u1();
           u2();
-          u3();
         } else {
           unlisten = () => {
             u1();
             u2();
-            u3();
           };
         }
       })

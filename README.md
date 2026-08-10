@@ -1,8 +1,8 @@
 # CaPilot IDE
 
-> AI Agent Orchestration Workbench — Tauri v2 + React + CodeMirror 6
+> Local AI coding workspace — Tauri v2 + React + CodeMirror 6
 
-CaPilot IDE is the desktop application for [CaPilot](https://github.com/hachi7574/CaPilot), an AI agent orchestration platform. Built with Tauri v2 for a lightweight, native desktop experience.
+CaPilot IDE is a lightweight desktop workspace for running AI coding CLIs in real PTY terminals, editing files, using Git, and controlling an ESP32 companion device.
 
 ## Tech Stack
 
@@ -24,30 +24,19 @@ CaPilot IDE is the desktop application for [CaPilot](https://github.com/hachi757
 ### Quick Start
 
 ```bash
-# Install dependencies
 pnpm install
-
-# Run in development mode
 pnpm tauri dev
-
-# Build for production
 pnpm tauri build
 ```
 
 ## Project Structure
 
-```
+```text
 CaPilot-Ide/
-├── src-tauri/         # Rust core (Tauri backend)
-│   ├── src/           # lib.rs, main.rs
-│   ├── capabilities/  # Tauri v2 permissions
-│   ├── icons/         # App icons
-│   └── tauri.conf.json
+├── src-tauri/         # Rust core and Tauri configuration
 ├── ui/                # React frontend
-│   ├── App.tsx
-│   └── main.tsx
-├── public/            # Static assets (logos, etc.)
-├── docs/              # Documentation
+├── public/            # Static assets
+├── docs/              # Documentation and design assets
 └── package.json
 ```
 

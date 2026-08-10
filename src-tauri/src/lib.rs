@@ -1,19 +1,16 @@
 mod agent_runtime;
 pub mod esp;
 mod git_gate;
-mod orchestration;
 mod persistence;
 mod resource;
 
-use agent_runtime::adapter::{AgentInfo, AgentRole, AgentSession};
+use agent_runtime::adapter::{AgentInfo, AgentSession};
 use agent_runtime::pty::{OnExit, PtyManager};
 use agent_runtime::runtimes::{get_adapter, known_runtimes};
 use esp::manager::EspManager;
-use orchestration::dispatcher::CascadeMode;
-use orchestration::Dispatcher;
 use persistence::{
-    agent_dir, ensure_project, project_dir, read_agent_meta, write_agent_meta, AgentMeta,
-    AgentSessionRecord, Persistence, DEFAULT_PROJECT,
+    agent_dir, ensure_project, read_agent_meta, write_agent_meta, AgentMeta, AgentSessionRecord,
+    Persistence, DEFAULT_PROJECT,
 };
 use serde::Serialize;
 use std::path::PathBuf;
@@ -27,22 +24,6 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
-}
-
-fn parse_role(s: &str) -> AgentRole {
-    match s {
-        "master" => AgentRole::Master,
-        "worker" => AgentRole::Worker,
-        _ => AgentRole::Standalone,
-    }
-}
-
-fn role_str(role: &AgentRole) -> &'static str {
-    match role {
-        AgentRole::Master => "master",
-        AgentRole::Worker => "worker",
-        AgentRole::Standalone => "standalone",
-    }
 }
 
 /// Validate a project name: reject absolute paths and `..`/`.` traversal so a
@@ -69,31 +50,12 @@ fn sanitize_project(project: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Prepend `~/CaPilot/bin` to PATH so every agent shell can invoke the
-/// development `capilot` Rust CLI (DevPlan §5.2).
-fn capilot_path_env() -> Vec<(String, String)> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let bin_dir = std::path::PathBuf::from(&home).join("CaPilot").join("bin");
-    match std::env::var("PATH") {
-        Ok(path) => vec![(
-            "PATH".to_string(),
-            format!("{}:{}", bin_dir.display(), path),
-        )],
-        Err(_) => vec![("PATH".to_string(), bin_dir.to_string_lossy().to_string())],
-    }
-}
-
-fn capilot_agent_identity_env(id: &str) -> (String, String) {
-    ("CAPILOT_AGENT_ID".to_string(), id.to_string())
-}
-
 // ── Agent commands ──────────────────────────────────────────────
 
 /// Settings KV key: what to do when a session's process exits on its own.
 /// `"keep"` (default) marks it done (recoverable from the sidebar "已结束"
 /// group, never auto-restored as a tab); `"delete"` removes the record entirely.
 const SESSION_END_MODE_KEY: &str = "session_end_mode";
-const RESTARTED_TASK_ERROR: &str = "CaPilot restarted before task completion was confirmed";
 
 /// Payload emitted on `agent://exited` — a session's process ended naturally
 /// and the record was kept (marked done).
@@ -114,28 +76,8 @@ struct AgentRemoved {
 /// Fired only on natural exit (EOF / read error); intentional kills never reach
 /// it. Reads the session-end setting fresh each time, so a settings change
 /// applies without an app restart.
-fn build_on_exit(
-    persistence: Arc<Persistence>,
-    dispatcher: Arc<Dispatcher>,
-    app: tauri::AppHandle,
-) -> OnExit {
+fn build_on_exit(persistence: Arc<Persistence>, app: tauri::AppHandle) -> OnExit {
     Arc::new(move |agent_id, exit_code| {
-        let failed_without_report = dispatcher.worker_ended_naturally(&agent_id, exit_code, &app);
-        let record = persistence
-            .db()
-            .lock()
-            .ok()
-            .and_then(|db| db.get(&agent_id).ok().flatten());
-        let is_master = record
-            .as_ref()
-            .is_some_and(|record| record.role == "master");
-        if !failed_without_report
-            && record
-                .as_ref()
-                .is_some_and(|record| record.role == "worker")
-        {
-            dispatcher.mark_attention(&agent_id, "finished", &app);
-        }
         // Poisoned lock / read error → default to "keep" so a session is never
         // silently dropped because of a transient DB failure.
         let keep = persistence
@@ -175,13 +117,7 @@ fn build_on_exit(
                     exit_code,
                 },
             );
-            if is_master {
-                dispatcher.cascade_master(&agent_id, CascadeMode::Keep, &app);
-            }
         } else {
-            if is_master {
-                dispatcher.cascade_master(&agent_id, CascadeMode::Delete, &app);
-            }
             // Delete mode: read the row's CURRENT project (not a value captured
             // at spawn — a project rename moves the agent dir, and the stale
             // name would leave the new dir orphaned).
@@ -209,12 +145,10 @@ fn build_on_exit(
 fn build_and_spawn(
     pty: &Arc<PtyManager>,
     persistence: &Arc<Persistence>,
-    dispatcher: &Arc<Dispatcher>,
     app: &tauri::AppHandle,
     id: &str,
     project: &str,
     workspace_id: Option<String>,
-    role: AgentRole,
     runtime: &str,
     resume: bool,
     resume_key: Option<String>,
@@ -273,7 +207,6 @@ fn build_and_spawn(
         model: normalized_model,
         cwd: cwd.clone(),
         context_dir: cwd.clone(),
-        role: role.clone(),
         rows: 24,
         cols: 80,
         resume_key: resume_key.clone(),
@@ -298,12 +231,7 @@ fn build_and_spawn(
         args.extend(resume_args);
     }
 
-    let mut launch_env = capilot_path_env();
-    launch_env.extend(adapter.launch_env(&session)?);
-    // Stable internal identity for task-aware `capilot report`. The CLI reads
-    // this automatically; display names and user-supplied arguments are never
-    // used to authenticate the reporting Worker.
-    launch_env.push(capilot_agent_identity_env(id));
+    let launch_env = adapter.launch_env(&session)?;
     let mut info = pty
         .spawn(
             id.to_string(),
@@ -313,18 +241,13 @@ fn build_and_spawn(
             24,
             80,
             on_data,
-            Some(build_on_exit(
-                persistence.clone(),
-                dispatcher.clone(),
-                app.clone(),
-            )),
+            Some(build_on_exit(persistence.clone(), app.clone())),
             &launch_env,
         )
         .map_err(|e| e.to_string())?;
     info.runtime = runtime.to_string();
     info.workspace_id = Some(workspace_id.clone());
     info.project = Some(project.to_string());
-    info.role = role.clone();
     info.mode = session.mode.clone();
     info.speed = session.speed.clone();
     info.model = session.model.clone();
@@ -332,8 +255,8 @@ fn build_and_spawn(
     // this shared spawn path generated a fresh cat-breed title on every resume,
     // so the first click after reopening the IDE appeared to rename the session.
     info.title = preserved_title.unwrap_or_else(|| {
-        // Every new terminal, including the pinned Master, receives a unique
-        // cat-breed title. Persisted titles are excluded across IDE restarts.
+        // Every new terminal receives a unique cat-breed title. Persisted
+        // titles are excluded across IDE restarts.
         let existing_titles = persistence
             .db()
             .lock()
@@ -355,9 +278,6 @@ fn build_and_spawn(
     let meta = AgentMeta {
         id: id.to_string(),
         workspace_id: Some(workspace_id.clone()),
-        requires_attention: false,
-        attention_reason: None,
-        role: role_str(&role).to_string(),
         runtime: runtime.to_string(),
         resume_key: persisted_key.clone(),
         status: "running".to_string(),
@@ -378,10 +298,7 @@ fn build_and_spawn(
     let record = AgentSessionRecord {
         id: id.to_string(),
         workspace_id: Some(workspace_id),
-        requires_attention: false,
-        attention_reason: None,
         project: project.to_string(),
-        role: role_str(&role).to_string(),
         runtime: runtime.to_string(),
         resume_key: persisted_key,
         cwd: cwd.clone(),
@@ -399,12 +316,6 @@ fn build_and_spawn(
         }
     }
 
-    match role {
-        AgentRole::Worker => dispatcher.register_worker(id),
-        AgentRole::Master => dispatcher.set_master(Some(id.to_string())),
-        _ => {}
-    }
-
     Ok(info)
 }
 
@@ -412,10 +323,8 @@ fn build_and_spawn(
 async fn agent_spawn(
     pty: tauri::State<'_, Arc<PtyManager>>,
     persistence: tauri::State<'_, Arc<Persistence>>,
-    dispatcher: tauri::State<'_, Arc<Dispatcher>>,
     app: tauri::AppHandle,
     runtime: String,
-    role: String,
     project: String,
     resume_key: Option<String>,
     model: Option<String>,
@@ -448,13 +357,9 @@ async fn agent_spawn(
     // picked folder) get this layout too — it never touches the project root.
     ensure_project(&project).map_err(|e| format!("Failed to init workspace: {}", e))?;
 
-    let role = parse_role(&role);
-
     // PTY working directory: custom-rooted agents open a terminal directly in
     // the project root (cloned repo / picked folder); workspace projects keep
-    // the per-agent dir so each session's context stays isolated. Master-group
-    // terminals use a short top-level dir (~/CaPilot/Master) so the bash prompt
-    // isn't a long workspaces/master/agents/<uuid> path.
+    // the per-agent dir so each session's context stays isolated.
     let cwd = match &project_root {
         Some(pr) => {
             // A caller-supplied project root feeds both `create_dir_all` and the
@@ -470,16 +375,6 @@ async fn agent_spawn(
                 .map_err(|e| format!("Failed to create project root: {}", e))?;
             p.canonicalize()
                 .map_err(|e| format!("Invalid project root: {}", e))?
-        }
-        None if role == AgentRole::Master => project_dir(&project),
-        None if project == "master" => {
-            let dir = persistence::workspace_root()
-                .parent()
-                .unwrap_or(std::path::Path::new("."))
-                .join("Master");
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| format!("Failed to create master terminal dir: {}", e))?;
-            dir
         }
         None => {
             let dir = agent_dir(&project, &agent_id);
@@ -497,12 +392,10 @@ async fn agent_spawn(
     let info = build_and_spawn(
         pty.inner(),
         persistence.inner(),
-        dispatcher.inner(),
         &app,
         &agent_id,
         &project,
         None,
-        role,
         &runtime,
         resume,
         resume_key,
@@ -560,7 +453,6 @@ async fn agent_spawn(
 async fn agent_resume(
     pty: tauri::State<'_, Arc<PtyManager>>,
     persistence: tauri::State<'_, Arc<Persistence>>,
-    dispatcher: tauri::State<'_, Arc<Dispatcher>>,
     app: tauri::AppHandle,
     id: String,
     on_data: Channel<Vec<u8>>,
@@ -575,16 +467,13 @@ async fn agent_resume(
 
     // Kill any leftover PTY before re-spawning.
     pty.kill(&id).map_err(|e| e.to_string())?;
-    let role = parse_role(&rec.role);
     build_and_spawn(
         pty.inner(),
         persistence.inner(),
-        dispatcher.inner(),
         &app,
         &id,
         &rec.project,
         rec.workspace_id.clone(),
-        role,
         &rec.runtime,
         true, // resume — continue the stored/detected conversation
         rec.resume_key.clone(),
@@ -656,7 +545,6 @@ async fn agent_resize(
 async fn agent_switch_runtime(
     pty: tauri::State<'_, Arc<PtyManager>>,
     persistence: tauri::State<'_, Arc<Persistence>>,
-    dispatcher: tauri::State<'_, Arc<Dispatcher>>,
     app: tauri::AppHandle,
     id: String,
     runtime: String,
@@ -693,16 +581,13 @@ async fn agent_switch_runtime(
         let _ = write_agent_meta(&project, &meta);
     }
 
-    let role = parse_role(&rec.role);
     build_and_spawn(
         pty.inner(),
         persistence.inner(),
-        dispatcher.inner(),
         &app,
         &id,
         &project,
         rec.workspace_id.clone(),
-        role,
         &runtime,
         true, // runtime switch resumes session history in the same context dir
         rec.resume_key.clone(),
@@ -713,44 +598,6 @@ async fn agent_switch_runtime(
         rec.cwd.clone(),
         on_data,
     )
-}
-
-#[tauri::command]
-async fn agent_set_role(
-    persistence: tauri::State<'_, Arc<Persistence>>,
-    dispatcher: tauri::State<'_, Arc<Dispatcher>>,
-    id: String,
-    role: String,
-) -> Result<(), String> {
-    let role = parse_role(&role);
-    let role_s = role_str(&role).to_string();
-    // The agent's own project (from its DB row) — agent metadata lives under
-    // `workspaces/<project>/agents/<id>`, and the row's project is the truth.
-    let project = {
-        let db = persistence.db().lock().unwrap();
-        db.get(&id)
-            .map(|r| r.map(|rec| rec.project).unwrap_or_default())
-            .map_err(|e| e.to_string())?
-    };
-    {
-        let db = persistence.db().lock().unwrap();
-        db.update_role(&id, &role_s, now_ms())
-            .map_err(|e| e.to_string())?;
-    }
-    if let Ok(mut meta) = read_agent_meta(&project, &id) {
-        meta.role = role_s.clone();
-        meta.updated_at = now_ms();
-        let _ = write_agent_meta(&project, &meta);
-    }
-    match role {
-        AgentRole::Worker => dispatcher.register_worker(&id),
-        AgentRole::Master => {
-            dispatcher.set_master(Some(id.clone()));
-            dispatcher.unregister_worker(&id);
-        }
-        AgentRole::Standalone => dispatcher.unregister_worker(&id),
-    }
-    Ok(())
 }
 
 /// Update a session's composer config (permission mode / speed / model).
@@ -896,12 +743,9 @@ fn list_projects() -> Result<Vec<ProjectInfo>, String> {
 /// Delete a project's workspace directory (`~/CaPilot/workspaces/<name>`) —
 /// sessions, agent metadata, context. Called by the sidebar's "移除项目".
 /// Custom-rooted projects only lose this metadata dir; their real folder
-/// (picked / cloned) is never touched. The pinned master group is guarded.
+/// (picked / cloned) is never touched.
 #[tauri::command]
 fn delete_project(name: String) -> Result<(), String> {
-    if name == "master" {
-        return Err("不能删除 master".to_string());
-    }
     sanitize_project(&name)?;
     let dir = persistence::project_dir(&name);
     // Belt-and-braces: the resolved path must stay under the workspace root.
@@ -933,9 +777,6 @@ fn rename_project_inner(persistence: &Persistence, old: &str, new: &str) -> Resu
     let root = persistence::workspace_root();
     let old_dir = root.join(old);
     let new_dir = root.join(new);
-    if old == "master" {
-        return Err("不能重命名 master".to_string());
-    }
     if old == new {
         return Ok(persistence::custom_project_root(old)
             .unwrap_or(old_dir)
@@ -991,8 +832,6 @@ fn rename_project_inner(persistence: &Persistence, old: &str, new: &str) -> Resu
 async fn sessions_delete(
     pty: tauri::State<'_, Arc<PtyManager>>,
     persistence: tauri::State<'_, Arc<Persistence>>,
-    dispatcher: tauri::State<'_, Arc<Dispatcher>>,
-    app: tauri::AppHandle,
     id: String,
 ) -> Result<(), String> {
     // Best-effort end to end: a failed kill (e.g. the PTY was already reaped by
@@ -1012,9 +851,6 @@ async fn sessions_delete(
     let Some(rec) = record else {
         return Err(format!("Session not found: {id}"));
     };
-    if rec.role == "master" {
-        dispatcher.cascade_master(&id, CascadeMode::Delete, &app);
-    }
     let dir = agent_dir(&rec.project, &id);
     // Belt-and-braces: the resolved dir must stay under the workspace root.
     if dir.starts_with(persistence::workspace_root()) && dir.exists() {
@@ -1023,7 +859,6 @@ async fn sessions_delete(
     if let Some(db) = persistence.db_tolerant() {
         let _ = db.delete(&id);
     }
-    dispatcher.unregister_worker(&id);
     Ok(())
 }
 
@@ -1055,29 +890,6 @@ fn setting_set(
     }
     let db = persistence.db().lock().unwrap();
     db.set_setting(&key, &value).map_err(|e| e.to_string())
-}
-
-// ── Orchestration commands ──────────────────────────────────────
-
-#[tauri::command]
-async fn worker_status(
-    dispatcher: tauri::State<'_, Arc<Dispatcher>>,
-) -> Result<Vec<orchestration::dispatcher::WorkerInfo>, String> {
-    Ok(dispatcher.workers_list())
-}
-
-#[tauri::command]
-async fn smart_return_set(
-    dispatcher: tauri::State<'_, Arc<Dispatcher>>,
-    enabled: bool,
-) -> Result<(), String> {
-    dispatcher.set_smart_return(enabled);
-    Ok(())
-}
-
-#[tauri::command]
-async fn smart_return_get(dispatcher: tauri::State<'_, Arc<Dispatcher>>) -> Result<bool, String> {
-    Ok(dispatcher.smart_return_enabled())
 }
 
 // ── Runtime commands ────────────────────────────────────────────
@@ -2018,17 +1830,9 @@ async fn git_push(repo: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        capilot_agent_identity_env, create_project, delete_project, git_run, parse_branches,
-        parse_log, parse_name_status, parse_porcelain, persistence, rename_project_inner,
+        create_project, delete_project, git_run, parse_branches, parse_log, parse_name_status,
+        parse_porcelain, persistence, rename_project_inner,
     };
-
-    #[test]
-    fn agent_process_receives_stable_internal_capilot_identity() {
-        assert_eq!(
-            capilot_agent_identity_env("agent-a8217c"),
-            ("CAPILOT_AGENT_ID".to_string(), "agent-a8217c".to_string())
-        );
-    }
 
     #[test]
     fn parses_porcelain_basic() {
@@ -2156,9 +1960,6 @@ mod tests {
         assert!(!ws.exists());
         assert!(root_folder.exists());
 
-        // master is guarded.
-        assert!(delete_project("master".into()).is_err());
-
         std::env::remove_var("HOME");
         std::fs::remove_dir_all(&home).ok();
     }
@@ -2270,9 +2071,6 @@ mod tests {
         let meta = persistence::AgentMeta {
             id: "a1".into(),
             workspace_id: Some("wks_a1".into()),
-            requires_attention: false,
-            attention_reason: None,
-            role: "worker".into(),
             runtime: "claude".into(),
             resume_key: None,
             status: "idle".into(),
@@ -2290,10 +2088,7 @@ mod tests {
         db.insert(&persistence::AgentSessionRecord {
             id: "a1".into(),
             workspace_id: Some("wks_a1".into()),
-            requires_attention: false,
-            attention_reason: None,
             project: "oldproj".into(),
-            role: "worker".into(),
             runtime: "claude".into(),
             resume_key: None,
             cwd: old_dir.clone(),
@@ -2331,7 +2126,7 @@ mod tests {
 
 // ── Notification command ────────────────────────────────────────
 
-/// Show a system notification (worker done / ESP drop / report ready).
+/// Show a system notification for background IDE events.
 /// The frontend `notify()` helper gates this on the 系统通知 toggle.
 #[tauri::command]
 fn notify(app: tauri::AppHandle, title: String, body: String) -> Result<(), String> {
@@ -2407,9 +2202,8 @@ fn system_stats(monitor: tauri::State<'_, Arc<resource::ResourceMonitor>>) -> Sy
 
 // ── App entry point ─────────────────────────────────────────────
 
-/// Repair names created by older builds: keep the first occurrence of a
-/// duplicate, rename later occurrences, and migrate the old `Runtime@master`
-/// title to the shared cat-name pool.
+/// Repair names created by older builds by keeping the first occurrence and
+/// renaming later duplicates from the shared cat-name pool.
 fn repair_session_titles(persistence: &Persistence) {
     let sessions = persistence
         .db()
@@ -2420,9 +2214,7 @@ fn repair_session_titles(persistence: &Persistence) {
     let mut occupied = std::collections::HashSet::new();
     for session in sessions {
         let duplicate = !occupied.insert(session.title.clone());
-        let legacy_master = session.role == "master"
-            && !agent_runtime::cat_breeds::BREEDS.contains(&session.title.as_str());
-        if !duplicate && !legacy_master {
+        if !duplicate {
             continue;
         }
         let title = agent_runtime::cat_breeds::next_breed_excluding(&occupied).to_string();
@@ -2445,27 +2237,8 @@ pub fn run() {
     // quit (no orphaned claude/bash), without touching their session rows.
     let pty_killer = pty.clone();
     let persistence = Arc::new(Persistence::open().expect("Failed to init persistence"));
-    match persistence
-        .db()
-        .lock()
-        .unwrap()
-        .task_fail_unfinished(RESTARTED_TASK_ERROR, now_ms())
-    {
-        Ok(0) => {}
-        Ok(count) => log::warn!("marked {count} unfinished Task(s) failed after CaPilot restart"),
-        Err(error) => log::error!("failed to close unfinished Tasks on startup: {error}"),
-    }
     repair_session_titles(&persistence);
-    let dispatcher = Arc::new(Dispatcher::new(pty.clone(), persistence.clone()));
-    dispatcher.refresh_workers();
     let resource = Arc::new(resource::ResourceMonitor::new());
-    // `pnpm tauri dev` builds the dedicated Rust CLI before launching Tauri.
-    // Point the stable PATH entry at that debug binary; no script/runtime shim.
-    match orchestration::dev_cli::install_dev_cli() {
-        Ok(Some(path)) => log::info!("capilot development CLI linked at {}", path.display()),
-        Ok(None) => {}
-        Err(error) => log::warn!("failed to link capilot development CLI: {error}"),
-    }
 
     let _app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -2478,7 +2251,6 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(pty)
         .manage(persistence)
-        .manage(dispatcher.clone())
         .manage(EspManager::new())
         .manage(resource)
         .invoke_handler(tauri::generate_handler![
@@ -2488,7 +2260,6 @@ pub fn run() {
             agent_kill,
             agent_resize,
             agent_switch_runtime,
-            agent_set_role,
             agent_set_session_config,
             sessions_list,
             sessions_delete,
@@ -2499,9 +2270,6 @@ pub fn run() {
             list_projects,
             delete_project,
             rename_project,
-            worker_status,
-            smart_return_set,
-            smart_return_get,
             runtime_list_available,
             runtime_models,
             fs_read,
@@ -2539,7 +2307,6 @@ pub fn run() {
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
-            dispatcher.start(handle.clone());
             // Resource sampler: every 3 s, sample each agent's process tree and
             // emit `resource://sample` (DevPlan §10).
             let pty = app.state::<Arc<PtyManager>>().inner().clone();

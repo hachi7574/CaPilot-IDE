@@ -29,8 +29,8 @@
     "active": true,
     "targets": "all",
     "category": "DeveloperTool",
-    "shortDescription": "CaPilot IDE — AI Agent 编排工作台",
-    "longDescription": "CaPilot IDE 是一个以 IDE 为中心的 AI Agent 编排工作台，支持 master/worker 多代理协作、终端 PTY、ESP 遥控器与版本控制。\n\nCaPilot IDE is an IDE-centric AI agent orchestration workbench featuring master/worker multi-agent collaboration, PTY terminals, an ESP remote, and version control.",
+    "shortDescription": "CaPilot IDE — 本地 AI 编程工作区",
+    "longDescription": "CaPilot IDE 是一个本地 AI 编程工作区，支持交互式终端 PTY、文件编辑、ESP 遥控器与版本控制。\n\nCaPilot IDE is a local AI coding workspace featuring interactive PTY terminals, file editing, an ESP remote, and version control.",
     "copyright": "© 2026 hachi7574",
     "publisher": "hachi7574",
     "icon": [

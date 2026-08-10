@@ -3,7 +3,6 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 
 // ── Types ───────────────────────────────────────────────────────
 
-export type AgentRole = "master" | "worker" | "standalone";
 export type AgentStatus =
   | "idle"
   | "running"
@@ -20,12 +19,9 @@ export type FontScale = "s" | "m" | "l" | "xl" | "xxl";
 export interface AgentInfo {
   id: string;
   workspace_id?: string | null;
-  requires_attention?: boolean;
-  attention_reason?: "finished" | "error" | null;
   /** Stable owning project supplied from persistence; cwd is execution-only. */
   project?: string;
   runtime: string;
-  role: AgentRole;
   status: AgentStatus;
   title: string;
   cwd: string;
@@ -84,10 +80,7 @@ export interface Tab {
 export interface RestoredSession {
   id: string;
   workspace_id: string | null;
-  requires_attention: boolean;
-  attention_reason: "finished" | "error" | null;
   project: string;
-  role: AgentRole;
   runtime: string;
   resume_key: string | null;
   cwd: string;
@@ -98,21 +91,6 @@ export interface RestoredSession {
   model: string | null;
   created_at: number;
   updated_at: number;
-}
-
-export interface WorkerInfo {
-  id: string;
-  title: string;
-  runtime: string;
-  status: string;
-  last_task: string | null;
-}
-
-export interface WorkerReport {
-  worker: string;
-  summary: string;
-  level: string;
-  ts: number;
 }
 
 export interface EspStatus {
@@ -151,10 +129,6 @@ const MAX_OUTPUT_BUFFER = 2_000_000;
 function projectOfCwd(cwd: string): string {
   const m = cwd.match(/workspaces\/([^/]+)/);
   if (m) return m[1];
-  // Master-group terminals live in ~/CaPilot/Master.
-  if (cwd.endsWith("/CaPilot/Master") || cwd.includes("/CaPilot/Master/")) {
-    return "master";
-  }
   const parts = cwd.split("/").filter(Boolean);
   return parts[parts.length - 1] || cwd;
 }
@@ -203,9 +177,7 @@ interface AppState {
   agentChannels: Map<string, Channel<number[]>>;
   /** Output buffered before a terminal attached (and between mounts). */
   agentOutputs: Map<string, number[]>;
-  masterAgentId: string | null;
-  /** Whether the initial persisted-session lookup has settled. Sidebar empty
-   *  states must wait for this or they briefly claim no Master during restore. */
+  /** Whether the initial persisted-session lookup has settled. */
   sessionsRestored: boolean;
   /** Agent ids whose next terminal mount should force a resume (sidebar
    *  "已结束" reopen). Ended (`done`) sessions never auto-resume otherwise. */
@@ -220,17 +192,11 @@ interface AppState {
   // Runtimes
   runtimes: RuntimeInfo[];
 
-  // Orchestration
-  workerInfos: WorkerInfo[];
-  reports: WorkerReport[];
-  smartReturn: boolean;
-
   // UI tabs
   tabs: Tab[];
   activeTabId: string | null;
 
   // Composer
-  composerTarget: "agent" | "master";
   composerOpen: boolean;
   permissionMode: PermissionMode;
   speed: Speed;
@@ -249,10 +215,6 @@ interface AppState {
   /** Tab id currently being dragged (for edge-drop feedback). */
   draggedTabId: string | null;
 
-  // Worker lock (DevPlan §4.6) — agent id currently unlocked (allows a send /
-  // terminal input) despite being a worker.
-  workerUnlockId: string | null;
-
   // Projects (workspace dirs under ~/CaPilot/workspaces/<name>)
   projects: string[];
   /** project name → absolute root path (from list_projects / create_project). */
@@ -267,10 +229,8 @@ interface AppState {
   rightWidth: number;
 
   // Composer height
-  /** Composer height (px); null = follow the right sidebar's master report. */
+  /** Composer height (px). */
   composerH: number | null;
-  /** Measured height of the master report card in the right sidebar (px). */
-  masterReportH: number;
 
   // ESP
   espStatus: EspStatus;
@@ -290,7 +250,6 @@ interface AppState {
   addAgent: (info: AgentInfo, channel: Channel<number[]> | null, createdAtTs?: number) => void;
   removeAgent: (id: string) => void;
   updateAgentStatus: (id: string, status: AgentStatus) => void;
-  updateAgentAttention: (id: string, reason: "finished" | "error" | null) => void;
   appendAgentOutput: (id: string, data: number[]) => void;
   clearAgentOutput: (id: string) => void;
   requestResume: (id: string) => void;
@@ -298,13 +257,8 @@ interface AppState {
   /** Drop a finished agent's dead channel, keeping its record + output so the
    *  sidebar "已结束" group can reopen (resume) it. */
   dropAgentChannel: (id: string) => void;
-  setMasterAgentId: (id: string | null) => void;
   setSessionsRestored: () => void;
   setRuntimes: (runtimes: RuntimeInfo[]) => void;
-  setWorkerInfos: (infos: WorkerInfo[]) => void;
-  upsertWorkerInfo: (info: WorkerInfo) => void;
-  addReport: (report: WorkerReport) => void;
-  setSmartReturn: (enabled: boolean) => void;
   addTab: (tab: Tab) => void;
   /** Add a tab without changing the active tab (used by session restore). */
   addTabSilent: (tab: Tab) => void;
@@ -315,8 +269,6 @@ interface AppState {
   removeSplitPane: (id: string) => void;
   setSplitRatio: (ratio: number) => void;
   setDraggedTabId: (id: string | null) => void;
-  setWorkerUnlock: (id: string | null) => void;
-  setComposerTarget: (target: "agent" | "master") => void;
   toggleComposer: () => void;
   setPermissionMode: (mode: PermissionMode) => void;
   setSpeed: (speed: Speed) => void;
@@ -328,15 +280,13 @@ interface AppState {
   setLeftWidth: (width: number) => void;
   setRightWidth: (width: number) => void;
   setComposerH: (height: number | null) => void;
-  setMasterReportH: (height: number) => void;
   setProjects: (projects: string[]) => void;
   setProjectRoots: (roots: Record<string, string>) => void;
   setFocusedProject: (name: string | null) => void;
   projectRoot: (name: string) => string | undefined;
   addProject: (name: string, root?: string) => void;
   removeProject: (name: string) => void;
-  /** Move `name` to `targetName`'s position in the sidebar project list
-   *  (drag-to-reorder). The pinned master group is never in `projects`. */
+  /** Move `name` to `targetName`'s position in the sidebar project list. */
   moveProject: (name: string, targetName: string) => void;
   /** Sleep a project: kill all its agent processes + close its tabs/panels to
    *  free CPU/memory. Sessions stay in the DB, so reopening a terminal resumes. */
@@ -434,17 +384,12 @@ export const useStore = create<AppState>((set, get) => ({
   agents: new Map(),
   agentChannels: new Map(),
   agentOutputs: new Map(),
-  masterAgentId: null,
   sessionsRestored: false,
   resumeOnOpen: new Set(),
   closedAgentIds: new Set(),
   runtimes: [],
-  workerInfos: [],
-  reports: [],
-  smartReturn: true,
   tabs: [],
   activeTabId: null,
-  composerTarget: "master",
   composerOpen: true,
   permissionMode: "ask",
   speed: "auto",
@@ -456,13 +401,11 @@ export const useStore = create<AppState>((set, get) => ({
   leftWidth: 248,
   rightWidth: 340,
   composerH: null,
-  masterReportH: 0,
   splitPaneA: null,
   splitPaneB: null,
   splitDirection: null,
   splitRatio: 0.5,
   draggedTabId: null,
-  workerUnlockId: null,
   espStatus: {
     connected: false,
     kind: null,
@@ -493,8 +436,7 @@ export const useStore = create<AppState>((set, get) => ({
       if (s.closedAgentIds.has(info.id)) return {};
       const agents = new Map(s.agents);
       // Anchor the count-up to a real timestamp: fresh spawns get now; restored
-      // sessions carry the DB `created_at` via `createdAtTs`. An existing agent
-      // (role-only update) keeps its original `createdAt`.
+      // sessions carry the DB `created_at` via `createdAtTs`.
       const created =
         info.createdAt ??
         (agents.has(info.id) ? agents.get(info.id)!.createdAt : undefined) ??
@@ -507,9 +449,8 @@ export const useStore = create<AppState>((set, get) => ({
         createdAt: created,
       });
       const channels = new Map(s.agentChannels);
-      // Only overwrite the PTY channel when a new one is supplied. `channel ===
-      // null` means a role-only update (setAgentRole) or a restored session with
-      // no live PTY yet — in that case preserve the agent's existing live
+      // Only overwrite the PTY channel when a new one is supplied. A restored
+      // session has no live PTY yet, so preserve the agent's existing live
       // channel so XTermPanel doesn't lose it and fall into the resume path.
       if (channel) channels.set(info.id, channel);
       return { agents, agentChannels: channels };
@@ -531,8 +472,6 @@ export const useStore = create<AppState>((set, get) => ({
       resumeOnOpen.delete(id);
       const closedAgentIds = new Set(s.closedAgentIds);
       closedAgentIds.add(id);
-      // If the removed agent was the master, clear masterAgentId so the composer
-      // doesn't see a stale master and spawn a duplicate (Bug 4).
       return {
         agents,
         agentChannels: channels,
@@ -541,7 +480,6 @@ export const useStore = create<AppState>((set, get) => ({
         resourceHistory: history,
         resumeOnOpen,
         closedAgentIds,
-        ...(s.masterAgentId === id ? { masterAgentId: null } : {}),
       };
     }),
 
@@ -550,20 +488,6 @@ export const useStore = create<AppState>((set, get) => ({
       const agents = new Map(s.agents);
       const a = agents.get(id);
       if (a) agents.set(id, { ...a, status });
-      return { agents };
-    }),
-
-  updateAgentAttention: (id, reason) =>
-    set((s) => {
-      const agents = new Map(s.agents);
-      const agent = agents.get(id);
-      if (agent) {
-        agents.set(id, {
-          ...agent,
-          requires_attention: reason !== null,
-          attention_reason: reason,
-        });
-      }
       return { agents };
     }),
 
@@ -615,29 +539,9 @@ export const useStore = create<AppState>((set, get) => ({
       return { agentChannels };
     }),
 
-  setMasterAgentId: (id) => set({ masterAgentId: id }),
-
   setSessionsRestored: () => set({ sessionsRestored: true }),
 
   setRuntimes: (runtimes) => set({ runtimes }),
-
-  setWorkerInfos: (infos) => set({ workerInfos: infos }),
-
-  upsertWorkerInfo: (info) =>
-    set((s) => {
-      const infos = [...s.workerInfos];
-      const idx = infos.findIndex((w) => w.id === info.id);
-      if (idx >= 0) infos[idx] = info;
-      else infos.push(info);
-      return { workerInfos: infos };
-    }),
-
-  addReport: (report) =>
-    set((s) => ({
-      reports: [report, ...s.reports].slice(0, 50),
-    })),
-
-  setSmartReturn: (enabled) => set({ smartReturn: enabled }),
 
   addTab: (tab) =>
     set((s) => {
@@ -744,10 +648,6 @@ export const useStore = create<AppState>((set, get) => ({
 
   setDraggedTabId: (id) => set({ draggedTabId: id }),
 
-  setWorkerUnlock: (id) => set({ workerUnlockId: id }),
-
-  setComposerTarget: (target) => set({ composerTarget: target }),
-
   toggleComposer: () => set((s) => ({ composerOpen: !s.composerOpen })),
 
   setPermissionMode: (mode) => set({ permissionMode: mode }),
@@ -776,8 +676,6 @@ export const useStore = create<AppState>((set, get) => ({
   setLeftWidth: (width) => set({ leftWidth: width }),
   setRightWidth: (width) => set({ rightWidth: width }),
   setComposerH: (height) => set({ composerH: height }),
-  setMasterReportH: (height) => set({ masterReportH: height }),
-
   setProjects: (projects) => set({ projects }),
 
   setProjectRoots: (roots) =>
@@ -806,10 +704,6 @@ export const useStore = create<AppState>((set, get) => ({
 
   removeProject: (name) => {
     const s = get();
-    // Guard: the Master group is pinned and never deletable. It is not part of
-    // `projects` and its agents live under the "master" project group, so a
-    // stray call must not kill the master session or its terminals.
-    if (name === "master") return;
     // Remove the project from the list and drop its root mapping; clear focus
     // when the removed project was the focused one (tab bar then shows all tabs).
     const projectRoots = { ...s.projectRoots };
@@ -833,19 +727,6 @@ export const useStore = create<AppState>((set, get) => ({
         .catch(() => invoke("agent_kill", { id }).catch(() => {}));
       s.closeTab(id);
       s.removeAgent(id);
-    }
-
-    // Guard: removing the master's project clears the master slot. removeAgent
-    // already clears masterAgentId when the master agent itself is removed;
-    // this covers a master whose cwd escaped the match, and drops the pinned
-    // "master" placeholder tab so a stale terminal doesn't linger.
-    const masterId = s.masterAgentId;
-    if (masterId) {
-      const master = s.agents.get(masterId);
-      if (!master || projectOfCwd(master.cwd) === name) {
-        set({ masterAgentId: null });
-        if (s.tabs.some((t) => t.id === "master")) s.closeTab("master");
-      }
     }
 
     // Delete the project's workspace dir (sessions / agent metadata / context).
@@ -873,7 +754,6 @@ export const useStore = create<AppState>((set, get) => ({
   // the terminal resumes the session) and the DB rows persist for restart.
   sleepProject: (name) => {
     const s = get();
-    if (name === "master") return;
     const root = s.projectRoots[name];
     const doomed: string[] = [];
     s.agents.forEach((a, id) => {

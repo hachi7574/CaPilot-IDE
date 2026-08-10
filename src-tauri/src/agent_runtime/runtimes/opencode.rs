@@ -264,7 +264,6 @@ impl AgentRuntimeAdapter for OpenCodeAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_runtime::adapter::AgentRole;
 
     fn session(mode: &str, resume_key: Option<&str>) -> AgentSession {
         AgentSession {
@@ -275,7 +274,6 @@ mod tests {
             model: Some("openai/gpt-test".into()),
             cwd: "/tmp/project".into(),
             context_dir: "/tmp/project".into(),
-            role: AgentRole::Standalone,
             rows: 24,
             cols: 80,
             resume_key: resume_key.map(str::to_owned),

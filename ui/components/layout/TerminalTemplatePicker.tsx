@@ -12,14 +12,12 @@ import { spawnTerminal } from "../../state/agentActions";
 export function TerminalTemplatePicker({
   project,
   anchor,
-  role = "standalone",
   onClose,
 }: {
   /** Project to spawn the terminal under. */
   project: string;
   /** Fixed-position anchor for the dropdown menu. */
   anchor: { x: number; y: number };
-  role?: "master" | "worker" | "standalone";
   onClose: () => void;
 }) {
   const termTemplates = useStore((s) => s.termTemplates);
@@ -51,7 +49,7 @@ export function TerminalTemplatePicker({
             key={t.id}
             className="tt-item"
             onClick={() => {
-              spawnTerminal(project, t, role).catch(console.error);
+              spawnTerminal(project, t).catch(console.error);
               onClose();
             }}
             onContextMenu={(e) => {

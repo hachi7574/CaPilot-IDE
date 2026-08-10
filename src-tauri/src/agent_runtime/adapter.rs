@@ -7,15 +7,6 @@ pub type RuntimeId = String;
 /// Agent session identifier
 pub type AgentId = String;
 
-/// Agent role in the orchestration system
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentRole {
-    Master,
-    Worker,
-    Standalone,
-}
-
 /// Agent lifecycle status
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,7 +57,6 @@ pub struct AgentSession {
     pub model: Option<String>,
     pub cwd: PathBuf,
     pub context_dir: PathBuf,
-    pub role: AgentRole,
     pub rows: u16,
     pub cols: u16,
     /// Provider session id to resume (`None` = start fresh). Each adapter builds
@@ -82,7 +72,6 @@ pub struct AgentInfo {
     pub workspace_id: Option<String>,
     pub project: Option<String>,
     pub runtime: RuntimeId,
-    pub role: AgentRole,
     pub status: AgentStatus,
     pub title: String,
     pub cwd: PathBuf,

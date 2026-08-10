@@ -248,8 +248,8 @@ mod tests {
         // were verified against real ~/.claude/projects/ entries.
         let cases = [
             (
-                "/home/hachi/CaPilot/workspaces/master",
-                "-home-hachi-CaPilot-workspaces-master",
+                "/home/hachi/CaPilot/workspaces/demo",
+                "-home-hachi-CaPilot-workspaces-demo",
             ),
             (
                 "/home/hachi/Project/CaPilot-Ide",

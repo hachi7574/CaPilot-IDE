@@ -105,12 +105,6 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
   const channel = useStore((s) => s.agentChannels.get(agentId));
   const fontScale = useStore((s) => s.fontScale);
 
-  // DevPlan §4.6 — worker lock: input typed while the agent is a worker is
-  // intercepted instead of silently forwarded; the user picks 仍然发送/解锁.
-  const [lockWarning, setLockWarning] = useState(false);
-  const lockedInputRef = useRef("");
-  const unlockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   // DevPlan §4.2 ④ — dragging a file onto the terminal pastes its path
   // (shell-escaped) into the PTY. Guards against double-insert when both the DOM
   // drop handler and the Tauri drag-drop event observe the same physical drop.
@@ -136,9 +130,7 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
     );
   }, []);
 
-  /** Insert shell-escaped path(s) into the PTY (raw keystroke passthrough).
-   *  Worker-locked agents route through the same lock banner instead of silently
-   *  accepting the input. */
+  /** Insert shell-escaped path(s) into the PTY (raw keystroke passthrough). */
   const insertPathToPty = useCallback(
     (paths: string[]) => {
       if (!paths.length) return;
@@ -146,25 +138,12 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
       // Leading space so the path doesn't glue to preceding text (typing a path
       // in a shell); raw:true sends the keystrokes verbatim (no \r appended).
       const payload = ` ${escaped}`;
-      const role = useStore.getState().agents.get(agentId)?.role;
-      const unlocked = useStore.getState().workerUnlockId === agentId;
-      if (role === "worker" && !unlocked) {
-        lockedInputRef.current += payload;
-        setLockWarning(true);
-        return;
-      }
       invoke("agent_write", { id: agentId, data: payload, raw: true }).catch(
         () => {}
       );
     },
     [agentId]
   );
-
-  useEffect(() => {
-    return () => {
-      if (unlockTimerRef.current) clearTimeout(unlockTimerRef.current);
-    };
-  }, []);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -260,10 +239,7 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
 
       state.addAgent({ ...agent, mode }, null);
       const activeTab = state.tabs.find((tab) => tab.id === state.activeTabId);
-      const composerAgentId =
-        state.composerTarget === "master"
-          ? state.masterAgentId
-          : activeTab?.agentId ?? null;
+      const composerAgentId = activeTab?.agentId ?? null;
       if (composerAgentId === agentId) state.setPermissionMode(mode);
 
       // A held key can emit many redraws per second. Reflect every one in the
@@ -439,17 +415,8 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
       }
     }
 
-    // Forward user input to the PTY (raw keystroke passthrough). Worker agents
-    // are locked (DevPlan §4.6): swallow the keystrokes into a buffer and show a
-    // warning instead of silently dropping them.
+    // Forward user input to the PTY (raw keystroke passthrough).
     term.onData((data) => {
-      const role = useStore.getState().agents.get(agentId)?.role;
-      const unlocked = useStore.getState().workerUnlockId === agentId;
-      if (role === "worker" && !unlocked) {
-        lockedInputRef.current += data;
-        setLockWarning(true);
-        return;
-      }
       invoke("agent_write", { id: agentId, data, raw: true }).catch(() => {});
     });
 
@@ -531,28 +498,6 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
     };
   }, [insertPathToPty, isPointInTerminal]);
 
-  const handleStillSendTerminal = () => {
-    const text = lockedInputRef.current;
-    if (text) {
-      // Line submission (raw:false appends \r), matching the composer send.
-      invoke("agent_write", { id: agentId, data: text, raw: false }).catch(() => {});
-    }
-    lockedInputRef.current = "";
-    setLockWarning(false);
-  };
-
-  const handleUnlockTerminal = () => {
-    setLockWarning(false);
-    lockedInputRef.current = "";
-    useStore.getState().setWorkerUnlock(agentId);
-    // "解锁 allows input for a bit" — auto-relock after 8s.
-    if (unlockTimerRef.current) clearTimeout(unlockTimerRef.current);
-    unlockTimerRef.current = setTimeout(() => {
-      const s = useStore.getState();
-      if (s.workerUnlockId === agentId) s.setWorkerUnlock(null);
-    }, 8000);
-  };
-
   return (
     <div
       ref={containerRef}
@@ -611,21 +556,6 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
         }
       }}
     >
-      {lockWarning && (
-        <div className="term-lock-banner">
-          <span>🔒 此 agent 是 worker，输入会被编排结果覆盖</span>
-          <button onClick={handleStillSendTerminal}>仍然发送</button>
-          <button onClick={handleUnlockTerminal}>解锁</button>
-          <button
-            onClick={() => {
-              lockedInputRef.current = "";
-              setLockWarning(false);
-            }}
-          >
-            知道了
-          </button>
-        </div>
-      )}
     </div>
   );
 }

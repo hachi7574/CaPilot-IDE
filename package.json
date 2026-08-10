@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "cargo build --manifest-path src-tauri/Cargo.toml --bin capilot && tauri"
+    "tauri": "tauri"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",

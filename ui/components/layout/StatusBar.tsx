@@ -1,15 +1,12 @@
 import { useEffect, useState } from "react";
 import { useStore, AgentInfo, ResourcePoint } from "../../state/store";
 import { connectEsp, disconnectEsp } from "../../state/esp";
-import { setSmartReturn } from "../../state/orchestration";
 import { fetchResourceHistory, fmtCpu, fmtMem } from "../../state/resource";
 
 export function StatusBar() {
   const agents = useStore((s) => s.agents);
-  const workerInfos = useStore((s) => s.workerInfos);
   const permissionMode = useStore((s) => s.permissionMode);
   const speed = useStore((s) => s.speed);
-  const smartReturn = useStore((s) => s.smartReturn);
   const espStatus = useStore((s) => s.espStatus);
   const espConnecting = useStore((s) => s.espConnecting);
   const agentResources = useStore((s) => s.agentResources);
@@ -17,11 +14,6 @@ export function StatusBar() {
   const activeTabId = useStore((s) => s.activeTabId);
   const tabs = useStore((s) => s.tabs);
   const [resourceOpen, setResourceOpen] = useState(false);
-
-  const workerCount = Math.max(
-    workerInfos.length,
-    [...agents.values()].filter((a) => a.role === "worker").length
-  );
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const activeAgentId = activeTab?.agentId ?? null;
@@ -43,8 +35,6 @@ export function StatusBar() {
     }
   };
 
-  const toggleSmartReturn = () => setSmartReturn(!smartReturn);
-
   return (
     <div className="statusbar">
       <span
@@ -65,16 +55,6 @@ export function StatusBar() {
       <span className={`sb-item sb-battery`}>
         🔋 {espStatus.battery_pct !== null ? `${espStatus.battery_pct}%` : "—"}
       </span>
-      <span className="sb-sep" />
-      <span
-        className={`sb-item${smartReturn ? "" : " off"}`}
-        onClick={toggleSmartReturn}
-        style={{ cursor: "pointer" }}
-        title="master 智能返回（分级汇报）开关"
-      >
-        汇报🔔 {smartReturn ? "开" : "关"}
-      </span>
-      <span className="sb-item">worker×{workerCount}</span>
       <span className="sb-sep" />
       <span
         className="sb-item resource-item"

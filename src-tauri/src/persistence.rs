@@ -1,16 +1,15 @@
 //! Contexts workspace model + persistence.
 //!
-//! Layout (per DevPlan §2.2):
+//! Workspace layout:
 //! ```text
 //! ~/CaPilot/workspaces/<project>/
 //! ├─ context/               # shared context
 //! ├─ agents/<agent-id>/     # per-agent workspace (PTY cwd)
-//! │  └─ .agent-meta.json    # role / runtime / resume_key / status
+//! │  └─ .agent-meta.json    # runtime / resume_key / status
 //! └─ sessions.db            # sqlite
 //! ```
 
-use crate::orchestration::{TaskRecord, TaskStatus};
-use rusqlite::{params, types::Type, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -26,12 +25,7 @@ pub struct AgentSessionRecord {
     pub id: String,
     #[serde(default)]
     pub workspace_id: Option<String>,
-    #[serde(default)]
-    pub requires_attention: bool,
-    #[serde(default)]
-    pub attention_reason: Option<String>,
     pub project: String,
-    pub role: String, // master | worker | standalone
     pub runtime: String,
     pub resume_key: Option<String>,
     pub cwd: PathBuf,
@@ -54,11 +48,6 @@ pub struct AgentMeta {
     pub id: String,
     #[serde(default)]
     pub workspace_id: Option<String>,
-    #[serde(default)]
-    pub requires_attention: bool,
-    #[serde(default)]
-    pub attention_reason: Option<String>,
-    pub role: String,
     pub runtime: String,
     pub resume_key: Option<String>,
     pub status: String,
@@ -226,10 +215,7 @@ impl SessionsDb {
             "CREATE TABLE IF NOT EXISTS sessions (
                 id         TEXT PRIMARY KEY,
                 workspace_id TEXT,
-                requires_attention INTEGER NOT NULL DEFAULT 0,
-                attention_reason TEXT,
                 project    TEXT NOT NULL,
-                role       TEXT NOT NULL,
                 runtime    TEXT NOT NULL,
                 resume_key TEXT,
                 cwd        TEXT NOT NULL,
@@ -244,32 +230,22 @@ impl SessionsDb {
             CREATE TABLE IF NOT EXISTS settings (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS tasks (
-                task_id             TEXT PRIMARY KEY,
-                project_id          TEXT NOT NULL,
-                master_agent_id     TEXT NOT NULL,
-                worker_agent_id     TEXT NOT NULL,
-                worker_display_name TEXT NOT NULL,
-                title               TEXT NOT NULL,
-                prompt              TEXT NOT NULL,
-                status              TEXT NOT NULL CHECK (
-                    status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')
-                ),
-                created_at          INTEGER NOT NULL,
-                started_at          INTEGER,
-                finished_at         INTEGER,
-                result              TEXT,
-                error               TEXT,
-                artifact            TEXT
             );",
         )?;
-        conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_tasks_project_created
-                 ON tasks(project_id, created_at DESC);
-             CREATE INDEX IF NOT EXISTS idx_tasks_worker_status
-                 ON tasks(worker_agent_id, status);",
-        )?;
+        // Older builds stored hierarchy and handoff state. It is intentionally
+        // discarded; SQLite's bundled version supports DROP COLUMN.
+        let legacy_columns = {
+            let mut stmt = conn.prepare("PRAGMA table_info(sessions)")?;
+            let columns = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<Vec<String>, _>>()?;
+            columns
+        };
+        for column in ["role", "requires_attention", "attention_reason"] {
+            if legacy_columns.iter().any(|existing| existing == column) {
+                conn.execute_batch(&format!("ALTER TABLE sessions DROP COLUMN {column};"))?;
+            }
+        }
         // Migrate pre-existing DBs (created before mode/speed/model existed):
         // ALTER TABLE only adds a missing column, so old rows default cleanly.
         ensure_column(
@@ -286,18 +262,6 @@ impl SessionsDb {
         )?;
         ensure_column(&conn, "sessions", "model", "model TEXT")?;
         ensure_column(&conn, "sessions", "workspace_id", "workspace_id TEXT")?;
-        ensure_column(
-            &conn,
-            "sessions",
-            "requires_attention",
-            "requires_attention INTEGER NOT NULL DEFAULT 0",
-        )?;
-        ensure_column(
-            &conn,
-            "sessions",
-            "attention_reason",
-            "attention_reason TEXT",
-        )?;
         Ok(Self { conn })
     }
 
@@ -325,21 +289,17 @@ impl SessionsDb {
     pub fn insert(&self, s: &AgentSessionRecord) -> rusqlite::Result<()> {
         self.conn.execute(
             "INSERT INTO sessions
-                (id, workspace_id, requires_attention, attention_reason, project, role, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                (id, workspace_id, project, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET
-                workspace_id=excluded.workspace_id, requires_attention=excluded.requires_attention,
-                attention_reason=excluded.attention_reason, project=excluded.project, role=excluded.role, runtime=excluded.runtime,
+                workspace_id=excluded.workspace_id, project=excluded.project, runtime=excluded.runtime,
                 resume_key=excluded.resume_key, cwd=excluded.cwd, title=excluded.title,
                 status=excluded.status, mode=excluded.mode, speed=excluded.speed,
                 model=excluded.model, updated_at=excluded.updated_at",
             params![
                 s.id,
                 s.workspace_id,
-                s.requires_attention,
-                s.attention_reason,
                 s.project,
-                s.role,
                 s.runtime,
                 s.resume_key,
                 s.cwd.to_string_lossy(),
@@ -363,19 +323,6 @@ impl SessionsDb {
         Ok(())
     }
 
-    pub fn update_attention(
-        &self,
-        id: &str,
-        reason: Option<&str>,
-        updated_at: i64,
-    ) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "UPDATE sessions SET requires_attention = ?1, attention_reason = ?2, updated_at = ?3 WHERE id = ?4",
-            params![reason.is_some(), reason, updated_at, id],
-        )?;
-        Ok(())
-    }
-
     pub fn update_runtime(&self, id: &str, runtime: &str, updated_at: i64) -> rusqlite::Result<()> {
         self.conn.execute(
             "UPDATE sessions SET runtime = ?1, updated_at = ?2 WHERE id = ?3",
@@ -388,14 +335,6 @@ impl SessionsDb {
         self.conn.execute(
             "UPDATE sessions SET title = ?1, updated_at = ?2 WHERE id = ?3",
             params![title, updated_at, id],
-        )?;
-        Ok(())
-    }
-
-    pub fn update_role(&self, id: &str, role: &str, updated_at: i64) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "UPDATE sessions SET role = ?1, updated_at = ?2 WHERE id = ?3",
-            params![role, updated_at, id],
         )?;
         Ok(())
     }
@@ -434,7 +373,7 @@ impl SessionsDb {
     pub fn get(&self, id: &str) -> rusqlite::Result<Option<AgentSessionRecord>> {
         self.conn
             .query_row(
-                "SELECT id, workspace_id, requires_attention, attention_reason, project, role, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at
+                "SELECT id, workspace_id, project, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 params![id],
                 Self::row_to_session,
@@ -445,7 +384,7 @@ impl SessionsDb {
     pub fn list_all(&self) -> rusqlite::Result<Vec<AgentSessionRecord>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, workspace_id, requires_attention, attention_reason, project, role, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at FROM sessions ORDER BY updated_at DESC")?;
+            .prepare("SELECT id, workspace_id, project, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at FROM sessions ORDER BY updated_at DESC")?;
         let rows = stmt.query_map([], Self::row_to_session)?;
         rows.collect()
     }
@@ -454,164 +393,6 @@ impl SessionsDb {
         self.conn
             .execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
         Ok(())
-    }
-
-    // ── Orchestration tasks ──────────────────────────────────────
-
-    pub fn task_insert(&self, task: &TaskRecord) -> rusqlite::Result<()> {
-        let artifact = task
-            .artifact
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        self.conn.execute(
-            "INSERT INTO tasks (
-                task_id, project_id, master_agent_id, worker_agent_id,
-                worker_display_name, title, prompt, status, created_at,
-                started_at, finished_at, result, error, artifact
-             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
-             )",
-            params![
-                task.task_id,
-                task.project_id,
-                task.master_agent_id,
-                task.worker_agent_id,
-                task.worker_display_name,
-                task.title,
-                task.prompt,
-                task.status.as_str(),
-                task.created_at,
-                task.started_at,
-                task.finished_at,
-                task.result,
-                task.error,
-                artifact,
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn task_get(&self, task_id: &str) -> rusqlite::Result<Option<TaskRecord>> {
-        self.conn
-            .query_row(
-                "SELECT task_id, project_id, master_agent_id, worker_agent_id,
-                        worker_display_name, title, prompt, status, created_at,
-                        started_at, finished_at, result, error, artifact
-                 FROM tasks WHERE task_id = ?1",
-                params![task_id],
-                Self::row_to_task,
-            )
-            .optional()
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn task_list_by_project(
-        &self,
-        project_id: &str,
-        limit: usize,
-    ) -> rusqlite::Result<Vec<TaskRecord>> {
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let mut stmt = self.conn.prepare(
-            "SELECT task_id, project_id, master_agent_id, worker_agent_id,
-                    worker_display_name, title, prompt, status, created_at,
-                    started_at, finished_at, result, error, artifact
-             FROM tasks
-             WHERE project_id = ?1
-             ORDER BY created_at DESC, task_id DESC
-             LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![project_id, limit], Self::row_to_task)?;
-        rows.collect()
-    }
-
-    /// Move a queued task to running. False means the task was missing or its
-    /// current state did not permit the transition.
-    pub fn task_mark_running(&self, task_id: &str, started_at: i64) -> rusqlite::Result<bool> {
-        let changed = self.conn.execute(
-            "UPDATE tasks
-             SET status = 'running', started_at = ?2
-             WHERE task_id = ?1 AND status = 'queued'",
-            params![task_id, started_at],
-        )?;
-        Ok(changed == 1)
-    }
-
-    /// Complete a running task exactly once.
-    pub fn task_complete(
-        &self,
-        task_id: &str,
-        result: &str,
-        artifact: Option<&serde_json::Value>,
-        finished_at: i64,
-    ) -> rusqlite::Result<bool> {
-        let artifact = artifact
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        let changed = self.conn.execute(
-            "UPDATE tasks
-             SET status = 'succeeded', result = ?2, error = NULL,
-                 artifact = ?3, finished_at = ?4
-             WHERE task_id = ?1 AND status = 'running'",
-            params![task_id, result, artifact, finished_at],
-        )?;
-        Ok(changed == 1)
-    }
-
-    /// Fail a task that has not reached a terminal state. Supporting queued →
-    /// failed lets Step 2 persist a dispatch/write failure after task creation.
-    pub fn task_fail(
-        &self,
-        task_id: &str,
-        error: &str,
-        finished_at: i64,
-    ) -> rusqlite::Result<bool> {
-        let changed = self.conn.execute(
-            "UPDATE tasks
-             SET status = 'failed', result = NULL, error = ?2, finished_at = ?3
-             WHERE task_id = ?1 AND status IN ('queued', 'running')",
-            params![task_id, error, finished_at],
-        )?;
-        Ok(changed == 1)
-    }
-
-    /// Cancel a queued or running task exactly once.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn task_cancel(&self, task_id: &str, finished_at: i64) -> rusqlite::Result<bool> {
-        let changed = self.conn.execute(
-            "UPDATE tasks
-             SET status = 'cancelled', finished_at = ?2
-             WHERE task_id = ?1 AND status IN ('queued', 'running')",
-            params![task_id, finished_at],
-        )?;
-        Ok(changed == 1)
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn task_list_unfinished(&self) -> rusqlite::Result<Vec<TaskRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT task_id, project_id, master_agent_id, worker_agent_id,
-                    worker_display_name, title, prompt, status, created_at,
-                    started_at, finished_at, result, error, artifact
-             FROM tasks
-             WHERE status IN ('queued', 'running')
-             ORDER BY created_at ASC, task_id ASC",
-        )?;
-        let rows = stmt.query_map([], Self::row_to_task)?;
-        rows.collect()
-    }
-
-    /// Deterministically close Tasks left active by a previous CaPilot process.
-    /// Startup recovery never retries or restores execution in Phase 1.
-    pub fn task_fail_unfinished(&self, error: &str, finished_at: i64) -> rusqlite::Result<usize> {
-        self.conn.execute(
-            "UPDATE tasks
-             SET status = 'failed', result = NULL, error = ?1, finished_at = ?2
-             WHERE status IN ('queued', 'running')",
-            params![error, finished_at],
-        )
     }
 
     /// Rewrite a project's sessions after its workspace dir was renamed: update
@@ -649,50 +430,17 @@ impl SessionsDb {
         Ok(AgentSessionRecord {
             id: row.get(0)?,
             workspace_id: row.get(1)?,
-            requires_attention: row.get(2)?,
-            attention_reason: row.get(3)?,
-            project: row.get(4)?,
-            role: row.get(5)?,
-            runtime: row.get(6)?,
-            resume_key: row.get(7)?,
-            cwd: PathBuf::from(row.get::<_, String>(8)?),
-            title: row.get(9)?,
-            status: row.get(10)?,
-            mode: row.get(11)?,
-            speed: row.get(12)?,
-            model: row.get(13)?,
-            created_at: row.get(14)?,
-            updated_at: row.get(15)?,
-        })
-    }
-
-    fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
-        let status_text: String = row.get(7)?;
-        let status = status_text.parse::<TaskStatus>().map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(7, Type::Text, Box::new(error))
-        })?;
-        let artifact_text: Option<String> = row.get(13)?;
-        let artifact = artifact_text
-            .map(|json| serde_json::from_str(&json))
-            .transpose()
-            .map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(13, Type::Text, Box::new(error))
-            })?;
-        Ok(TaskRecord {
-            task_id: row.get(0)?,
-            project_id: row.get(1)?,
-            master_agent_id: row.get(2)?,
-            worker_agent_id: row.get(3)?,
-            worker_display_name: row.get(4)?,
-            title: row.get(5)?,
-            prompt: row.get(6)?,
-            status,
-            created_at: row.get(8)?,
-            started_at: row.get(9)?,
-            finished_at: row.get(10)?,
-            result: row.get(11)?,
-            error: row.get(12)?,
-            artifact,
+            project: row.get(2)?,
+            runtime: row.get(3)?,
+            resume_key: row.get(4)?,
+            cwd: PathBuf::from(row.get::<_, String>(5)?),
+            title: row.get(6)?,
+            status: row.get(7)?,
+            mode: row.get(8)?,
+            speed: row.get(9)?,
+            model: row.get(10)?,
+            created_at: row.get(11)?,
+            updated_at: row.get(12)?,
         })
     }
 }
@@ -738,13 +486,6 @@ impl Persistence {
         &self.db
     }
 
-    #[cfg(test)]
-    pub(crate) fn open_test(path: &Path) -> rusqlite::Result<Self> {
-        Ok(Self {
-            db: Mutex::new(SessionsDb::open(path)?),
-        })
-    }
-
     /// Lock the sessions DB, tolerating a poisoned mutex (a panic while holding
     /// the lock marks it poisoned; `unwrap()` would then panic on every command).
     /// Returns None only if the lock is currently held by a panicked holder that
@@ -762,46 +503,17 @@ mod tests {
         AgentSessionRecord {
             id: "abc".into(),
             workspace_id: Some("wks_test".into()),
-            requires_attention: false,
-            attention_reason: None,
             project: "test".into(),
-            role: "worker".into(),
             runtime: "claude".into(),
             resume_key: Some("k1".into()),
             cwd: PathBuf::from("/tmp/w/agents/abc"),
-            title: "Claude@worker".into(),
+            title: "布偶".into(),
             status: "running".into(),
             mode: "yolo".into(),
             speed: "fast".into(),
             model: Some("claude-opus-5".into()),
             created_at: 1,
             updated_at: 2,
-        }
-    }
-
-    fn task_db_path(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "capilot-{label}-{}.db",
-            uuid::Uuid::new_v4().simple()
-        ))
-    }
-
-    fn sample_task(task_id: &str, project_id: &str, created_at: i64) -> TaskRecord {
-        TaskRecord {
-            task_id: task_id.into(),
-            project_id: project_id.into(),
-            master_agent_id: "master-1".into(),
-            worker_agent_id: "worker-1".into(),
-            worker_display_name: "阿比西尼亚".into(),
-            title: "检查登录模块".into(),
-            prompt: "检查登录模块并报告结果".into(),
-            status: TaskStatus::Queued,
-            created_at,
-            started_at: None,
-            finished_at: None,
-            result: None,
-            error: None,
-            artifact: None,
         }
     }
 
@@ -815,20 +527,15 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].resume_key.as_deref(), Some("k1"));
         assert_eq!(all[0].workspace_id.as_deref(), Some("wks_test"));
-        assert!(!all[0].requires_attention);
-        assert_eq!(all[0].attention_reason, None);
         // mode/speed/model survive the roundtrip.
         assert_eq!(all[0].mode, "yolo");
         assert_eq!(all[0].speed, "fast");
         assert_eq!(all[0].model.as_deref(), Some("claude-opus-5"));
 
         db.update_status("abc", "done", 99).unwrap();
-        db.update_attention("abc", Some("finished"), 100).unwrap();
         let got = db.get("abc").unwrap().unwrap();
         assert_eq!(got.status, "done");
-        assert!(got.requires_attention);
-        assert_eq!(got.attention_reason.as_deref(), Some("finished"));
-        assert_eq!(got.updated_at, 100);
+        assert_eq!(got.updated_at, 99);
 
         db.delete("abc").unwrap();
         assert!(db.get("abc").unwrap().is_none());
@@ -843,9 +550,6 @@ mod tests {
         let meta = AgentMeta {
             id: "x".into(),
             workspace_id: Some("wks_meta".into()),
-            requires_attention: false,
-            attention_reason: None,
-            role: "master".into(),
             runtime: "claude".into(),
             resume_key: None,
             status: "running".into(),
@@ -862,7 +566,6 @@ mod tests {
             serde_json::from_slice(&std::fs::read(target.join(".agent-meta.json")).unwrap())
                 .unwrap();
         assert_eq!(read.id, "x");
-        assert_eq!(read.role, "master");
         assert_eq!(read.mode, "ask");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -947,235 +650,6 @@ mod tests {
         assert_eq!(got.mode, "yolo");
         assert_eq!(got.speed, "fast");
         assert_eq!(got.model.as_deref(), Some("claude-opus-5"));
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn task_insert_get_and_null_artifact_roundtrip() {
-        let path = task_db_path("task-roundtrip");
-        let db = SessionsDb::open(&path).unwrap();
-        let task = sample_task("task-1", "project-a", 10);
-
-        db.task_insert(&task).unwrap();
-        let stored = db.task_get("task-1").unwrap().unwrap();
-
-        assert_eq!(stored, task);
-        assert_eq!(stored.status, TaskStatus::Queued);
-        assert_eq!(stored.artifact, None);
-        assert_eq!(db.task_get("missing").unwrap(), None);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn tasks_are_listed_by_project_newest_first_and_limited() {
-        let path = task_db_path("task-project-list");
-        let db = SessionsDb::open(&path).unwrap();
-        db.task_insert(&sample_task("a-old", "project-a", 1))
-            .unwrap();
-        db.task_insert(&sample_task("a-new", "project-a", 3))
-            .unwrap();
-        db.task_insert(&sample_task("b-only", "project-b", 2))
-            .unwrap();
-
-        let project_a = db.task_list_by_project("project-a", 10).unwrap();
-        assert_eq!(
-            project_a
-                .iter()
-                .map(|task| task.task_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["a-new", "a-old"]
-        );
-        assert_eq!(db.task_list_by_project("project-a", 1).unwrap().len(), 1);
-        assert!(db.task_list_by_project("missing", 10).unwrap().is_empty());
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn queued_task_can_run_and_succeed_once_with_artifact() {
-        let path = task_db_path("task-success");
-        let db = SessionsDb::open(&path).unwrap();
-        db.task_insert(&sample_task("task-success", "project-a", 1))
-            .unwrap();
-
-        assert!(db.task_mark_running("task-success", 2).unwrap());
-        assert!(!db.task_mark_running("task-success", 3).unwrap());
-        let artifact = serde_json::json!({"files_changed": ["src/auth.rs"]});
-        assert!(db
-            .task_complete("task-success", "修复完成", Some(&artifact), 4)
-            .unwrap());
-        assert!(!db
-            .task_complete("task-success", "重复结果", None, 5)
-            .unwrap());
-
-        let stored = db.task_get("task-success").unwrap().unwrap();
-        assert_eq!(stored.status, TaskStatus::Succeeded);
-        assert_eq!(stored.started_at, Some(2));
-        assert_eq!(stored.finished_at, Some(4));
-        assert_eq!(stored.result.as_deref(), Some("修复完成"));
-        assert_eq!(stored.error, None);
-        assert_eq!(stored.artifact, Some(artifact));
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn running_task_can_fail_but_terminal_state_is_immutable() {
-        let path = task_db_path("task-failure");
-        let db = SessionsDb::open(&path).unwrap();
-        db.task_insert(&sample_task("task-failed", "project-a", 1))
-            .unwrap();
-        assert!(db.task_mark_running("task-failed", 2).unwrap());
-        assert!(db.task_fail("task-failed", "测试失败", 3).unwrap());
-
-        assert!(!db.task_fail("task-failed", "第二个错误", 4).unwrap());
-        assert!(!db
-            .task_complete("task-failed", "错误地成功", None, 4)
-            .unwrap());
-        assert!(!db.task_cancel("task-failed", 4).unwrap());
-        assert!(!db.task_mark_running("task-failed", 4).unwrap());
-
-        let stored = db.task_get("task-failed").unwrap().unwrap();
-        assert_eq!(stored.status, TaskStatus::Failed);
-        assert_eq!(stored.error.as_deref(), Some("测试失败"));
-        assert_eq!(stored.finished_at, Some(3));
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn running_task_can_be_cancelled_but_not_completed_afterwards() {
-        let path = task_db_path("task-cancel");
-        let db = SessionsDb::open(&path).unwrap();
-        db.task_insert(&sample_task("task-cancelled", "project-a", 1))
-            .unwrap();
-        assert!(db.task_mark_running("task-cancelled", 2).unwrap());
-        assert!(db.task_cancel("task-cancelled", 3).unwrap());
-        assert!(!db
-            .task_complete("task-cancelled", "迟到的结果", None, 4)
-            .unwrap());
-        assert!(!db.task_fail("task-cancelled", "迟到的错误", 4).unwrap());
-
-        let stored = db.task_get("task-cancelled").unwrap().unwrap();
-        assert_eq!(stored.status, TaskStatus::Cancelled);
-        assert_eq!(stored.finished_at, Some(3));
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn task_updates_return_false_for_missing_ids() {
-        let path = task_db_path("task-missing");
-        let db = SessionsDb::open(&path).unwrap();
-
-        assert!(!db.task_mark_running("missing", 1).unwrap());
-        assert!(!db.task_complete("missing", "result", None, 1).unwrap());
-        assert!(!db.task_fail("missing", "error", 1).unwrap());
-        assert!(!db.task_cancel("missing", 1).unwrap());
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn unfinished_query_returns_only_queued_and_running_tasks() {
-        let path = task_db_path("task-unfinished");
-        let db = SessionsDb::open(&path).unwrap();
-        for (id, created_at) in [("queued", 1), ("running", 2), ("done", 3)] {
-            db.task_insert(&sample_task(id, "project-a", created_at))
-                .unwrap();
-        }
-        assert!(db.task_mark_running("running", 4).unwrap());
-        assert!(db.task_mark_running("done", 4).unwrap());
-        assert!(db.task_complete("done", "完成", None, 5).unwrap());
-
-        let unfinished = db.task_list_unfinished().unwrap();
-        assert_eq!(
-            unfinished
-                .iter()
-                .map(|task| (task.task_id.as_str(), task.status))
-                .collect::<Vec<_>>(),
-            vec![
-                ("queued", TaskStatus::Queued),
-                ("running", TaskStatus::Running)
-            ]
-        );
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn startup_recovery_fails_all_unfinished_tasks_only() {
-        let path = task_db_path("task-startup-recovery");
-        let db = SessionsDb::open(&path).unwrap();
-        for id in ["queued", "running", "completed"] {
-            db.task_insert(&sample_task(id, "project-a", 1)).unwrap();
-        }
-        assert!(db.task_mark_running("running", 2).unwrap());
-        assert!(db.task_mark_running("completed", 2).unwrap());
-        assert!(db.task_complete("completed", "done", None, 3).unwrap());
-
-        let error = "CaPilot restarted before task completion was confirmed";
-        assert_eq!(db.task_fail_unfinished(error, 10).unwrap(), 2);
-        for id in ["queued", "running"] {
-            let task = db.task_get(id).unwrap().unwrap();
-            assert_eq!(task.status, TaskStatus::Failed);
-            assert_eq!(task.error.as_deref(), Some(error));
-            assert_eq!(task.finished_at, Some(10));
-        }
-        let completed = db.task_get("completed").unwrap().unwrap();
-        assert_eq!(completed.status, TaskStatus::Succeeded);
-        assert_eq!(completed.result.as_deref(), Some("done"));
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn opening_legacy_database_preserves_sessions_and_settings_and_adds_tasks() {
-        let path = task_db_path("task-legacy-upgrade");
-        {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE sessions (
-                    id         TEXT PRIMARY KEY,
-                    project    TEXT NOT NULL,
-                    role       TEXT NOT NULL,
-                    runtime    TEXT NOT NULL,
-                    resume_key TEXT,
-                    cwd        TEXT NOT NULL,
-                    title      TEXT NOT NULL DEFAULT '',
-                    status     TEXT NOT NULL DEFAULT 'idle',
-                    created_at INTEGER NOT NULL,
-                    updated_at INTEGER NOT NULL
-                );
-                CREATE TABLE settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                );
-                INSERT INTO sessions
-                    (id, project, role, runtime, cwd, title, status, created_at, updated_at)
-                VALUES
-                    ('legacy-agent', 'legacy-project', 'worker', 'claude', '/tmp',
-                     '布偶', 'idle', 1, 2);
-                INSERT INTO settings (key, value)
-                VALUES ('session_end_mode', 'keep');",
-            )
-            .unwrap();
-        }
-
-        let db = SessionsDb::open(&path).unwrap();
-        assert_eq!(db.list_all().unwrap().len(), 1);
-        assert_eq!(
-            db.get_setting("session_end_mode").unwrap().as_deref(),
-            Some("keep")
-        );
-        db.task_insert(&sample_task("new-task", "legacy-project", 3))
-            .unwrap();
-        assert!(db.task_get("new-task").unwrap().is_some());
-
-        let index_count: i64 = db
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type = 'index'
-                   AND name IN ('idx_tasks_project_created', 'idx_tasks_worker_status')",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(index_count, 2);
         let _ = std::fs::remove_file(&path);
     }
 }

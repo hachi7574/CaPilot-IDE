@@ -5,15 +5,12 @@ import { spawnAgent } from "../../state/agentActions";
 
 /**
  * First-run onboarding overlay (shown until the user completes it).
- * Five steps: 欢迎 → 运行环境检测 → ESP 配对 → 创建 Master → 完成.
+ * Five steps: 欢迎 → 运行环境检测 → ESP 配对 → 创建会话 → 完成.
  *
  * The whole guide can be skipped at any point via the top-right 跳过引导
  * button; skipping just marks onboarding done and drops the overlay. The
- * "创建 Master" step is the core first-run action — without a master agent
- * there is nothing to orchestrate. If the master can't be created (e.g. the
- * claude runtime isn't installed/authenticated yet), an error is shown and the
- * user can still proceed — the sidebar's Master group + the composer both
- * offer a create path later.
+ * If the first session can't be created, an error is shown and the user can
+ * still proceed and create one later from the sidebar or composer.
  */
 export function Onboarding() {
   const runtimes = useStore((s) => s.runtimes);
@@ -23,8 +20,8 @@ export function Onboarding() {
 
   const [step, setStep] = useState(0);
   const [espMsg, setEspMsg] = useState<string | null>(null);
-  const [creatingMaster, setCreatingMaster] = useState(false);
-  const [masterErr, setMasterErr] = useState<string | null>(null);
+  const [creatingAgent, setCreatingAgent] = useState(false);
+  const [agentErr, setAgentErr] = useState<string | null>(null);
 
   const total = 5;
   const isLast = step === total - 1;
@@ -37,24 +34,20 @@ export function Onboarding() {
     else setEspMsg("已发起 BLE 连接…");
   };
 
-  /** Create the orchestrator master agent, then finish onboarding. */
-  const handleCreateMaster = async () => {
-    setCreatingMaster(true);
-    setMasterErr(null);
+  /** Create the first agent session, then finish onboarding. */
+  const handleCreateAgent = async () => {
+    setCreatingAgent(true);
+    setAgentErr(null);
     try {
-      // A master may already exist (e.g. restored from a previous session after
-      // a localStorage reset). Don't spawn a duplicate — just finish.
-      if (useStore.getState().masterAgentId) {
+      if (useStore.getState().agents.size > 0) {
         setOnboarded(true);
         return;
       }
-      await spawnAgent("master");
+      await spawnAgent();
       setOnboarded(true);
     } catch (e) {
-      setMasterErr(
-        `创建失败：${e}。可稍后在左侧栏「Master」组或底部输入框重试。`
-      );
-      setCreatingMaster(false);
+      setAgentErr(`创建失败：${e}。可稍后在左侧栏或底部输入框重试。`);
+      setCreatingAgent(false);
     }
   };
 
@@ -78,8 +71,8 @@ export function Onboarding() {
           <div className="onboarding-step">
             <div className="onboarding-step-title">欢迎使用 CaPilot</div>
             <p className="onboarding-step-desc">
-              以 IDE 为中心的 Agent 编排工作台：Master 分配任务，多个 Worker
-              并行执行，报告自动汇总。跟随引导完成基础设置，即可开始使用。
+              以 IDE 为中心的本地 AI 编码工作台，可统一启动和管理多种 Agent
+              CLI 会话。跟随引导完成基础设置，即可开始使用。
             </p>
           </div>
         )}
@@ -154,25 +147,23 @@ export function Onboarding() {
 
         {step === 3 && (
           <div className="onboarding-step">
-            <div className="onboarding-step-title">创建 Master agent</div>
+            <div className="onboarding-step-title">创建第一个 Agent 会话</div>
             <p className="onboarding-step-desc">
-              Master 是编排的核心：你向它下发任务，它调度多个 Worker 并行执行，
-              并自动汇总报告。先创建一个 Master，即可开始第一个工作流。
+              创建一个 Agent 终端，即可在底部输入框或原生终端界面中开始工作。
             </p>
-            <div className="onboarding-master">
-              {masterErr && (
-                <div className="onboarding-master-err">{masterErr}</div>
+            <div className="onboarding-agent">
+              {agentErr && (
+                <div className="onboarding-agent-err">{agentErr}</div>
               )}
               <button
                 className="onboarding-btn onboarding-btn-primary"
-                onClick={handleCreateMaster}
-                disabled={creatingMaster}
+                onClick={handleCreateAgent}
+                disabled={creatingAgent}
               >
-                {creatingMaster ? "正在创建…" : "🚀 创建 Master agent 并开始"}
+                {creatingAgent ? "正在创建…" : "🚀 创建 Agent 会话并开始"}
               </button>
-              <div className="onboarding-master-hint">
-                也可以点击下方「下一步」跳过——稍后在左侧栏「Master」组或底部
-                输入框都能创建。
+              <div className="onboarding-agent-hint">
+                也可以点击下方「下一步」跳过，稍后从项目侧栏或底部输入框创建。
               </div>
             </div>
           </div>
@@ -182,9 +173,8 @@ export function Onboarding() {
           <div className="onboarding-step">
             <div className="onboarding-step-title">准备就绪</div>
             <p className="onboarding-step-desc">
-              所有基础设置已完成。点击「开始使用」进入 CaPilot IDE：Master 组
-              的「+」可新建终端；底部输入框会向 Master 下发任务（若尚未创建
-              Master，发送消息会自动创建）。
+              所有基础设置已完成。点击「开始使用」进入 CaPilot IDE；项目旁的
+              「+」可新建终端，底部输入框会向当前 Agent 会话发送消息。
             </p>
           </div>
         )}
@@ -206,7 +196,7 @@ export function Onboarding() {
                 onClick={() => {
                   setStep((s) => s - 1);
                   setEspMsg(null);
-                  setMasterErr(null);
+                  setAgentErr(null);
                 }}
               >
                 上一步

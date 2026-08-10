@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useStore, Tab, AgentInfo } from "../../state/store";
-import { closeAgent as closeAgentAction, MASTER_PROJECT } from "../../state/agentActions";
+import { closeAgent as closeAgentAction } from "../../state/agentActions";
 import { TerminalTemplatePicker } from "./TerminalTemplatePicker";
 
 function projectOf(cwd: string): string {
@@ -28,7 +28,7 @@ function projectRootOfPath(
 }
 
 /** Map a tab to its owning project, or undefined when it can't be determined.
- *  - agent tab → the agent's cwd via `projectOf` (master-group cwd → "master")
+ *  - agent tab → the agent's cwd via `projectOf`
  *  - editor tab → longest matching `projectRoots` prefix, else `projectOf` on
  *    the file path's dirname */
 function tabProject(
@@ -37,8 +37,6 @@ function tabProject(
   projectRoots: Record<string, string>
 ): string | undefined {
   if (tab.type === "agent") {
-    // Pinned master placeholder tab (no live agent yet).
-    if (tab.id === "master") return "master";
     if (tab.agentId) {
       const agent = agents.get(tab.agentId);
       if (agent?.workspace_id && agent.project) return agent.project;
@@ -95,12 +93,11 @@ export function TabBar() {
       : undefined;
     // The focused project defines the currently visible tab set. Prefer the
     // active tab when it belongs to that set (especially editor tabs), then
-    // fall back to the focused project. Only an entirely unscoped view should
-    // create under the pinned Master group.
+    // fall back to the focused project or the default workspace.
     const project =
       activeProject && (!focusedProject || activeProject === focusedProject)
         ? activeProject
-        : focusedProject ?? MASTER_PROJECT;
+        : focusedProject ?? "default";
     setTermPicker({ x: r.right, y: r.bottom, project });
   };
 
@@ -116,18 +113,12 @@ export function TabBar() {
       {visibleTabs.map((tab) => {
         const agent = tab.agentId ? agents.get(tab.agentId) : undefined;
         const status = agent?.status || "idle";
-        const roleBadge = agent?.role && agent.role !== "standalone" ? ` · ${agent.role}` : "";
         // Agent records are the live source of truth for terminal names. A
         // tab's title is only the snapshot taken when it was opened, so it can
         // become stale after restoring/resuming a session (or any runtime
         // update that replaces AgentInfo). The sidebar already renders from
-        // `agents`; doing the same here keeps both labels in lockstep. Master
-        // is intentionally named "master" in the pinned sidebar row.
-        const title = tab.type === "agent"
-          ? agent?.role === "master"
-            ? "master"
-            : agent?.title || tab.title
-          : tab.title;
+        // `agents`; doing the same here keeps both labels in lockstep.
+        const title = tab.type === "agent" ? agent?.title || tab.title : tab.title;
         return (
           <div
             key={tab.id}
@@ -142,32 +133,21 @@ export function TabBar() {
             onClick={() => setActiveTab(tab.id)}
           >
             <span className={`tab-dot ${status}`} />
-            {agent?.requires_attention && (
-              <span
-                className={`tab-attention ${agent.attention_reason ?? "finished"}`}
-                title={agent.attention_reason === "error" ? "需要处理：异常退出" : "任务已完成"}
-              >
-                !
-              </span>
-            )}
             <span>
               {tab.type === "agent" ? "🤖" : "📄"}{title}
             </span>
             {agent?.runtime && (
-              <span className="tab-runtime">{agent.runtime}{roleBadge}</span>
+              <span className="tab-runtime">{agent.runtime}</span>
             )}
             <button
               className="tab-close"
               onClick={(e) => {
                 e.stopPropagation();
-                // A worker's home is the sidebar worker track: closing its tab
-                // only hides the view and leaves the task/PTY alive. Explicit
-                // archive/delete remains available from the sidebar. Ended
-                // sessions likewise stay recoverable.
+                // Ended sessions stay recoverable from the sidebar.
                 if (tab.type === "agent" && tab.agentId) {
-                  if (agent?.status === "done" || agent?.role === "worker") {
+                  if (agent?.status === "done") {
                     closeTab(tab.id);
-                    if (agent?.status === "done") dropAgentChannel(tab.agentId);
+                    dropAgentChannel(tab.agentId);
                   } else {
                     closeAgentAction(tab.agentId);
                   }
@@ -179,8 +159,6 @@ export function TabBar() {
                 tab.type === "agent" && tab.agentId
                   ? agent?.status === "done"
                     ? "关闭（已结束，可从侧栏找回）"
-                    : agent?.role === "worker"
-                      ? "关闭视图（worker 继续运行）"
                     : "关闭并终止"
                   : "关闭标签"
               }
@@ -206,7 +184,6 @@ export function TabBar() {
         <TerminalTemplatePicker
           project={termPicker.project}
           anchor={termPicker}
-          role="standalone"
           onClose={() => setTermPicker(null)}
         />
       )}

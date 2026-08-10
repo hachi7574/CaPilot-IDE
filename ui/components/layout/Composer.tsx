@@ -18,14 +18,10 @@ import type {
   ThinkingOptionInfo,
 } from "../../state/store";
 import { spawnAgent, ensureAgentChannel } from "../../state/agentActions";
-import { setAgentRole } from "../../state/orchestration";
 import { PermissionConfirmationDialog } from "./PermissionConfirmationDialog";
 
 const DEFAULT_RUNTIME = "claude";
 type ComposerPermissionMode = PermissionMode;
-
-const MASTER_ORCHESTRATION_INSTRUCTIONS = `[CaPilot Master]
-用户点名一个 Worker 时：先运行 capilot status；只按返回的完整名称调用 capilot dispatch --worker "<名称>" --title "<标题>" --prompt "<任务>"。不得假装 Worker 已执行；找不到名称时原样告知用户并列出 available_workers。当前一次请求只调度一个 Worker。`;
 
 // Claude Code's Shift+Tab cycle is not the same order as the permission menu:
 // manual → acceptEdits → plan → bypassPermissions → auto. Keep this explicit;
@@ -62,7 +58,6 @@ export function Composer() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const composerOpen = useStore((s) => s.composerOpen);
-  const composerTarget = useStore((s) => s.composerTarget);
   const permissionMode = useStore((s) => s.permissionMode);
   const speed = useStore((s) => s.speed);
   const selectedModel = useStore((s) => s.selectedModel);
@@ -70,17 +65,12 @@ export function Composer() {
   const tabs = useStore((s) => s.tabs);
   const agents = useStore((s) => s.agents);
   const runtimes = useStore((s) => s.runtimes);
-  const masterAgentId = useStore((s) => s.masterAgentId);
-  const workerUnlockId = useStore((s) => s.workerUnlockId);
 
   const toggleComposer = useStore((s) => s.toggleComposer);
-  const setComposerTarget = useStore((s) => s.setComposerTarget);
   const composerH = useStore((s) => s.composerH);
-  const masterReportH = useStore((s) => s.masterReportH);
   const setComposerH = useStore((s) => s.setComposerH);
   const pushDraft = useStore((s) => s.pushDraft);
   const navigateDraft = useStore((s) => s.navigateDraft);
-  const setWorkerUnlock = useStore((s) => s.setWorkerUnlock);
 
   const [atMenu, setAtMenu] = useState<AtMenuState | null>(null);
   const [dragHover, setDragHover] = useState(false);
@@ -123,20 +113,9 @@ export function Composer() {
   // allow two slider clicks to interleave and land on an unintended mode.
   const permissionSwitchingRef = useRef(false);
   const modelSwitchingRef = useRef(false);
-  // Auto-relock timer for the composer 解锁 (mirrors XTermPanel's 8s window).
-  const unlockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Clear the composer unlock timer on unmount.
-  useEffect(() => {
-    return () => {
-      if (unlockTimerRef.current) clearTimeout(unlockTimerRef.current);
-    };
-  }, []);
-
   // Keep the textarea in the right mode when the composer switches between
-  // auto-height and a fixed height (e.g. the master report height lands on
-  // mount, or the user drags the divider).
-  const fixedHeight = composerH !== null || masterReportH > 0;
+  // auto-height and a fixed user-selected height.
+  const fixedHeight = composerH !== null;
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
@@ -149,33 +128,14 @@ export function Composer() {
   }, [fixedHeight]);
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
-  const targetAgentId =
-    composerTarget === "agent" ? activeTab?.agentId : undefined;
-
-  // The selected terminal defines the default send target (DevPlan §3.1/3.2).
-  // Previously `composerTarget` stayed at its initial "master" value until the
-  // user pressed Tab, so selecting a standalone/Codex terminal still sent the
-  // composer text to Master and appeared to do nothing in the visible terminal.
-  // This runs only when the selected tab changes; Tab can still override the
-  // target while the user remains on the same terminal.
-  useEffect(() => {
-    if (activeTab?.type !== "agent") return;
-    if (activeTab.id === "master") {
-      setComposerTarget("master");
-      return;
-    }
-    if (!activeTab.agentId) return;
-    const role = useStore.getState().agents.get(activeTab.agentId)?.role;
-    setComposerTarget(role === "master" ? "master" : "agent");
-  }, [activeTabId, activeTab?.type, activeTab?.agentId, setComposerTarget]);
+  const targetAgentId = activeTab?.agentId;
 
   // ── Per-session composer config ────────────────────────────────
   // The permission/speed/model controls show and edit the CURRENT target
   // session's own values (falling back to the global "next spawn" defaults when
   // no session is targeted). Changing one applies to that session (persisted,
   // takes effect on next resume) and remembers the choice for new sessions.
-  const configAgentId =
-    composerTarget === "master" ? masterAgentId ?? undefined : activeTab?.agentId;
+  const configAgentId = activeTab?.agentId;
   const configAgent = configAgentId ? agents.get(configAgentId) : undefined;
   const configRuntimeId = configAgent?.runtime ?? DEFAULT_RUNTIME;
   const configRuntime = runtimes.find((runtime) => runtime.id === configRuntimeId);
@@ -200,21 +160,19 @@ export function Composer() {
       if (patch.speed !== undefined) s.setSpeed(patch.speed as never);
       if (patch.model !== undefined) s.setSelectedModel(patch.model);
       // Apply to the current session (persisted; takes effect on next resume).
-      const id =
-        composerTarget === "master" ? s.masterAgentId : activeTab?.agentId;
+      const id = activeTab?.agentId;
       if (!id || !s.agents.has(id)) return;
       s.addAgent({ ...s.agents.get(id)!, ...patch }, null);
       invoke("agent_set_session_config", { id, ...patch }).catch(() => {});
     },
-    [composerTarget, activeTab?.agentId]
+    [activeTab?.agentId]
   );
 
   const applyPermissionMode = useCallback(
     async (mode: ComposerPermissionMode) => {
       if (permissionSwitchingRef.current) return;
       const s = useStore.getState();
-      const id =
-        composerTarget === "master" ? s.masterAgentId : activeTab?.agentId;
+      const id = activeTab?.agentId;
       const agent = id ? s.agents.get(id) : undefined;
       if (!id || !agent) {
         s.setPermissionMode(mode);
@@ -340,14 +298,14 @@ export function Composer() {
         permissionSwitchingRef.current = false;
       }
     },
-    [composerTarget, activeTab?.agentId, permissionModes]
+    [activeTab?.agentId, permissionModes]
   );
 
   const applyModel = useCallback(
     async (modelId: string) => {
       if (modelSwitchingRef.current) return;
       const s = useStore.getState();
-      const id = composerTarget === "master" ? s.masterAgentId : activeTab?.agentId;
+      const id = activeTab?.agentId;
       const agent = id ? s.agents.get(id) : undefined;
       if (!id || !agent) {
         s.setSelectedModel(modelId);
@@ -387,12 +345,12 @@ export function Composer() {
         modelSwitchingRef.current = false;
       }
     },
-    [composerTarget, activeTab?.agentId, models]
+    [activeTab?.agentId, models]
   );
 
   const cycleOpenCodeAgent = useCallback(async () => {
     const s = useStore.getState();
-    const id = composerTarget === "master" ? s.masterAgentId : activeTab?.agentId;
+    const id = activeTab?.agentId;
     const agent = id ? s.agents.get(id) : undefined;
     if (!id || agent?.runtime !== "opencode") return;
     try {
@@ -408,24 +366,17 @@ export function Composer() {
     } catch (error) {
       console.error("OpenCode agent switch failed:", error);
     }
-  }, [composerTarget, activeTab?.agentId]);
-
-  // DevPlan §4.6: worker terminals lock the composer input to prevent
-  // orchestration conflicts. Locked → readOnly + 仍然发送/解锁 affordance.
-  const activeAgent = activeTab?.agentId ? agents.get(activeTab.agentId) : undefined;
-  const workerLocked = composerTarget === "agent" && activeAgent?.role === "worker";
-  const unlocked = workerUnlockId === activeTab?.agentId;
-  const locked = workerLocked && !unlocked;
+  }, [activeTab?.agentId]);
 
   // ── Esc → abort the target agent's current operation ──────────
   // Sends a raw ESC byte to the agent's PTY — the same path the terminal uses
   // (xterm keydown → agent_write raw:true), so the CLI aborts its in-flight
   // turn exactly like pressing Esc inside the terminal.
   const abortAgentOperation = useCallback(() => {
-    const id = composerTarget === "agent" ? activeTab?.agentId : masterAgentId;
+    const id = activeTab?.agentId;
     if (!id || !agents.has(id)) return;
     invoke("agent_write", { id, data: "\u001b", raw: true }).catch(() => {});
-  }, [composerTarget, activeTab?.agentId, masterAgentId, agents]);
+  }, [activeTab?.agentId, agents]);
 
   // ── Popover open/close (click-outside + Escape) ───────────────
   useEffect(() => {
@@ -478,11 +429,10 @@ export function Composer() {
 
   // ── Text helpers ──────────────────────────────────────────────
   const resizeTextarea = useCallback((el: HTMLTextAreaElement) => {
-    // Fixed-height composer (default = master report height, or user-dragged):
-    // the textarea fills the input area and scrolls internally. In the default
+    // A fixed-height composer fills the input area and scrolls internally. In
     // auto-height mode it grows with its content instead (capped at 200px).
     const s = useStore.getState();
-    if (s.composerH !== null || s.masterReportH > 0) {
+    if (s.composerH !== null) {
       el.style.height = "100%";
       return;
     }
@@ -638,10 +588,7 @@ export function Composer() {
   // ── `@` file autocomplete (DevPlan §3.2) ──────────────────────
   const resolveTargetCwd = useCallback((): string | null => {
     const s = useStore.getState();
-    const id =
-      s.composerTarget === "agent"
-        ? s.tabs.find((t) => t.id === s.activeTabId)?.agentId
-        : s.masterAgentId;
+    const id = s.tabs.find((t) => t.id === s.activeTabId)?.agentId;
     return id ? s.agents.get(id)?.cwd ?? null : null;
   }, []);
 
@@ -798,13 +745,10 @@ export function Composer() {
     const raw = el.value.trim();
     if (!raw) return;
     // `!命令` 直发终端（绕过 agent 会话，DevPlan §4.3）：去掉 `!` 标记，其余原样
-    // 发送（不做 smart 包装）。视觉上由 `.composer-bang` 徽标标注。
+    // 发送。视觉上由 `.composer-bang` 徽标标注。
     const isBang = raw.startsWith("!");
     const text = isBang ? raw.slice(1).trimStart() : raw;
-    const agentInput =
-      composerTarget === "master" && !isBang
-        ? `${MASTER_ORCHESTRATION_INSTRUCTIONS}\n\n用户请求：\n${text}`
-        : text;
+    const agentInput = text;
     pushDraft(raw);
 
     // Clear the textarea synchronously before any await so a second Enter can't
@@ -820,17 +764,8 @@ export function Composer() {
     let justSpawned = false;
     try {
       if (!agentId) {
-        if (composerTarget === "master") {
-          // Reuse the existing master session instead of spawning a new one.
-          if (masterAgentId && agents.has(masterAgentId)) {
-            agentId = masterAgentId;
-          }
-        }
-        if (!agentId) {
-          const role = composerTarget === "master" ? "master" : "standalone";
-          agentId = await spawnAgent(role);
-          justSpawned = true;
-        }
+        agentId = await spawnAgent();
+        justSpawned = true;
       }
 
       // Resumed/restored sessions may not have a channel yet.
@@ -871,42 +806,14 @@ export function Composer() {
     } catch (err) {
       console.error("Failed to send to agent:", err);
     } finally {
-      // Relock worker input even when the send fails (Bug 6), and release the
-      // in-flight guard so the next Enter can send again.
-      if (unlockTimerRef.current) {
-        clearTimeout(unlockTimerRef.current);
-        unlockTimerRef.current = null;
-      }
-      setWorkerUnlock(null);
+      // Release the in-flight guard so the next Enter can send again.
       sendingRef.current = false;
     }
   }, [
     targetAgentId,
-    composerTarget,
-    masterAgentId,
-    agents,
     resizeTextarea,
     pushDraft,
-    setWorkerUnlock,
   ]);
-
-  /** 解锁 — allow worker input for 8s (mirrors XTermPanel's auto-relock, Bug 6). */
-  const handleUnlock = useCallback(() => {
-    const id = activeTab?.agentId;
-    if (!id) return;
-    setWorkerUnlock(id);
-    if (unlockTimerRef.current) clearTimeout(unlockTimerRef.current);
-    unlockTimerRef.current = setTimeout(() => {
-      const s = useStore.getState();
-      if (s.workerUnlockId === id) s.setWorkerUnlock(null);
-    }, 8000);
-  }, [activeTab?.agentId, setWorkerUnlock]);
-
-  const handleStillSend = useCallback(async () => {
-    if (!activeTab?.agentId) return;
-    handleUnlock(); // allow a single send…
-    await handleSend(); // …which relocks after sending.
-  }, [activeTab?.agentId, handleSend, handleUnlock]);
 
   // ── Keyboard ──────────────────────────────────────────────────
   const handleKeyDown = useCallback(
@@ -951,7 +858,6 @@ export function Composer() {
 
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
-        if (locked) return; // 锁定期间不静默发送，走 banner 二选一
         handleSend();
       } else if (e.key === "Tab") {
         e.preventDefault();
@@ -971,8 +877,6 @@ export function Composer() {
           } else {
             void applyPermissionMode(next.id);
           }
-        } else {
-          setComposerTarget(composerTarget === "agent" ? "master" : "agent");
         }
       } else if (e.key === "ArrowUp" && !e.currentTarget.value) {
         e.preventDefault();
@@ -987,11 +891,10 @@ export function Composer() {
           e.currentTarget.value = draft;
         }
       } else if (e.key === "Escape") {
-        // 终端式中断：向目标 agent 的 PTY 发原始 ESC 字节。worker 锁定期间
-        // 与终端一致不转发（终端在 lock 状态下同样吞掉所有按键）；模型/文件
-        // 弹出菜单打开时，这次 Esc 只负责关菜单（窗口级监听），不中断。
+        // 终端式中断：向目标 agent 的 PTY 发原始 ESC 字节。模型/文件弹出
+        // 菜单打开时，这次 Esc 只负责关菜单（窗口级监听），不中断。
         e.preventDefault();
-        if (!locked && !modelMenuOpen && !permissionMenuOpen && !thinkingMenuOpen && !refMenuOpen) abortAgentOperation();
+        if (!modelMenuOpen && !permissionMenuOpen && !thinkingMenuOpen && !refMenuOpen) abortAgentOperation();
       }
     },
     [
@@ -1004,10 +907,7 @@ export function Composer() {
       cycleOpenCodeAgent,
       applyConfig,
       applyPermissionMode,
-      composerTarget,
-      setComposerTarget,
       navigateDraft,
-      locked,
       modelMenuOpen,
       permissionMenuOpen,
       thinkingMenuOpen,
@@ -1059,9 +959,7 @@ export function Composer() {
 
   const resetComposerH = useCallback(() => setComposerH(null), [setComposerH]);
 
-  // Effective composer height: user-dragged value wins; otherwise follow the
-  // master report's measured height; otherwise stay auto-sized.
-  const effH = composerH ?? (masterReportH > 0 ? masterReportH : null);
+  const effH = composerH;
 
   return (
     <div
@@ -1069,8 +967,7 @@ export function Composer() {
       className={`composer${!composerOpen ? " composer-collapsed" : ""}`}
       style={composerOpen && effH ? { height: effH } : undefined}
     >
-      {/* Height divider: drag to resize, double-click to reset to the default
-          (master-report) height. */}
+      {/* Height divider: drag to resize, double-click to reset. */}
       {composerOpen && (
         <div
           className={`composer-resize${composerResizing ? " active" : ""}`}
@@ -1081,18 +978,12 @@ export function Composer() {
       )}
       {/* Target line */}
       <div className="composer-target">
-        {composerTarget === "master" ? (
-          <span>→ master</span>
-        ) : (
-          <span>
-            → agent:{" "}
-            {activeTab?.type === "agent" && activeTab.agentId
-              ? activeTab.title || "agent"
-              : "(无标签)"}
-          </span>
-        )}
-        {activeAgent?.role === "worker" ? " · worker" : ""}
-        {workerLocked ? " · 🔒worker" : ""}
+        <span>
+          → agent:{" "}
+          {activeTab?.type === "agent" && activeTab.agentId
+            ? activeTab.title || "agent"
+            : "(无标签)"}
+        </span>
         {isBangInput && <span className="composer-bang">⚡ 终端直发</span>}
       </div>
 
@@ -1105,33 +996,12 @@ export function Composer() {
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
-        {locked && (
-          <div className="lock-banner">
-            <span className="lock-banner-text">🔒 此 agent 是 worker，输入会被编排结果覆盖</span>
-            <button className="lock-btn" onClick={handleStillSend}>
-              仍然发送
-            </button>
-            <button className="lock-btn" onClick={handleUnlock}>
-              解锁
-            </button>
-          </div>
-        )}
-        {unlocked && workerLocked && (
-          <div className="lock-banner unlocked">
-            <span className="lock-banner-text">🔓 已解锁（发送后重新锁定）</span>
-          </div>
-        )}
         <div className="ul-composer-input-row">
           <textarea
             ref={textareaRef}
-            className={`composer-input${locked ? " locked" : ""}`}
-            placeholder={
-              locked
-                ? "🔒 worker — 输入被编排锁定"
-                : "发消息…（/ 命令 · @ 文件 · ! 终端 · 拖入文件）"
-            }
+            className="composer-input"
+            placeholder="发消息…（/ 命令 · @ 文件 · ! 终端 · 拖入文件）"
             rows={2}
-            readOnly={locked}
             onKeyDown={handleKeyDown}
             onInput={handleInput}
           />
@@ -1139,7 +1009,7 @@ export function Composer() {
             className="ul-send-btn"
             title="发送消息（Enter）"
             onClick={() => handleSend()}
-            disabled={locked || sendingRef.current || !hasInput}
+            disabled={sendingRef.current || !hasInput}
           >
             发送
           </button>
@@ -1301,28 +1171,6 @@ export function Composer() {
             )}
           </span>
         )}
-        <span className="act-sep" />
-        <span
-          className={`act-btn accent${activeAgent?.role === "worker" ? " active" : ""}${!activeAgent || activeAgent.role === "master" ? " disabled" : ""}`}
-          title={
-            !activeAgent
-              ? "请先选择一个会话"
-              : activeAgent.role === "master"
-                ? "Master 会话不能设为 worker"
-                : activeAgent.role === "worker"
-                  ? "取消当前会话的 worker 角色"
-                  : "将当前会话设为 worker"
-          }
-          onClick={() => {
-            if (!activeTab?.agentId || !activeAgent || activeAgent.role === "master") return;
-            setAgentRole(
-              activeTab.agentId,
-              activeAgent.role === "worker" ? "standalone" : "worker"
-            );
-          }}
-        >
-          🤖worker {activeAgent?.role === "worker" ? "开" : "关"}
-        </span>
         <span className="act-sep" />
         {permissionModes.length > 0 && (
           <span className="cmp-pop" ref={permissionAnchorRef}>

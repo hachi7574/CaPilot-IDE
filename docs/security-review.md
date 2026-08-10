@@ -44,7 +44,7 @@ Current grants: `core:default`, `opener:default`, `updater:default`, `notificati
 |---|---|---|
 | `core:default` | Yes | Baseline Tauri core. |
 | `updater:default` | Yes (scaffolding) | Exposes `check`/`download`/`install` to the webview. Endpoint is a placeholder today, so calls fail harmlessly. Keep for scaffolding; must be backed by a real endpoint + pubkey before release. |
-| `notification:default` | Yes | Required by the `notify` command (worker-done / ESP-drop alerts). |
+| `notification:default` | Yes | Required by the `notify` command (ESP-drop alerts). |
 | `store:default` | Yes | Persistent settings KV store. |
 | `log:default` | Yes (dev) | Logger; can be trimmed for release. |
 | `process:default` | Low risk | App `exit`/`restart` only; does **not** include `kill-child` (correctly absent). |
@@ -103,7 +103,7 @@ scoping:
 | `git_*` (`git_status`, `git_stage`, `git_commit`, `git_pull`, `git_push`, …) | Accept an arbitrary `repo` path, **not** validated to be a known workspace. A compromised frontend can run git in any readable directory (e.g., `git push` from `/etc`). Low–moderate. |
 | `agent_spawn` | Spawns new PTY sessions (including `bash`); a compromised frontend can spawn shells or exhaust resources. By design; consider a session cap. |
 | `sessions_delete` | Removes an agent workspace dir; path is derived from persisted data — OK. |
-| `notify`, `resource_history`, `smart_return_*`, `worker_status` | Low risk. |
+| `notify`, `resource_history` | Low risk. |
 
 ---
 

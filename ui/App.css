@@ -130,20 +130,6 @@ body::after {
 .proj-dropzone { flex: 1; min-height: 40px; }
 .proj-dropzone.dragging { outline: 1px dashed var(--brand); background: rgba(139,92,246,.05); }
 
-/* Master pinned */
-.master-pinned { border-bottom: 2px solid var(--rule); }
-.master-header {
-  display: flex; align-items: center; gap: 6px; padding: 7px 10px;
-  font-family: var(--mono); font-size: var(--fs-sm); color: var(--ai);
-  cursor: pointer; transition: background .2s var(--ease-apple);
-}
-.master-header:hover { background: var(--bg3); }
-.master-header .m-icon { font-size: var(--fs-md); }
-.master-header .m-name { flex: 1; font-weight: 700; }
-.master-header .m-arrow { font-family: var(--pixel); font-size: var(--fs-2xs); color: var(--muted); transition: transform .2s var(--ease-apple); }
-.master-pinned.collapsed .m-arrow { transform: rotate(-90deg); }
-.master-pinned.collapsed .terminal-item { display: none; }
-
 /* Project */
 .proj { border-bottom: 1px solid var(--rule); }
 .proj-header {
@@ -238,19 +224,6 @@ body::after {
 .tab-dot.done { background: var(--success); }
 .tab-dot.idle { background: var(--muted); }
 .tab-dot.failed { background: var(--danger); }
-.tab-attention {
-  display: inline-grid;
-  place-items: center;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: var(--warn);
-  color: #090b10;
-  font-size: 10px;
-  font-weight: 800;
-}
-.tab-attention.error { background: var(--danger); color: white; }
-
 /* xterm's cursor blink is an injected infinite CSS keyframe animation (option
    or DEC mode 12 both enable it). WebKitGTK's software compositor repaints the
    whole window at 60 fps for any CSS animation (~1 full core, measured) — the
@@ -340,31 +313,6 @@ body::after {
   flex: 1; overflow-y: auto; border-bottom: 2px solid var(--rule);
   display: flex; flex-direction: column;
 }
-
-/* Master Report */
-.master-report {
-  flex-shrink: 0; background: var(--bg2); max-height: 42%; overflow-y: auto;
-}
-.report-header {
-  display: flex; align-items: center; padding: 6px 14px;
-  font-family: var(--pixel); font-size: var(--fs-2xs); line-height: 1; color: var(--ai);
-  letter-spacing: 1px; text-transform: uppercase; cursor: pointer;
-  border-bottom: 1px solid var(--rule);
-  transition: background .2s var(--ease-apple);
-}
-.report-header:hover { background: var(--bg3); }
-.report-toggle { margin-left: auto; font-size: var(--fs-md); color: var(--muted); }
-.report-body { padding: 10px 14px; font-size: var(--fs-base); }
-.report-time { font-family: var(--mono); font-size: var(--fs-xs); color: var(--muted); margin-bottom: 6px; }
-.report-quote { color: var(--ai); font-style: italic; margin-bottom: 8px; line-height: 1.6; }
-.report-meta { font-family: var(--mono); font-size: var(--fs-xs); color: var(--muted); line-height: 1.7; }
-.report-actions { display: flex; gap: 6px; margin-top: 10px; }
-.report-actions .rbtn {
-  font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 1px; padding: 5px 10px;
-  color: var(--ai); border: 1px solid var(--ai-dim); background: rgba(196,181,253,.04);
-  cursor: pointer; text-transform: uppercase; transition: all .2s var(--ease-apple);
-}
-.report-actions .rbtn:hover { background: rgba(196,181,253,.1); }
 
 /* ── Overview Dashboard ───────────────────────────────────────── */
 
@@ -754,7 +702,7 @@ body::after {
 .nproj-btn.danger { color: var(--danger); border-color: var(--danger); }
 .nproj-btn.danger:hover { background: rgba(248, 113, 113, 0.1); color: var(--danger); }
 
-/* Worker toggle active state */
+/* Active action state */
 .act-btn.active { border-color: var(--brand); background: rgba(139, 92, 246, 0.18); color: var(--brand); box-shadow: 0 0 8px rgba(139, 92, 246, 0.3); }
 
 /* Status bar off state */
@@ -864,40 +812,7 @@ body::after {
 .drop-zone.top { top: 0; left: 0; right: 0; height: 30%; }
 .drop-zone.bottom { bottom: 0; left: 0; right: 0; height: 30%; }
 
-/* ── Worker lock (DevPlan §4.6) ───────────────────────────────── */
-
 .tab-item.dragging { opacity: 0.5; }
-
-.lock-banner {
-  display: flex; align-items: center; gap: 8px;
-  padding: 5px 14px; border-bottom: 1px solid var(--rule);
-  background: rgba(250, 204, 21, 0.06); font-size: var(--fs-sm); color: var(--warn);
-}
-.lock-banner.unlocked { background: rgba(74, 222, 128, 0.06); color: var(--success); }
-.lock-banner-text { flex: 1; font-family: var(--mono); }
-.lock-btn {
-  font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 1px;
-  padding: 3px 8px; color: var(--warn); border: 1px solid rgba(250, 204, 21, 0.4);
-  background: transparent; cursor: pointer; text-transform: uppercase;
-}
-.lock-btn:hover { background: rgba(250, 204, 21, 0.15); }
-
-.composer-input.locked { color: var(--muted); cursor: not-allowed; }
-
-.term-lock-banner {
-  position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
-  z-index: 30; display: flex; align-items: center; gap: 8px;
-  padding: 6px 12px; background: rgba(250, 204, 21, 0.1);
-  border: 1px solid rgba(250, 204, 21, 0.5); color: var(--warn);
-  font-size: var(--fs-sm); max-width: 90%;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-}
-.term-lock-banner button {
-  font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 1px;
-  padding: 3px 8px; color: var(--warn); border: 1px solid rgba(250, 204, 21, 0.4);
-  background: transparent; cursor: pointer; text-transform: uppercase;
-}
-.term-lock-banner button:hover { background: rgba(250, 204, 21, 0.15); }
 
 /* ── Onboarding (first-run) ────────────────────────────────────── */
 
@@ -1102,8 +1017,8 @@ body::after {
 }
 .onboarding-dot.active { background: var(--brand); }
 
-/* ── Onboarding "创建 Master" step ────────────────────────────── */
-.onboarding-master {
+/* ── Onboarding agent creation step ───────────────────────────── */
+.onboarding-agent {
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -1111,43 +1026,16 @@ body::after {
   background: var(--bg);
   border: 1px solid var(--rule);
 }
-.onboarding-master-err {
+.onboarding-agent-err {
   font-family: var(--mono);
   font-size: var(--fs-xs);
   color: var(--danger);
 }
-.onboarding-master-hint {
+.onboarding-agent-hint {
   font-family: var(--mono);
   font-size: var(--fs-xs);
   color: var(--muted);
   line-height: 1.6;
-}
-
-/* ── LeftSidebar Master-group empty state ("创建 Master 开始编排") ── */
-.uj-master-empty {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 10px;
-  cursor: pointer;
-  border: 1px dashed var(--brand-dim);
-  border-radius: 6px;
-  margin: 4px 8px 6px;
-  transition: background 0.15s ease, border-color 0.15s ease;
-}
-.uj-master-empty:hover {
-  background: rgba(139, 92, 246, 0.08);
-  border-color: var(--brand);
-}
-.uj-master-empty .tm-name {
-  flex: 1;
-  color: var(--brand);
-  font-size: var(--fs-sm);
-}
-.uj-master-empty .tm-time {
-  font-family: var(--pixel);
-  font-size: var(--fs-sm);
-  color: var(--brand);
 }
 
 .onboarding-nav { display: flex; gap: 10px; }
@@ -1184,7 +1072,7 @@ body::after {
   background: rgba(255, 71, 87, .12);
 }
 
-/* Disabled context-menu item (master info line) */
+/* Disabled context-menu item */
 .ctx-item.disabled {
   color: var(--muted);
   cursor: default;
@@ -1524,36 +1412,6 @@ body::after {
   text-overflow: ellipsis;
 }
 
-/* ── Master session = single purple button (u9-*) ─────────────── */
-
-.u9-master-btn {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 8px 10px;
-  background: var(--brand);
-  color: #F5F3FF;
-  font-family: var(--pixel);
-  font-size: var(--fs-xs);
-  letter-spacing: 1px;
-  text-transform: uppercase;
-  cursor: pointer;
-  border: none;
-  border-bottom: 2px solid var(--rule);
-  transition: background .2s var(--ease-apple);
-}
-.u9-master-btn:hover { background: var(--brand-dim); }
-.u9-master-btn.active {
-  box-shadow: inset 0 0 0 2px rgba(245, 243, 255, 0.35);
-}
-.u9-master-name {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 /* Collapsed overview section: summary row is the only line shown, and acts as
    the click-to-expand target (header row is not rendered in collapsed state). */
 .ov-section.collapsed .uf-ov-summary {
@@ -1621,44 +1479,6 @@ body::after {
   text-transform: uppercase;
   color: var(--muted);
 }
-
-/* ── Master group expand/collapse (uj-*) ────────────────────────
-   Master is a collapsible purple group (like a project): header toggles
-   expand; collapsed hides the master terminal row, standalone terminals,
-   and the "＋ 新建终端" affordance. The purple button look stays on the
-   existing .u9-master-btn rules. */
-
-.uj-master-group { border-bottom: 2px solid var(--rule); }
-/* The group owns the separator; drop the button's own border so there's no
-   doubled rule line. */
-.uj-master-group .u9-master-btn { border-bottom: none; }
-
-.uj-master-group.collapsed .terminal-item,
-.uj-master-group.collapsed .uj-master-new { display: none; }
-
-.uj-master-group .uj-master-arrow {
-  font-family: var(--pixel);
-  font-size: var(--fs-2xs);
-  color: rgba(245, 243, 255, 0.7);
-  flex-shrink: 0;
-  transition: transform 0.2s var(--ease-apple);
-}
-.uj-master-group.collapsed .uj-master-arrow { transform: rotate(-90deg); }
-
-.uj-master-group .uj-master-term .tm-name { color: var(--ai); }
-
-.uj-master-new {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 10px 5px 22px;
-  font-family: var(--mono);
-  font-size: var(--fs-xs);
-  color: var(--muted);
-  cursor: pointer;
-  transition: all 0.2s var(--ease-apple);
-}
-.uj-master-new:hover { background: var(--bg3); color: var(--brand); }
 
 /* ── LeftSidebar refinements (um-*) — hover "+" new-terminal on project headers ── */
 
@@ -1770,40 +1590,6 @@ body::after {
   max-width: 60%;
 }
 
-/* ── LeftSidebar master hover "+" (un-*) — mirrors .um-new-term on the purple
-   master header. Hidden by default; shown on hover / keyboard focus of the
-   header. Clicking spawns a terminal under the Master group. ─────────────── */
-
-.un-master-new {
-  display: none;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  margin-left: 2px;
-  flex-shrink: 0;
-  font-family: var(--pixel);
-  font-size: var(--fs-sm);
-  line-height: 1;
-  color: rgba(245, 243, 255, 0.85);
-  background: none;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  padding: 0;
-  transition: all .15s var(--ease-apple);
-}
-
-.u9-master-btn:hover .un-master-new,
-.u9-master-btn:focus-within .un-master-new {
-  display: flex;
-}
-
-.un-master-new:hover {
-  color: #F5F3FF;
-  background: rgba(245, 243, 255, 0.18);
-}
-
 /* ── New-project modal: git clone flow (un-*) — parent-dir picker row shows the
    chosen path (ellipsized); the "克隆并创建" button aligns right. ───────────── */
 
@@ -1875,16 +1661,6 @@ body::after {
 }
 
 /* ── Workspace focus model (uo-*) — single-select project focus ── */
-
-/* Subtle tint on the Master group when it is the focused project (mirrors the
-   `.proj.focused` highlight for dynamic projects). Clicking the ⭐ master
-   terminal focuses "master", so the group gets the same visual cue. */
-.uj-master-group.uo-master-focused {
-  background: rgba(139, 92, 246, 0.08);
-}
-.uj-master-group.uo-master-focused .u9-master-btn {
-  box-shadow: inset 3px 0 0 rgba(245, 243, 255, 0.9);
-}
 
 /* ── Git panel v2 — VS Code Source Control style (gv-*) ──────────
    Replaces the old flat git list with a VS Code-like SCM panel:

@@ -331,7 +331,6 @@ mod tests {
             model: Some("gpt-5.4".into()),
             cwd: "/tmp/project".into(),
             context_dir: "/tmp/project".into(),
-            role: crate::agent_runtime::adapter::AgentRole::Standalone,
             rows: 24,
             cols: 80,
             resume_key: resume_key.map(str::to_owned),

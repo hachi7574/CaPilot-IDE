@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useStore, FontScale } from "../../state/store";
 import { connectEsp, disconnectEsp } from "../../state/esp";
-import { setSmartReturn } from "../../state/orchestration";
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -17,8 +16,6 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const runtimes = useStore((s) => s.runtimes);
   const espStatus = useStore((s) => s.espStatus);
   const espConnecting = useStore((s) => s.espConnecting);
-  const smartReturn = useStore((s) => s.smartReturn);
-  const setSmartReturnState = useStore((s) => s.setSmartReturn);
   const setOnboarded = useStore((s) => s.setOnboarded);
   const fontScale = useStore((s) => s.fontScale);
   const setFontScale = useStore((s) => s.setFontScale);
@@ -59,12 +56,6 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     } catch {
       // ignore storage errors
     }
-  };
-
-  const toggleSmart = async () => {
-    const next = !smartReturn;
-    setSmartReturnState(next);
-    await setSmartReturn(next);
   };
 
   const handleEsp = async () => {
@@ -174,23 +165,6 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             通用偏好
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: "var(--fs-sm)" }}>
-            <span style={{ color: "var(--ink2)" }}>Master 智能返回</span>
-            <button
-              onClick={toggleSmart}
-              style={{
-                fontFamily: "var(--pixel)",
-                fontSize: "var(--fs-2xs)",
-                padding: "4px 10px",
-                border: `1px solid ${smartReturn ? "var(--success)" : "var(--rule2)"}`,
-                color: smartReturn ? "var(--success)" : "var(--muted)",
-                background: smartReturn ? "rgba(74,222,128,.08)" : "transparent",
-                cursor: "pointer",
-              }}
-            >
-              {smartReturn ? "开" : "关"}
-            </button>
-          </div>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: "var(--fs-sm)" }}>
             <span style={{ color: "var(--ink2)" }}>界面字体大小</span>
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -268,7 +242,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             通知
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: "var(--fs-sm)" }}>
-            <span style={{ color: "var(--ink2)" }}>系统通知（Worker 完成 / ESP 断连）</span>
+            <span style={{ color: "var(--ink2)" }}>系统通知（ESP 断连）</span>
             <button
               onClick={toggleNotifications}
               style={{
@@ -320,7 +294,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             CaPilot IDE <span style={{ fontFamily: "var(--mono)", color: "var(--muted)" }}>v{APP_VERSION}</span>
           </div>
           <div style={{ fontSize: "var(--fs-xs)", color: "var(--muted)", marginTop: 4, fontFamily: "var(--mono)" }}>
-            AI Agent Orchestration Workbench · Master/Worker
+            Local AI coding workspace
           </div>
         </div>
       </div>

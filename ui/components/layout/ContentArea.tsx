@@ -25,7 +25,7 @@ function Panel({ tab, onRemove }: { tab: Tab; onRemove?: () => void }) {
       </div>
       {tab.type === "agent" && tab.agentId && <XTermPanel agentId={tab.agentId} />}
       {tab.type === "agent" && !tab.agentId && (
-        <div className="panel-placeholder">Master 会话未启动 — 在输入框发消息自动创建</div>
+        <div className="panel-placeholder">会话未启动 — 在输入框发消息自动创建</div>
       )}
       {tab.type === "editor" && tab.filePath && <EditorPanel filePath={tab.filePath} />}
       {tab.type === "diff" && (

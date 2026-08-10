@@ -1,9 +1,8 @@
 # CaPilot IDE — 运行与维护手册
 
-> **日期:** 2026-08-06
+> **日期:** 2026-08-10
 > **定位:** 项目的「如何跑 / 已知坑 / 文档地图」运行手册。
-> 项目架构、模块划分、交互规格与开发进度见 [CaPilot-IDE-DevPlan.md](CaPilot-IDE-DevPlan.md)（v2.1，已同步实施进度）；产品需求见 [CaPilot-PRD.md](CaPilot-PRD.md)（v3.1）；安全细节见 [security-review.md](security-review.md)。
-> 本文不重复上述文档的架构论述，只收录项目运行维护所需、且未在其它文档中的可操作性信息（运行命令、设计资源位置、已知坑、安全注意）。
+> 安全细节见 [security-review.md](security-review.md)。
 
 ---
 
@@ -45,22 +44,20 @@ IDE 遵循 CaPilot 主仓库的 **LUCY styleguide**（8-bit Pixel × Apple Smoot
 - 颜色令牌定义在 `ui/App.css :root`（`@font-face` 引用 `/fonts/*.ttf`，全本地、无 Google Fonts）
 - 应用图标由主仓库 logo 生成于 `src-tauri/icons/`
 
-**同步规则：** `docs/styleguide/` 与 `docs/Assets/` 是主仓库 `Doc/styleguide/`、`Doc/Assets/` 的复制品，**改设计需两边同步**。同理 `docs/CaPilot-PRD.md` 也复制自主仓库 `Doc/CaPilot-PRD.md`，改文档需两边同步。
+**同步规则：** `docs/styleguide/` 与 `docs/Assets/` 是主仓库 `Doc/styleguide/`、`Doc/Assets/` 的复制品，**改设计需两边同步**。
 
 ## 3. 已知问题与技术债
 
 ### 已知技术债（Medium/Low，均未修）
 
 - `.lock().unwrap()` 毒化处理（多处 std Mutex）
-- dispatcher `reports` 日志无界增长（需环形缓冲）
 - `git_status` 未跟踪大文件整读入内存（应流式）
-- `resolve_worker` 前缀匹配歧义（短 id 可能派错 worker）
 - ESP `connected` 事件未带 `kind` 字段（前端 fallback 到 BLE）
 - `Persistence::open` 启动 expect（`$HOME` 不可写会 panic）
 
-> 已解决（2026-08-06）：「会话 permissionMode 未持久化」已在会话生命周期改造中一并完成 —— mode/speed/model 持久化进 `sessions` 表，Composer 三设置跟随当前会话，详见 DevPlan §6.3。
+> 已解决（2026-08-06）：「会话 permissionMode 未持久化」已在会话生命周期改造中一并完成 —— mode/speed/model 持久化进 `sessions` 表，Composer 三设置跟随当前会话。
 
-### 待开发项（DevPlan P3 剩余，详见 DevPlan §8/§9/§7.2）
+### 待开发项
 
 - **ESP**：USB（`UsbSerial`）/ WiFi（`WifiWs`）传输、配对向导、5s 心跳 / 15s 超时、控制帧 ack/重试
 - **语音链路**（最重）：ESP mic → Opus → BLE → Rust 解码 → sherpa-onnx 流式 STT → 实时字幕 → 回复 TTS
@@ -79,8 +76,5 @@ IDE 遵循 CaPilot 主仓库的 **LUCY styleguide**（8-bit Pixel × Apple Smoot
 | 文档 | 位置 | 内容 |
 | --- | --- | --- |
 | 本手册 | `docs/CaPilot-IDE-RUNBOOK.md` | 运行 / 已知坑 / 文档地图 |
-| 开发计划 | `docs/CaPilot-IDE-DevPlan.md` | DevPlan v2.1（架构 / 模块 / 交互 / 里程碑 / 决策清单，已同步实施进度）|
-| 产品需求 | `docs/CaPilot-PRD.md` | PRD v3.1（源：主仓库 `Doc/CaPilot-PRD.md`）|
 | 安全审查 | `docs/security-review.md` | CSP / 权限 / 路径 / IPC 审查与发布前 checklist |
 | LUCY 风格 | `docs/styleguide/` | 设计规范（源：主仓库 `Doc/styleguide/`）|
-| 界面预览 | `docs/CaPilot-IDE-Preview.html` | 参考 UI 设计（浏览器打开）|

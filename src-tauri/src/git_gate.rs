@@ -34,9 +34,6 @@ fn allowed_roots() -> Vec<PathBuf> {
             }
         }
     }
-    if let Some(capilot) = workspace.parent() {
-        roots.extend(capilot.join("Master").canonicalize());
-    }
     roots
 }
 

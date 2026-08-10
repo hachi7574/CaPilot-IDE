@@ -105,7 +105,7 @@ fn is_own_entry(
 /// Manages all PTY sessions. Stored as Tauri managed state (behind an Arc).
 ///
 /// Uses a `std::sync::Mutex` with synchronous methods so both async Tauri
-/// commands and the (sync) orchestrator socket handler can use it without
+/// commands and synchronous runtime callbacks can use it without
 /// holding locks across await points.
 pub struct PtyManager {
     children: Arc<Mutex<HashMap<AgentId, PtyChild>>>,
@@ -318,7 +318,6 @@ impl PtyManager {
             workspace_id: None,
             project: None,
             runtime: String::new(),
-            role: crate::agent_runtime::adapter::AgentRole::Standalone,
             status: AgentStatus::Running,
             title: String::new(),
             cwd: cwd.clone(),
@@ -408,11 +407,6 @@ impl PtyManager {
         for id in ids {
             let _ = self.kill(&id);
         }
-    }
-
-    /// True if a live PTY exists for the agent.
-    pub fn is_alive(&self, agent_id: &str) -> bool {
-        self.children.lock().unwrap().contains_key(agent_id)
     }
 
     /// Snapshot of live agent PIDs — `(agent_id, pid)`. Used by the resource
