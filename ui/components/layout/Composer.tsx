@@ -54,8 +54,35 @@ interface AtMenuState {
   idx: number;
 }
 
+interface SlashItem {
+  name: string;
+  description: string;
+  /** Exact provider-native text inserted into the Composer. */
+  invocation: string;
+  source: string;
+  kind: "skill" | "command";
+}
+
+interface SlashMenuState {
+  /** Index of the trigger `/` in the textarea value. */
+  anchor: number;
+  query: string;
+  items: SlashItem[];
+  idx: number;
+  loading: boolean;
+  mode: "commands";
+}
+
+interface ComposerDraftState {
+  value: string;
+  selectionStart: number;
+  selectionEnd: number;
+}
+
 export function Composer() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const atMenuRef = useRef<HTMLDivElement>(null);
+  const slashMenuRef = useRef<HTMLDivElement>(null);
 
   const composerOpen = useStore((s) => s.composerOpen);
   const permissionMode = useStore((s) => s.permissionMode);
@@ -73,6 +100,7 @@ export function Composer() {
   const navigateDraft = useStore((s) => s.navigateDraft);
 
   const [atMenu, setAtMenu] = useState<AtMenuState | null>(null);
+  const [slashMenu, setSlashMenu] = useState<SlashMenuState | null>(null);
   const [dragHover, setDragHover] = useState(false);
   const [isBangInput, setIsBangInput] = useState(false);
   // Non-empty input → enables the send button (`.ul-send-btn`).
@@ -102,6 +130,15 @@ export function Composer() {
 
   // Stale-response guard for async fs_list fetches in the `@` menu.
   const atReqRef = useRef(0);
+  const slashReqRef = useRef(0);
+  const slashCatalogRef = useRef<{
+    agentId: string;
+    items: SlashItem[];
+  } | null>(null);
+  // The Composer textarea is intentionally uncontrolled for low-latency typing.
+  // Keep a separate draft per terminal and swap the DOM value on tab changes.
+  const terminalDraftsRef = useRef<Map<string, ComposerDraftState>>(new Map());
+  const draftOwnerRef = useRef<string | null>(null);
   // Guards against double-insert when both the DOM drop handler and the Tauri
   // drag-drop event observe the same drop.
   const dropHandledRef = useRef(false);
@@ -113,6 +150,7 @@ export function Composer() {
   // allow two slider clicks to interleave and land on an unintended mode.
   const permissionSwitchingRef = useRef(false);
   const modelSwitchingRef = useRef(false);
+  const thinkingSwitchingRef = useRef(false);
   // Keep the textarea in the right mode when the composer switches between
   // auto-height and a fixed user-selected height.
   const fixedHeight = composerH !== null;
@@ -129,6 +167,33 @@ export function Composer() {
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const targetAgentId = activeTab?.agentId;
+
+  useEffect(() => {
+    // Skills are session/runtime/cwd-specific. Never carry a previous agent's
+    // catalog into a newly selected tab.
+    atReqRef.current += 1;
+    slashReqRef.current += 1;
+    slashCatalogRef.current = null;
+    setAtMenu(null);
+    setSlashMenu(null);
+  }, [targetAgentId]);
+
+  useEffect(() => {
+    // Keep the highlighted file visible while navigating a long `@` result list.
+    const activeItem = atMenuRef.current?.querySelector<HTMLElement>(
+      '[role="option"][aria-selected="true"]'
+    );
+    activeItem?.scrollIntoView({ block: "nearest" });
+  }, [atMenu?.idx, atMenu?.items]);
+
+  useEffect(() => {
+    // Long native command lists (notably Claude and OMP) overflow the picker.
+    // Keep keyboard navigation synchronized with the visible scroll region.
+    const activeItem = slashMenuRef.current?.querySelector<HTMLElement>(
+      '[role="option"][aria-selected="true"]'
+    );
+    activeItem?.scrollIntoView({ block: "nearest" });
+  }, [slashMenu?.idx, slashMenu?.items]);
 
   // ── Per-session composer config ────────────────────────────────
   // The permission/speed/model controls show and edit the CURRENT target
@@ -151,22 +216,6 @@ export function Composer() {
     ? preferredModel
     : defaultModel?.id ?? null;
   const currentModel = models.find((m) => m.id === shownModel) ?? null;
-
-  const applyConfig = useCallback(
-    (patch: { mode?: string; speed?: string; model?: string | null }) => {
-      const s = useStore.getState();
-      // Remember for the next spawned session.
-      if (patch.mode !== undefined) s.setPermissionMode(patch.mode as never);
-      if (patch.speed !== undefined) s.setSpeed(patch.speed as never);
-      if (patch.model !== undefined) s.setSelectedModel(patch.model);
-      // Apply to the current session (persisted; takes effect on next resume).
-      const id = activeTab?.agentId;
-      if (!id || !s.agents.has(id)) return;
-      s.addAgent({ ...s.agents.get(id)!, ...patch }, null);
-      invoke("agent_set_session_config", { id, ...patch }).catch(() => {});
-    },
-    [activeTab?.agentId]
-  );
 
   const applyPermissionMode = useCallback(
     async (mode: ComposerPermissionMode) => {
@@ -348,6 +397,98 @@ export function Composer() {
     [activeTab?.agentId, models]
   );
 
+  const applyThinkingSpeed = useCallback(
+    async (nextSpeed: string) => {
+      if (thinkingSwitchingRef.current) return;
+      const s = useStore.getState();
+      const id = activeTab?.agentId;
+      const agent = id ? s.agents.get(id) : undefined;
+      if (!id || !agent) {
+        s.setSpeed(nextSpeed as never);
+        return;
+      }
+
+      const previousSpeed = agent.speed ?? s.speed;
+      if (nextSpeed === previousSpeed) return;
+
+      thinkingSwitchingRef.current = true;
+      try {
+        // If the restored session has no running PTY, only persist the choice;
+        // selecting an effort must not start/restart a session as a side effect.
+        if (s.agentChannels.has(id)) {
+          if (agent.runtime === "codex") {
+            // Codex exposes live, non-modal effort controls: Shift+Up raises
+            // reasoning and Shift+Down lowers it. Move from the saved/current
+            // tier to the requested tier without opening /model or restarting.
+            // Auto corresponds to the model's balanced/default (medium) tier.
+            const effortOrder = ["fast", "mid", "high", "xhigh"];
+            const currentIndex =
+              previousSpeed === "auto" ? 1 : effortOrder.indexOf(previousSpeed);
+            const targetIndex =
+              nextSpeed === "auto" ? 1 : effortOrder.indexOf(nextSpeed);
+            if (currentIndex < 0 || targetIndex < 0) {
+              throw new Error(`Unsupported Codex reasoning effort: ${nextSpeed}`);
+            }
+            const delta = targetIndex - currentIndex;
+            const key = delta > 0 ? "\u001b[1;2A" : "\u001b[1;2B";
+            for (let index = 0; index < Math.abs(delta); index++) {
+              await invoke("agent_write", { id, data: key, raw: true });
+              if (index + 1 < Math.abs(delta)) {
+                await new Promise((resolve) => setTimeout(resolve, 35));
+              }
+            }
+          } else if (agent.runtime === "claude") {
+            const nativeEffort =
+              nextSpeed === "fast"
+                ? "low"
+                : nextSpeed === "mid"
+                  ? "medium"
+                  : nextSpeed;
+            await invoke("agent_write", {
+              id,
+              data: `/effort ${nativeEffort}`,
+              raw: true,
+            });
+            await new Promise((resolve) => setTimeout(resolve, 35));
+            await invoke("agent_write", { id, data: "\r", raw: true });
+          } else if (agent.runtime === "omp") {
+            // OMP binds Shift+Tab to app.thinking.cycle. Move forward from the
+            // session's saved level to the requested level without restarting.
+            const currentIndex = thinkingOptions.findIndex(
+              (option) => option.id === previousSpeed
+            );
+            const targetIndex = thinkingOptions.findIndex(
+              (option) => option.id === nextSpeed
+            );
+            if (currentIndex < 0 || targetIndex < 0) {
+              throw new Error(`Unsupported OMP thinking level: ${nextSpeed}`);
+            }
+            const steps =
+              (targetIndex - currentIndex + thinkingOptions.length) %
+              thinkingOptions.length;
+            for (let index = 0; index < steps; index++) {
+              await invoke("agent_write", { id, data: "\u001b[Z", raw: true });
+              if (index + 1 < steps) {
+                await new Promise((resolve) => setTimeout(resolve, 45));
+              }
+            }
+          }
+        }
+
+        await invoke("agent_set_session_config", { id, speed: nextSpeed });
+        const latest = useStore.getState();
+        latest.setSpeed(nextSpeed as never);
+        const current = latest.agents.get(id);
+        if (current) latest.addAgent({ ...current, speed: nextSpeed }, null);
+      } catch (error) {
+        console.error("thinking effort switch failed:", error);
+      } finally {
+        thinkingSwitchingRef.current = false;
+      }
+    },
+    [activeTab?.agentId, thinkingOptions]
+  );
+
   const cycleOpenCodeAgent = useCallback(async () => {
     const s = useStore.getState();
     const id = activeTab?.agentId;
@@ -427,6 +568,46 @@ export function Composer() {
     };
   }, [refMenuOpen]);
 
+  // ── F1 → toggle focus between the composer input and the terminal ──────
+  // Composer owns the F1 window listener (it always mounts, and it knows both
+  // the textarea and its open/closed state). When the input holds focus we hand
+  // focus to the active tab's terminal via a store directive; otherwise (focus
+  // in the terminal, a sidebar, or elsewhere) we focus the input. A collapsed
+  // composer hides its input (`display:none`, unfocusable), so F1 then routes
+  // to the terminal instead of no-oping. Dismiss any open popover first so
+  // focus can't straddle the two areas.
+  useEffect(() => {
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key !== "F1") return;
+      e.preventDefault();
+      const el = textareaRef.current;
+      const inputFocused = el !== null && document.activeElement === el;
+      const st = useStore.getState();
+      // The active tab is where the terminal would live: an agent tab with a
+      // session renders an XTermPanel; editor/diff tabs and placeholder agent
+      // tabs have no terminal to hand focus to.
+      const activeTab = st.tabs.find((t) => t.id === st.activeTabId);
+      const hasTerminal = activeTab?.type === "agent" && !!activeTab.agentId;
+      // Dismiss any open popover first so focus can't straddle the two areas.
+      setAtMenu(null);
+      setSlashMenu(null);
+      setModelMenuOpen(false);
+      setPermissionMenuOpen(false);
+      setThinkingMenuOpen(false);
+      setRefMenuOpen(false);
+      if (inputFocused) {
+        if (hasTerminal) st.requestFocus("terminal");
+        // No terminal to move to — leave focus in the input.
+      } else if (el && st.composerOpen) {
+        el.focus();
+      } else if (hasTerminal) {
+        st.requestFocus("terminal");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   // ── Text helpers ──────────────────────────────────────────────
   const resizeTextarea = useCallback((el: HTMLTextAreaElement) => {
     // A fixed-height composer fills the input area and scrolls internally. In
@@ -439,6 +620,34 @@ export function Composer() {
     el.style.height = "auto";
     el.style.height = Math.min(el.scrollHeight, 200) + "px";
   }, []);
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+
+    const nextOwner = targetAgentId ?? "__untargeted__";
+    const previousOwner = draftOwnerRef.current;
+    if (previousOwner !== null && previousOwner !== nextOwner) {
+      terminalDraftsRef.current.set(previousOwner, {
+        value: el.value,
+        selectionStart: el.selectionStart ?? el.value.length,
+        selectionEnd: el.selectionEnd ?? el.value.length,
+      });
+    }
+
+    const nextDraft = terminalDraftsRef.current.get(nextOwner);
+    el.value = nextDraft?.value ?? "";
+    const caret = Math.min(nextDraft?.selectionStart ?? el.value.length, el.value.length);
+    const selectionEnd = Math.min(nextDraft?.selectionEnd ?? caret, el.value.length);
+    el.setSelectionRange(caret, selectionEnd);
+    draftOwnerRef.current = nextOwner;
+
+    resizeTextarea(el);
+    setIsBangInput(el.value.trimStart().startsWith("!"));
+    setHasInput(el.value.trim().length > 0);
+    // Up/down history navigation starts independently after a terminal switch.
+    useStore.setState({ draftIndex: -1 });
+  }, [resizeTextarea, targetAgentId]);
 
   const insertText = useCallback(
     (text: string, pos?: number) => {
@@ -598,18 +807,24 @@ export function Composer() {
       const before = el.value.slice(0, pos);
       const lastAt = before.lastIndexOf("@");
       if (lastAt < 0) {
+        atReqRef.current += 1;
         setAtMenu(null);
         return;
       }
       const query = before.slice(lastAt + 1);
       // A space / newline ends the `@` mention.
       if (/\s/.test(query)) {
+        atReqRef.current += 1;
         setAtMenu(null);
         return;
       }
 
       const cwd = resolveTargetCwd();
-      if (!cwd) return;
+      if (!cwd) {
+        atReqRef.current += 1;
+        setAtMenu(null);
+        return;
+      }
 
       const req = ++atReqRef.current;
       const slashIdx = query.lastIndexOf("/");
@@ -663,6 +878,116 @@ export function Composer() {
       setAtMenu(null);
     },
     [atMenu, resizeTextarea]
+  );
+
+  // ── Runtime-aware `/` skill / command autocomplete ───────────
+  const slashContext = useCallback((el: HTMLTextAreaElement) => {
+    const pos = el.selectionStart ?? el.value.length;
+    const before = el.value.slice(0, pos);
+    // Provider slash commands are meaningful only as the leading token. Allow
+    // indentation, but dismiss once arguments/ordinary whitespace are typed.
+    const match = before.match(/^(\s*)\/([^\s]*)$/);
+    if (!match) return null;
+    return { anchor: match[1].length, query: match[2] };
+  }, []);
+
+  const filterSlashItems = useCallback((items: SlashItem[], query: string) => {
+    const needle = query.toLocaleLowerCase();
+    if (!needle) return items;
+    return items.filter((item) =>
+      `${item.name} ${item.invocation} ${item.description}`
+        .toLocaleLowerCase()
+        .includes(needle)
+    );
+  }, []);
+
+  const handleSlashAuto = useCallback(
+    async (el: HTMLTextAreaElement) => {
+      const context = slashContext(el);
+      if (!context) {
+        slashReqRef.current += 1;
+        setSlashMenu(null);
+        return;
+      }
+      const agentId = targetAgentId;
+      if (!agentId) {
+        slashReqRef.current += 1;
+        setSlashMenu(null);
+        return;
+      }
+
+      const cached = slashCatalogRef.current;
+      if (cached?.agentId === agentId) {
+        setSlashMenu({
+          ...context,
+          items: filterSlashItems(cached.items, context.query),
+          idx: 0,
+          loading: false,
+          mode: "commands",
+        });
+        return;
+      }
+
+      setSlashMenu({
+        ...context,
+        items: [],
+        idx: 0,
+        loading: true,
+        mode: "commands",
+      });
+      const req = ++slashReqRef.current;
+      try {
+        const items =
+          (await invoke<SlashItem[]>("agent_list_slash_items", { id: agentId })) ?? [];
+        if (req !== slashReqRef.current || targetAgentId !== agentId) return;
+        slashCatalogRef.current = { agentId, items };
+        const currentEl = textareaRef.current;
+        const current = currentEl ? slashContext(currentEl) : null;
+        if (!current) {
+          setSlashMenu(null);
+          return;
+        }
+        setSlashMenu({
+          ...current,
+          items: filterSlashItems(items, current.query),
+          idx: 0,
+          loading: false,
+          mode: "commands",
+        });
+      } catch {
+        if (req === slashReqRef.current) {
+          setSlashMenu({
+            ...context,
+            items: [],
+            idx: 0,
+            loading: false,
+            mode: "commands",
+          });
+        }
+      }
+    },
+    [filterSlashItems, slashContext, targetAgentId]
+  );
+
+  const insertSlashItem = useCallback(
+    (item: SlashItem) => {
+      if (!slashMenu || !textareaRef.current) return;
+      const el = textareaRef.current;
+
+      const insert = `${item.invocation} `;
+      const replacedLength = slashMenu.query.length + 1;
+      el.value =
+        el.value.slice(0, slashMenu.anchor) +
+        insert +
+        el.value.slice(slashMenu.anchor + replacedLength);
+      const newPos = slashMenu.anchor + insert.length;
+      el.selectionStart = el.selectionEnd = newPos;
+      el.focus();
+      resizeTextarea(el);
+      setHasInput(true);
+      setSlashMenu(null);
+    },
+    [resizeTextarea, slashMenu]
   );
 
   // Load the active agent's cwd listing when the file/ref menu opens.
@@ -749,6 +1074,7 @@ export function Composer() {
     const isBang = raw.startsWith("!");
     const text = isBang ? raw.slice(1).trimStart() : raw;
     const agentInput = text;
+
     pushDraft(raw);
 
     // Clear the textarea synchronously before any await so a second Enter can't
@@ -758,6 +1084,8 @@ export function Composer() {
     resizeTextarea(el);
     setIsBangInput(false);
     setHasInput(false);
+    setAtMenu(null);
+    setSlashMenu(null);
 
     sendingRef.current = true;
     let agentId = targetAgentId;
@@ -818,6 +1146,42 @@ export function Composer() {
   // ── Keyboard ──────────────────────────────────────────────────
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
+      if (slashMenu) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          if (slashMenu.items.length) {
+            setSlashMenu({
+              ...slashMenu,
+              idx: (slashMenu.idx + 1) % slashMenu.items.length,
+            });
+          }
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          if (slashMenu.items.length) {
+            setSlashMenu({
+              ...slashMenu,
+              idx:
+                (slashMenu.idx - 1 + slashMenu.items.length) %
+                slashMenu.items.length,
+            });
+          }
+          return;
+        }
+        if (e.key === "Enter" || e.key === "Tab") {
+          e.preventDefault();
+          const item = slashMenu.items[slashMenu.idx];
+          if (item) insertSlashItem(item);
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setSlashMenu(null);
+          return;
+        }
+      }
+
       if (atMenu) {
         if (e.key === "ArrowDown") {
           e.preventDefault();
@@ -899,13 +1263,14 @@ export function Composer() {
     },
     [
       atMenu,
+      slashMenu,
       insertAtItem,
+      insertSlashItem,
       handleSend,
       shownMode,
       permissionModes,
       configRuntimeId,
       cycleOpenCodeAgent,
-      applyConfig,
       applyPermissionMode,
       navigateDraft,
       modelMenuOpen,
@@ -923,11 +1288,12 @@ export function Composer() {
       setIsBangInput(el.value.trimStart().startsWith("!"));
       setHasInput(el.value.trim().length > 0);
       handleAtAuto(el);
+      void handleSlashAuto(el);
       // Typing dismisses the popover menus (模型选择 / 文件引用).
       setModelMenuOpen(false);
       setRefMenuOpen(false);
     },
-    [resizeTextarea, handleAtAuto]
+    [resizeTextarea, handleAtAuto, handleSlashAuto]
   );
 
   // ── Height resize (drag the divider above the composer) ───────
@@ -1001,7 +1367,7 @@ export function Composer() {
             ref={textareaRef}
             className="composer-input"
             placeholder="发消息…（/ 命令 · @ 文件 · ! 终端 · 拖入文件）"
-            rows={2}
+            rows={4}
             onKeyDown={handleKeyDown}
             onInput={handleInput}
           />
@@ -1018,7 +1384,7 @@ export function Composer() {
 
       {/* `@` file autocomplete menu */}
       {atMenu && (
-        <div className="composer-at-menu" role="listbox">
+        <div ref={atMenuRef} className="composer-at-menu" role="listbox">
           {atMenu.items.map((item, i) => (
             <div
               key={item.name}
@@ -1034,6 +1400,45 @@ export function Composer() {
               </span>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Runtime-aware native command / skill menu. `/` is only the trigger:
+          each row inserts the syntax required by the selected agent. */}
+      {slashMenu && (
+        <div
+          ref={slashMenuRef}
+          className="composer-at-menu composer-slash-menu"
+          role="listbox"
+        >
+          <div className="composer-slash-head">
+            <span>{configRuntime?.name ?? configRuntimeId}</span>
+            <span>内置命令 / 自定义命令 / 技能</span>
+          </div>
+          {slashMenu.loading ? (
+            <div className="composer-slash-empty">正在读取…</div>
+          ) : slashMenu.items.length === 0 ? (
+            <div className="composer-slash-empty">没有匹配的命令或技能</div>
+          ) : (
+            slashMenu.items.map((item, i) => (
+              <div
+                key={`${item.invocation}:${item.source}`}
+                role="option"
+                aria-selected={i === slashMenu.idx}
+                className={`composer-at-item composer-slash-item${
+                  i === slashMenu.idx ? " active" : ""
+                }`}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => insertSlashItem(item)}
+              >
+                <span className="composer-slash-invocation">{item.invocation}</span>
+                <span className="composer-slash-description">
+                  {item.description || (item.kind === "skill" ? "加载 Agent 技能" : "运行命令")}
+                </span>
+                <span className="composer-slash-source">{item.source}</span>
+              </div>
+            ))
+          )}
         </div>
       )}
 
@@ -1159,7 +1564,7 @@ export function Composer() {
                     className={`cmp-menu-item${option.id === shownSpeed ? " current" : ""}`}
                     title={option.description}
                     onClick={() => {
-                      applyConfig({ speed: option.id });
+                      void applyThinkingSpeed(option.id);
                       setThinkingMenuOpen(false);
                     }}
                   >

@@ -485,6 +485,37 @@ body::after {
 .composer-at-item.active { background: var(--brand-dim); color: #F5F3FF; }
 .composer-at-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+/* Composer: runtime-aware `/` skill / command picker. */
+.composer-slash-menu { max-height: min(320px, 48vh); }
+.composer-slash-head {
+  position: sticky; top: 0; z-index: 1;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 12px; border-bottom: 1px solid var(--rule2);
+  background: var(--bg3); color: var(--muted);
+  font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.composer-slash-item { min-height: 34px; }
+.composer-slash-invocation {
+  flex: 0 0 min(220px, 34%); color: var(--primary);
+  font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.composer-slash-description {
+  flex: 1 1 auto; color: var(--ink2); font-size: var(--fs-xs);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.composer-slash-source {
+  flex: 0 0 auto; padding: 1px 5px; border: 1px solid var(--rule2);
+  color: var(--muted); font-family: var(--pixel); font-size: var(--fs-2xs);
+  white-space: nowrap;
+}
+.composer-slash-item.active .composer-slash-invocation,
+.composer-slash-item.active .composer-slash-description,
+.composer-slash-item.active .composer-slash-source { color: #F5F3FF; }
+.composer-slash-empty {
+  padding: 14px 12px; color: var(--muted); text-align: center;
+  font-family: var(--mono); font-size: var(--fs-xs);
+}
 /* ── Status Bar ───────────────────────────────────────────────── */
 
 .statusbar {

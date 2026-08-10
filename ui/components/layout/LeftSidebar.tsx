@@ -272,11 +272,9 @@ export function LeftSidebar() {
       }
     >();
     agents.forEach((a, id) => {
-      // New sessions carry an explicit persisted project/workspace identity;
-      // cwd inference remains only for legacy rows without workspace_id.
-      const projName = a.workspace_id && a.project
-        ? a.project
-        : projectOf(a.cwd, projectRoots);
+      // Persisted project identity wins. cwd inference is only a fallback for
+      // sessions created before the project field was exposed to the UI.
+      const projName = a.project || projectOf(a.cwd, projectRoots);
       if (!map.has(projName)) {
         map.set(projName, { cwd: a.cwd, agents: [] });
       }

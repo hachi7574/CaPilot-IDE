@@ -7,7 +7,16 @@ import { DiffPanel } from "../editor/DiffPanel";
 type DropEdge = "left" | "right" | "top" | "bottom" | null;
 
 /** A single tab's panel (terminal / editor), reused in split panes. */
-function Panel({ tab, onRemove }: { tab: Tab; onRemove?: () => void }) {
+function Panel({
+  tab,
+  onRemove,
+  active,
+}: {
+  tab: Tab;
+  onRemove?: () => void;
+  /** True for the panel of the active tab (drives F1 terminal-focus gating). */
+  active?: boolean;
+}) {
   const agents = useStore((s) => s.agents);
   const agent = tab.agentId ? agents.get(tab.agentId) : undefined;
   return (
@@ -23,7 +32,9 @@ function Panel({ tab, onRemove }: { tab: Tab; onRemove?: () => void }) {
           </button>
         )}
       </div>
-      {tab.type === "agent" && tab.agentId && <XTermPanel agentId={tab.agentId} />}
+      {tab.type === "agent" && tab.agentId && (
+        <XTermPanel agentId={tab.agentId} active={active} />
+      )}
       {tab.type === "agent" && !tab.agentId && (
         <div className="panel-placeholder">会话未启动 — 在输入框发消息自动创建</div>
       )}
@@ -161,14 +172,22 @@ export function ContentArea() {
       <div className="content-area" {...dropHandlers}>
         <div className={`split-container ${row ? "split-row" : "split-column"}`}>
           <div className="split-pane" style={{ flexBasis: `${splitRatio * 100}%` }}>
-            <Panel tab={paneA} onRemove={() => removeSplitPane(paneA.id)} />
+            <Panel
+              tab={paneA}
+              onRemove={() => removeSplitPane(paneA.id)}
+              active={paneA.id === activeTabId}
+            />
           </div>
           <div
             className={`split-divider ${row ? "split-divider-col" : "split-divider-row"}${resizing ? " active" : ""}`}
             onMouseDown={startResize}
           />
           <div className="split-pane" style={{ flex: 1 }}>
-            <Panel tab={paneB} onRemove={() => removeSplitPane(paneB.id)} />
+            <Panel
+              tab={paneB}
+              onRemove={() => removeSplitPane(paneB.id)}
+              active={paneB.id === activeTabId}
+            />
           </div>
         </div>
         {draggedTabId && dropEdge && <div className={`drop-zone ${dropEdge}`} />}
@@ -179,7 +198,7 @@ export function ContentArea() {
   // Default single-panel view.
   return (
     <div className="content-area" {...dropHandlers}>
-      {activeTab && !activeIsOpenCode && <Panel tab={activeTab} />}
+      {activeTab && !activeIsOpenCode && <Panel tab={activeTab} active />}
       {/* OpenCode owns an alternate-screen TUI whose complete frame is held by
           xterm, not replayed by the PTY. Keep each opened OpenCode panel mounted
           across tab changes so returning to it cannot produce an empty canvas. */}
@@ -189,7 +208,7 @@ export function ContentArea() {
           className={`resident-terminal-panel${tab.id === activeTab?.id ? " active" : " hidden"}`}
           aria-hidden={tab.id !== activeTab?.id}
         >
-          <Panel tab={tab} />
+          <Panel tab={tab} active={tab.id === activeTab?.id} />
         </div>
       ))}
       {draggedTabId && dropEdge && <div className={`drop-zone ${dropEdge}`} />}

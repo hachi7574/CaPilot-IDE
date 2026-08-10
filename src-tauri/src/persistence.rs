@@ -395,6 +395,14 @@ impl SessionsDb {
         Ok(())
     }
 
+    pub fn delete_project(&self, project: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "DELETE FROM sessions WHERE project = ?1",
+            params![project],
+        )?;
+        Ok(())
+    }
+
     /// Rewrite a project's sessions after its workspace dir was renamed: update
     /// the `project` column, and rewrite `cwd` for default-rooted sessions
     /// (cwd inside the old workspace prefix). Custom-rooted cwds are untouched.
@@ -539,6 +547,28 @@ mod tests {
 
         db.delete("abc").unwrap();
         assert!(db.get("abc").unwrap().is_none());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn delete_project_uses_persisted_identity_not_cwd() {
+        let path = std::env::temp_dir().join(format!(
+            "capilot-project-delete-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let db = SessionsDb::open(&path).unwrap();
+        let mut session = sample();
+        session.project = "legacy".into();
+        session.cwd = PathBuf::from("/tmp/Legacy");
+        db.insert(&session).unwrap();
+
+        db.delete_project("other").unwrap();
+        assert!(db.get("abc").unwrap().is_some());
+        db.delete_project("legacy").unwrap();
+        assert!(db.get("abc").unwrap().is_none());
+
         let _ = std::fs::remove_file(&path);
     }
 

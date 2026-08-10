@@ -3,6 +3,7 @@ pub mod esp;
 mod git_gate;
 mod persistence;
 mod resource;
+mod slash;
 
 use agent_runtime::adapter::{AgentInfo, AgentSession};
 use agent_runtime::pty::{OnExit, PtyManager};
@@ -740,14 +741,9 @@ fn list_projects() -> Result<Vec<ProjectInfo>, String> {
     Ok(projects)
 }
 
-/// Delete a project's workspace directory (`~/CaPilot/workspaces/<name>`) —
-/// sessions, agent metadata, context. Called by the sidebar's "移除项目".
-/// Custom-rooted projects only lose this metadata dir; their real folder
-/// (picked / cloned) is never touched.
-#[tauri::command]
-fn delete_project(name: String) -> Result<(), String> {
-    sanitize_project(&name)?;
-    let dir = persistence::project_dir(&name);
+fn delete_project_dir(name: &str) -> Result<(), String> {
+    sanitize_project(name)?;
+    let dir = persistence::project_dir(name);
     // Belt-and-braces: the resolved path must stay under the workspace root.
     if !dir.starts_with(persistence::workspace_root()) {
         return Err("非法路径".to_string());
@@ -756,6 +752,41 @@ fn delete_project(name: String) -> Result<(), String> {
         std::fs::remove_dir_all(&dir).map_err(|e| format!("删除项目目录失败: {}", e))?;
     }
     Ok(())
+}
+
+/// Delete a project and all persisted sessions that belong to it. Session
+/// ownership comes from the database's `project` field, never from cwd parsing;
+/// custom-rooted and legacy sessions may not share the project's casing/path.
+/// Only CaPilot's workspace metadata directory is removed—picked/cloned source
+/// folders remain untouched.
+#[tauri::command]
+fn delete_project(
+    pty: tauri::State<'_, Arc<PtyManager>>,
+    persistence: tauri::State<'_, Arc<Persistence>>,
+    name: String,
+) -> Result<(), String> {
+    sanitize_project(&name)?;
+    let session_ids = {
+        let db = persistence
+            .db_tolerant()
+            .ok_or_else(|| "persistence unavailable".to_string())?;
+        db.list_all()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|record| record.project == name)
+            .map(|record| record.id)
+            .collect::<Vec<_>>()
+    };
+    for id in session_ids {
+        let _ = pty.kill(&id);
+    }
+    {
+        let db = persistence
+            .db_tolerant()
+            .ok_or_else(|| "persistence unavailable".to_string())?;
+        db.delete_project(&name).map_err(|e| e.to_string())?;
+    }
+    delete_project_dir(&name)
 }
 
 /// Rename a workspace project: renames `~/CaPilot/workspaces/<old>` →
@@ -1830,8 +1861,8 @@ async fn git_push(repo: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_project, delete_project, git_run, parse_branches, parse_log, parse_name_status,
-        parse_porcelain, persistence, rename_project_inner,
+        create_project, delete_project_dir, git_run, parse_branches, parse_log,
+        parse_name_status, parse_porcelain, persistence, rename_project_inner,
     };
 
     #[test]
@@ -1955,7 +1986,7 @@ mod tests {
         let ws = home.join("CaPilot/workspaces/proj");
         assert!(ws.exists());
 
-        delete_project("proj".into()).unwrap();
+        delete_project_dir("proj").unwrap();
         // Workspace metadata dir is gone, the custom root folder is untouched.
         assert!(!ws.exists());
         assert!(root_folder.exists());
@@ -2272,6 +2303,7 @@ pub fn run() {
             rename_project,
             runtime_list_available,
             runtime_models,
+            slash::agent_list_slash_items,
             fs_read,
             fs_write,
             fs_list,

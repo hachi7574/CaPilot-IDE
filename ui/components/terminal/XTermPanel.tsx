@@ -8,6 +8,10 @@ import "@xterm/xterm/css/xterm.css";
 
 interface XTermPanelProps {
   agentId: string;
+  /** True when this panel belongs to the active tab. Only an active terminal may
+   *  steal focus on the F1 input↔terminal toggle; hidden resident OpenCode
+   *  panels must not. Defaults to true for standalone use. */
+  active?: boolean;
 }
 
 /** Terminal PTY font size (px) per UI font-size preset. Base preset "s" keeps
@@ -82,6 +86,11 @@ async function copyText(text: string): Promise<void> {
  */
 const resumeInFlight = new Set<string>();
 
+/** Last `focusRequest.seq` an active terminal has consumed for the F1 toggle.
+ *  Module-level (not per-instance) so a reactivated resident OpenCode panel
+ *  can't re-steal focus for a request a different terminal already handled. */
+let lastFocusHandledSeq = 0;
+
 /** xterm panel bound to an agent's PTY channel.
  *
  * Race handling: the Composer starts buffering channel output into
@@ -91,7 +100,7 @@ const resumeInFlight = new Set<string>();
  * is reopened. When the channel object changes (e.g. runtime switch), the
  * effect re-runs and attaches the new channel.
  */
-export function XTermPanel({ agentId }: XTermPanelProps) {
+export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -104,6 +113,7 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
   // (e.g. a different agent spawning/resuming elsewhere in the app).
   const channel = useStore((s) => s.agentChannels.get(agentId));
   const fontScale = useStore((s) => s.fontScale);
+  const focusRequest = useStore((s) => s.focusRequest);
 
   // DevPlan §4.2 ④ — dragging a file onto the terminal pastes its path
   // (shell-escaped) into the PTY. Guards against double-insert when both the DOM
@@ -193,6 +203,20 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
     // is left alone so the PTY still receives SIGINT. Returning false stops the
     // event reaching xterm's own key handling.
     term.attachCustomKeyEventHandler((ev) => {
+      // F1 is reserved for the composer↔terminal focus toggle (handled by a
+      // window-level listener). Swallow it here so the PTY never receives the
+      // F1 escape sequence on top of the focus switch — most CLIs would act on
+      // it (help panel, etc.), leaving the two areas in an inconsistent state.
+      if (
+        ev.type === "keydown" &&
+        ev.key === "F1" &&
+        !ev.ctrlKey &&
+        !ev.shiftKey &&
+        !ev.altKey &&
+        !ev.metaKey
+      ) {
+        return false;
+      }
       if (
         ev.type === "keydown" &&
         ev.ctrlKey &&
@@ -497,6 +521,18 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
       unlisten?.();
     };
   }, [insertPathToPty, isPointInTerminal]);
+
+  // F1 focus toggle (Composer → terminal). Only the active tab's terminal
+  // responds, and only to requests the shared counter hasn't consumed yet — so
+  // neither a freshly-mounted panel nor a reactivated resident OpenCode panel
+  // steals focus for a stale request.
+  useEffect(() => {
+    if (!active || !focusRequest) return;
+    if (focusRequest.target !== "terminal") return;
+    if (focusRequest.seq <= lastFocusHandledSeq) return;
+    lastFocusHandledSeq = focusRequest.seq;
+    termRef.current?.focus();
+  }, [focusRequest, active]);
 
   return (
     <div

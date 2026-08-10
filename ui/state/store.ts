@@ -133,6 +133,12 @@ function projectOfCwd(cwd: string): string {
   return parts[parts.length - 1] || cwd;
 }
 
+/** Resolve an agent to the same project key used by the sidebar. Persisted
+ * project identity wins; cwd parsing exists only for legacy records. */
+function projectOfAgent(agent: AgentInfo): string {
+  return agent.project || projectOfCwd(agent.cwd);
+}
+
 /**
  * Create a Tauri Channel that buffers every event immediately, so no PTY
  * output is lost in the race between spawn and the terminal mounting.
@@ -198,6 +204,9 @@ interface AppState {
 
   // Composer
   composerOpen: boolean;
+  /** One-shot focus directive for the F1 input↔terminal toggle. `seq` bumps on
+   *  every request so subscribers can skip stale/mount-time values. */
+  focusRequest: { target: "composer" | "terminal"; seq: number } | null;
   permissionMode: PermissionMode;
   speed: Speed;
   /** Runtime model id chosen via composer `[模型↑]` (null = runtime default). */
@@ -270,6 +279,7 @@ interface AppState {
   setSplitRatio: (ratio: number) => void;
   setDraggedTabId: (id: string | null) => void;
   toggleComposer: () => void;
+  requestFocus: (target: "composer" | "terminal") => void;
   setPermissionMode: (mode: PermissionMode) => void;
   setSpeed: (speed: Speed) => void;
   setSelectedModel: (model: string | null) => void;
@@ -391,6 +401,7 @@ export const useStore = create<AppState>((set, get) => ({
   tabs: [],
   activeTabId: null,
   composerOpen: true,
+  focusRequest: null,
   permissionMode: "ask",
   speed: "auto",
   selectedModel: null,
@@ -650,6 +661,11 @@ export const useStore = create<AppState>((set, get) => ({
 
   toggleComposer: () => set((s) => ({ composerOpen: !s.composerOpen })),
 
+  requestFocus: (target) =>
+    set((s) => ({
+      focusRequest: { target, seq: (s.focusRequest?.seq ?? 0) + 1 },
+    })),
+
   setPermissionMode: (mode) => set({ permissionMode: mode }),
 
   setSpeed: (speed) => set({ speed }),
@@ -714,11 +730,12 @@ export const useStore = create<AppState>((set, get) => ({
       focusedProject: s.focusedProject === name ? null : s.focusedProject,
     });
 
-    // Close + kill every agent whose workspace cwd belongs to the removed
-    // project (matches the sidebar's projectOf grouping).
+    // Close + kill every agent in the removed project. Persisted project
+    // identity must win over cwd parsing: old sessions can use a differently
+    // cased or custom cwd (for example project "foo" rooted at "/.../Foo").
     const doomed: string[] = [];
     s.agents.forEach((a, id) => {
-      if (projectOfCwd(a.cwd) === name) doomed.push(id);
+      if (projectOfAgent(a) === name) doomed.push(id);
     });
     for (const id of doomed) {
       // sessions_delete kills the PTY and drops the DB row so the agent can't
@@ -757,7 +774,7 @@ export const useStore = create<AppState>((set, get) => ({
     const root = s.projectRoots[name];
     const doomed: string[] = [];
     s.agents.forEach((a, id) => {
-      if (projectOfCwd(a.cwd) === name) doomed.push(id);
+      if (projectOfAgent(a) === name) doomed.push(id);
     });
     const channels = new Map(s.agentChannels);
     for (const id of doomed) {

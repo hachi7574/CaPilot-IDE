@@ -5,6 +5,7 @@ import { StatusBar } from "./components/layout/StatusBar";
 import { Onboarding } from "./components/onboarding/Onboarding";
 import { useEspSync } from "./state/esp";
 import { useResourceSync } from "./state/resource";
+import { useRuntimeSync } from "./state/runtime";
 import { useSessionRestore, useAgentEvents } from "./state/session";
 import { useNotifications } from "./state/notifications";
 import { useStore } from "./state/store";
@@ -13,6 +14,7 @@ import "./App.css";
 function App() {
   useEspSync();
   useResourceSync();
+  useRuntimeSync();
   useSessionRestore();
   useAgentEvents();
   useNotifications();
