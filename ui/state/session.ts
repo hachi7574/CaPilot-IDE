@@ -60,9 +60,12 @@ export function useSessionRestore() {
             title: rec.title || `${rec.runtime}@${rec.role}`,
           });
         }
+        s.setSessionsRestored();
       })
       .catch(() => {
-        // Backend not ready — ignore.
+        // Backend not ready: the lookup still settled, so reveal the genuine
+        // empty state and let the user create a Master manually.
+        if (!cancelled) useStore.getState().setSessionsRestored();
       });
     return () => {
       cancelled = true;

@@ -1,5 +1,5 @@
 use crate::agent_runtime::adapter::{
-    AgentRuntimeAdapter, AgentSession, ModelInfo, PermissionMode, Speed,
+    AgentRuntimeAdapter, AgentSession, ModelInfo, PermissionModeInfo, ThinkingOptionInfo,
 };
 use std::process::Command;
 
@@ -51,6 +51,14 @@ impl AgentRuntimeAdapter for BashAdapter {
         vec![]
     }
 
+    fn list_permission_modes(&self) -> Vec<PermissionModeInfo> {
+        vec![]
+    }
+
+    fn list_thinking_options(&self) -> Vec<ThinkingOptionInfo> {
+        vec![]
+    }
+
     fn spawn_interactive(&self, _session: &AgentSession) -> Result<(String, Vec<String>), String> {
         // `--norc` for the minimal shell; the full variant just runs `bash`
         // (interactive), which sources /etc/bash.bashrc + ~/.bashrc.
@@ -66,11 +74,11 @@ impl AgentRuntimeAdapter for BashAdapter {
         vec![]
     }
 
-    fn speed_args(&self, _speed: Speed) -> Vec<String> {
+    fn speed_args(&self, _speed: &str) -> Vec<String> {
         vec![]
     }
 
-    fn mode_args(&self, _mode: PermissionMode) -> Vec<String> {
+    fn mode_args(&self, _mode: &str) -> Vec<String> {
         vec![]
     }
 }

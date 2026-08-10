@@ -122,7 +122,10 @@ pub fn try_decode(buf: &[u8]) -> Result<(Frame, usize), FrameError> {
     let version = buf[6];
     let total = 9 + payload_len;
     if payload_len > MAX_FRAME || total > MAX_FRAME {
-        return Err(FrameError::FrameTooLarge { payload_len, max: MAX_FRAME });
+        return Err(FrameError::FrameTooLarge {
+            payload_len,
+            max: MAX_FRAME,
+        });
     }
     if buf.len() < total {
         return Err(FrameError::TooShort(buf.len()));
@@ -242,7 +245,15 @@ mod tests {
     #[test]
     fn try_decode_rejects_oversized_length() {
         // Header declaring a payload beyond MAX_FRAME.
-        let mut wire = vec![MAGIC_0, MAGIC_1, FrameType::Command as u8, 0xFF, 0xFF, 0, VERSION];
+        let mut wire = vec![
+            MAGIC_0,
+            MAGIC_1,
+            FrameType::Command as u8,
+            0xFF,
+            0xFF,
+            0,
+            VERSION,
+        ];
         wire.resize(9 + MAX_FRAME * 4, 0);
         assert!(matches!(
             try_decode(&wire),
@@ -267,7 +278,15 @@ mod tests {
     fn drain_frames_caps_runaway_buffer() {
         // A header declaring a huge length never completes → the buffer must not
         // grow unboundedly; drain_frames should drop the bogus data.
-        let mut buf = vec![MAGIC_0, MAGIC_1, FrameType::Telemetry as u8, 0xFF, 0x7F, 0, VERSION];
+        let mut buf = vec![
+            MAGIC_0,
+            MAGIC_1,
+            FrameType::Telemetry as u8,
+            0xFF,
+            0x7F,
+            0,
+            VERSION,
+        ];
         buf.extend(std::iter::repeat_n(0xAA, MAX_FRAME));
         let mut frames = Vec::new();
         drain_frames(&mut buf, &mut frames);

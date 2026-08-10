@@ -7,25 +7,6 @@ pub type RuntimeId = String;
 /// Agent session identifier
 pub type AgentId = String;
 
-/// Speed tier for thinking effort
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Speed {
-    High,
-    Mid,
-    Fast,
-    Auto,
-}
-
-/// Permission mode for agent operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PermissionMode {
-    Ask,
-    Auto,
-    Yolo,
-}
-
 /// Agent role in the orchestration system
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,6 +34,25 @@ pub struct ModelInfo {
     pub id: String,
     pub name: String,
     pub provider: String,
+    pub is_default: bool,
+}
+
+/// One permission preset exposed by a runtime. `id` is CaPilot's persisted
+/// policy key; label/description describe the provider-native behavior.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermissionModeInfo {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub requires_confirmation: bool,
+}
+
+/// One provider-native thinking/effort choice exposed by a runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThinkingOptionInfo {
+    pub id: String,
+    pub label: String,
+    pub description: String,
 }
 
 /// Session configuration for spawning an agent
@@ -60,8 +60,8 @@ pub struct ModelInfo {
 pub struct AgentSession {
     pub id: AgentId,
     pub runtime: RuntimeId,
-    pub mode: PermissionMode,
-    pub speed: Speed,
+    pub mode: String,
+    pub speed: String,
     /// Selected model id (composer `[模型↑]`). `None` = runtime default.
     pub model: Option<String>,
     pub cwd: PathBuf,
@@ -87,9 +87,9 @@ pub struct AgentInfo {
     pub title: String,
     pub cwd: PathBuf,
     pub pid: Option<u32>,
-    /// Permission mode this session runs under ("ask" | "auto" | "yolo").
+    /// Provider-specific permission mode id.
     pub mode: String,
-    /// Speed tier this session runs under ("high" | "mid" | "fast" | "auto").
+    /// Provider-specific thinking/effort option id.
     pub speed: String,
     /// Selected model id, or None for the runtime default.
     pub model: Option<String>,
@@ -103,6 +103,8 @@ pub struct RuntimeInfo {
     pub available: bool,
     pub authenticated: bool,
     pub models: Vec<ModelInfo>,
+    pub permission_modes: Vec<PermissionModeInfo>,
+    pub thinking_options: Vec<ThinkingOptionInfo>,
 }
 
 /// The core trait that every agent CLI must implement.
@@ -123,9 +125,23 @@ pub trait AgentRuntimeAdapter: Send + Sync {
     /// List available models for this runtime
     fn list_models(&self) -> Vec<ModelInfo>;
 
+    /// Permission presets supported by this runtime. An empty list means the
+    /// runtime has no agent permission control (for example a plain shell).
+    fn list_permission_modes(&self) -> Vec<PermissionModeInfo>;
+
+    /// Thinking/effort choices supported by this runtime.
+    fn list_thinking_options(&self) -> Vec<ThinkingOptionInfo>;
+
     /// Spawn an interactive TUI session (PTY).
     /// Returns (command, args) to execute.
     fn spawn_interactive(&self, session: &AgentSession) -> Result<(String, Vec<String>), String>;
+
+    /// Provider-specific environment injected into this one PTY process.
+    /// Keeping this session-scoped avoids modifying the user's global CLI
+    /// configuration just to make an IDE integration reliable.
+    fn launch_env(&self, _session: &AgentSession) -> Result<Vec<(String, String)>, String> {
+        Ok(vec![])
+    }
 
     /// Build args to resume an existing session
     fn resume_args(&self, session: &AgentSession) -> Vec<String>;
@@ -144,10 +160,10 @@ pub trait AgentRuntimeAdapter: Send + Sync {
     }
 
     /// Map speed tier to CLI arguments
-    fn speed_args(&self, speed: Speed) -> Vec<String>;
+    fn speed_args(&self, speed: &str) -> Vec<String>;
 
     /// Map permission mode to CLI arguments
-    fn mode_args(&self, mode: PermissionMode) -> Vec<String>;
+    fn mode_args(&self, mode: &str) -> Vec<String>;
 }
 
 /// Error type for agent operations

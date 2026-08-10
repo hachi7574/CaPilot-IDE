@@ -49,7 +49,10 @@ pub fn validate_repo(repo: &str) -> Result<PathBuf, String> {
     #[cfg(not(test))]
     let test_root_allowed = false;
     if !resolved.is_dir()
-        || (!test_root_allowed && !allowed_roots().iter().any(|root| resolved.starts_with(root)))
+        || (!test_root_allowed
+            && !allowed_roots()
+                .iter()
+                .any(|root| resolved.starts_with(root)))
     {
         return Err("repo path is outside CaPilot project roots".to_string());
     }
@@ -60,14 +63,18 @@ fn wait_for_rate_slot() {
     loop {
         let now = Instant::now();
         let mut starts = GATE.starts.lock().unwrap();
-        while starts.front().is_some_and(|at| now.duration_since(*at) >= Duration::from_secs(1)) {
+        while starts
+            .front()
+            .is_some_and(|at| now.duration_since(*at) >= Duration::from_secs(1))
+        {
             starts.pop_front();
         }
         if starts.len() < MAX_STARTS_PER_SECOND {
             starts.push_back(now);
             return;
         }
-        let wait = Duration::from_secs(1).saturating_sub(now.duration_since(*starts.front().unwrap()));
+        let wait =
+            Duration::from_secs(1).saturating_sub(now.duration_since(*starts.front().unwrap()));
         drop(starts);
         std::thread::sleep(wait.min(Duration::from_millis(20)));
     }
@@ -95,13 +102,21 @@ pub fn run(repo: &str, args: &[&str]) -> Result<Output, String> {
 }
 
 pub fn clone_into(url: &str, target: &Path) -> Result<Output, String> {
-    let parent = target.parent().ok_or_else(|| "clone target has no parent".to_string())?;
-    let parent = parent.canonicalize().map_err(|error| format!("invalid clone parent: {error}"))?;
-    let home = std::env::var("HOME").map(PathBuf::from).map_err(|_| "HOME not set".to_string())?;
+    let parent = target
+        .parent()
+        .ok_or_else(|| "clone target has no parent".to_string())?;
+    let parent = parent
+        .canonicalize()
+        .map_err(|error| format!("invalid clone parent: {error}"))?;
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .map_err(|_| "HOME not set".to_string())?;
     if !parent.is_dir() || !parent.starts_with(home) {
         return Err("clone target is outside the user home".to_string());
     }
-    let name = target.file_name().ok_or_else(|| "invalid clone target".to_string())?;
+    let name = target
+        .file_name()
+        .ok_or_else(|| "invalid clone target".to_string())?;
     let _permit = acquire();
     wait_for_rate_slot();
     Command::new("git")

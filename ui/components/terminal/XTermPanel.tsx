@@ -20,6 +20,32 @@ const TERMINAL_FONT_SIZES: Record<string, number> = {
   xxl: 17,
 };
 
+const CLAUDE_PERMISSION_MARKERS: ReadonlyArray<[string, string]> = [
+  // Claude renders manual without the cycle hint; the other four include it.
+  ["manual mode on", "ask"],
+  ["accept edits on (shift+tab to cycle)", "accept_edits"],
+  ["plan mode on (shift+tab to cycle)", "plan"],
+  ["bypass permissions on (shift+tab to cycle)", "yolo"],
+  ["auto mode on (shift+tab to cycle)", "auto"],
+];
+
+/** Return the last Claude permission status rendered in a PTY fragment.
+ * A held Shift+Tab can redraw several modes in one packet, so first-match
+ * semantics would leave the composer one or more modes behind the terminal. */
+function detectClaudePermissionMode(text: string): string | null {
+  const normalized = text.toLowerCase();
+  let detected: string | null = null;
+  let detectedAt = -1;
+  for (const [marker, mode] of CLAUDE_PERMISSION_MARKERS) {
+    const at = normalized.lastIndexOf(marker);
+    if (at > detectedAt) {
+      detectedAt = at;
+      detected = mode;
+    }
+  }
+  return detected;
+}
+
 /** Shell-escape a path so spaces / quotes survive (single-quote wrap, `'` → `'\''`). */
 function shellEscape(path: string): string {
   return `'${path.replace(/'/g, `'\\''`)}'`;
@@ -97,6 +123,9 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
   const isPointInTerminal = useCallback((pos: { x: number; y: number }) => {
     const el = containerRef.current;
     if (!el) return false;
+    // Resident OpenCode terminals remain mounted while another tab is visible.
+    // Do not let the webview-wide Tauri drop listener target a hidden panel.
+    if (getComputedStyle(el).visibility === "hidden") return false;
     const r = el.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
     const x = pos.x / dpr;
@@ -207,6 +236,59 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
     let pendingChunks: Uint8Array[] = [];
     let pendingBytes = 0;
     let flushRaf: number | null = null;
+    let redrawPulseTimer: ReturnType<typeof setTimeout> | null = null;
+    let redrawRestoreTimer: ReturnType<typeof setTimeout> | null = null;
+    let redrawPulseRequested = false;
+    let pendingClaudeMode: string | null = null;
+    let modePersistTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const persistClaudeMode = () => {
+      modePersistTimer = null;
+      const mode = pendingClaudeMode;
+      pendingClaudeMode = null;
+      if (!mode) return;
+      invoke("agent_set_session_config", { id: agentId, mode }).catch(() => {});
+    };
+
+    const syncClaudeMode = (text: string) => {
+      const state = useStore.getState();
+      const agent = state.agents.get(agentId);
+      if (agent?.runtime !== "claude") return;
+
+      const mode = detectClaudePermissionMode(text);
+      if (!mode || agent.mode === mode) return;
+
+      state.addAgent({ ...agent, mode }, null);
+      const activeTab = state.tabs.find((tab) => tab.id === state.activeTabId);
+      const composerAgentId =
+        state.composerTarget === "master"
+          ? state.masterAgentId
+          : activeTab?.agentId ?? null;
+      if (composerAgentId === agentId) state.setPermissionMode(mode);
+
+      // A held key can emit many redraws per second. Reflect every one in the
+      // UI immediately, but persist only the final settled mode.
+      pendingClaudeMode = mode;
+      if (modePersistTimer) clearTimeout(modePersistTimer);
+      modePersistTimer = setTimeout(persistClaudeMode, 150);
+    };
+
+    const syncClaudeModeFromScreen = () => {
+      if (disposed) return;
+      // Claude's normal TUI redraws only changed character spans, so its raw
+      // PTY packets do not necessarily contain a complete status phrase. Read
+      // xterm's post-ANSI visible buffer, where the final line is reconstructed.
+      const buffer = term.buffer.active;
+      const lines: string[] = [];
+      const end = Math.min(buffer.length, buffer.baseY + term.rows);
+      for (let row = buffer.baseY; row < end; row++) {
+        const line = buffer.getLine(row)?.translateToString(true);
+        if (line) lines.push(line);
+      }
+      // The compact join also covers a status phrase wrapped by a very narrow
+      // terminal; the newline join keeps normal rows separated.
+      syncClaudeMode(`${lines.join("\n")}\n${lines.join("")}`);
+    };
 
     const flushPending = () => {
       flushRaf = null;
@@ -220,7 +302,7 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
       pendingChunks = [];
       pendingBytes = 0;
       try {
-        term.write(merged);
+        term.write(merged, syncClaudeModeFromScreen);
       } catch {
         // terminal disposed
       }
@@ -243,6 +325,30 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
       if (rows === lastResize.rows && cols === lastResize.cols) return;
       lastResize = { rows, cols };
       invoke("agent_resize", { id: agentId, rows, cols }).catch(() => {});
+    };
+
+    /** OpenCode's alternate-screen TUI may stay idle after this xterm component
+     *  is recreated. The PTY is still alive, but xterm has no screen snapshot to
+     *  paint and an unchanged resize is normally suppressed. A one-column resize
+     *  pulse makes the native TUI redraw without sending it an input command. */
+    const requestOpenCodeRedraw = () => {
+      if (redrawPulseRequested) return;
+      if (useStore.getState().agents.get(agentId)?.runtime !== "opencode") return;
+      redrawPulseRequested = true;
+      redrawPulseTimer = setTimeout(() => {
+        redrawPulseTimer = null;
+        if (disposed) return;
+        const rows = term.rows || 24;
+        const cols = term.cols || 80;
+        const pulseCols = cols > 2 ? cols - 1 : cols + 1;
+        invoke("agent_resize", { id: agentId, rows, cols: pulseCols }).catch(() => {});
+        redrawRestoreTimer = setTimeout(() => {
+          redrawRestoreTimer = null;
+          if (disposed) return;
+          invoke("agent_resize", { id: agentId, rows, cols }).catch(() => {});
+          lastResize = { rows, cols };
+        }, 32);
+      }, 80);
     };
 
     /** Fit the terminal to its container and force a repaint. A terminal opened
@@ -284,6 +390,7 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
         useStore.getState().clearAgentOutput(agentId);
       }
       sendResize();
+      requestOpenCodeRedraw();
     };
 
     if (channel) {
@@ -355,6 +462,10 @@ export function XTermPanel({ agentId }: XTermPanelProps) {
     observer.observe(containerRef.current);
 
     return () => {
+      if (redrawPulseTimer) clearTimeout(redrawPulseTimer);
+      if (redrawRestoreTimer) clearTimeout(redrawRestoreTimer);
+      if (modePersistTimer) clearTimeout(modePersistTimer);
+      persistClaudeMode();
       // Do not strand the final packet behind a cancelled animation frame.
       if (flushRaf !== null) cancelAnimationFrame(flushRaf);
       flushPending();

@@ -37,6 +37,7 @@ function Panel({ tab, onRemove }: { tab: Tab; onRemove?: () => void }) {
 
 export function ContentArea() {
   const tabs = useStore((s) => s.tabs);
+  const agents = useStore((s) => s.agents);
   const activeTabId = useStore((s) => s.activeTabId);
   const splitPaneA = useStore((s) => s.splitPaneA);
   const splitPaneB = useStore((s) => s.splitPaneB);
@@ -56,6 +57,10 @@ export function ContentArea() {
   const paneB = tabs.find((t) => t.id === splitPaneB);
   const splitActive =
     splitPaneA !== null && splitPaneB !== null && splitDirection !== null;
+  const openCodeTabs = tabs.filter(
+    (tab) => tab.type === "agent" && tab.agentId && agents.get(tab.agentId)?.runtime === "opencode"
+  );
+  const activeIsOpenCode = openCodeTabs.some((tab) => tab.id === activeTab?.id);
 
   /** Which edge band a drop position falls in (left/right first, then top/bottom). */
   const computeEdge = (clientX: number, clientY: number, el: HTMLElement): DropEdge => {
@@ -174,7 +179,19 @@ export function ContentArea() {
   // Default single-panel view.
   return (
     <div className="content-area" {...dropHandlers}>
-      {activeTab && <Panel tab={activeTab} />}
+      {activeTab && !activeIsOpenCode && <Panel tab={activeTab} />}
+      {/* OpenCode owns an alternate-screen TUI whose complete frame is held by
+          xterm, not replayed by the PTY. Keep each opened OpenCode panel mounted
+          across tab changes so returning to it cannot produce an empty canvas. */}
+      {openCodeTabs.map((tab) => (
+        <div
+          key={tab.id}
+          className={`resident-terminal-panel${tab.id === activeTab?.id ? " active" : " hidden"}`}
+          aria-hidden={tab.id !== activeTab?.id}
+        >
+          <Panel tab={tab} />
+        </div>
+      ))}
       {draggedTabId && dropEdge && <div className={`drop-zone ${dropEdge}`} />}
     </div>
   );

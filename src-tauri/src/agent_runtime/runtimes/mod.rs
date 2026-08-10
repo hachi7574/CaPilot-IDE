@@ -1,5 +1,8 @@
 pub mod bash;
 pub mod claude;
+pub mod codex;
+pub mod omp;
+pub mod opencode;
 
 use crate::agent_runtime::adapter::AgentRuntimeAdapter;
 
@@ -8,6 +11,11 @@ pub fn get_adapter(runtime: &str) -> Box<dyn AgentRuntimeAdapter> {
     match runtime {
         "bash" => Box::new(bash::BashAdapter::new("bash", true)),
         "bash-rc" => Box::new(bash::BashAdapter::new("bash-rc", false)),
+        "codex" => Box::new(codex::CodexAdapter::new()),
+        // `opm` was used by an early UI draft; keep it as a read-compatible
+        // alias while new sessions persist the CLI's real name, `omp`.
+        "omp" | "opm" => Box::new(omp::OmpAdapter::new()),
+        "opencode" => Box::new(opencode::OpenCodeAdapter::new()),
         // Default to claude for any other/unknown id.
         _ => Box::new(claude::ClaudeAdapter::new()),
     }
@@ -17,5 +25,5 @@ pub fn get_adapter(runtime: &str) -> Box<dyn AgentRuntimeAdapter> {
 /// runtime stays resolvable in `get_adapter` (for resuming older sessions) but
 /// is no longer offered as a new terminal — users get the full 正常 bash.
 pub fn known_runtimes() -> &'static [&'static str] {
-    &["claude", "bash-rc"]
+    &["claude", "codex", "opencode", "omp", "bash-rc"]
 }

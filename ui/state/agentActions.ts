@@ -36,7 +36,10 @@ export async function spawnAgent(
     project: proj,
     projectRoot: projectRoot ?? null,
     resumeKey: null,
-    model: s.selectedModel,
+    // The composer currently exposes Claude's model list. Do not leak that
+    // provider-specific selection into another runtime (for example Codex),
+    // which should use its own configured default model.
+    model: runtime === DEFAULT_RUNTIME ? s.selectedModel : null,
     speed: s.speed,
     mode: s.permissionMode,
     onData: channel,

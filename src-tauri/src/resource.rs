@@ -92,7 +92,11 @@ impl ResourceMonitor {
         sys.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
-            ProcessRefreshKind::nothing(),
+            // Linux tasks share their owning process's address space. If they
+            // enter the parent/child graph, summing `memory()` counts the same
+            // RSS once per thread (OpenCode commonly has dozens), inflating a
+            // ~600 MB process into tens of GB.
+            ProcessRefreshKind::nothing().without_tasks(),
         );
 
         // Parent → children edges, owned so the mutable refresh below can borrow `sys`.
@@ -109,7 +113,11 @@ impl ResourceMonitor {
             let processes = sys.processes();
             for (agent_id, pid) in &pids {
                 let root = Pid::from_u32(*pid);
-                agents.push((agent_id.clone(), *pid, collect_tree(root, processes, &children)));
+                agents.push((
+                    agent_id.clone(),
+                    *pid,
+                    collect_tree(root, processes, &children),
+                ));
             }
         }
 
@@ -159,10 +167,7 @@ impl ResourceMonitor {
     fn push_history(&self, agent_id: &str, cpu_pct: f32, mem_bytes: u64) {
         let mut hist = self.history.lock().unwrap();
         let buf = hist.entry(agent_id.to_string()).or_default();
-        buf.push_back(HistoryPoint {
-            cpu_pct,
-            mem_bytes,
-        });
+        buf.push_back(HistoryPoint { cpu_pct, mem_bytes });
         while buf.len() > HISTORY_LEN {
             buf.pop_front();
         }

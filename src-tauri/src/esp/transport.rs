@@ -43,11 +43,26 @@ pub struct EspStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum EspEvent {
-    Connected { name: String, address: String },
-    Disconnected { reason: String },
-    Frame { frame_type: FrameType, seq: u8, payload: Vec<u8> },
-    Telemetry { battery_pct: u8, battery_mv: u32, extra: serde_json::Value },
-    Error { message: String },
+    Connected {
+        name: String,
+        address: String,
+    },
+    Disconnected {
+        reason: String,
+    },
+    Frame {
+        frame_type: FrameType,
+        seq: u8,
+        payload: Vec<u8>,
+    },
+    Telemetry {
+        battery_pct: u8,
+        battery_mv: u32,
+        extra: serde_json::Value,
+    },
+    Error {
+        message: String,
+    },
 }
 
 /// Error type for ESP transport operations.

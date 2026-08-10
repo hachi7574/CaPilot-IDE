@@ -11,8 +11,8 @@ export type AgentStatus =
   | "busy"
   | "done"
   | "failed";
-export type PermissionMode = "ask" | "auto" | "yolo";
-export type Speed = "high" | "mid" | "fast" | "auto";
+export type PermissionMode = string;
+export type Speed = string;
 /** UI font size preset. Base `"s"` is the smallest; larger presets scale the
  *  CSS `--fs-*` tokens. */
 export type FontScale = "s" | "m" | "l" | "xl" | "xxl";
@@ -30,9 +30,9 @@ export interface AgentInfo {
   title: string;
   cwd: string;
   pid: number | null;
-  /** Permission mode this session runs under ("ask" | "auto" | "yolo"). */
+  /** Provider-specific permission mode id. */
   mode?: string;
-  /** Speed tier this session runs under ("high" | "mid" | "fast" | "auto"). */
+  /** Provider-specific thinking/effort option id. */
   speed?: string;
   /** Selected model id, or null/undefined for the runtime default. */
   model?: string | null;
@@ -47,7 +47,24 @@ export interface RuntimeInfo {
   name: string;
   available: boolean;
   authenticated: boolean;
-  models?: { id: string; name: string; provider: string }[];
+  models?: { id: string; name: string; provider: string; is_default: boolean }[];
+  /** Provider-native permission choices. Empty means this runtime has no
+   * permission policy control (for example Bash). */
+  permission_modes?: PermissionModeInfo[];
+  thinking_options?: ThinkingOptionInfo[];
+}
+
+export interface ThinkingOptionInfo {
+  id: Speed;
+  label: string;
+  description: string;
+}
+
+export interface PermissionModeInfo {
+  id: PermissionMode;
+  label: string;
+  description: string;
+  requires_confirmation: boolean;
 }
 
 export interface Tab {
@@ -187,6 +204,9 @@ interface AppState {
   /** Output buffered before a terminal attached (and between mounts). */
   agentOutputs: Map<string, number[]>;
   masterAgentId: string | null;
+  /** Whether the initial persisted-session lookup has settled. Sidebar empty
+   *  states must wait for this or they briefly claim no Master during restore. */
+  sessionsRestored: boolean;
   /** Agent ids whose next terminal mount should force a resume (sidebar
    *  "已结束" reopen). Ended (`done`) sessions never auto-resume otherwise. */
   resumeOnOpen: Set<string>;
@@ -216,7 +236,6 @@ interface AppState {
   speed: Speed;
   /** Runtime model id chosen via composer `[模型↑]` (null = runtime default). */
   selectedModel: string | null;
-  workerMode: boolean;
   draftHistory: string[];
   draftIndex: number;
 
@@ -280,6 +299,7 @@ interface AppState {
    *  sidebar "已结束" group can reopen (resume) it. */
   dropAgentChannel: (id: string) => void;
   setMasterAgentId: (id: string | null) => void;
+  setSessionsRestored: () => void;
   setRuntimes: (runtimes: RuntimeInfo[]) => void;
   setWorkerInfos: (infos: WorkerInfo[]) => void;
   upsertWorkerInfo: (info: WorkerInfo) => void;
@@ -301,7 +321,6 @@ interface AppState {
   setPermissionMode: (mode: PermissionMode) => void;
   setSpeed: (speed: Speed) => void;
   setSelectedModel: (model: string | null) => void;
-  toggleWorkerMode: () => void;
   pushDraft: (text: string) => void;
   navigateDraft: (dir: -1 | 1) => string | null;
   toggleLeftSidebar: () => void;
@@ -359,17 +378,17 @@ function loadFontScale(): FontScale {
 }
 
 // ── New-terminal templates ──────────────────────────────────────
-// The project "+" button opens a picker: bash (fixed, always first) / claude /
-// user-defined quick-start commands. Custom templates persist to localStorage.
+// The project "+" button opens a picker: bash (fixed, always first) / Claude /
+// Codex / user-defined quick-start commands. Custom templates persist locally.
 
 /** A new-terminal template shown in the project "+" picker. `command` is run
- *  after the shell starts (bash / bash-rc) / ignored for claude; `fixed` (bash)
- *  can't be renamed or removed. */
+ *  after the shell starts (bash / bash-rc) / ignored for agent runtimes;
+ *  `fixed` (bash) can't be renamed or removed. */
 export interface TermTemplate {
   id: string;
   name: string;
   command: string;
-  runtime: "bash" | "bash-rc" | "claude";
+  runtime: "bash" | "bash-rc" | "claude" | "codex" | "opencode" | "omp";
   fixed?: boolean;
 }
 
@@ -377,6 +396,9 @@ const TERM_TEMPLATES_KEY = "capilot.termTemplates";
 const DEFAULT_TEMPLATES: TermTemplate[] = [
   { id: "bash-rc", name: "bash", command: "", runtime: "bash-rc", fixed: true },
   { id: "claude", name: "claude", command: "", runtime: "claude" },
+  { id: "codex", name: "codex", command: "", runtime: "codex" },
+  { id: "opencode", name: "opencode", command: "", runtime: "opencode" },
+  { id: "omp", name: "omp", command: "", runtime: "omp" },
 ];
 function loadTermTemplates(): TermTemplate[] {
   try {
@@ -413,6 +435,7 @@ export const useStore = create<AppState>((set, get) => ({
   agentChannels: new Map(),
   agentOutputs: new Map(),
   masterAgentId: null,
+  sessionsRestored: false,
   resumeOnOpen: new Set(),
   closedAgentIds: new Set(),
   runtimes: [],
@@ -426,7 +449,6 @@ export const useStore = create<AppState>((set, get) => ({
   permissionMode: "ask",
   speed: "auto",
   selectedModel: null,
-  workerMode: false,
   draftHistory: [],
   draftIndex: -1,
   leftSidebarOpen: true,
@@ -595,6 +617,8 @@ export const useStore = create<AppState>((set, get) => ({
 
   setMasterAgentId: (id) => set({ masterAgentId: id }),
 
+  setSessionsRestored: () => set({ sessionsRestored: true }),
+
   setRuntimes: (runtimes) => set({ runtimes }),
 
   setWorkerInfos: (infos) => set({ workerInfos: infos }),
@@ -731,8 +755,6 @@ export const useStore = create<AppState>((set, get) => ({
   setSpeed: (speed) => set({ speed }),
 
   setSelectedModel: (model) => set({ selectedModel: model }),
-
-  toggleWorkerMode: () => set((s) => ({ workerMode: !s.workerMode })),
 
   pushDraft: (text) =>
     set((s) => ({

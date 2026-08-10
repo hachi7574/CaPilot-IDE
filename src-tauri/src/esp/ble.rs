@@ -155,10 +155,7 @@ impl EspTransport for BleUart {
         TransportKind::Ble
     }
 
-    async fn connect(
-        &mut self,
-        events: mpsc::Sender<EspEvent>,
-    ) -> Result<(), EspError> {
+    async fn connect(&mut self, events: mpsc::Sender<EspEvent>) -> Result<(), EspError> {
         Self::power_on_adapter();
 
         let peripheral = Self::scan_and_connect().await?;
@@ -208,10 +205,12 @@ impl EspTransport for BleUart {
 
         let evt_sink = events.clone();
         let addr = self.address.clone().unwrap_or_default();
-        let _ = evt_sink.send(EspEvent::Connected {
-            name: TARGET_NAME.to_string(),
-            address: addr,
-        }).await;
+        let _ = evt_sink
+            .send(EspEvent::Connected {
+                name: TARGET_NAME.to_string(),
+                address: addr,
+            })
+            .await;
 
         let mut frame_buf: Vec<u8> = Vec::new();
         self.reader_handle = Some(tokio::spawn(async move {
@@ -220,25 +219,39 @@ impl EspTransport for BleUart {
                 let mut frames: Vec<Frame> = Vec::new();
                 drain_frames(&mut frame_buf, &mut frames);
                 for f in frames {
-                    let _ = evt_sink.send(EspEvent::Frame {
-                        frame_type: f.frame_type,
-                        seq: f.seq,
-                        payload: f.payload.clone(),
-                    }).await;
+                    let _ = evt_sink
+                        .send(EspEvent::Frame {
+                            frame_type: f.frame_type,
+                            seq: f.seq,
+                            payload: f.payload.clone(),
+                        })
+                        .await;
                     // Convenience typed telemetry event.
                     if let Ok(payload_str) = std::str::from_utf8(&f.payload) {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload_str) {
-                            let _ = evt_sink.send(EspEvent::Telemetry {
-                                battery_pct: v.get("batt_pct").and_then(|x| x.as_u64()).unwrap_or(0) as u8,
-                                battery_mv: v.get("batt_mv").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
-                                extra: v,
-                            }).await;
+                            let _ = evt_sink
+                                .send(EspEvent::Telemetry {
+                                    battery_pct: v
+                                        .get("batt_pct")
+                                        .and_then(|x| x.as_u64())
+                                        .unwrap_or(0)
+                                        as u8,
+                                    battery_mv: v
+                                        .get("batt_mv")
+                                        .and_then(|x| x.as_u64())
+                                        .unwrap_or(0)
+                                        as u32,
+                                    extra: v,
+                                })
+                                .await;
                         }
                     }
                 }
             }
             let _ = evt_sink
-                .send(EspEvent::Disconnected { reason: "notification stream ended".into() })
+                .send(EspEvent::Disconnected {
+                    reason: "notification stream ended".into(),
+                })
                 .await;
         }));
 

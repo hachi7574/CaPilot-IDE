@@ -1,5 +1,5 @@
 use crate::agent_runtime::adapter::{
-    AgentRuntimeAdapter, AgentSession, ModelInfo, PermissionMode, Speed,
+    AgentRuntimeAdapter, AgentSession, ModelInfo, PermissionModeInfo, ThinkingOptionInfo,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -51,7 +51,10 @@ impl ClaudeAdapter {
     /// stem, or None if the cwd has no session yet (fresh agent).
     fn detect_resume_key(cwd: &Path) -> Option<String> {
         let home = std::env::var("HOME").ok()?;
-        let dir = PathBuf::from(&home).join(".claude").join("projects").join(Self::claude_project_key(cwd));
+        let dir = PathBuf::from(&home)
+            .join(".claude")
+            .join("projects")
+            .join(Self::claude_project_key(cwd));
         let mut sessions: Vec<(SystemTime, String)> = Vec::new();
         let entries = std::fs::read_dir(dir).ok()?;
         for entry in entries.flatten() {
@@ -92,16 +95,79 @@ impl AgentRuntimeAdapter for ClaudeAdapter {
                 id: "claude-sonnet-5".into(),
                 name: "Claude Sonnet 5".into(),
                 provider: "anthropic".into(),
+                is_default: true,
             },
             ModelInfo {
                 id: "claude-opus-5".into(),
                 name: "Claude Opus 5".into(),
                 provider: "anthropic".into(),
+                is_default: false,
             },
             ModelInfo {
                 id: "claude-haiku-4-5".into(),
                 name: "Claude Haiku 4.5".into(),
                 provider: "anthropic".into(),
+                is_default: false,
+            },
+        ]
+    }
+
+    fn list_permission_modes(&self) -> Vec<PermissionModeInfo> {
+        vec![
+            PermissionModeInfo {
+                id: "ask".into(),
+                label: "manual".into(),
+                description: "Claude 在执行需要授权的工具前询问".into(),
+                requires_confirmation: false,
+            },
+            PermissionModeInfo {
+                id: "accept_edits".into(),
+                label: "accept edits".into(),
+                description: "自动接受文件编辑，其他敏感工具仍询问".into(),
+                requires_confirmation: false,
+            },
+            PermissionModeInfo {
+                id: "plan".into(),
+                label: "plan".into(),
+                description: "只进行分析和规划，不执行修改".into(),
+                requires_confirmation: false,
+            },
+            PermissionModeInfo {
+                id: "auto".into(),
+                label: "auto".into(),
+                description: "使用 Claude Code 原生自动权限模式".into(),
+                requires_confirmation: false,
+            },
+            PermissionModeInfo {
+                id: "yolo".into(),
+                label: "bypass".into(),
+                description: "绕过 Claude Code 权限检查".into(),
+                requires_confirmation: true,
+            },
+        ]
+    }
+
+    fn list_thinking_options(&self) -> Vec<ThinkingOptionInfo> {
+        vec![
+            ThinkingOptionInfo {
+                id: "auto".into(),
+                label: "Auto".into(),
+                description: "由 Claude 自动选择思考强度".into(),
+            },
+            ThinkingOptionInfo {
+                id: "fast".into(),
+                label: "Low".into(),
+                description: "低思考强度，响应更快".into(),
+            },
+            ThinkingOptionInfo {
+                id: "mid".into(),
+                label: "Medium".into(),
+                description: "中等思考强度".into(),
+            },
+            ThinkingOptionInfo {
+                id: "high".into(),
+                label: "High".into(),
+                description: "高思考强度".into(),
             },
         ]
     }
@@ -112,16 +178,13 @@ impl AgentRuntimeAdapter for ClaudeAdapter {
             .model
             .clone()
             .unwrap_or_else(|| "claude-sonnet-5".to_string());
-        let mut args = vec![
-            "--model".to_string(),
-            model,
-        ];
+        let mut args = vec!["--model".to_string(), model];
 
         // Add permission mode args
-        args.extend(self.mode_args(session.mode));
+        args.extend(self.mode_args(&session.mode));
 
         // Add speed args
-        args.extend(self.speed_args(session.speed));
+        args.extend(self.speed_args(&session.speed));
 
         Ok(("claude".to_string(), args))
     }
@@ -146,27 +209,31 @@ impl AgentRuntimeAdapter for ClaudeAdapter {
         Self::detect_resume_key(cwd)
     }
 
-    fn speed_args(&self, speed: Speed) -> Vec<String> {
+    fn speed_args(&self, speed: &str) -> Vec<String> {
         match speed {
-            Speed::High => vec!["--thinking-effort".to_string(), "high".to_string()],
-            Speed::Mid => vec!["--thinking-effort".to_string(), "medium".to_string()],
-            Speed::Fast => vec!["--thinking-effort".to_string(), "low".to_string()],
-            Speed::Auto => vec![], // Let Claude decide based on the task
+            "high" => vec!["--thinking-effort".to_string(), "high".to_string()],
+            "mid" => vec!["--thinking-effort".to_string(), "medium".to_string()],
+            "fast" => vec!["--thinking-effort".to_string(), "low".to_string()],
+            _ => vec![],
         }
     }
 
-    fn mode_args(&self, mode: PermissionMode) -> Vec<String> {
-        match mode {
-            PermissionMode::Ask => vec![
-                "--permission-mode".to_string(),
-                "acceptEdits".to_string(),
-            ],
-            PermissionMode::Auto => vec![], // Claude's default behavior
-            PermissionMode::Yolo => vec![
-                "--permission-mode".to_string(),
-                "bypassPermissions".to_string(),
-            ],
-        }
+    fn mode_args(&self, mode: &str) -> Vec<String> {
+        let native_mode = match mode {
+            "accept_edits" => "acceptEdits",
+            "plan" => "plan",
+            "auto" => "auto",
+            "yolo" => "bypassPermissions",
+            _ => "manual",
+        };
+        vec![
+            "--permission-mode".to_string(),
+            native_mode.to_string(),
+            // Makes bypassPermissions part of Claude Code's live Shift+Tab
+            // cycle. It does not enable bypass by itself; Ask and Auto still
+            // start in their explicitly selected modes above.
+            "--allow-dangerously-skip-permissions".to_string(),
+        ]
     }
 }
 
@@ -180,8 +247,14 @@ mod tests {
         // character with '-', including the leading slash. These exact strings
         // were verified against real ~/.claude/projects/ entries.
         let cases = [
-            ("/home/hachi/CaPilot/workspaces/master", "-home-hachi-CaPilot-workspaces-master"),
-            ("/home/hachi/Project/CaPilot-Ide", "-home-hachi-Project-CaPilot-Ide"),
+            (
+                "/home/hachi/CaPilot/workspaces/master",
+                "-home-hachi-CaPilot-workspaces-master",
+            ),
+            (
+                "/home/hachi/Project/CaPilot-Ide",
+                "-home-hachi-Project-CaPilot-Ide",
+            ),
             // Dots and spaces also collapse to '-'.
             ("/home/x/my.proj", "-home-x-my-proj"),
             ("/home/x/my dir", "-home-x-my-dir"),
@@ -191,6 +264,27 @@ mod tests {
                 ClaudeAdapter::claude_project_key(Path::new(cwd)),
                 expected,
                 "cwd {cwd}"
+            );
+        }
+    }
+
+    #[test]
+    fn composer_permission_modes_map_to_claude_native_modes() {
+        let adapter = ClaudeAdapter::new();
+        for (mode, expected) in [
+            ("ask", "manual"),
+            ("accept_edits", "acceptEdits"),
+            ("plan", "plan"),
+            ("auto", "auto"),
+            ("yolo", "bypassPermissions"),
+        ] {
+            assert_eq!(
+                adapter.mode_args(mode),
+                vec![
+                    "--permission-mode".to_string(),
+                    expected.to_string(),
+                    "--allow-dangerously-skip-permissions".to_string(),
+                ]
             );
         }
     }

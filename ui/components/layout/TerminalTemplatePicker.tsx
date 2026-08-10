@@ -5,7 +5,7 @@ import { spawnTerminal } from "../../state/agentActions";
 /**
  * New-terminal template picker for the project "+" / tab-bar "+" buttons.
  *
- * bash (fixed, always first) / claude / user-defined quick-start commands.
+ * bash (fixed, always first) / Claude / Codex / user-defined quick-start commands.
  * Right-click a non-fixed template to rename it or edit its launch command;
  * "＋ 添加快速启动" adds a new one (persisted to localStorage).
  */
@@ -15,7 +15,7 @@ export function TerminalTemplatePicker({
   role = "standalone",
   onClose,
 }: {
-  /** Project to spawn the terminal under ("master" for the tab-bar "+"). */
+  /** Project to spawn the terminal under. */
   project: string;
   /** Fixed-position anchor for the dropdown menu. */
   anchor: { x: number; y: number };

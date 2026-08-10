@@ -10,23 +10,35 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useStore } from "../../state/store";
+import { createBufferedChannel, useStore } from "../../state/store";
+import type {
+  AgentInfo,
+  PermissionMode,
+  PermissionModeInfo,
+  ThinkingOptionInfo,
+} from "../../state/store";
 import { spawnAgent, ensureAgentChannel } from "../../state/agentActions";
+import { setAgentRole } from "../../state/orchestration";
+import { PermissionConfirmationDialog } from "./PermissionConfirmationDialog";
 
 const DEFAULT_RUNTIME = "claude";
-const PERMISSION_MODES = ["ask", "auto", "yolo"] as const;
-const SPEED_LABELS: Record<string, string> = {
-  high: "high",
-  mid: "mid",
-  fast: "fast",
-  auto: "auto",
-};
+type ComposerPermissionMode = PermissionMode;
 
-interface ModelInfo {
-  id: string;
-  name: string;
-  provider: string;
-}
+const MASTER_ORCHESTRATION_INSTRUCTIONS = `[CaPilot Master]
+用户点名一个 Worker 时：先运行 capilot status；只按返回的完整名称调用 capilot dispatch --worker "<名称>" --title "<标题>" --prompt "<任务>"。不得假装 Worker 已执行；找不到名称时原样告知用户并列出 available_workers。当前一次请求只调度一个 Worker。`;
+
+// Claude Code's Shift+Tab cycle is not the same order as the permission menu:
+// manual → acceptEdits → plan → bypassPermissions → auto. Keep this explicit;
+// using `list_permission_modes()` here makes auto/bypass transitions land on
+// the wrong native mode because the menu intentionally presents safer choices
+// before bypass.
+const CLAUDE_PERMISSION_CYCLE: readonly ComposerPermissionMode[] = [
+  "ask",
+  "accept_edits",
+  "plan",
+  "yolo",
+  "auto",
+];
 
 interface FsEntryBrief {
   name: string;
@@ -54,10 +66,10 @@ export function Composer() {
   const permissionMode = useStore((s) => s.permissionMode);
   const speed = useStore((s) => s.speed);
   const selectedModel = useStore((s) => s.selectedModel);
-  const workerMode = useStore((s) => s.workerMode);
   const activeTabId = useStore((s) => s.activeTabId);
   const tabs = useStore((s) => s.tabs);
   const agents = useStore((s) => s.agents);
+  const runtimes = useStore((s) => s.runtimes);
   const masterAgentId = useStore((s) => s.masterAgentId);
   const workerUnlockId = useStore((s) => s.workerUnlockId);
 
@@ -66,12 +78,10 @@ export function Composer() {
   const composerH = useStore((s) => s.composerH);
   const masterReportH = useStore((s) => s.masterReportH);
   const setComposerH = useStore((s) => s.setComposerH);
-  const toggleWorkerMode = useStore((s) => s.toggleWorkerMode);
   const pushDraft = useStore((s) => s.pushDraft);
   const navigateDraft = useStore((s) => s.navigateDraft);
   const setWorkerUnlock = useStore((s) => s.setWorkerUnlock);
 
-  const [models, setModels] = useState<ModelInfo[]>([]);
   const [atMenu, setAtMenu] = useState<AtMenuState | null>(null);
   const [dragHover, setDragHover] = useState(false);
   const [isBangInput, setIsBangInput] = useState(false);
@@ -83,10 +93,20 @@ export function Composer() {
 
   // Composer popover menus (向上弹出)：模型选择 + 文件/引用.
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [permissionMenuOpen, setPermissionMenuOpen] = useState(false);
+  const [pendingPermissionMode, setPendingPermissionMode] =
+    useState<PermissionModeInfo | null>(null);
+  const [thinkingMenuOpen, setThinkingMenuOpen] = useState(false);
+  const [openCodeAgentModes, setOpenCodeAgentModes] =
+    useState<Record<string, "Build" | "Plan">>({});
   const [refMenuOpen, setRefMenuOpen] = useState(false);
   const [recentEntries, setRecentEntries] = useState<RecentEntry[]>([]);
   const modelAnchorRef = useRef<HTMLSpanElement>(null);
   const modelMenuRef = useRef<HTMLDivElement>(null);
+  const permissionAnchorRef = useRef<HTMLSpanElement>(null);
+  const permissionMenuRef = useRef<HTMLDivElement>(null);
+  const thinkingAnchorRef = useRef<HTMLSpanElement>(null);
+  const thinkingMenuRef = useRef<HTMLDivElement>(null);
   const refAnchorRef = useRef<HTMLSpanElement>(null);
   const refMenuRef = useRef<HTMLDivElement>(null);
 
@@ -99,6 +119,10 @@ export function Composer() {
   const dragDepthRef = useRef(0);
   // Guards against double-send on rapid Enter (Bug 3).
   const sendingRef = useRef(false);
+  // A Claude permission change is a short sequence of PTY key presses. Do not
+  // allow two slider clicks to interleave and land on an unintended mode.
+  const permissionSwitchingRef = useRef(false);
+  const modelSwitchingRef = useRef(false);
   // Auto-relock timer for the composer 解锁 (mirrors XTermPanel's 8s window).
   const unlockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -128,6 +152,23 @@ export function Composer() {
   const targetAgentId =
     composerTarget === "agent" ? activeTab?.agentId : undefined;
 
+  // The selected terminal defines the default send target (DevPlan §3.1/3.2).
+  // Previously `composerTarget` stayed at its initial "master" value until the
+  // user pressed Tab, so selecting a standalone/Codex terminal still sent the
+  // composer text to Master and appeared to do nothing in the visible terminal.
+  // This runs only when the selected tab changes; Tab can still override the
+  // target while the user remains on the same terminal.
+  useEffect(() => {
+    if (activeTab?.type !== "agent") return;
+    if (activeTab.id === "master") {
+      setComposerTarget("master");
+      return;
+    }
+    if (!activeTab.agentId) return;
+    const role = useStore.getState().agents.get(activeTab.agentId)?.role;
+    setComposerTarget(role === "master" ? "master" : "agent");
+  }, [activeTabId, activeTab?.type, activeTab?.agentId, setComposerTarget]);
+
   // ── Per-session composer config ────────────────────────────────
   // The permission/speed/model controls show and edit the CURRENT target
   // session's own values (falling back to the global "next spawn" defaults when
@@ -136,11 +177,19 @@ export function Composer() {
   const configAgentId =
     composerTarget === "master" ? masterAgentId ?? undefined : activeTab?.agentId;
   const configAgent = configAgentId ? agents.get(configAgentId) : undefined;
+  const configRuntimeId = configAgent?.runtime ?? DEFAULT_RUNTIME;
+  const configRuntime = runtimes.find((runtime) => runtime.id === configRuntimeId);
+  const models = configRuntime?.models ?? [];
+  const permissionModes: PermissionModeInfo[] = configRuntime?.permission_modes ?? [];
+  const thinkingOptions: ThinkingOptionInfo[] = configRuntime?.thinking_options ?? [];
   const shownMode =
-    (configAgent?.mode as (typeof PERMISSION_MODES)[number]) ?? permissionMode;
-  const shownSpeed =
-    (configAgent?.speed as "high" | "mid" | "fast" | "auto") ?? speed;
-  const shownModel = configAgent?.model ?? selectedModel;
+    (configAgent?.mode as ComposerPermissionMode) ?? permissionMode;
+  const shownSpeed = configAgent?.speed ?? speed;
+  const defaultModel = models.find((model) => model.is_default) ?? null;
+  const preferredModel = configAgent?.model ?? selectedModel;
+  const shownModel = models.some((model) => model.id === preferredModel)
+    ? preferredModel
+    : defaultModel?.id ?? null;
   const currentModel = models.find((m) => m.id === shownModel) ?? null;
 
   const applyConfig = useCallback(
@@ -160,6 +209,207 @@ export function Composer() {
     [composerTarget, activeTab?.agentId]
   );
 
+  const applyPermissionMode = useCallback(
+    async (mode: ComposerPermissionMode) => {
+      if (permissionSwitchingRef.current) return;
+      const s = useStore.getState();
+      const id =
+        composerTarget === "master" ? s.masterAgentId : activeTab?.agentId;
+      const agent = id ? s.agents.get(id) : undefined;
+      if (!id || !agent) {
+        s.setPermissionMode(mode);
+        return;
+      }
+
+      const previousMode =
+        (agent.mode as ComposerPermissionMode | undefined) ?? s.permissionMode;
+      if (mode === previousMode) return;
+
+      permissionSwitchingRef.current = true;
+      try {
+        if (agent.runtime === "omp") {
+          // OMP's approval mode is a process-level runtime override; its TUI
+          // currently has no live command/keybinding for changing it. Persist
+          // first, then restart the same provider session so the terminal's
+          // effective mode and the composer selection cannot diverge.
+          await invoke("agent_set_session_config", { id, mode });
+          const { channel, flush } = createBufferedChannel();
+          try {
+            const info = await invoke<AgentInfo>("agent_resume", {
+              id,
+              onData: channel,
+            });
+            flush(info.id);
+            useStore.getState().addAgent(info, channel);
+          } catch (error) {
+            // Keep persistence aligned with the still-displayed selection if
+            // the restart failed before the new OMP process became available.
+            await invoke("agent_set_session_config", { id, mode: previousMode }).catch(
+              () => {}
+            );
+            throw error;
+          }
+        } else {
+          // A restored session may not have its PTY until its terminal is first
+          // shown. Resume it before applying a live mode change.
+          const resumed = !s.agentChannels.has(id)
+            ? await ensureAgentChannel(id)
+            : false;
+          if (resumed) await new Promise((r) => setTimeout(r, 250));
+        }
+
+        if (agent.runtime === "codex") {
+          // Codex supports changing permissions in the current TUI through the
+          // native `/permissions` picker. Drive that picker instead of killing
+          // and resuming the process. Its presets are ordered Read Only,
+          // Default (workspace access), Full Access.
+          const presetIndex = permissionModes.findIndex((item) => item.id === mode);
+          if (presetIndex < 0) throw new Error(`Unsupported Codex permission mode: ${mode}`);
+          await invoke("agent_write", { id, data: "/permissions", raw: true });
+          await new Promise((r) => setTimeout(r, 40));
+          await invoke("agent_write", { id, data: "\r", raw: true });
+          await new Promise((r) => setTimeout(r, 160));
+          await invoke("agent_write", { id, data: "\u001b[H", raw: true });
+          for (let i = 0; i < presetIndex; i++) {
+            await invoke("agent_write", { id, data: "\u001b[B", raw: true });
+          }
+          await invoke("agent_write", { id, data: "\r", raw: true });
+          if (mode === "yolo") {
+            // Codex opens a second "Enable full access?" picker after the
+            // preset is selected. The user has already accepted the IDE-owned
+            // warning dialog, so accept Codex's default "Yes, continue anyway"
+            // choice here as well; terminal focus is never required.
+            await new Promise((r) => setTimeout(r, 160));
+            await invoke("agent_write", { id, data: "\r", raw: true });
+          }
+        } else if (agent.runtime === "claude") {
+          // Claude Code has no direct in-session command that takes a target
+          // permission mode. Its supported live control is Shift+Tab, cycling:
+          // manual → acceptEdits → plan → bypassPermissions → auto. Calculate
+          // the forward route from the persisted current policy. This
+          // changes the running TUI; it does not kill or resume the process.
+          const currentMode =
+            (agent.mode as ComposerPermissionMode | undefined) ?? s.permissionMode;
+          const currentPosition = CLAUDE_PERMISSION_CYCLE.indexOf(currentMode);
+          const targetPosition = CLAUDE_PERMISSION_CYCLE.indexOf(mode);
+          if (currentPosition < 0 || targetPosition < 0) {
+            throw new Error(`Unsupported Claude permission transition: ${currentMode} -> ${mode}`);
+          }
+          const steps =
+            (targetPosition - currentPosition + CLAUDE_PERMISSION_CYCLE.length) %
+            CLAUDE_PERMISSION_CYCLE.length;
+          for (let i = 0; i < steps; i++) {
+            await invoke("agent_write", { id, data: "\u001b[Z", raw: true });
+            // Claude redraws its status line after every transition. Giving it
+            // a brief turn prevents rapid key presses from being coalesced.
+            if (i + 1 < steps) await new Promise((r) => setTimeout(r, 60));
+          }
+        } else if (agent.runtime === "opencode") {
+          // OpenCode only accepts --auto at process startup. For a running TUI,
+          // its supported switch lives in the command palette. CaPilot launches
+          // OpenCode with a session-scoped TUI config that binds that palette to
+          // F12, avoiding dependence on the user's configurable Ctrl+P binding.
+          const command =
+            mode === "auto"
+              ? "Enable auto-approve permissions"
+              : "Disable auto-approve permissions";
+          // Ctrl+P keeps already-running sessions (started before the private
+          // config existed) working. F12 is authoritative for newly launched
+          // sessions. Sending both is harmless: an already-open palette ignores
+          // F12, while a remapped Ctrl+P is ignored before F12 opens it.
+          await invoke("agent_write", { id, data: "\u0010", raw: true });
+          await new Promise((r) => setTimeout(r, 120));
+          await invoke("agent_write", { id, data: "\u001b[24~", raw: true });
+          await new Promise((r) => setTimeout(r, 120));
+          await invoke("agent_write", { id, data: command, raw: true });
+          await new Promise((r) => setTimeout(r, 80));
+          await invoke("agent_write", { id, data: "\r", raw: true });
+        }
+
+        // Persist the selected mode so a later resume starts with the same
+        // policy. This does not restart or replace the running PTY.
+        if (agent.runtime !== "omp") {
+          await invoke("agent_set_session_config", { id, mode });
+        }
+        const latest = useStore.getState().agents.get(id);
+        if (latest) useStore.getState().addAgent({ ...latest, mode }, null);
+        useStore.getState().setPermissionMode(mode);
+      } catch (error) {
+        console.error("permission mode switch failed:", error);
+      } finally {
+        permissionSwitchingRef.current = false;
+      }
+    },
+    [composerTarget, activeTab?.agentId, permissionModes]
+  );
+
+  const applyModel = useCallback(
+    async (modelId: string) => {
+      if (modelSwitchingRef.current) return;
+      const s = useStore.getState();
+      const id = composerTarget === "master" ? s.masterAgentId : activeTab?.agentId;
+      const agent = id ? s.agents.get(id) : undefined;
+      if (!id || !agent) {
+        s.setSelectedModel(modelId);
+        return;
+      }
+
+      modelSwitchingRef.current = true;
+      try {
+        const resumed = !s.agentChannels.has(id) ? await ensureAgentChannel(id) : false;
+        if (resumed) await new Promise((resolve) => setTimeout(resolve, 250));
+
+        if (agent.runtime === "codex") {
+          const modelIndex = models.findIndex((model) => model.id === modelId);
+          if (modelIndex < 0) throw new Error(`Unsupported Codex model: ${modelId}`);
+          await invoke("agent_write", { id, data: "/model", raw: true });
+          await new Promise((resolve) => setTimeout(resolve, 40));
+          await invoke("agent_write", { id, data: "\r", raw: true });
+          await new Promise((resolve) => setTimeout(resolve, 180));
+          await invoke("agent_write", { id, data: "\u001b[H", raw: true });
+          for (let i = 0; i < modelIndex; i++) {
+            await invoke("agent_write", { id, data: "\u001b[B", raw: true });
+          }
+          await invoke("agent_write", { id, data: "\r", raw: true });
+        } else if (agent.runtime === "claude") {
+          await invoke("agent_write", { id, data: `/model ${modelId}`, raw: true });
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          await invoke("agent_write", { id, data: "\r", raw: true });
+        }
+
+        await invoke("agent_set_session_config", { id, model: modelId });
+        const latest = useStore.getState().agents.get(id);
+        if (latest) useStore.getState().addAgent({ ...latest, model: modelId }, null);
+        useStore.getState().setSelectedModel(modelId);
+      } catch (error) {
+        console.error("model switch failed:", error);
+      } finally {
+        modelSwitchingRef.current = false;
+      }
+    },
+    [composerTarget, activeTab?.agentId, models]
+  );
+
+  const cycleOpenCodeAgent = useCallback(async () => {
+    const s = useStore.getState();
+    const id = composerTarget === "master" ? s.masterAgentId : activeTab?.agentId;
+    const agent = id ? s.agents.get(id) : undefined;
+    if (!id || agent?.runtime !== "opencode") return;
+    try {
+      const resumed = !s.agentChannels.has(id) ? await ensureAgentChannel(id) : false;
+      if (resumed) await new Promise((resolve) => setTimeout(resolve, 250));
+      // OpenCode owns primary-agent switching in its native TUI. One Tab moves
+      // to the next primary agent (Build ⇄ Plan in the default configuration).
+      await invoke("agent_write", { id, data: "\t", raw: true });
+      setOpenCodeAgentModes((current) => ({
+        ...current,
+        [id]: current[id] === "Plan" ? "Build" : "Plan",
+      }));
+    } catch (error) {
+      console.error("OpenCode agent switch failed:", error);
+    }
+  }, [composerTarget, activeTab?.agentId]);
+
   // DevPlan §4.6: worker terminals lock the composer input to prevent
   // orchestration conflicts. Locked → readOnly + 仍然发送/解锁 affordance.
   const activeAgent = activeTab?.agentId ? agents.get(activeTab.agentId) : undefined;
@@ -177,33 +427,27 @@ export function Composer() {
     invoke("agent_write", { id, data: "\u001b", raw: true }).catch(() => {});
   }, [composerTarget, activeTab?.agentId, masterAgentId, agents]);
 
-  // ── Model list (composer `[模型↑]`) ────────────────────────────
-  useEffect(() => {
-    let cancelled = false;
-    invoke<ModelInfo[]>("runtime_models", { runtime: DEFAULT_RUNTIME })
-      .then((m) => {
-        if (cancelled) return;
-        setModels(m ?? []);
-        const s = useStore.getState();
-        if (!s.selectedModel && m && m.length) s.setSelectedModel(m[0].id);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
   // ── Popover open/close (click-outside + Escape) ───────────────
   useEffect(() => {
-    if (!modelMenuOpen) return;
+    if (!modelMenuOpen && !permissionMenuOpen && !thinkingMenuOpen) return;
     const onDown = (e: MouseEvent) => {
       const t = e.target as Node | null;
       if (modelMenuRef.current?.contains(t)) return;
       if (modelAnchorRef.current?.contains(t)) return;
+      if (permissionMenuRef.current?.contains(t)) return;
+      if (permissionAnchorRef.current?.contains(t)) return;
+      if (thinkingMenuRef.current?.contains(t)) return;
+      if (thinkingAnchorRef.current?.contains(t)) return;
       setModelMenuOpen(false);
+      setPermissionMenuOpen(false);
+      setThinkingMenuOpen(false);
     };
     const onKey = (e: globalThis.KeyboardEvent) => {
-      if (e.key === "Escape") setModelMenuOpen(false);
+      if (e.key === "Escape") {
+        setModelMenuOpen(false);
+        setPermissionMenuOpen(false);
+        setThinkingMenuOpen(false);
+      }
     };
     window.addEventListener("mousedown", onDown);
     window.addEventListener("keydown", onKey);
@@ -211,7 +455,7 @@ export function Composer() {
       window.removeEventListener("mousedown", onDown);
       window.removeEventListener("keydown", onKey);
     };
-  }, [modelMenuOpen]);
+  }, [modelMenuOpen, permissionMenuOpen, thinkingMenuOpen]);
 
   useEffect(() => {
     if (!refMenuOpen) return;
@@ -557,6 +801,10 @@ export function Composer() {
     // 发送（不做 smart 包装）。视觉上由 `.composer-bang` 徽标标注。
     const isBang = raw.startsWith("!");
     const text = isBang ? raw.slice(1).trimStart() : raw;
+    const agentInput =
+      composerTarget === "master" && !isBang
+        ? `${MASTER_ORCHESTRATION_INSTRUCTIONS}\n\n用户请求：\n${text}`
+        : text;
     pushDraft(raw);
 
     // Clear the textarea synchronously before any await so a second Enter can't
@@ -579,12 +827,7 @@ export function Composer() {
           }
         }
         if (!agentId) {
-          const role =
-            composerTarget === "master"
-              ? "master"
-              : workerMode
-              ? "worker"
-              : "standalone";
+          const role = composerTarget === "master" ? "master" : "standalone";
           agentId = await spawnAgent(role);
           justSpawned = true;
         }
@@ -609,7 +852,22 @@ export function Composer() {
       if (justSpawned || resumed) {
         await new Promise((r) => setTimeout(r, 800));
       }
-      await invoke("agent_write", { id: agentId, data: text });
+      const runtime = useStore.getState().agents.get(agentId)?.runtime;
+      if (runtime === "codex") {
+        // Codex's TUI detects a text+Enter burst as pasted input. When both are
+        // delivered in one PTY write, the trailing CR may remain in the editor
+        // instead of submitting the prompt. Send the keystrokes separately,
+        // matching what happens when a user types in the terminal directly.
+        await invoke("agent_write", {
+          id: agentId,
+          data: agentInput,
+          raw: true,
+        });
+        await new Promise((r) => setTimeout(r, 30));
+        await invoke("agent_write", { id: agentId, data: "\r", raw: true });
+      } else {
+        await invoke("agent_write", { id: agentId, data: agentInput });
+      }
     } catch (err) {
       console.error("Failed to send to agent:", err);
     } finally {
@@ -625,7 +883,6 @@ export function Composer() {
   }, [
     targetAgentId,
     composerTarget,
-    workerMode,
     masterAgentId,
     agents,
     resizeTextarea,
@@ -699,8 +956,21 @@ export function Composer() {
       } else if (e.key === "Tab") {
         e.preventDefault();
         if (e.shiftKey) {
-          const idx = PERMISSION_MODES.indexOf(shownMode);
-          applyConfig({ mode: PERMISSION_MODES[(idx + 1) % 3] });
+          // In OpenCode, Shift+Tab in CaPilot's composer mirrors the native
+          // primary-agent switch: Build ⇄ Plan. Permission switching remains
+          // available from its dedicated button/menu.
+          if (configRuntimeId === "opencode") {
+            void cycleOpenCodeAgent();
+            return;
+          }
+          if (permissionModes.length === 0) return;
+          const idx = permissionModes.findIndex((mode) => mode.id === shownMode);
+          const next = permissionModes[(idx + 1 + permissionModes.length) % permissionModes.length];
+          if (next.requires_confirmation && shownMode !== next.id) {
+            setPendingPermissionMode(next);
+          } else {
+            void applyPermissionMode(next.id);
+          }
         } else {
           setComposerTarget(composerTarget === "agent" ? "master" : "agent");
         }
@@ -721,7 +991,7 @@ export function Composer() {
         // 与终端一致不转发（终端在 lock 状态下同样吞掉所有按键）；模型/文件
         // 弹出菜单打开时，这次 Esc 只负责关菜单（窗口级监听），不中断。
         e.preventDefault();
-        if (!locked && !modelMenuOpen && !refMenuOpen) abortAgentOperation();
+        if (!locked && !modelMenuOpen && !permissionMenuOpen && !thinkingMenuOpen && !refMenuOpen) abortAgentOperation();
       }
     },
     [
@@ -729,12 +999,18 @@ export function Composer() {
       insertAtItem,
       handleSend,
       shownMode,
+      permissionModes,
+      configRuntimeId,
+      cycleOpenCodeAgent,
       applyConfig,
+      applyPermissionMode,
       composerTarget,
       setComposerTarget,
       navigateDraft,
       locked,
       modelMenuOpen,
+      permissionMenuOpen,
+      thinkingMenuOpen,
       refMenuOpen,
       abortAgentOperation,
     ]
@@ -815,7 +1091,7 @@ export function Composer() {
               : "(无标签)"}
           </span>
         )}
-        {workerMode && composerTarget !== "master" ? " · worker" : ""}
+        {activeAgent?.role === "worker" ? " · worker" : ""}
         {workerLocked ? " · 🔒worker" : ""}
         {isBangInput && <span className="composer-bang">⚡ 终端直发</span>}
       </div>
@@ -899,10 +1175,12 @@ export function Composer() {
             title="插入文件引用 / 最近文件"
             onClick={() => {
               setModelMenuOpen(false);
+              setPermissionMenuOpen(false);
+              setThinkingMenuOpen(false);
               setRefMenuOpen((o) => !o);
             }}
           >
-            + 文件/引用
+            +
           </span>
           {refMenuOpen && (
             <div className="cmp-menu" ref={refMenuRef} role="menu">
@@ -939,11 +1217,13 @@ export function Composer() {
             className="act-btn"
             onClick={() => {
               setRefMenuOpen(false);
+              setPermissionMenuOpen(false);
+              setThinkingMenuOpen(false);
               setModelMenuOpen((o) => !o);
             }}
             title={`选择模型（当前：${currentModel ? currentModel.name : "runtime 默认"}）`}
           >
-            模型{currentModel ? `: ${currentModel.name}` : " ↑"}
+            {currentModel ? currentModel.name : "选择模型"}
           </span>
           {modelMenuOpen && (
             <div className="cmp-menu" ref={modelMenuRef} role="menu">
@@ -956,7 +1236,7 @@ export function Composer() {
                   key={m.id}
                   className={`cmp-menu-item${m.id === shownModel ? " current" : ""}`}
                   onClick={() => {
-                    applyConfig({ model: m.id });
+                    applyModel(m.id);
                     setModelMenuOpen(false);
                   }}
                 >
@@ -970,40 +1250,134 @@ export function Composer() {
           )}
         </span>
 
+        {configRuntimeId === "opencode" && (
+          <span
+            className="act-btn"
+            title="切换 OpenCode Build / Plan"
+            onClick={() => {
+              setRefMenuOpen(false);
+              setModelMenuOpen(false);
+              setPermissionMenuOpen(false);
+              setThinkingMenuOpen(false);
+              void cycleOpenCodeAgent();
+            }}
+          >
+            {configAgentId ? openCodeAgentModes[configAgentId] ?? "Build" : "Build"}
+          </span>
+        )}
+
+        {thinkingOptions.length > 0 && (
+          <span className="cmp-pop" ref={thinkingAnchorRef}>
+            <span
+              className="act-btn"
+              title="选择思考强度"
+              onClick={() => {
+                setRefMenuOpen(false);
+                setModelMenuOpen(false);
+                setPermissionMenuOpen(false);
+                setThinkingMenuOpen((open) => !open);
+              }}
+            >
+              ⚡ {thinkingOptions.find((option) => option.id === shownSpeed)?.label ?? "思考强度"}
+            </span>
+            {thinkingMenuOpen && (
+              <div className="cmp-menu" ref={thinkingMenuRef} role="menu">
+                <div className="cmp-menu-label">思考强度</div>
+                {thinkingOptions.map((option) => (
+                  <div
+                    key={option.id}
+                    className={`cmp-menu-item${option.id === shownSpeed ? " current" : ""}`}
+                    title={option.description}
+                    onClick={() => {
+                      applyConfig({ speed: option.id });
+                      setThinkingMenuOpen(false);
+                    }}
+                  >
+                    <span className="cmp-menu-name">{option.label}</span>
+                    {option.id === shownSpeed && <span className="cmp-menu-check">✓</span>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </span>
+        )}
+        <span className="act-sep" />
         <span
-          className="act-btn"
+          className={`act-btn accent${activeAgent?.role === "worker" ? " active" : ""}${!activeAgent || activeAgent.role === "master" ? " disabled" : ""}`}
+          title={
+            !activeAgent
+              ? "请先选择一个会话"
+              : activeAgent.role === "master"
+                ? "Master 会话不能设为 worker"
+                : activeAgent.role === "worker"
+                  ? "取消当前会话的 worker 角色"
+                  : "将当前会话设为 worker"
+          }
           onClick={() => {
-            const s = ["high", "mid", "fast", "auto"] as const;
-            const idx = s.indexOf(shownSpeed);
-            applyConfig({ speed: s[(idx + 1) % 4] });
+            if (!activeTab?.agentId || !activeAgent || activeAgent.role === "master") return;
+            setAgentRole(
+              activeTab.agentId,
+              activeAgent.role === "worker" ? "standalone" : "worker"
+            );
           }}
         >
-          速度: {SPEED_LABELS[shownSpeed]}
+          🤖worker {activeAgent?.role === "worker" ? "开" : "关"}
         </span>
         <span className="act-sep" />
-        <span
-          className={`act-btn accent${workerMode ? " active" : ""}`}
-          title="worker 开关：开启后新终端进编排池"
-          onClick={toggleWorkerMode}
-        >
-          🤖worker {workerMode ? "开" : "关"}
-        </span>
-        <span className="act-sep" />
-        <span className="act-mode-group">
-          {PERMISSION_MODES.map((m) => (
+        {permissionModes.length > 0 && (
+          <span className="cmp-pop" ref={permissionAnchorRef}>
             <span
-              key={m}
-              className={`act-mode-btn${shownMode === m ? " active" : ""}`}
-              onClick={() => applyConfig({ mode: m })}
+              className="act-btn"
+              title="选择权限模式"
+              onClick={() => {
+                setRefMenuOpen(false);
+                setModelMenuOpen(false);
+                setThinkingMenuOpen(false);
+                setPermissionMenuOpen((open) => !open);
+              }}
             >
-              {m}
+              🛡 {permissionModes.find((mode) => mode.id === shownMode)?.label ?? "权限"}
             </span>
-          ))}
-        </span>
+            {permissionMenuOpen && (
+              <div className="cmp-menu" ref={permissionMenuRef} role="menu">
+                <div className="cmp-menu-label">权限模式</div>
+                {permissionModes.map((mode) => (
+                  <div
+                    key={mode.id}
+                    className={`cmp-menu-item${shownMode === mode.id ? " current" : ""}`}
+                    title={mode.description}
+                    onClick={() => {
+                      setPermissionMenuOpen(false);
+                      if (mode.requires_confirmation && shownMode !== mode.id) {
+                        setPendingPermissionMode(mode);
+                      } else {
+                        void applyPermissionMode(mode.id);
+                      }
+                    }}
+                  >
+                    <span className="cmp-menu-name">{mode.label}</span>
+                    {shownMode === mode.id && <span className="cmp-menu-check">✓</span>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </span>
+        )}
         <button className="collapse-btn" onClick={toggleComposer}>
           {composerOpen ? "▼" : "▲"}
         </button>
       </div>
+      {pendingPermissionMode && (
+        <PermissionConfirmationDialog
+          modeLabel={pendingPermissionMode.label}
+          onCancel={() => setPendingPermissionMode(null)}
+          onConfirm={() => {
+            const mode = pendingPermissionMode.id;
+            setPendingPermissionMode(null);
+            void applyPermissionMode(mode);
+          }}
+        />
+      )}
     </div>
   );
 }

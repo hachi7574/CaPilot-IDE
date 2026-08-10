@@ -1764,13 +1764,12 @@ function GitPanel() {
               恢复时从 git 历史找回 committed 组 JSX 即可）。 */}
 
           {entries.length === 0 && !error && <div className="gv-clean">工作区干净 ✅</div>}
-          </div>
 
-          {/* Commit history (DevPlan §7.4B) — pinned at the panel bottom */}
-          <div className="gg-log">
-            <div className="gg-log-head" onClick={() => setLogOpen(!logOpen)}>
-              <span>提交历史</span>
-              <span className="gg-log-toggle">{logOpen ? "▼" : "▶"}</span>
+          {/* Commit history (DevPlan §7.4B) */}
+          <div className="gv-group gg-log">
+            <div className="gv-group-header gg-log-head" onClick={() => setLogOpen(!logOpen)}>
+              <span className="gv-arrow">{logOpen ? "▾" : "▸"}</span>
+              <span className="gv-group-title">提交历史</span>
             </div>
             {logOpen && (
               <div className="gg-log-body">
@@ -1787,6 +1786,7 @@ function GitPanel() {
                 ))}
               </div>
             )}
+          </div>
           </div>
         </>
       )}

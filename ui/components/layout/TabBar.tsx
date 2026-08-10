@@ -61,7 +61,6 @@ export function TabBar() {
   const agents = useStore((s) => s.agents);
   const projectRoots = useStore((s) => s.projectRoots);
   const focusedProject = useStore((s) => s.focusedProject);
-  const workerMode = useStore((s) => s.workerMode);
   const draggedTabId = useStore((s) => s.draggedTabId);
   const setActiveTab = useStore((s) => s.setActiveTab);
   const setDraggedTabId = useStore((s) => s.setDraggedTabId);
@@ -83,12 +82,26 @@ export function TabBar() {
     : tabs;
 
   // New-terminal template picker (the "+" button), anchored at the button.
-  const [termPicker, setTermPicker] = useState<{ x: number; y: number } | null>(
-    null
-  );
+  const [termPicker, setTermPicker] = useState<{
+    x: number;
+    y: number;
+    project: string;
+  } | null>(null);
   const openPicker = (e: React.MouseEvent) => {
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    setTermPicker({ x: r.right, y: r.bottom });
+    const activeTab = tabs.find((tab) => tab.id === activeTabId);
+    const activeProject = activeTab
+      ? tabProject(activeTab, agents, projectRoots)
+      : undefined;
+    // The focused project defines the currently visible tab set. Prefer the
+    // active tab when it belongs to that set (especially editor tabs), then
+    // fall back to the focused project. Only an entirely unscoped view should
+    // create under the pinned Master group.
+    const project =
+      activeProject && (!focusedProject || activeProject === focusedProject)
+        ? activeProject
+        : focusedProject ?? MASTER_PROJECT;
+    setTermPicker({ x: r.right, y: r.bottom, project });
   };
 
   return (
@@ -191,9 +204,9 @@ export function TabBar() {
       </button>
       {termPicker && (
         <TerminalTemplatePicker
-          project={MASTER_PROJECT}
+          project={termPicker.project}
           anchor={termPicker}
-          role={workerMode ? "worker" : "standalone"}
+          role="standalone"
           onClose={() => setTermPicker(null)}
         />
       )}

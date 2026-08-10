@@ -63,7 +63,12 @@ fn extract_error_lines(output: &str) -> String {
         }
     }
     if out.is_empty() {
-        output.lines().take(5).map(|l| l.trim().to_string()).collect::<Vec<_>>().join("\n")
+        output
+            .lines()
+            .take(5)
+            .map(|l| l.trim().to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
     } else {
         out.join("\n")
     }

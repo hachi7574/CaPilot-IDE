@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useStore, ResourcePoint } from "../../state/store";
+import { useStore, AgentInfo, ResourcePoint } from "../../state/store";
 import { connectEsp, disconnectEsp } from "../../state/esp";
 import { setSmartReturn } from "../../state/orchestration";
 import { fetchResourceHistory, fmtCpu, fmtMem } from "../../state/resource";
@@ -25,7 +25,14 @@ export function StatusBar() {
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const activeAgentId = activeTab?.agentId ?? null;
-  const activeRes = activeAgentId ? agentResources.get(activeAgentId) : undefined;
+  const activeAgent = activeAgentId ? agents.get(activeAgentId) : undefined;
+  const monitoredActiveAgentId =
+    activeAgent && activeAgent.pid !== null && activeAgent.status !== "done"
+      ? activeAgentId
+      : null;
+  const activeRes = monitoredActiveAgentId
+    ? agentResources.get(monitoredActiveAgentId)
+    : undefined;
 
   const handleEspClick = async () => {
     if (espStatus.connected) {
@@ -81,7 +88,7 @@ export function StatusBar() {
             agents={agents}
             agentResources={agentResources}
             resourceHistory={resourceHistory}
-            activeAgentId={activeAgentId}
+            activeAgentId={monitoredActiveAgentId}
             onClose={() => setResourceOpen(false)}
           />
         )}
@@ -102,7 +109,7 @@ function ResourcePopover({
   activeAgentId,
   onClose,
 }: {
-  agents: Map<string, { id: string; title: string }>;
+  agents: Map<string, AgentInfo>;
   agentResources: Map<string, ResourcePoint>;
   resourceHistory: Map<string, ResourcePoint[]>;
   activeAgentId: string | null;
@@ -121,7 +128,11 @@ function ResourcePopover({
     });
   }, [activeAgentId]);
 
-  const rows = [...agents.values()];
+  // Restored and ended sessions remain in the sidebar, but have no live PTY.
+  // Listing them here produced a large wall of misleading `CPU — / MEM —` rows.
+  const rows = [...agents.values()].filter(
+    (agent) => agent.pid !== null && agent.status !== "done"
+  );
 
   return (
     <div className="resource-popover" onMouseLeave={onClose}>

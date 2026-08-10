@@ -98,6 +98,7 @@ export function LeftSidebar() {
   const tabs = useStore((s) => s.tabs);
   const activeTabId = useStore((s) => s.activeTabId);
   const masterAgentId = useStore((s) => s.masterAgentId);
+  const sessionsRestored = useStore((s) => s.sessionsRestored);
   const setMasterAgentId = useStore((s) => s.setMasterAgentId);
   const requestResume = useStore((s) => s.requestResume);
   const closeTab = useStore((s) => s.closeTab);
@@ -601,10 +602,11 @@ export function LeftSidebar() {
                         </button>
                       </div>
                     ))}
-                    {/* No master yet — a one-click create affordance. The composer
-                        can also auto-create on send, but a discoverable button here
-                        makes the orchestrator's first-run action obvious. */}
-                    {!masterAgentId && (
+                    {/* Truly empty Master group — a one-click create affordance.
+                        Any existing session row already gives the user an entry
+                        point, even when that session is a standalone terminal
+                        rather than the orchestration master itself. */}
+                    {sessionsRestored && !masterAgentId && masterTerminals.length === 0 && (
                       <div
                         className="uj-master-empty"
                         onClick={() =>
@@ -845,6 +847,7 @@ export function LeftSidebar() {
         <TerminalTemplatePicker
           project={termMenu.project}
           anchor={{ x: termMenu.x, y: termMenu.y }}
+          role="standalone"
           onClose={() => setTermMenu(null)}
         />
       )}
@@ -1160,7 +1163,9 @@ function ContextMenu({
             // Spawn + expand (so a terminal added to an empty/collapsed
             // project is immediately visible).
             if (onSpawnInProject) onSpawnInProject(proj);
-            else spawnAgent("standalone", proj);
+            else {
+              spawnAgent("standalone", proj).catch(console.error);
+            }
             onClose();
           }}
         >

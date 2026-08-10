@@ -12,6 +12,7 @@
   --pixel-body: 'PixelifySans', sans-serif;
   --body: 'Tektur', system-ui, sans-serif;
   --mono: 'JetBrainsMono', ui-monospace, monospace;
+  --panel-ui-font: 'JetBrainsMono', ui-monospace, monospace;
   --ease-apple: cubic-bezier(0.25, 0.1, 0.25, 1);
   --shadow-hard: 4px 4px 0 rgba(0, 0, 0, 0.4);
   --left-width: 248px;
@@ -306,6 +307,14 @@ body::after {
 /* ── Right Sidebar ────────────────────────────────────────────── */
 
 .right-sidebar {
+  /* Right sidebar and bottom chrome share one typography system. Rebinding the
+     existing semantic font tokens keeps every nested control consistent,
+     including rules that explicitly request --pixel or --body. */
+  --pixel: var(--panel-ui-font);
+  --pixel-body: var(--panel-ui-font);
+  --body: var(--panel-ui-font);
+  --mono: var(--panel-ui-font);
+  font-family: var(--panel-ui-font);
   width: var(--right-width); min-width: 260px; background: var(--bg2);
   border-left: 2px solid var(--rule); display: flex; flex-direction: column;
   flex-shrink: 0; overflow: hidden;
@@ -403,6 +412,11 @@ body::after {
 /* ── Composer ─────────────────────────────────────────────────── */
 
 .composer {
+  --pixel: var(--panel-ui-font);
+  --pixel-body: var(--panel-ui-font);
+  --body: var(--panel-ui-font);
+  --mono: var(--panel-ui-font);
+  font-family: var(--panel-ui-font);
   border-top: 2px solid var(--rule); background: var(--bg2);
   flex-shrink: 0; display: flex; flex-direction: column;
 }
@@ -462,7 +476,7 @@ body::after {
   display: inline-flex; align-items: center; justify-content: center;
   width: var(--composer-action-h); height: var(--composer-action-h); line-height: 1;
   font-family: var(--pixel); font-size: var(--fs-md); color: var(--muted);
-  cursor: pointer; margin-left: 8px; transition: color .2s var(--ease-apple);
+  cursor: pointer; margin-left: auto; transition: color .2s var(--ease-apple);
   background: none; border: none;
 }
 .collapse-btn:hover { color: var(--brand); }
@@ -526,6 +540,11 @@ body::after {
 /* ── Status Bar ───────────────────────────────────────────────── */
 
 .statusbar {
+  --pixel: var(--panel-ui-font);
+  --pixel-body: var(--panel-ui-font);
+  --body: var(--panel-ui-font);
+  --mono: var(--panel-ui-font);
+  font-family: var(--panel-ui-font);
   height: 28px; min-height: 28px; background: var(--bg2);
   border-top: 2px solid var(--rule);
   display: flex; align-items: center; padding: 0 14px; gap: 16px;
@@ -799,6 +818,17 @@ body::after {
 /* ── Content split panes (DevPlan §3.1.2) ─────────────────────── */
 
 .content-area { position: relative; }
+
+/* OpenCode uses an alternate-screen TUI and may emit no output while idle.
+   Its xterm canvas therefore stays resident between tab changes; hiding it by
+   visibility preserves both the DOM renderer and its in-memory screen buffer. */
+.resident-terminal-panel {
+  flex: 1; display: flex; min-width: 0; min-height: 0; overflow: hidden;
+}
+.resident-terminal-panel.active { position: relative; z-index: 1; }
+.resident-terminal-panel.hidden {
+  position: absolute; inset: 0; visibility: hidden; pointer-events: none;
+}
 
 .panel-header-title {
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1287,6 +1317,70 @@ body::after {
   color: var(--muted);
 }
 
+/* Provider permission escalation confirmation. It lives in the IDE instead of
+   the PTY so terminal focus is never required to answer a safety prompt. */
+.permission-confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(4, 5, 10, 0.72);
+  backdrop-filter: blur(3px);
+}
+
+.permission-confirm-dialog {
+  width: min(340px, calc(100vw - 48px));
+  padding: 18px;
+  color: var(--ink);
+  background: var(--bg2);
+  border: 1px solid var(--brand);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5), 0 0 24px rgba(139, 92, 246, 0.12);
+}
+
+.permission-confirm-title {
+  font-family: var(--pixel);
+  font-size: var(--fs-sm);
+  letter-spacing: 0.4px;
+  color: var(--primary);
+}
+
+.permission-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.permission-confirm-btn {
+  min-width: 96px;
+  padding: 8px 14px;
+  color: var(--ink);
+  font: inherit;
+  background: var(--bg3);
+  border: 1px solid var(--rule2);
+  cursor: pointer;
+}
+
+.permission-confirm-btn:hover,
+.permission-confirm-btn:focus-visible {
+  outline: none;
+  border-color: var(--ink);
+}
+
+.permission-confirm-btn.primary {
+  color: var(--primary);
+  border-color: var(--brand);
+}
+
+.permission-confirm-btn.primary:hover,
+.permission-confirm-btn.primary:focus-visible {
+  color: #fff;
+  background: var(--brand-dim);
+  border-color: var(--primary);
+}
+
 /* ── New-project modal + empty-project row (nproj-*) ───────────── */
 
 .nproj-overlay {
@@ -1645,22 +1739,13 @@ body::after {
 .gg-diff-open:hover { background: rgba(139,92,246,.14); color: var(--brand); }
 .gg-diff-wrap .git-diff { margin-left: 8px; }
 
-/* Commit history section (collapsible), pinned at the panel bottom. */
-.gg-log { margin-top: 12px; border-top: 2px solid var(--rule); flex-shrink: 0; }
-.gg-log-head {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 7px 0 4px; font-family: var(--pixel); font-size: var(--fs-2xs);
-  letter-spacing: 1px; color: var(--ink2); text-transform: uppercase;
-  cursor: pointer; transition: color .2s var(--ease-apple);
-}
-.gg-log-head:hover { color: var(--brand); }
-.gg-log-toggle { color: var(--muted); font-size: var(--fs-2xs); }
+/* Commit history group (collapsible, aligned with the change groups). */
 .gg-log-body {
-  max-height: 220px; overflow-y: auto; margin-top: 2px;
+  max-height: 220px; overflow-y: auto;
   font-family: var(--mono); font-size: var(--fs-xs); line-height: 1.7;
 }
 .gg-log-row {
-  display: flex; gap: 8px; padding: 2px 0; cursor: default;
+  display: flex; gap: 8px; padding: 2px 0 2px 12px; cursor: default;
   color: var(--ink2); white-space: nowrap;
 }
 .gg-log-row:hover { background: var(--bg3); color: var(--ink); }
@@ -1668,7 +1753,7 @@ body::after {
 .gg-log-subject {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
 }
-.gg-log-empty { color: var(--muted); font-family: var(--mono); font-size: var(--fs-xs); padding: 4px 0; }
+.gg-log-empty { color: var(--muted); font-family: var(--mono); font-size: var(--fs-xs); padding: 4px 0 4px 12px; }
 
 /* ── Overview collapsed inline summary (same title bar, values on the right) ── */
 .ov-summary-inline {

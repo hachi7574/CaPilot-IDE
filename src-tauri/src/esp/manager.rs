@@ -3,7 +3,9 @@
 
 use crate::esp::ble::BleUart;
 use crate::esp::protocol::{encode, FrameError, FrameType};
-use crate::esp::transport::{EspError, EspEvent, EspStatus, EspTransport, SeqCounter, TransportKind};
+use crate::esp::transport::{
+    EspError, EspEvent, EspStatus, EspTransport, SeqCounter, TransportKind,
+};
 use std::sync::Arc;
 use tauri::Emitter;
 use tokio::sync::Mutex;
@@ -89,7 +91,11 @@ impl EspManager {
                         st.battery_pct = None;
                         log::info!("ESP disconnected: {reason}");
                     }
-                    EspEvent::Telemetry { battery_pct, battery_mv, .. } => {
+                    EspEvent::Telemetry {
+                        battery_pct,
+                        battery_mv,
+                        ..
+                    } => {
                         let mut st = status_arc.lock().await;
                         st.battery_pct = Some(*battery_pct);
                         st.battery_mv = Some(*battery_mv);
@@ -153,8 +159,8 @@ impl EspManager {
     /// Convenience: build+send a JSON command.
     #[allow(dead_code)]
     pub async fn send_json(&self, value: &serde_json::Value) -> Result<(), EspError> {
-        let payload = serde_json::to_vec(value).map_err(|e| EspError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData, e)))?;
+        let payload = serde_json::to_vec(value)
+            .map_err(|e| EspError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
         self.send_command(&payload).await
     }
 }

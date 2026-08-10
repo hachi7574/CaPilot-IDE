@@ -5,13 +5,16 @@ mod orchestration;
 mod persistence;
 mod resource;
 
-use agent_runtime::adapter::{AgentRole, AgentSession, AgentInfo, PermissionMode, Speed};
+use agent_runtime::adapter::{AgentInfo, AgentRole, AgentSession};
 use agent_runtime::pty::{OnExit, PtyManager};
 use agent_runtime::runtimes::{get_adapter, known_runtimes};
 use esp::manager::EspManager;
 use orchestration::dispatcher::CascadeMode;
 use orchestration::Dispatcher;
-use persistence::{agent_dir, ensure_project, project_dir, read_agent_meta, write_agent_meta, AgentMeta, AgentSessionRecord, Persistence, DEFAULT_PROJECT};
+use persistence::{
+    agent_dir, ensure_project, project_dir, read_agent_meta, write_agent_meta, AgentMeta,
+    AgentSessionRecord, Persistence, DEFAULT_PROJECT,
+};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -42,40 +45,6 @@ fn role_str(role: &AgentRole) -> &'static str {
     }
 }
 
-fn parse_speed(s: &str) -> Speed {
-    match s {
-        "high" => Speed::High,
-        "mid" => Speed::Mid,
-        "fast" => Speed::Fast,
-        _ => Speed::Auto,
-    }
-}
-
-fn parse_mode(s: &str) -> PermissionMode {
-    match s {
-        "auto" => PermissionMode::Auto,
-        "yolo" => PermissionMode::Yolo,
-        _ => PermissionMode::Ask,
-    }
-}
-
-fn mode_str(mode: &PermissionMode) -> &'static str {
-    match mode {
-        PermissionMode::Ask => "ask",
-        PermissionMode::Auto => "auto",
-        PermissionMode::Yolo => "yolo",
-    }
-}
-
-fn speed_str(speed: &Speed) -> &'static str {
-    match speed {
-        Speed::High => "high",
-        Speed::Mid => "mid",
-        Speed::Fast => "fast",
-        Speed::Auto => "auto",
-    }
-}
-
 /// Validate a project name: reject absolute paths and `..`/`.` traversal so a
 /// project can't escape the workspace root (persistence::project_dir joins it).
 fn sanitize_project(project: &str) -> Result<(), String> {
@@ -88,7 +57,10 @@ fn sanitize_project(project: &str) -> Result<(), String> {
         || p.components().any(|c| {
             matches!(
                 c,
-                Component::ParentDir | Component::CurDir | Component::RootDir | Component::Prefix(_)
+                Component::ParentDir
+                    | Component::CurDir
+                    | Component::RootDir
+                    | Component::Prefix(_)
             )
         })
     {
@@ -98,14 +70,21 @@ fn sanitize_project(project: &str) -> Result<(), String> {
 }
 
 /// Prepend `~/CaPilot/bin` to PATH so every agent shell can invoke the
-/// `capilot` orchestration shim (DevPlan §5.2).
+/// development `capilot` Rust CLI (DevPlan §5.2).
 fn capilot_path_env() -> Vec<(String, String)> {
     let home = std::env::var("HOME").unwrap_or_default();
     let bin_dir = std::path::PathBuf::from(&home).join("CaPilot").join("bin");
     match std::env::var("PATH") {
-        Ok(path) => vec![("PATH".to_string(), format!("{}:{}", bin_dir.display(), path))],
+        Ok(path) => vec![(
+            "PATH".to_string(),
+            format!("{}:{}", bin_dir.display(), path),
+        )],
         Err(_) => vec![("PATH".to_string(), bin_dir.to_string_lossy().to_string())],
     }
+}
+
+fn capilot_agent_identity_env(id: &str) -> (String, String) {
+    ("CAPILOT_AGENT_ID".to_string(), id.to_string())
 }
 
 // ── Agent commands ──────────────────────────────────────────────
@@ -114,6 +93,7 @@ fn capilot_path_env() -> Vec<(String, String)> {
 /// `"keep"` (default) marks it done (recoverable from the sidebar "已结束"
 /// group, never auto-restored as a tab); `"delete"` removes the record entirely.
 const SESSION_END_MODE_KEY: &str = "session_end_mode";
+const RESTARTED_TASK_ERROR: &str = "CaPilot restarted before task completion was confirmed";
 
 /// Payload emitted on `agent://exited` — a session's process ended naturally
 /// and the record was kept (marked done).
@@ -146,8 +126,14 @@ fn build_on_exit(
             .lock()
             .ok()
             .and_then(|db| db.get(&agent_id).ok().flatten());
-        let is_master = record.as_ref().is_some_and(|record| record.role == "master");
-        if !failed_without_report && record.as_ref().is_some_and(|record| record.role == "worker") {
+        let is_master = record
+            .as_ref()
+            .is_some_and(|record| record.role == "master");
+        if !failed_without_report
+            && record
+                .as_ref()
+                .is_some_and(|record| record.role == "worker")
+        {
             dispatcher.mark_attention(&agent_id, "finished", &app);
         }
         // Poisoned lock / read error → default to "keep" so a session is never
@@ -232,25 +218,59 @@ fn build_and_spawn(
     runtime: &str,
     resume: bool,
     resume_key: Option<String>,
+    preserved_title: Option<String>,
     model: Option<String>,
     speed: &str,
     mode: &str,
     cwd: PathBuf,
     on_data: Channel<Vec<u8>>,
 ) -> Result<AgentInfo, String> {
-    let workspace_id = workspace_id
-        .unwrap_or_else(|| format!("wks_{}", uuid::Uuid::new_v4().simple()));
+    let workspace_id =
+        workspace_id.unwrap_or_else(|| format!("wks_{}", uuid::Uuid::new_v4().simple()));
     let adapter = get_adapter(runtime);
     if !adapter.is_available() {
         return Err(format!("Runtime '{}' is not available", runtime));
     }
 
+    // Provider adapters own the valid choices. This also normalizes a legacy
+    // value when a session switches to a harness with a different capability
+    // set. Shell runtimes expose no choices and keep the stored value unused.
+    let permission_modes = adapter.list_permission_modes();
+    let normalized_mode =
+        if permission_modes.is_empty() || permission_modes.iter().any(|choice| choice.id == mode) {
+            mode.to_string()
+        } else {
+            permission_modes[0].id.clone()
+        };
+    let thinking_options = adapter.list_thinking_options();
+    let normalized_speed = if thinking_options.is_empty()
+        || thinking_options.iter().any(|choice| choice.id == speed)
+    {
+        speed.to_string()
+    } else {
+        thinking_options
+            .iter()
+            .find(|choice| choice.id == "auto")
+            .unwrap_or(&thinking_options[0])
+            .id
+            .clone()
+    };
+    let models = adapter.list_models();
+    let normalized_model = model
+        .filter(|selected| models.iter().any(|item| item.id == *selected))
+        .or_else(|| {
+            models
+                .iter()
+                .find(|item| item.is_default)
+                .map(|item| item.id.clone())
+        });
+
     let session = AgentSession {
         id: id.to_string(),
         runtime: runtime.to_string(),
-        mode: parse_mode(mode),
-        speed: parse_speed(speed),
-        model,
+        mode: normalized_mode,
+        speed: normalized_speed,
+        model: normalized_model,
         cwd: cwd.clone(),
         context_dir: cwd.clone(),
         role: role.clone(),
@@ -266,7 +286,11 @@ fn build_and_spawn(
     // caller asked for a resume (restored session / runtime switch). A brand-new
     // spawn stays fresh so it can never hijack the newest session in a shared
     // cwd (e.g. two claude terminals in one custom-rooted project).
-    let resume_args = if resume { adapter.resume_args(&session) } else { vec![] };
+    let resume_args = if resume {
+        adapter.resume_args(&session)
+    } else {
+        vec![]
+    };
     let detected_key = (!resume_args.is_empty())
         .then(|| resume_args.last().cloned().filter(|s| s != "--resume"))
         .flatten();
@@ -274,6 +298,12 @@ fn build_and_spawn(
         args.extend(resume_args);
     }
 
+    let mut launch_env = capilot_path_env();
+    launch_env.extend(adapter.launch_env(&session)?);
+    // Stable internal identity for task-aware `capilot report`. The CLI reads
+    // this automatically; display names and user-supplied arguments are never
+    // used to authenticate the reporting Worker.
+    launch_env.push(capilot_agent_identity_env(id));
     let mut info = pty
         .spawn(
             id.to_string(),
@@ -288,33 +318,40 @@ fn build_and_spawn(
                 dispatcher.clone(),
                 app.clone(),
             )),
-            &capilot_path_env(),
+            &launch_env,
         )
         .map_err(|e| e.to_string())?;
     info.runtime = runtime.to_string();
     info.workspace_id = Some(workspace_id.clone());
     info.project = Some(project.to_string());
     info.role = role.clone();
-    info.mode = mode_str(&session.mode).to_string();
-    info.speed = speed_str(&session.speed).to_string();
+    info.mode = session.mode.clone();
+    info.speed = session.speed.clone();
     info.model = session.model.clone();
-    // New terminals are named after a random TICA cat breed (布偶 / 奥西 / …)
-    // so they're friendly and memorable; the pinned master keeps its role label.
-    if role == AgentRole::Master {
-        info.title = format!("{}@{}", adapter.name(), role_str(&role));
-    } else {
-        info.title = agent_runtime::cat_breeds::next_breed().to_string();
-    }
+    // Resuming an existing session must keep its persisted title. Previously
+    // this shared spawn path generated a fresh cat-breed title on every resume,
+    // so the first click after reopening the IDE appeared to rename the session.
+    info.title = preserved_title.unwrap_or_else(|| {
+        // Every new terminal, including the pinned Master, receives a unique
+        // cat-breed title. Persisted titles are excluded across IDE restarts.
+        let existing_titles = persistence
+            .db()
+            .lock()
+            .ok()
+            .and_then(|db| db.list_all().ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|record| record.title)
+            .collect();
+        agent_runtime::cat_breeds::next_breed_excluding(&existing_titles).to_string()
+    });
 
     // Persist metadata + session (best-effort; PTY already running).
     let now = now_ms();
     // The stored key is the provider session to continue on the next launch.
     // Fresh spawns have no session yet — agent_spawn's background capture fills
     // it in shortly after; resume carries the explicit key or the detected one.
-    let persisted_key = session
-        .resume_key
-        .clone()
-        .or_else(|| detected_key.clone());
+    let persisted_key = session.resume_key.clone().or_else(|| detected_key.clone());
     let meta = AgentMeta {
         id: id.to_string(),
         workspace_id: Some(workspace_id.clone()),
@@ -326,8 +363,8 @@ fn build_and_spawn(
         status: "running".to_string(),
         cwd: cwd.clone(),
         title: info.title.clone(),
-        mode: mode.to_string(),
-        speed: speed.to_string(),
+        mode: session.mode.clone(),
+        speed: session.speed.clone(),
         model: session.model.clone(),
         updated_at: now,
     };
@@ -350,8 +387,8 @@ fn build_and_spawn(
         cwd: cwd.clone(),
         title: info.title.clone(),
         status: "running".to_string(),
-        mode: mode.to_string(),
-        speed: speed.to_string(),
+        mode: session.mode.clone(),
+        speed: session.speed.clone(),
         model: session.model.clone(),
         created_at: now,
         updated_at: now,
@@ -469,6 +506,7 @@ async fn agent_spawn(
         &runtime,
         resume,
         resume_key,
+        None, // genuinely new IDE session: assign a new display title
         model,
         &speed.unwrap_or_else(|| "auto".to_string()),
         &mode.unwrap_or_else(|| "ask".to_string()),
@@ -550,6 +588,7 @@ async fn agent_resume(
         &rec.runtime,
         true, // resume — continue the stored/detected conversation
         rec.resume_key.clone(),
+        Some(rec.title.clone()),
         rec.model.clone(),
         &rec.speed,
         &rec.mode,
@@ -572,7 +611,8 @@ async fn agent_write(
     } else {
         format!("{}\r", data)
     };
-    pty.write(&id, payload.as_bytes()).map_err(|e| e.to_string())
+    pty.write(&id, payload.as_bytes())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -643,7 +683,8 @@ async fn agent_switch_runtime(
     pty.kill(&id).map_err(|e| e.to_string())?;
     {
         let db = persistence.db().lock().unwrap();
-        db.update_runtime(&id, &runtime, now_ms()).map_err(|e| e.to_string())?;
+        db.update_runtime(&id, &runtime, now_ms())
+            .map_err(|e| e.to_string())?;
     }
     let project = rec.project.clone();
     if let Ok(mut meta) = read_agent_meta(&project, &id) {
@@ -665,6 +706,7 @@ async fn agent_switch_runtime(
         &runtime,
         true, // runtime switch resumes session history in the same context dir
         rec.resume_key.clone(),
+        Some(rec.title.clone()),
         rec.model.clone(),
         &rec.speed,
         &rec.mode,
@@ -692,7 +734,8 @@ async fn agent_set_role(
     };
     {
         let db = persistence.db().lock().unwrap();
-        db.update_role(&id, &role_s, now_ms()).map_err(|e| e.to_string())?;
+        db.update_role(&id, &role_s, now_ms())
+            .map_err(|e| e.to_string())?;
     }
     if let Ok(mut meta) = read_agent_meta(&project, &id) {
         meta.role = role_s.clone();
@@ -730,12 +773,15 @@ async fn agent_set_session_config(
             .get(&id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Session not found: {id}"))?;
+        let adapter = get_adapter(&rec.runtime);
+        let permission_modes = adapter.list_permission_modes();
         let mode = match mode {
-            Some(m) if matches!(m.as_str(), "ask" | "auto" | "yolo") => m,
+            Some(m) if permission_modes.iter().any(|choice| choice.id == m) => m,
             _ => rec.mode.clone(),
         };
+        let thinking_options = adapter.list_thinking_options();
         let speed = match speed {
-            Some(s) if matches!(s.as_str(), "high" | "mid" | "fast" | "auto") => s,
+            Some(s) if thinking_options.iter().any(|choice| choice.id == s) => s,
             _ => rec.speed.clone(),
         };
         let model = model.or_else(|| rec.model.clone());
@@ -819,8 +865,8 @@ fn list_projects() -> Result<Vec<ProjectInfo>, String> {
         return Ok(Vec::new());
     }
     let mut projects = Vec::new();
-    for entry in std::fs::read_dir(&root)
-        .map_err(|e| format!("Failed to read workspaces dir: {}", e))?
+    for entry in
+        std::fs::read_dir(&root).map_err(|e| format!("Failed to read workspaces dir: {}", e))?
     {
         let entry = entry.map_err(|e| format!("Failed to read workspace entry: {}", e))?;
         let file_type = entry
@@ -836,8 +882,8 @@ fn list_projects() -> Result<Vec<ProjectInfo>, String> {
         // A custom-rooted project (cloned / picked folder) keeps its real root
         // in the agents' metadata — surface it instead of the workspace dir so
         // the sidebar restores the right cwd after a restart.
-        let project_root = persistence::custom_project_root(&name)
-            .unwrap_or_else(|| root.join(&name));
+        let project_root =
+            persistence::custom_project_root(&name).unwrap_or_else(|| root.join(&name));
         projects.push(ProjectInfo {
             root: project_root.to_string_lossy().to_string(),
             name,
@@ -1030,9 +1076,7 @@ async fn smart_return_set(
 }
 
 #[tauri::command]
-async fn smart_return_get(
-    dispatcher: tauri::State<'_, Arc<Dispatcher>>,
-) -> Result<bool, String> {
+async fn smart_return_get(dispatcher: tauri::State<'_, Arc<Dispatcher>>) -> Result<bool, String> {
     Ok(dispatcher.smart_return_enabled())
 }
 
@@ -1049,6 +1093,8 @@ async fn runtime_list_available() -> Vec<agent_runtime::adapter::RuntimeInfo> {
             available: adapter.is_available(),
             authenticated: adapter.is_authenticated(),
             models: adapter.list_models(),
+            permission_modes: adapter.list_permission_modes(),
+            thinking_options: adapter.list_thinking_options(),
         });
     }
     out
@@ -1152,8 +1198,8 @@ async fn fs_list(dir: String) -> Result<Vec<FsEntryBrief>, String> {
         return Err("Path escapes allowed directories".to_string());
     }
     let mut entries = Vec::new();
-    let read_dir = std::fs::read_dir(&resolved)
-        .map_err(|e| format!("Failed to read directory: {}", e))?;
+    let read_dir =
+        std::fs::read_dir(&resolved).map_err(|e| format!("Failed to read directory: {}", e))?;
     for entry in read_dir {
         let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
         let file_type = entry
@@ -1234,10 +1280,7 @@ fn resolve_existing_in_home(raw: &std::path::Path) -> Result<std::path::PathBuf,
 /// Recursively copy a directory into `dest` (created if missing). Symlinks are
 /// re-created as symlinks and never followed — following them could escape
 /// $HOME or loop forever through a cycle.
-fn copy_dir_recursive(
-    src: &std::path::Path,
-    dest: &std::path::Path,
-) -> std::io::Result<()> {
+fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dest)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
@@ -1364,7 +1407,9 @@ async fn fs_rename(src: String, new_name: String) -> Result<String, String> {
     let home = std::env::var("HOME").map_err(|e| format!("HOME not set: {}", e))?;
     let home_path = std::path::Path::new(&home);
     let raw = std::path::Path::new(&src);
-    let parent = raw.parent().ok_or_else(|| "无效路径：无父目录".to_string())?;
+    let parent = raw
+        .parent()
+        .ok_or_else(|| "无效路径：无父目录".to_string())?;
     let canonical_parent = parent
         .canonicalize()
         .map_err(|e| format!("无效路径: {}", e))?;
@@ -1532,7 +1577,10 @@ fn count_lines(path: &std::path::Path) -> i32 {
     let Ok(file) = std::fs::File::open(path) else {
         return 0;
     };
-    std::io::BufReader::new(file).lines().take(1_000_000).count() as i32
+    std::io::BufReader::new(file)
+        .lines()
+        .take(1_000_000)
+        .count() as i32
 }
 
 /// Parse `git diff --numstat` lines ("adds\tdeletes\tpath") into a path→(add,del) map.
@@ -1639,7 +1687,12 @@ fn parse_log(text: &str) -> Vec<GitLogEntry> {
         }
         let subject = parts.next().unwrap_or("").trim().to_string();
         let author = parts.next().unwrap_or("").trim().to_string();
-        let ts = parts.next().unwrap_or("0").trim().parse::<i64>().unwrap_or(0);
+        let ts = parts
+            .next()
+            .unwrap_or("0")
+            .trim()
+            .parse::<i64>()
+            .unwrap_or(0);
         entries.push(GitLogEntry {
             hash,
             subject,
@@ -1658,7 +1711,10 @@ async fn git_status(dir: String) -> Result<Vec<GitEntry>, String> {
     // Per-file line counts: staged (--cached) + unstaged diffs.
     let mut counts: std::collections::HashMap<String, (i32, i32)> =
         std::collections::HashMap::new();
-    for args in [&["diff", "--cached", "--numstat"][..], &["diff", "--numstat"][..]] {
+    for args in [
+        &["diff", "--cached", "--numstat"][..],
+        &["diff", "--numstat"][..],
+    ] {
         if let Ok(out) = git_run(&dir, args) {
             for (path, (a, d)) in parse_numstat(&out) {
                 let c = counts.entry(path).or_insert((0, 0));
@@ -1812,8 +1868,7 @@ async fn git_discard(repo: String, files: Vec<String>) -> Result<(), String> {
             return Err(format!("删除路径越界: {}", f));
         }
         if p.is_file() {
-            std::fs::remove_file(&p)
-                .map_err(|e| format!("删除未跟踪文件失败 {}: {}", f, e))?;
+            std::fs::remove_file(&p).map_err(|e| format!("删除未跟踪文件失败 {}: {}", f, e))?;
         }
     }
     Ok(())
@@ -1904,7 +1959,9 @@ fn validate_git_url(url: &str) -> Result<(), String> {
     }
     const PREFIXES: [&str; 5] = ["http://", "https://", "ssh://", "git@", "git://"];
     if !PREFIXES.iter().any(|p| url.starts_with(p)) {
-        return Err("不支持的 Git 地址（仅支持 http://、https://、ssh://、git@、git://）".to_string());
+        return Err(
+            "不支持的 Git 地址（仅支持 http://、https://、ssh://、git@、git://）".to_string(),
+        );
     }
     Ok(())
 }
@@ -1929,12 +1986,11 @@ async fn git_clone(url: String, name: String, parent_dir: String) -> Result<Stri
         return Err(format!("目标目录已存在: {}", target.display()));
     }
     let target_for_cmd = target.clone();
-    let out = tauri::async_runtime::spawn_blocking(move || {
-        git_gate::clone_into(&url, &target_for_cmd)
-    })
-    .await
-    .map_err(|e| format!("git clone 任务失败: {}", e))?
-    .map_err(|e| format!("git 启动失败: {}", e))?;
+    let out =
+        tauri::async_runtime::spawn_blocking(move || git_gate::clone_into(&url, &target_for_cmd))
+            .await
+            .map_err(|e| format!("git clone 任务失败: {}", e))?
+            .map_err(|e| format!("git 启动失败: {}", e))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         return Err(format!("git clone 失败: {}", err.trim()));
@@ -1962,10 +2018,17 @@ async fn git_push(repo: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_project, delete_project, git_run, parse_branches, parse_log,
-        parse_name_status, parse_porcelain, persistence, rename_project,
-        rename_project_inner,
+        capilot_agent_identity_env, create_project, delete_project, git_run, parse_branches,
+        parse_log, parse_name_status, parse_porcelain, persistence, rename_project_inner,
     };
+
+    #[test]
+    fn agent_process_receives_stable_internal_capilot_identity() {
+        assert_eq!(
+            capilot_agent_identity_env("agent-a8217c"),
+            ("CAPILOT_AGENT_ID".to_string(), "agent-a8217c".to_string())
+        );
+    }
 
     #[test]
     fn parses_porcelain_basic() {
@@ -2163,9 +2226,14 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "v1").unwrap();
         run(&["add", "a.txt"]);
         run(&[
-            "-c", "user.name=test",
-            "-c", "user.email=test@test.dev",
-            "commit", "-q", "-m", "init",
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@test.dev",
+            "commit",
+            "-q",
+            "-m",
+            "init",
         ]);
         std::fs::write(dir.join("a.txt"), "v2").unwrap();
 
@@ -2292,16 +2360,18 @@ async fn esp_disconnect(state: tauri::State<'_, EspManager>) -> Result<(), Strin
 }
 
 #[tauri::command]
-async fn esp_status(state: tauri::State<'_, EspManager>) -> Result<esp::transport::EspStatus, String> {
+async fn esp_status(
+    state: tauri::State<'_, EspManager>,
+) -> Result<esp::transport::EspStatus, String> {
     Ok(state.status().await)
 }
 
 #[tauri::command]
-async fn esp_send(
-    state: tauri::State<'_, EspManager>,
-    payload: String,
-) -> Result<(), String> {
-    state.send_command(payload.as_bytes()).await.map_err(|e| e.to_string())
+async fn esp_send(state: tauri::State<'_, EspManager>, payload: String) -> Result<(), String> {
+    state
+        .send_command(payload.as_bytes())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ── Resource monitor commands ──────────────────────────────────
@@ -2324,9 +2394,7 @@ struct SystemStats {
 }
 
 #[tauri::command]
-fn system_stats(
-    monitor: tauri::State<'_, Arc<resource::ResourceMonitor>>,
-) -> SystemStats {
+fn system_stats(monitor: tauri::State<'_, Arc<resource::ResourceMonitor>>) -> SystemStats {
     // Served from the sampler's per-tick cache — no re-scan of /proc, and no
     // lock contention with the sampler's own `System`.
     let (cpu_pct, mem_used, mem_total) = monitor.snapshot();
@@ -2339,22 +2407,64 @@ fn system_stats(
 
 // ── App entry point ─────────────────────────────────────────────
 
+/// Repair names created by older builds: keep the first occurrence of a
+/// duplicate, rename later occurrences, and migrate the old `Runtime@master`
+/// title to the shared cat-name pool.
+fn repair_session_titles(persistence: &Persistence) {
+    let sessions = persistence
+        .db()
+        .lock()
+        .ok()
+        .and_then(|db| db.list_all().ok())
+        .unwrap_or_default();
+    let mut occupied = std::collections::HashSet::new();
+    for session in sessions {
+        let duplicate = !occupied.insert(session.title.clone());
+        let legacy_master = session.role == "master"
+            && !agent_runtime::cat_breeds::BREEDS.contains(&session.title.as_str());
+        if !duplicate && !legacy_master {
+            continue;
+        }
+        let title = agent_runtime::cat_breeds::next_breed_excluding(&occupied).to_string();
+        occupied.insert(title.clone());
+        if let Ok(db) = persistence.db().lock() {
+            let _ = db.update_title(&session.id, &title, now_ms());
+        }
+        if let Ok(mut meta) = read_agent_meta(&session.project, &session.id) {
+            meta.title = title;
+            meta.updated_at = now_ms();
+            let _ = write_agent_meta(&session.project, &meta);
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let pty = Arc::new(PtyManager::new());
     // Clone kept for the exit handler so the app can kill every agent PTY on
     // quit (no orphaned claude/bash), without touching their session rows.
     let pty_killer = pty.clone();
-    let persistence = Arc::new(
-        Persistence::open().expect("Failed to init persistence"),
-    );
+    let persistence = Arc::new(Persistence::open().expect("Failed to init persistence"));
+    match persistence
+        .db()
+        .lock()
+        .unwrap()
+        .task_fail_unfinished(RESTARTED_TASK_ERROR, now_ms())
+    {
+        Ok(0) => {}
+        Ok(count) => log::warn!("marked {count} unfinished Task(s) failed after CaPilot restart"),
+        Err(error) => log::error!("failed to close unfinished Tasks on startup: {error}"),
+    }
+    repair_session_titles(&persistence);
     let dispatcher = Arc::new(Dispatcher::new(pty.clone(), persistence.clone()));
     dispatcher.refresh_workers();
     let resource = Arc::new(resource::ResourceMonitor::new());
-    // Install the `capilot` PATH shim (best-effort).
-    match orchestration::shim::install_shim() {
-        Ok(p) => log::info!("capilot shim installed at {}", p.display()),
-        Err(e) => log::warn!("failed to install capilot shim: {e}"),
+    // `pnpm tauri dev` builds the dedicated Rust CLI before launching Tauri.
+    // Point the stable PATH entry at that debug binary; no script/runtime shim.
+    match orchestration::dev_cli::install_dev_cli() {
+        Ok(Some(path)) => log::info!("capilot development CLI linked at {}", path.display()),
+        Ok(None) => {}
+        Err(error) => log::warn!("failed to link capilot development CLI: {error}"),
     }
 
     let _app = tauri::Builder::default()
@@ -2433,7 +2543,10 @@ pub fn run() {
             // Resource sampler: every 3 s, sample each agent's process tree and
             // emit `resource://sample` (DevPlan §10).
             let pty = app.state::<Arc<PtyManager>>().inner().clone();
-            let resource = app.state::<Arc<resource::ResourceMonitor>>().inner().clone();
+            let resource = app
+                .state::<Arc<resource::ResourceMonitor>>()
+                .inner()
+                .clone();
             resource::start_sampler(pty, resource, handle);
             Ok(())
         })
