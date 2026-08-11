@@ -10,15 +10,16 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import { createBufferedChannel, useStore } from "../../state/store";
+import { useStore } from "../../state/store";
+import { pathsFromDataTransfer } from "../../state/dropPaths";
 import type {
-  AgentInfo,
   PermissionMode,
   PermissionModeInfo,
   ThinkingOptionInfo,
 } from "../../state/store";
 import { spawnAgent, ensureAgentChannel } from "../../state/agentActions";
 import { PermissionConfirmationDialog } from "./PermissionConfirmationDialog";
+import { Icon } from "../Icon";
 
 const DEFAULT_RUNTIME = "claude";
 type ComposerPermissionMode = PermissionMode;
@@ -35,6 +36,25 @@ const CLAUDE_PERMISSION_CYCLE: readonly ComposerPermissionMode[] = [
   "yolo",
   "auto",
 ];
+
+// CaPilot's persisted speed tiers map to codex's native reasoning efforts (the
+// reasoning popup lists them in catalog order). "auto" has no native id — it
+// means the model's default effort.
+const SPEED_TO_EFFORT: Record<string, string> = {
+  fast: "low",
+  mid: "medium",
+  high: "high",
+  xhigh: "xhigh",
+};
+
+// Reverse map: turn a codex model's native default effort back into a CaPilot
+// speed tier, so the ⚡ label can reflect the model default instead of "auto".
+const EFFORT_TO_SPEED: Record<string, string> = {
+  low: "fast",
+  medium: "mid",
+  high: "high",
+  xhigh: "xhigh",
+};
 
 interface FsEntryBrief {
   name: string;
@@ -61,16 +81,28 @@ interface SlashItem {
   invocation: string;
   source: string;
   kind: "skill" | "command";
+  /** Backends mark commands whose options open a second-level picker. Older
+      responses omit the field — treat missing as falsy. */
+  has_children?: boolean;
 }
 
+/** One level of the drill-down `/` menu stack. The deepest level is the one
+    being navigated; ancestors exist only so Esc can roll back level by level. */
 interface SlashMenuState {
-  /** Index of the trigger `/` in the textarea value. */
+  /** Textarea index where this level's filter input begins. Root = the `/`
+      index; child levels = right after the parent invocation + space. */
   anchor: number;
-  query: string;
+  /** Text length to truncate to on Esc, removing the parent invocation that
+      opened this level. Root level never truncates (kept at -1). */
+  rollbackTo: number;
+  /** The selected parent item that opened this level (`null` for root). */
+  parent: SlashItem | null;
+  /** Full, unfiltered items; filtered by `query` at render/navigation time. */
   items: SlashItem[];
   idx: number;
   loading: boolean;
-  mode: "commands";
+  /** Filter text typed within this level (e.g. `mod` under `/model`). */
+  query: string;
 }
 
 interface ComposerDraftState {
@@ -100,7 +132,7 @@ export function Composer() {
   const navigateDraft = useStore((s) => s.navigateDraft);
 
   const [atMenu, setAtMenu] = useState<AtMenuState | null>(null);
-  const [slashMenu, setSlashMenu] = useState<SlashMenuState | null>(null);
+  const [slashMenuStack, setSlashMenuStack] = useState<SlashMenuState[]>([]);
   const [dragHover, setDragHover] = useState(false);
   const [isBangInput, setIsBangInput] = useState(false);
   // Non-empty input → enables the send button (`.ul-send-btn`).
@@ -108,9 +140,15 @@ export function Composer() {
   // Root ref + dragging flag for the height-resize divider above the composer.
   const composerRef = useRef<HTMLDivElement>(null);
   const [composerResizing, setComposerResizing] = useState(false);
+  // Divider mousedown position: distinguishes a click (toggle) from a drag
+  // (resize) on the composer divider.
+  const resizeStartRef = useRef<{ x: number; y: number } | null>(null);
 
   // Composer popover menus (向上弹出)：模型选择 + 文件/引用.
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  // Codex drill-down: after picking a model, the picker switches to that
+  // model's reasoning efforts so the effort is also chosen in the GUI.
+  const [pendingEffortModel, setPendingEffortModel] = useState<string | null>(null);
   const [permissionMenuOpen, setPermissionMenuOpen] = useState(false);
   const [pendingPermissionMode, setPendingPermissionMode] =
     useState<PermissionModeInfo | null>(null);
@@ -135,6 +173,13 @@ export function Composer() {
     agentId: string;
     items: SlashItem[];
   } | null>(null);
+  // Per-agent+parent cache of the static second-level items (`/mcp`, `/agents`,
+  // ...). Keyed by agent so switching tabs never leaks another session's data.
+  const slashChildrenRef = useRef<Map<string, SlashItem[]>>(new Map());
+  // Guards against a stale child fetch overwriting a newer level (Bug pattern:
+  // select `/model`, quickly Esc, select `/mcp` → the `/model` response must
+  // not paint over `/mcp`'s picker).
+  const slashChildReqRef = useRef(0);
   // The Composer textarea is intentionally uncontrolled for low-latency typing.
   // Keep a separate draft per terminal and swap the DOM value on tab changes.
   const terminalDraftsRef = useRef<Map<string, ComposerDraftState>>(new Map());
@@ -146,6 +191,10 @@ export function Composer() {
   const dragDepthRef = useRef(0);
   // Guards against double-send on rapid Enter (Bug 3).
   const sendingRef = useRef(false);
+  // Latest `handleSend`, so `selectSlashItem` (declared earlier in the body)
+  // can auto-send a leaf selection without a stale closure or a TDZ access to
+  // the later `handleSend` const.
+  const handleSendRef = useRef<() => void>(() => {});
   // A Claude permission change is a short sequence of PTY key presses. Do not
   // allow two slider clicks to interleave and land on an unintended mode.
   const permissionSwitchingRef = useRef(false);
@@ -174,8 +223,9 @@ export function Composer() {
     atReqRef.current += 1;
     slashReqRef.current += 1;
     slashCatalogRef.current = null;
+    slashChildrenRef.current.clear();
     setAtMenu(null);
-    setSlashMenu(null);
+    setSlashMenuStack([]);
   }, [targetAgentId]);
 
   useEffect(() => {
@@ -186,14 +236,16 @@ export function Composer() {
     activeItem?.scrollIntoView({ block: "nearest" });
   }, [atMenu?.idx, atMenu?.items]);
 
+  const topSlashLevel = slashMenuStack[slashMenuStack.length - 1];
+
   useEffect(() => {
-    // Long native command lists (notably Claude and OMP) overflow the picker.
+    // Long native command lists (notably Claude) overflow the picker.
     // Keep keyboard navigation synchronized with the visible scroll region.
     const activeItem = slashMenuRef.current?.querySelector<HTMLElement>(
       '[role="option"][aria-selected="true"]'
     );
     activeItem?.scrollIntoView({ block: "nearest" });
-  }, [slashMenu?.idx, slashMenu?.items]);
+  }, [topSlashLevel?.idx, topSlashLevel?.items]);
 
   // ── Per-session composer config ────────────────────────────────
   // The permission/speed/model controls show and edit the CURRENT target
@@ -216,6 +268,49 @@ export function Composer() {
     ? preferredModel
     : defaultModel?.id ?? null;
   const currentModel = models.find((m) => m.id === shownModel) ?? null;
+  // Codex model drill-down: map the model's supported reasoning efforts (from
+  // the backend catalog) onto CaPilot's speed vocabulary, so the picker only
+  // offers tiers the model actually supports. "auto" means "use the model's
+  // default effort", which is not a native Codex tier (the reasoning popup
+  // simply highlights the default), so it is never offered in the drill-down.
+  const effortOptionsFor = (modelId: string) => {
+    const efforts = models.find((model) => model.id === modelId)?.efforts ?? [];
+    return thinkingOptions.filter((option) => {
+      const native = SPEED_TO_EFFORT[option.id];
+      return native ? efforts.some((effort) => effort.id === native) : false;
+    });
+  };
+  const pendingEffortOptions = pendingEffortModel
+    ? effortOptionsFor(pendingEffortModel)
+    : [];
+  // Codex has no native "auto" effort — the reasoning popup only lists real
+  // tiers and highlights the model's default. Hide CaPilot's "auto" (use the
+  // model default) from the ⚡ picker so the GUI only offers tiers the CLI
+  // accepts. The value stays valid in the store/session config: "auto" spawns
+  // without an effort flag and applyThinkingSpeed treats it as "don't move".
+  const menuThinkingOptions =
+    configRuntimeId === "codex"
+      ? thinkingOptions.filter((option) => option.id !== "auto")
+      : thinkingOptions;
+  // Button label: on a codex session still on "auto" (fresh spawn), reflect the
+  // model's default tier instead of the word "Auto".
+  const defaultSpeedForCodex =
+    configRuntimeId === "codex"
+      ? (() => {
+          const defaultEffort = currentModel?.efforts?.find(
+            (effort) => effort.is_default
+          )?.id;
+          return defaultEffort ? EFFORT_TO_SPEED[defaultEffort] : undefined;
+        })()
+      : undefined;
+  const currentSpeedLabel =
+    shownSpeed === "auto" && configRuntimeId === "codex"
+      ? (defaultSpeedForCodex
+          ? (thinkingOptions.find((option) => option.id === defaultSpeedForCodex)
+              ?.label ?? "思考强度")
+          : "思考强度")
+      : (thinkingOptions.find((option) => option.id === shownSpeed)?.label ??
+        "思考强度");
 
   const applyPermissionMode = useCallback(
     async (mode: ComposerPermissionMode) => {
@@ -234,36 +329,12 @@ export function Composer() {
 
       permissionSwitchingRef.current = true;
       try {
-        if (agent.runtime === "omp") {
-          // OMP's approval mode is a process-level runtime override; its TUI
-          // currently has no live command/keybinding for changing it. Persist
-          // first, then restart the same provider session so the terminal's
-          // effective mode and the composer selection cannot diverge.
-          await invoke("agent_set_session_config", { id, mode });
-          const { channel, flush } = createBufferedChannel();
-          try {
-            const info = await invoke<AgentInfo>("agent_resume", {
-              id,
-              onData: channel,
-            });
-            flush(info.id);
-            useStore.getState().addAgent(info, channel);
-          } catch (error) {
-            // Keep persistence aligned with the still-displayed selection if
-            // the restart failed before the new OMP process became available.
-            await invoke("agent_set_session_config", { id, mode: previousMode }).catch(
-              () => {}
-            );
-            throw error;
-          }
-        } else {
-          // A restored session may not have its PTY until its terminal is first
-          // shown. Resume it before applying a live mode change.
-          const resumed = !s.agentChannels.has(id)
-            ? await ensureAgentChannel(id)
-            : false;
-          if (resumed) await new Promise((r) => setTimeout(r, 250));
-        }
+        // A restored session may not have its PTY until its terminal is first
+        // shown. Resume it before applying a live mode change.
+        const resumed = !s.agentChannels.has(id)
+          ? await ensureAgentChannel(id)
+          : false;
+        if (resumed) await new Promise((r) => setTimeout(r, 250));
 
         if (agent.runtime === "codex") {
           // Codex supports changing permissions in the current TUI through the
@@ -335,9 +406,7 @@ export function Composer() {
 
         // Persist the selected mode so a later resume starts with the same
         // policy. This does not restart or replace the running PTY.
-        if (agent.runtime !== "omp") {
-          await invoke("agent_set_session_config", { id, mode });
-        }
+        await invoke("agent_set_session_config", { id, mode });
         const latest = useStore.getState().agents.get(id);
         if (latest) useStore.getState().addAgent({ ...latest, mode }, null);
         useStore.getState().setPermissionMode(mode);
@@ -351,7 +420,7 @@ export function Composer() {
   );
 
   const applyModel = useCallback(
-    async (modelId: string) => {
+    async (modelId: string, effortId?: string) => {
       if (modelSwitchingRef.current) return;
       const s = useStore.getState();
       const id = activeTab?.agentId;
@@ -376,18 +445,79 @@ export function Composer() {
           await invoke("agent_write", { id, data: "\u001b[H", raw: true });
           for (let i = 0; i < modelIndex; i++) {
             await invoke("agent_write", { id, data: "\u001b[B", raw: true });
+            if (i + 1 < modelIndex) await new Promise((resolve) => setTimeout(resolve, 35));
           }
           await invoke("agent_write", { id, data: "\r", raw: true });
+          if (effortId) {
+            // The model selection opens Codex's "Select Reasoning Level" popup
+            // with the model's default effort highlighted. Move to the chosen
+            // tier and confirm, so the whole selection happens in the GUI.
+            await new Promise((resolve) => setTimeout(resolve, 260));
+            const nativeEffort = effortId === "auto" ? null : SPEED_TO_EFFORT[effortId];
+            if (nativeEffort) {
+              const efforts = models.find((m) => m.id === modelId)?.efforts ?? [];
+              const defaultIndex = efforts.findIndex((e) => e.is_default);
+              const targetIndex = efforts.findIndex((e) => e.id === nativeEffort);
+              const base = defaultIndex >= 0 ? defaultIndex : 0;
+              if (targetIndex >= 0 && targetIndex !== base) {
+                const delta = targetIndex - base;
+                const key = delta > 0 ? "\u001b[B" : "\u001b[A";
+                for (let i = 0; i < Math.abs(delta); i++) {
+                  await invoke("agent_write", { id, data: key, raw: true });
+                  if (i + 1 < Math.abs(delta)) {
+                    await new Promise((resolve) => setTimeout(resolve, 35));
+                  }
+                }
+              }
+            }
+            await invoke("agent_write", { id, data: "\r", raw: true });
+          } else {
+            // No effort chosen in the GUI (single-effort model or legacy path):
+            // leave the reasoning popup open and hand focus to the terminal.
+            useStore.getState().requestFocus("terminal");
+          }
         } else if (agent.runtime === "claude") {
           await invoke("agent_write", { id, data: `/model ${modelId}`, raw: true });
           await new Promise((resolve) => setTimeout(resolve, 30));
           await invoke("agent_write", { id, data: "\r", raw: true });
+        } else if (agent.runtime === "opencode") {
+          const modelPart = modelId.includes("/")
+            ? modelId.slice(modelId.lastIndexOf("/") + 1)
+            : modelId;
+          const modelName =
+            models.find((model) => model.id === modelId)?.name ??
+            modelPart.replace(/-/g, " ");
+          // Ctrl+P opens the command palette; F12 is remapped to command_list
+          // via OPENCODE_TUI_CONFIG. Type "model", Enter to open the dialog.
+          await invoke("agent_write", { id, data: "\u0010", raw: true });
+          await new Promise((resolve) => setTimeout(resolve, 120));
+          await invoke("agent_write", { id, data: "\u001b[24~", raw: true });
+          await new Promise((resolve) => setTimeout(resolve, 120));
+          await invoke("agent_write", { id, data: "model", raw: true });
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          await invoke("agent_write", { id, data: "\r", raw: true });
+          await new Promise((resolve) => setTimeout(resolve, 320));
+          // DialogModel filters by the catalog display name; the top match
+          // is selected, so Enter applies the model.
+          await invoke("agent_write", { id, data: modelName, raw: true });
+          await new Promise((resolve) => setTimeout(resolve, 120));
+          await invoke("agent_write", { id, data: "\r", raw: true });
         }
 
-        await invoke("agent_set_session_config", { id, model: modelId });
+        await invoke("agent_set_session_config", {
+          id,
+          model: modelId,
+          speed: effortId ?? undefined,
+        });
         const latest = useStore.getState().agents.get(id);
-        if (latest) useStore.getState().addAgent({ ...latest, model: modelId }, null);
+        if (latest) {
+          useStore.getState().addAgent(
+            { ...latest, model: modelId, speed: effortId ?? latest.speed },
+            null
+          );
+        }
         useStore.getState().setSelectedModel(modelId);
+        if (effortId) useStore.getState().setSpeed(effortId as never);
       } catch (error) {
         console.error("model switch failed:", error);
       } finally {
@@ -451,27 +581,6 @@ export function Composer() {
             });
             await new Promise((resolve) => setTimeout(resolve, 35));
             await invoke("agent_write", { id, data: "\r", raw: true });
-          } else if (agent.runtime === "omp") {
-            // OMP binds Shift+Tab to app.thinking.cycle. Move forward from the
-            // session's saved level to the requested level without restarting.
-            const currentIndex = thinkingOptions.findIndex(
-              (option) => option.id === previousSpeed
-            );
-            const targetIndex = thinkingOptions.findIndex(
-              (option) => option.id === nextSpeed
-            );
-            if (currentIndex < 0 || targetIndex < 0) {
-              throw new Error(`Unsupported OMP thinking level: ${nextSpeed}`);
-            }
-            const steps =
-              (targetIndex - currentIndex + thinkingOptions.length) %
-              thinkingOptions.length;
-            for (let index = 0; index < steps; index++) {
-              await invoke("agent_write", { id, data: "\u001b[Z", raw: true });
-              if (index + 1 < steps) {
-                await new Promise((resolve) => setTimeout(resolve, 45));
-              }
-            }
           }
         }
 
@@ -533,12 +642,14 @@ export function Composer() {
       setModelMenuOpen(false);
       setPermissionMenuOpen(false);
       setThinkingMenuOpen(false);
+      setPendingEffortModel(null);
     };
     const onKey = (e: globalThis.KeyboardEvent) => {
       if (e.key === "Escape") {
         setModelMenuOpen(false);
         setPermissionMenuOpen(false);
         setThinkingMenuOpen(false);
+        setPendingEffortModel(null);
       }
     };
     window.addEventListener("mousedown", onDown);
@@ -590,11 +701,12 @@ export function Composer() {
       const hasTerminal = activeTab?.type === "agent" && !!activeTab.agentId;
       // Dismiss any open popover first so focus can't straddle the two areas.
       setAtMenu(null);
-      setSlashMenu(null);
+      setSlashMenuStack([]);
       setModelMenuOpen(false);
       setPermissionMenuOpen(false);
       setThinkingMenuOpen(false);
       setRefMenuOpen(false);
+      setPendingEffortModel(null);
       if (inputFocused) {
         if (hasTerminal) st.requestFocus("terminal");
         // No terminal to move to — leave focus in the input.
@@ -722,28 +834,16 @@ export function Composer() {
         setDragHover(false);
         return;
       }
-      // Some webviews still expose `.path` on File (Tauri v1 heritage / v2
-      // dragDropEnabled). If present, insert directly; otherwise defer to the
-      // Tauri drag-drop event, which carries the real absolute paths.
-      const f = e.dataTransfer.files?.[0] as
-        | (File & { path?: string })
-        | undefined;
-      if (f?.path) {
-        appendPaths([f.path]);
+      // Extract absolute paths straight from the DOM dataTransfer. On Tauri
+      // v2 + WebKitGTK the legacy `File.path` is gone and the Tauri drag-drop
+      // event can be unreliable, so this is the primary source (the file
+      // manager's `text/uri-list`, plus `text/plain` for app-internal drags).
+      const paths = pathsFromDataTransfer(e.dataTransfer);
+      if (paths.length) {
+        appendPaths(paths);
         dropHandledRef.current = true;
         dragDepthRef.current = 0;
         setDragHover(false);
-      } else {
-        // Application-internal drag (e.g. a file tree row): the source's
-        // onDragStart stored the full path in text/plain. Consume it so the
-        // drop inserts @path instead of the browser's default text selection.
-        const textPath = e.dataTransfer.getData("text/plain");
-        if (textPath && textPath.trim() && !textPath.includes("\n")) {
-          appendPaths([textPath.trim()]);
-          dropHandledRef.current = true;
-          dragDepthRef.current = 0;
-          setDragHover(false);
-        }
       }
       // No path at all → leave dragDepthRef/dropHandledRef untouched so the
       // Tauri drag-drop event (which fires next) can still detect the composer.
@@ -906,89 +1006,207 @@ export function Composer() {
       const context = slashContext(el);
       if (!context) {
         slashReqRef.current += 1;
-        setSlashMenu(null);
+        setSlashMenuStack([]);
         return;
       }
       const agentId = targetAgentId;
       if (!agentId) {
         slashReqRef.current += 1;
-        setSlashMenu(null);
+        setSlashMenuStack([]);
         return;
       }
+
+      const rootLevel = (items: SlashItem[], loading: boolean): SlashMenuState => ({
+        anchor: context.anchor,
+        rollbackTo: -1,
+        parent: null,
+        items,
+        idx: 0,
+        loading,
+        query: context.query,
+      });
 
       const cached = slashCatalogRef.current;
       if (cached?.agentId === agentId) {
-        setSlashMenu({
-          ...context,
-          items: filterSlashItems(cached.items, context.query),
-          idx: 0,
-          loading: false,
-          mode: "commands",
-        });
+        setSlashMenuStack([rootLevel(cached.items, false)]);
         return;
       }
 
-      setSlashMenu({
-        ...context,
-        items: [],
-        idx: 0,
-        loading: true,
-        mode: "commands",
-      });
+      setSlashMenuStack([rootLevel([], true)]);
       const req = ++slashReqRef.current;
       try {
         const items =
           (await invoke<SlashItem[]>("agent_list_slash_items", { id: agentId })) ?? [];
         if (req !== slashReqRef.current || targetAgentId !== agentId) return;
         slashCatalogRef.current = { agentId, items };
+        // Re-derive the trigger from the current text: the user may have typed
+        // more while the catalog was loading, or deleted past `/` entirely.
         const currentEl = textareaRef.current;
         const current = currentEl ? slashContext(currentEl) : null;
         if (!current) {
-          setSlashMenu(null);
+          setSlashMenuStack([]);
           return;
         }
-        setSlashMenu({
-          ...current,
-          items: filterSlashItems(items, current.query),
-          idx: 0,
-          loading: false,
-          mode: "commands",
-        });
-      } catch {
-        if (req === slashReqRef.current) {
-          setSlashMenu({
-            ...context,
-            items: [],
+        setSlashMenuStack([
+          {
+            anchor: current.anchor,
+            rollbackTo: -1,
+            parent: null,
+            items,
             idx: 0,
             loading: false,
-            mode: "commands",
-          });
+            query: current.query,
+          },
+        ]);
+      } catch {
+        if (req === slashReqRef.current) {
+          setSlashMenuStack([rootLevel([], false)]);
         }
       }
     },
-    [filterSlashItems, slashContext, targetAgentId]
+    [slashContext, targetAgentId]
   );
 
-  const insertSlashItem = useCallback(
-    (item: SlashItem) => {
-      if (!slashMenu || !textareaRef.current) return;
-      const el = textareaRef.current;
+  /** Patch the deepest open level without touching the rest of the stack. */
+  const updateTopLevel = useCallback((patch: Partial<SlashMenuState>) => {
+    setSlashMenuStack((stack) => {
+      if (stack.length === 0) return stack;
+      const next = stack.slice();
+      next[next.length - 1] = { ...next[next.length - 1], ...patch };
+      return next;
+    });
+  }, []);
 
+  /** Apply fetched children to the top level, but only while it is still the
+      child level that requested them (guards against a stale response painting
+      over a different picker after Esc/descend raced). The query is re-derived
+      from the live textarea so text typed during the brief loading window is
+      not lost, and a fresh load resets the selection. */
+  const patchTopIfParent = useCallback(
+    (parent: SlashItem, patch: Partial<SlashMenuState>) => {
+      setSlashMenuStack((stack) => {
+        if (stack.length === 0) return stack;
+        const top = stack[stack.length - 1];
+        if (top.parent?.name !== parent.name) return stack;
+        const el = textareaRef.current;
+        const query = el ? el.value.slice(top.anchor) : top.query;
+        const next = stack.slice();
+        next[next.length - 1] = { ...top, ...patch, query, idx: 0 };
+        return next;
+      });
+    },
+    []
+  );
+
+  /** Fetch the static second-level items for a parent, honoring the cache. */
+  const fetchSlashChildren = useCallback(
+    async (agentId: string, parent: SlashItem) => {
+      const req = ++slashChildReqRef.current;
+      const cacheKey = `${agentId}:${parent.name}`;
+      const cached = slashChildrenRef.current.get(cacheKey);
+      if (cached) {
+        patchTopIfParent(parent, { items: cached, loading: false });
+        return;
+      }
+      try {
+        const items =
+          (await invoke<SlashItem[]>("agent_list_slash_children", {
+            id: agentId,
+            parent: parent.name,
+          })) ?? [];
+        if (req !== slashChildReqRef.current) return; // stale
+        slashChildrenRef.current.set(cacheKey, items);
+        patchTopIfParent(parent, { items, loading: false });
+      } catch {
+        if (req === slashChildReqRef.current) {
+          patchTopIfParent(parent, { items: [], loading: false });
+        }
+      }
+    },
+    [patchTopIfParent]
+  );
+
+  /** Complete/descend into a menu item. Leaves send the completed line straight
+      to the terminal; commands with children push a loading level and fetch
+      their options from the backend. */
+  const selectSlashItem = useCallback(
+    (item: SlashItem) => {
+      if (slashMenuStack.length === 0) return;
+      const el = textareaRef.current;
+      if (!el) return;
+      const level = slashMenuStack[slashMenuStack.length - 1];
       const insert = `${item.invocation} `;
-      const replacedLength = slashMenu.query.length + 1;
-      el.value =
-        el.value.slice(0, slashMenu.anchor) +
-        insert +
-        el.value.slice(slashMenu.anchor + replacedLength);
-      const newPos = slashMenu.anchor + insert.length;
-      el.selectionStart = el.selectionEnd = newPos;
+      const beforeLen = el.value.length;
+
+      if (slashMenuStack.length === 1) {
+        // Root level: replace the `/query` token (query + trigger `/`) with the
+        // selected invocation. The pre-edit text length is the rollback point
+        // for the child level, if one opens.
+        const replacedLength = level.query.length + 1;
+        el.value =
+          el.value.slice(0, level.anchor) +
+          insert +
+          el.value.slice(level.anchor + replacedLength);
+      } else {
+        // Child level: the typed filter (everything after this level's anchor)
+        // is replaced by the selected invocation — otherwise `/model op` +
+        // `claude-opus-5` would concatenate into `/model opclaude-opus-5`.
+        const filterLength = Math.max(0, el.value.length - level.anchor);
+        el.value =
+          el.value.slice(0, level.anchor) +
+          insert +
+          el.value.slice(level.anchor + filterLength);
+      }
+      el.selectionStart = el.selectionEnd = el.value.length;
       el.focus();
       resizeTextarea(el);
       setHasInput(true);
-      setSlashMenu(null);
+
+      if (item.has_children) {
+        setSlashMenuStack((stack) => [
+          ...stack,
+          {
+            anchor: el.value.length,
+            rollbackTo: beforeLen,
+            parent: item,
+            items: [],
+            idx: 0,
+            loading: true,
+            query: "",
+          },
+        ]);
+        const agentId = targetAgentId;
+        if (agentId) void fetchSlashChildren(agentId, item);
+      } else {
+        // Final-level selection: the completed line (`/model claude-opus-5 `)
+        // goes straight to the terminal. `handleSend` reads the textarea
+        // synchronously, clears it, and sends — same path as a manual Enter.
+        setSlashMenuStack([]);
+        handleSendRef.current();
+      }
     },
-    [resizeTextarea, slashMenu]
+    [slashMenuStack, targetAgentId, resizeTextarea, fetchSlashChildren]
   );
+
+  /** Esc / ← 返回: roll the text back past the level-opening invocation and pop
+      one level. Root Esc just closes the whole menu. */
+  const popSlashLevel = useCallback(() => {
+    if (slashMenuStack.length === 0) return;
+    if (slashMenuStack.length === 1) {
+      setSlashMenuStack([]);
+      return;
+    }
+    const top = slashMenuStack[slashMenuStack.length - 1];
+    const el = textareaRef.current;
+    if (el && top.rollbackTo >= 0 && top.rollbackTo <= el.value.length) {
+      el.value = el.value.slice(0, top.rollbackTo);
+      el.selectionStart = el.selectionEnd = top.rollbackTo;
+      el.focus();
+      resizeTextarea(el);
+      setHasInput(el.value.trim().length > 0);
+    }
+    setSlashMenuStack((stack) => stack.slice(0, -1));
+  }, [slashMenuStack, resizeTextarea]);
 
   // Load the active agent's cwd listing when the file/ref menu opens.
   useEffect(() => {
@@ -1085,7 +1303,7 @@ export function Composer() {
     setIsBangInput(false);
     setHasInput(false);
     setAtMenu(null);
-    setSlashMenu(null);
+    setSlashMenuStack([]);
 
     sendingRef.current = true;
     let agentId = targetAgentId;
@@ -1143,41 +1361,41 @@ export function Composer() {
     pushDraft,
   ]);
 
+  // Keep the auto-send bridge fresh whenever `handleSend` is recreated.
+  useEffect(() => {
+    handleSendRef.current = handleSend;
+  }, [handleSend]);
+
   // ── Keyboard ──────────────────────────────────────────────────
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
-      if (slashMenu) {
+      if (slashMenuStack.length > 0) {
+        const level = slashMenuStack[slashMenuStack.length - 1];
+        const visible = level.query
+          ? filterSlashItems(level.items, level.query)
+          : level.items;
+        const count = visible.length;
         if (e.key === "ArrowDown") {
           e.preventDefault();
-          if (slashMenu.items.length) {
-            setSlashMenu({
-              ...slashMenu,
-              idx: (slashMenu.idx + 1) % slashMenu.items.length,
-            });
-          }
+          if (count) updateTopLevel({ idx: (level.idx + 1) % count });
           return;
         }
         if (e.key === "ArrowUp") {
           e.preventDefault();
-          if (slashMenu.items.length) {
-            setSlashMenu({
-              ...slashMenu,
-              idx:
-                (slashMenu.idx - 1 + slashMenu.items.length) %
-                slashMenu.items.length,
-            });
-          }
+          if (count) updateTopLevel({ idx: (level.idx - 1 + count) % count });
           return;
         }
         if (e.key === "Enter" || e.key === "Tab") {
           e.preventDefault();
-          const item = slashMenu.items[slashMenu.idx];
-          if (item) insertSlashItem(item);
+          const item = visible[Math.min(level.idx, count - 1)];
+          if (item) selectSlashItem(item);
           return;
         }
-        if (e.key === "Escape") {
+        // Esc pops one level (root Esc closes the whole menu); ArrowLeft is a
+        // mouse-free way to climb back to the parent level.
+        if (e.key === "Escape" || e.key === "ArrowLeft") {
           e.preventDefault();
-          setSlashMenu(null);
+          popSlashLevel();
           return;
         }
       }
@@ -1263,9 +1481,12 @@ export function Composer() {
     },
     [
       atMenu,
-      slashMenu,
+      slashMenuStack,
+      filterSlashItems,
+      updateTopLevel,
+      selectSlashItem,
+      popSlashLevel,
       insertAtItem,
-      insertSlashItem,
       handleSend,
       shownMode,
       permissionModes,
@@ -1287,13 +1508,39 @@ export function Composer() {
       resizeTextarea(el);
       setIsBangInput(el.value.trimStart().startsWith("!"));
       setHasInput(el.value.trim().length > 0);
-      handleAtAuto(el);
-      void handleSlashAuto(el);
       // Typing dismisses the popover menus (模型选择 / 文件引用).
       setModelMenuOpen(false);
       setRefMenuOpen(false);
+      if (slashMenuStack.length > 0) {
+        // At the root level the trigger is live text: deleting the `/` or
+        // typing a space invalidates the `/query` token and must close the
+        // menu (mirrors the pre-stack behavior). Child levels sit on committed
+        // parent text, so only their filter is re-derived.
+        if (slashMenuStack.length === 1 && !slashContext(el)) {
+          slashReqRef.current += 1;
+          setSlashMenuStack([]);
+          return;
+        }
+        // A menu level is open: the deepest level's filter is whatever text
+        // follows its anchor. Re-filter live without re-fetching the catalog.
+        setSlashMenuStack((stack) => {
+          if (stack.length === 0) return stack;
+          const next = stack.slice();
+          const last = next[next.length - 1];
+          if (last.loading) return stack;
+          next[next.length - 1] = {
+            ...last,
+            query: el.value.slice(last.anchor),
+            idx: 0,
+          };
+          return next;
+        });
+        return;
+      }
+      handleAtAuto(el);
+      void handleSlashAuto(el);
     },
-    [resizeTextarea, handleAtAuto, handleSlashAuto]
+    [resizeTextarea, handleAtAuto, handleSlashAuto, slashMenuStack]
   );
 
   // ── Height resize (drag the divider above the composer) ───────
@@ -1333,24 +1580,65 @@ export function Composer() {
       className={`composer${!composerOpen ? " composer-collapsed" : ""}`}
       style={composerOpen && effH ? { height: effH } : undefined}
     >
-      {/* Height divider: drag to resize, double-click to reset. */}
-      {composerOpen && (
-        <div
-          className={`composer-resize${composerResizing ? " active" : ""}`}
-          title="拖拽调整高度 · 双击恢复默认高度"
-          onMouseDown={startComposerResize}
-          onDoubleClick={resetComposerH}
-        />
-      )}
+      {/* Height divider: drag to resize, double-click to reset, hover button to
+          collapse/expand (always rendered so a collapsed composer can be
+          reopened). */}
+      <div
+        className={`composer-resize${composerResizing ? " active" : ""}`}
+        title="单击收起/展开 · 拖拽调整高度 · 双击恢复默认高度"
+        onMouseDown={(e) => {
+          resizeStartRef.current = { x: e.clientX, y: e.clientY };
+          startComposerResize(e);
+        }}
+        onClick={(e) => {
+          // A click (no movement) toggles the composer; a drag resizes instead.
+          const start = resizeStartRef.current;
+          resizeStartRef.current = null;
+          if (
+            start &&
+            Math.hypot(e.clientX - start.x, e.clientY - start.y) > 5
+          ) {
+            return;
+          }
+          toggleComposer();
+        }}
+        onDoubleClick={resetComposerH}
+      >
+        <button
+          className="resize-collapse"
+          title={composerOpen ? "收起输入区" : "展开输入区"}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleComposer();
+          }}
+        >
+          <Icon name={composerOpen ? "chevron-down" : "chevron-up"} size={10} />
+        </button>
+      </div>
       {/* Target line */}
       <div className="composer-target">
         <span>
-          → agent:{" "}
+          <Icon name="arrow-right" size={12} style={{ marginRight: 4 }} />
+          agent:{" "}
           {activeTab?.type === "agent" && activeTab.agentId
             ? activeTab.title || "agent"
             : "(无标签)"}
         </span>
-        {isBangInput && <span className="composer-bang">⚡ 终端直发</span>}
+        <span className="composer-target-right">
+          {isBangInput && (
+            <span className="composer-bang">
+              <Icon name="zap" size={12} style={{ marginRight: 4 }} />
+              终端直发
+            </span>
+          )}
+          <span
+            className="composer-f1-hint"
+            title="F1 在输入框与终端之间切换焦点"
+          >
+            <kbd>F1</kbd> 切换焦点
+          </span>
+        </span>
       </div>
 
       {/* Input area */}
@@ -1404,43 +1692,89 @@ export function Composer() {
       )}
 
       {/* Runtime-aware native command / skill menu. `/` is only the trigger:
-          each row inserts the syntax required by the selected agent. */}
-      {slashMenu && (
-        <div
-          ref={slashMenuRef}
-          className="composer-at-menu composer-slash-menu"
-          role="listbox"
-        >
-          <div className="composer-slash-head">
-            <span>{configRuntime?.name ?? configRuntimeId}</span>
-            <span>内置命令 / 自定义命令 / 技能</span>
-          </div>
-          {slashMenu.loading ? (
-            <div className="composer-slash-empty">正在读取…</div>
-          ) : slashMenu.items.length === 0 ? (
-            <div className="composer-slash-empty">没有匹配的命令或技能</div>
-          ) : (
-            slashMenu.items.map((item, i) => (
-              <div
-                key={`${item.invocation}:${item.source}`}
-                role="option"
-                aria-selected={i === slashMenu.idx}
-                className={`composer-at-item composer-slash-item${
-                  i === slashMenu.idx ? " active" : ""
-                }`}
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => insertSlashItem(item)}
-              >
-                <span className="composer-slash-invocation">{item.invocation}</span>
-                <span className="composer-slash-description">
-                  {item.description || (item.kind === "skill" ? "加载 Agent 技能" : "运行命令")}
+          each row inserts the syntax required by the selected agent. Commands
+          with children (has_children) push a second-level picker. */}
+      {slashMenuStack.length > 0 &&
+        (() => {
+          const level = slashMenuStack[slashMenuStack.length - 1];
+          const visible = level.query
+            ? filterSlashItems(level.items, level.query)
+            : level.items;
+          const breadcrumb = slashMenuStack
+            .map((l) => l.parent?.name)
+            .filter((n): n is string => Boolean(n));
+          return (
+            <div
+              ref={slashMenuRef}
+              className="composer-at-menu composer-slash-menu"
+              role="listbox"
+            >
+              <div className="composer-slash-head">
+                <span>
+                  {breadcrumb.length > 0 ? (
+                    <>
+                      <span className="composer-slash-breadcrumb">
+                        /
+                        {breadcrumb.map((seg, i) => (
+                          <span key={`${seg}-${i}`}>
+                            {i > 0 && (
+                              <Icon name="chevron-right" size={10} style={{ margin: "0 3px" }} />
+                            )}
+                            {seg}
+                          </span>
+                        ))}
+                      </span>{" "}
+                      {configRuntime?.name ?? configRuntimeId}
+                    </>
+                  ) : (
+                    configRuntime?.name ?? configRuntimeId
+                  )}
                 </span>
-                <span className="composer-slash-source">{item.source}</span>
+                <span>内置命令 / 自定义命令 / 技能</span>
               </div>
-            ))
-          )}
-        </div>
-      )}
+              {slashMenuStack.length > 1 && (
+                <div
+                  className="composer-slash-back"
+                  role="option"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={popSlashLevel}
+                >
+                  <Icon name="arrow-left" size={12} style={{ marginRight: 4 }} />
+                  返回
+                </div>
+              )}
+              {level.loading ? (
+                <div className="composer-slash-empty">正在读取…</div>
+              ) : visible.length === 0 ? (
+                <div className="composer-slash-empty">没有匹配的命令或技能</div>
+              ) : (
+                visible.map((item, i) => (
+                  <div
+                    key={`${item.invocation}:${item.source}`}
+                    role="option"
+                    aria-selected={i === level.idx}
+                    className={`composer-at-item composer-slash-item${
+                      i === level.idx ? " active" : ""
+                    }`}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => selectSlashItem(item)}
+                  >
+                    <span className="composer-slash-invocation">
+                      {item.invocation}
+                      {item.has_children && (
+                        <Icon name="chevron-right" size={10} style={{ marginLeft: 4 }} />
+                      )}
+                    </span>
+                    <span className="composer-slash-description">
+                      {item.description || (item.kind === "skill" ? "加载 Agent 技能" : "运行命令")}
+                    </span>
+                    <span className="composer-slash-source">{item.source}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          );
+        })()}
 
       {/* Actions */}
       <div className="composer-actions">
@@ -1461,10 +1795,14 @@ export function Composer() {
             <div className="cmp-menu" ref={refMenuRef} role="menu">
               <div className="cmp-menu-label">插入文件/引用</div>
               <div className="cmp-menu-item" onClick={handlePickFile}>
-                <span className="cmp-menu-name">📄 选择文件…</span>
+                <span className="cmp-menu-name">
+                  <Icon name="file-text" size={13} style={{ marginRight: 6 }} /> 选择文件…
+                </span>
               </div>
               <div className="cmp-menu-item" onClick={handlePasteRef}>
-                <span className="cmp-menu-name">🔗 粘贴引用/路径</span>
+                <span className="cmp-menu-name">
+                  <Icon name="link" size={13} style={{ marginRight: 6 }} /> 粘贴引用/路径
+                </span>
               </div>
               <div className="cmp-menu-sep" />
               <div className="cmp-menu-label">最近文件（agent cwd）</div>
@@ -1494,6 +1832,7 @@ export function Composer() {
               setRefMenuOpen(false);
               setPermissionMenuOpen(false);
               setThinkingMenuOpen(false);
+              setPendingEffortModel(null);
               setModelMenuOpen((o) => !o);
             }}
             title={`选择模型（当前：${currentModel ? currentModel.name : "runtime 默认"}）`}
@@ -1502,25 +1841,74 @@ export function Composer() {
           </span>
           {modelMenuOpen && (
             <div className="cmp-menu" ref={modelMenuRef} role="menu">
-              <div className="cmp-menu-label">选择模型</div>
-              {models.length === 0 && (
-                <div className="cmp-menu-empty">无可用模型</div>
-              )}
-              {models.map((m) => (
-                <div
-                  key={m.id}
-                  className={`cmp-menu-item${m.id === shownModel ? " current" : ""}`}
-                  onClick={() => {
-                    applyModel(m.id);
-                    setModelMenuOpen(false);
-                  }}
-                >
-                  <span className="cmp-menu-name">{m.name}</span>
-                  {m.id === shownModel && (
-                    <span className="cmp-menu-check">✓</span>
+              {pendingEffortModel ? (
+                <>
+                  <div
+                    className="cmp-menu-item"
+                    onClick={() => setPendingEffortModel(null)}
+                  >
+                    <span className="cmp-menu-name">
+                      <Icon name="arrow-left" size={13} style={{ marginRight: 6 }} /> 返回
+                    </span>
+                  </div>
+                  <div className="cmp-menu-label">选择推理强度</div>
+                  {pendingEffortOptions.map((option) => (
+                    <div
+                      key={option.id}
+                      className={`cmp-menu-item${option.id === shownSpeed ? " current" : ""}`}
+                      title={option.description}
+                      onClick={() => {
+                        void applyModel(pendingEffortModel, option.id);
+                        setPendingEffortModel(null);
+                        setModelMenuOpen(false);
+                      }}
+                    >
+                      <span className="cmp-menu-name">{option.label}</span>
+                      {option.id === shownSpeed && (
+                        <span className="cmp-menu-check">
+                          <Icon name="check" size={12} />
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </>
+              ) : (
+                <>
+                  <div className="cmp-menu-label">选择模型</div>
+                  {models.length === 0 && (
+                    <div className="cmp-menu-empty">无可用模型</div>
                   )}
-                </div>
-              ))}
+                  {models.map((m) => (
+                    <div
+                      key={m.id}
+                      className={`cmp-menu-item${m.id === shownModel ? " current" : ""}`}
+                      onClick={() => {
+                        // Codex models with several reasoning efforts drill
+                        // into an effort picker; other runtimes apply directly.
+                        // Only drill down when the model has more than one tier
+                        // the GUI can actually select (avoids an empty submenu
+                        // for models whose efforts are all advanced tiers).
+                        const drillDown =
+                          configRuntimeId === "codex" &&
+                          effortOptionsFor(m.id).length > 1;
+                        if (drillDown) {
+                          setPendingEffortModel(m.id);
+                        } else {
+                          applyModel(m.id);
+                          setModelMenuOpen(false);
+                        }
+                      }}
+                    >
+                      <span className="cmp-menu-name">{m.name}</span>
+                      {m.id === shownModel && (
+                        <span className="cmp-menu-check">
+                          <Icon name="check" size={12} />
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </>
+              )}
             </div>
           )}
         </span>
@@ -1541,7 +1929,7 @@ export function Composer() {
           </span>
         )}
 
-        {thinkingOptions.length > 0 && (
+        {menuThinkingOptions.length > 0 && (
           <span className="cmp-pop" ref={thinkingAnchorRef}>
             <span
               className="act-btn"
@@ -1553,12 +1941,13 @@ export function Composer() {
                 setThinkingMenuOpen((open) => !open);
               }}
             >
-              ⚡ {thinkingOptions.find((option) => option.id === shownSpeed)?.label ?? "思考强度"}
+              <Icon name="zap" size={13} style={{ marginRight: 4 }} />
+              {currentSpeedLabel}
             </span>
             {thinkingMenuOpen && (
               <div className="cmp-menu" ref={thinkingMenuRef} role="menu">
                 <div className="cmp-menu-label">思考强度</div>
-                {thinkingOptions.map((option) => (
+                {menuThinkingOptions.map((option) => (
                   <div
                     key={option.id}
                     className={`cmp-menu-item${option.id === shownSpeed ? " current" : ""}`}
@@ -1569,7 +1958,11 @@ export function Composer() {
                     }}
                   >
                     <span className="cmp-menu-name">{option.label}</span>
-                    {option.id === shownSpeed && <span className="cmp-menu-check">✓</span>}
+                    {option.id === shownSpeed && (
+                      <span className="cmp-menu-check">
+                        <Icon name="check" size={12} />
+                      </span>
+                    )}
                   </div>
                 ))}
               </div>
@@ -1589,7 +1982,8 @@ export function Composer() {
                 setPermissionMenuOpen((open) => !open);
               }}
             >
-              🛡 {permissionModes.find((mode) => mode.id === shownMode)?.label ?? "权限"}
+              <Icon name="shield" size={13} style={{ marginRight: 4 }} />
+              {permissionModes.find((mode) => mode.id === shownMode)?.label ?? "权限"}
             </span>
             {permissionMenuOpen && (
               <div className="cmp-menu" ref={permissionMenuRef} role="menu">
@@ -1609,16 +2003,17 @@ export function Composer() {
                     }}
                   >
                     <span className="cmp-menu-name">{mode.label}</span>
-                    {shownMode === mode.id && <span className="cmp-menu-check">✓</span>}
+                    {shownMode === mode.id && (
+                      <span className="cmp-menu-check">
+                        <Icon name="check" size={12} />
+                      </span>
+                    )}
                   </div>
                 ))}
               </div>
             )}
           </span>
         )}
-        <button className="collapse-btn" onClick={toggleComposer}>
-          {composerOpen ? "▼" : "▲"}
-        </button>
       </div>
       {pendingPermissionMode && (
         <PermissionConfirmationDialog

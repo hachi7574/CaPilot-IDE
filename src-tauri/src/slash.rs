@@ -1,3 +1,4 @@
+use crate::agent_runtime::runtimes::get_adapter;
 use crate::persistence::Persistence;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -728,289 +729,6 @@ const OPENCODE_COMMANDS: &[BuiltinCommand] = &[
     },
 ];
 
-const OMP_COMMANDS: &[BuiltinCommand] = &[
-    BuiltinCommand {
-        name: "security",
-        description: "规划、运行和查看 OMP 原生安全扫描",
-    },
-    BuiltinCommand {
-        name: "settings",
-        description: "打开设置面板",
-    },
-    BuiltinCommand {
-        name: "setup",
-        description: "配置模型提供商",
-    },
-    BuiltinCommand {
-        name: "plan",
-        description: "开启或关闭先规划后执行模式",
-    },
-    BuiltinCommand {
-        name: "plan-review",
-        description: "重新打开最近一次计划的评审界面",
-    },
-    BuiltinCommand {
-        name: "vibe",
-        description: "开启或关闭持续快速执行模式",
-    },
-    BuiltinCommand {
-        name: "goal",
-        description: "开启或关闭当前会话的持久目标模式",
-    },
-    BuiltinCommand {
-        name: "guided-goal",
-        description: "通过访谈创建一个持久目标",
-    },
-    BuiltinCommand {
-        name: "loop",
-        description: "配置 Agent 的周期执行循环",
-    },
-    BuiltinCommand {
-        name: "queue",
-        description: "将消息排队到 Agent 本轮结束后执行",
-    },
-    BuiltinCommand {
-        name: "model",
-        description: "切换当前会话使用的模型",
-    },
-    BuiltinCommand {
-        name: "switch",
-        description: "切换当前会话使用的模型",
-    },
-    BuiltinCommand {
-        name: "fast",
-        description: "开启或关闭模型提供商的优先服务层",
-    },
-    BuiltinCommand {
-        name: "computer",
-        description: "开启或关闭原生计算机操作工具",
-    },
-    BuiltinCommand {
-        name: "vision",
-        description: "配置图像检查与视觉委派工具",
-    },
-    BuiltinCommand {
-        name: "prewalk",
-        description: "让下一步操作临时使用快速低成本模型",
-    },
-    BuiltinCommand {
-        name: "advisor",
-        description: "开启或关闭每轮提供复核意见的顾问模型",
-    },
-    BuiltinCommand {
-        name: "export",
-        description: "将当前会话导出为 HTML 文件",
-    },
-    BuiltinCommand {
-        name: "dump",
-        description: "复制会话记录并导出请求诊断数据",
-    },
-    BuiltinCommand {
-        name: "share",
-        description: "通过加密链接分享当前会话",
-    },
-    BuiltinCommand {
-        name: "collab",
-        description: "通过中继实时共享当前会话",
-    },
-    BuiltinCommand {
-        name: "join",
-        description: "加入一个实时协作会话",
-    },
-    BuiltinCommand {
-        name: "leave",
-        description: "离开当前实时协作会话",
-    },
-    BuiltinCommand {
-        name: "browser",
-        description: "切换浏览器的无头或可视模式",
-    },
-    BuiltinCommand {
-        name: "copy",
-        description: "从对话中选择并复制文本或代码",
-    },
-    BuiltinCommand {
-        name: "todo",
-        description: "查看或修改 Agent 的待办列表",
-    },
-    BuiltinCommand {
-        name: "session",
-        description: "管理当前会话",
-    },
-    BuiltinCommand {
-        name: "jobs",
-        description: "查看异步后台任务状态",
-    },
-    BuiltinCommand {
-        name: "usage",
-        description: "查看模型提供商的用量和限额",
-    },
-    BuiltinCommand {
-        name: "stats",
-        description: "打开本地使用统计面板",
-    },
-    BuiltinCommand {
-        name: "changelog",
-        description: "查看版本更新记录",
-    },
-    BuiltinCommand {
-        name: "hotkeys",
-        description: "查看全部键盘快捷键",
-    },
-    BuiltinCommand {
-        name: "tools",
-        description: "查看当前 Agent 可使用的工具",
-    },
-    BuiltinCommand {
-        name: "context",
-        description: "查看上下文用量估算和构成",
-    },
-    BuiltinCommand {
-        name: "extensions",
-        description: "打开扩展控制中心",
-    },
-    BuiltinCommand {
-        name: "agents",
-        description: "打开 Agent 控制中心",
-    },
-    BuiltinCommand {
-        name: "branch",
-        description: "从历史消息创建一个新分支",
-    },
-    BuiltinCommand {
-        name: "fork",
-        description: "从历史消息创建一个新会话分叉",
-    },
-    BuiltinCommand {
-        name: "tree",
-        description: "浏览会话树并切换分支",
-    },
-    BuiltinCommand {
-        name: "login",
-        description: "登录 OAuth 模型提供商",
-    },
-    BuiltinCommand {
-        name: "logout",
-        description: "退出 OAuth 模型提供商账号",
-    },
-    BuiltinCommand {
-        name: "mcp",
-        description: "添加、查看、移除或测试 MCP 服务器",
-    },
-    BuiltinCommand {
-        name: "ssh",
-        description: "添加、查看或移除 SSH 主机",
-    },
-    BuiltinCommand {
-        name: "new",
-        description: "开始一个新会话",
-    },
-    BuiltinCommand {
-        name: "fresh",
-        description: "重置提供商流状态，但保留本地对话记录",
-    },
-    BuiltinCommand {
-        name: "clear",
-        description: "清除对话上下文，但保留当前会话",
-    },
-    BuiltinCommand {
-        name: "drop",
-        description: "删除当前会话并开始新会话",
-    },
-    BuiltinCommand {
-        name: "compact",
-        description: "手动压缩当前会话上下文",
-    },
-    BuiltinCommand {
-        name: "shake",
-        description: "从上下文中移除大型工具结果和内容块",
-    },
-    BuiltinCommand {
-        name: "handoff",
-        description: "将当前上下文移交到新会话",
-    },
-    BuiltinCommand {
-        name: "resume",
-        description: "恢复另一个历史会话",
-    },
-    BuiltinCommand {
-        name: "btw",
-        description: "使用当前上下文提出一次性侧边问题",
-    },
-    BuiltinCommand {
-        name: "tan",
-        description: "让后台 Agent 处理旁支任务",
-    },
-    BuiltinCommand {
-        name: "omfg",
-        description: "根据反馈生成防止重复问题的行为规则",
-    },
-    BuiltinCommand {
-        name: "retry",
-        description: "重试最近一次失败的 Agent 回合",
-    },
-    BuiltinCommand {
-        name: "debug",
-        description: "打开调试工具选择器",
-    },
-    BuiltinCommand {
-        name: "memory",
-        description: "检查并维护 Agent 记忆",
-    },
-    BuiltinCommand {
-        name: "rename",
-        description: "重命名当前会话",
-    },
-    BuiltinCommand {
-        name: "move",
-        description: "将当前会话移动到其他目录",
-    },
-    BuiltinCommand {
-        name: "add-dir",
-        description: "为当前会话添加工作目录",
-    },
-    BuiltinCommand {
-        name: "remove-dir",
-        description: "从当前会话移除工作目录",
-    },
-    BuiltinCommand {
-        name: "dirs",
-        description: "列出当前会话的全部工作目录",
-    },
-    BuiltinCommand {
-        name: "marketplace",
-        description: "管理插件市场来源和已安装插件",
-    },
-    BuiltinCommand {
-        name: "plugins",
-        description: "查看和管理已安装插件",
-    },
-    BuiltinCommand {
-        name: "reload-plugins",
-        description: "重新加载插件、技能、命令、钩子和工具",
-    },
-    BuiltinCommand {
-        name: "force",
-        description: "强制下一轮使用指定工具",
-    },
-    BuiltinCommand {
-        name: "live",
-        description: "启动由 Codex 支持的实时语音模式",
-    },
-    BuiltinCommand {
-        name: "pause",
-        description: "暂停所有 Agent，直到手动恢复",
-    },
-    BuiltinCommand {
-        name: "exit",
-        description: "退出 OMP",
-    },
-    BuiltinCommand {
-        name: "quit",
-        description: "退出 OMP",
-    },
-];
-
 /// One entry in the Composer's runtime-aware `/` picker. `invocation` is the
 /// exact text understood by the target CLI; it intentionally differs between
 /// providers (for example Codex skills use `$name`).
@@ -1021,6 +739,66 @@ pub struct SlashItem {
     pub invocation: String,
     pub source: String,
     pub kind: String,
+    /// The Composer opens a second-level picker after selecting this item.
+    /// Frontends treat a missing field as falsy, so older UI builds keep
+    /// rendering the flat catalog.
+    pub has_children: bool,
+}
+
+/// How a built-in command relates to the static child pickers.
+enum ChildSource {
+    /// Leaf — selecting it completes the input and closes the menu.
+    None,
+    /// `agent_list_slash_children` can enumerate its options statically.
+    Static,
+    /// Needs a dynamic picker/harvest to populate; hidden from the Composer.
+    Excluded,
+}
+
+/// Per-runtime commands that get a second-level static picker. The child list
+/// is produced by `discover_children` without touching the PTY.
+///
+/// Only commands whose CLI accepts a verbatim inline argument belong here.
+/// Codex's built-ins (`supports_inline_args`) and OpenCode's pickers take no
+/// inline values, so their rows are absent — those commands stay plain leaves
+/// and the CLI opens its own picker in the PTY.
+const STATIC_CHILDREN: &[(&str, &[&str])] = &[
+    ("claude", &["model", "permissions", "effort", "fast", "mcp"]),
+];
+
+/// Per-runtime commands whose options live only in the CLI's own picker
+/// (sessions, forks, plugins, ...). Selecting them from the Composer would
+/// dead-end, so they are filtered out of the menu. Users can still type them
+/// and send them to the terminal manually.
+const EXCLUDED: &[(&str, &[&str])] = &[
+    (
+        "claude",
+        &[
+            "resume", "fork", "rewind", "memory", "config", "plugins", "add-dir", "cd",
+            "background", "tasks",
+        ],
+    ),
+    (
+        "codex",
+        &["resume", "fork", "apps", "plugins", "hooks", "ps"],
+    ),
+    ("opencode", &["sessions"]),
+];
+
+fn child_source(runtime: &str, name: &str) -> ChildSource {
+    if EXCLUDED
+        .iter()
+        .any(|(r, names)| *r == runtime && names.contains(&name))
+    {
+        return ChildSource::Excluded;
+    }
+    if STATIC_CHILDREN
+        .iter()
+        .any(|(r, names)| *r == runtime && names.contains(&name))
+    {
+        return ChildSource::Static;
+    }
+    ChildSource::None
 }
 
 #[derive(Default)]
@@ -1166,7 +944,6 @@ fn builtin_commands(runtime: &str) -> &'static [BuiltinCommand] {
         "claude" => CLAUDE_COMMANDS,
         "codex" => CODEX_COMMANDS,
         "opencode" => OPENCODE_COMMANDS,
-        "omp" | "opm" => OMP_COMMANDS,
         _ => &[],
     }
 }
@@ -1174,6 +951,11 @@ fn builtin_commands(runtime: &str) -> &'static [BuiltinCommand] {
 fn append_builtin_commands(runtime: &str, items: &mut Vec<SlashItem>, seen: &mut HashSet<String>) {
     let append =
         |command: &BuiltinCommand, items: &mut Vec<SlashItem>, seen: &mut HashSet<String>| {
+            // Dynamic-picker commands are not statically enumerable; keep them
+            // out of the menu so selecting one never dead-ends.
+            if matches!(child_source(runtime, command.name), ChildSource::Excluded) {
+                return;
+            }
             push_item(
                 items,
                 seen,
@@ -1183,6 +965,10 @@ fn append_builtin_commands(runtime: &str, items: &mut Vec<SlashItem>, seen: &mut
                     invocation: format!("/{}", command.name),
                     source: BUILTIN_SOURCE.to_string(),
                     kind: "command".to_string(),
+                    has_children: matches!(
+                        child_source(runtime, command.name),
+                        ChildSource::Static
+                    ),
                 },
             );
         };
@@ -1255,6 +1041,7 @@ fn scan_skill_root(
                 invocation: invocation(name),
                 source: source.to_string(),
                 kind: "skill".to_string(),
+                has_children: false,
             },
         );
     }
@@ -1300,6 +1087,7 @@ fn scan_command_root(
                 invocation: format!("/{name}"),
                 source: source.to_string(),
                 kind: "command".to_string(),
+                has_children: false,
             },
         );
     }
@@ -1438,105 +1226,6 @@ fn discover(runtime: &str, cwd: &Path) -> Vec<SlashItem> {
                 );
             }
         }
-        "omp" | "opm" => {
-            // OMP exposes every discovered skill as `/skill:<name>` when skill
-            // commands are enabled. Native sources win before compatibility
-            // providers, mirroring OMP's provider priority.
-            if let Some(home) = &home {
-                let agent_dir = std::env::var_os("PI_CODING_AGENT_DIR")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| {
-                        let config = std::env::var_os("PI_CONFIG_DIR")
-                            .map(PathBuf::from)
-                            .unwrap_or_else(|| home.join(".omp"));
-                        if config.is_absolute() {
-                            config.join("agent")
-                        } else {
-                            home.join(config).join("agent")
-                        }
-                    });
-                for dir in &ancestors {
-                    scan_command_root(
-                        &dir.join(".omp/commands"),
-                        "项目命令",
-                        &mut items,
-                        &mut seen,
-                    );
-                }
-                scan_command_root(
-                    &agent_dir.join("commands"),
-                    "OMP 命令",
-                    &mut items,
-                    &mut seen,
-                );
-                scan_skill_root(
-                    &agent_dir.join("skills"),
-                    "OMP",
-                    |name| format!("/skill:{name}"),
-                    &mut items,
-                    &mut seen,
-                );
-            }
-            for dir in &ancestors {
-                scan_skill_root(
-                    &dir.join(".omp/skills"),
-                    "项目",
-                    |name| format!("/skill:{name}"),
-                    &mut items,
-                    &mut seen,
-                );
-            }
-            if let Some(home) = &home {
-                scan_skill_root(
-                    &home.join(".claude/skills"),
-                    "Claude 兼容",
-                    |name| format!("/skill:{name}"),
-                    &mut items,
-                    &mut seen,
-                );
-            }
-            for dir in &ancestors {
-                scan_skill_root(
-                    &dir.join(".claude/skills"),
-                    "项目 · Claude",
-                    |name| format!("/skill:{name}"),
-                    &mut items,
-                    &mut seen,
-                );
-            }
-            if let Some(home) = &home {
-                scan_skill_root(
-                    &home.join(".agents/skills"),
-                    "个人兼容",
-                    |name| format!("/skill:{name}"),
-                    &mut items,
-                    &mut seen,
-                );
-                scan_skill_root(
-                    &home.join(".codex/skills"),
-                    "Codex 兼容",
-                    |name| format!("/skill:{name}"),
-                    &mut items,
-                    &mut seen,
-                );
-            }
-            for dir in &ancestors {
-                for relative in [
-                    ".agents/skills",
-                    ".codex/skills",
-                    ".opencode/skills",
-                    ".github/skills",
-                ] {
-                    scan_skill_root(
-                        &dir.join(relative),
-                        "项目",
-                        |name| format!("/skill:{name}"),
-                        &mut items,
-                        &mut seen,
-                    );
-                }
-            }
-        }
         _ => {}
     }
 
@@ -1563,9 +1252,137 @@ pub fn agent_list_slash_items(
     Ok(discover(&session.runtime, &session.cwd))
 }
 
+/// Enumerate the static options for a built-in command's second-level picker.
+/// `parent` is the built-in command name (`model`, `effort`, `mcp`, ...). All
+/// children are leaves for now; the stack mechanism supports deeper levels.
+///
+/// `invocation` is always the verbatim argument the target CLI accepts after
+/// `/parent` — never CaPilot's internal id vocabulary. The adapters' internal
+/// ids (`list_thinking_options`, `list_permission_modes`) stay for the spawn
+/// flags and settings panel; they are not valid interactive-command text.
+fn discover_children(runtime: &str, _cwd: &Path, parent: &str) -> Vec<SlashItem> {
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+
+    // (invocation, Chinese description) pairs for a static child list.
+    let mut push_static = |pairs: &[(&str, &str)], source: &str| {
+        for (invocation, description) in pairs {
+            push_item(
+                &mut items,
+                &mut seen,
+                SlashItem {
+                    name: invocation.to_string(),
+                    description: description.to_string(),
+                    invocation: invocation.to_string(),
+                    source: source.to_string(),
+                    kind: "command".to_string(),
+                    has_children: false,
+                },
+            );
+        }
+    };
+
+    match parent {
+        "model" => {
+            // Only Claude's `/model <id>` accepts an inline model id; Codex opens
+            // an interactive picker instead.
+            if runtime == "claude" {
+                for model in get_adapter(runtime).list_models() {
+                    push_item(
+                        &mut items,
+                        &mut seen,
+                        SlashItem {
+                            name: model.id.clone(),
+                            description: format!("{} · {}", model.name, model.provider),
+                            invocation: model.id,
+                            source: "模型".to_string(),
+                            kind: "command".to_string(),
+                            has_children: false,
+                        },
+                    );
+                }
+            }
+        }
+        "permissions" => {
+            // Claude accepts `/permissions <mode>`. `bypassPermissions` is
+            // gated behind --dangerously-skip-permissions, so it is omitted.
+            match runtime {
+                "claude" => push_static(
+                    &[
+                        ("default", "默认权限模式：敏感操作逐一询问"),
+                        ("acceptEdits", "自动接受文件编辑，其他操作仍询问"),
+                        ("plan", "只读规划模式：不执行修改"),
+                        ("auto", "由 Claude 自动决策权限（原生自动模式）"),
+                    ],
+                    "权限模式",
+                ),
+                _ => {}
+            }
+        }
+        "effort" => {
+            // Claude Code v2.1.205+ `/effort [level|auto]`; `auto` resets.
+            match runtime {
+                "claude" => push_static(
+                    &[
+                        ("low", "低思考强度，响应更快"),
+                        ("medium", "中等思考强度"),
+                        ("high", "高思考强度"),
+                        ("xhigh", "极高思考强度"),
+                        ("max", "最大思考强度（会话级）"),
+                        ("ultracode", "Ultracode 模式（会话级）"),
+                        ("auto", "由模型自动选择"),
+                    ],
+                    "思考强度",
+                ),
+                _ => {}
+            }
+        }
+        "fast" => {
+            // claude `/fast [on|off]`.
+            push_static(&[("on", "快速模式"), ("off", "快速模式")], "开关");
+        }
+        "mcp" => {
+            match runtime {
+                // claude `/mcp [reconnect <server>|enable|disable [<server>|all]]`:
+                // a bare server name is invalid, so offer the actions and let the
+                // CLI's own server list finish the command in the PTY.
+                "claude" => push_static(
+                    &[
+                        ("enable", "启用 MCP 服务器（随后在终端选择服务器）"),
+                        ("disable", "禁用 MCP 服务器（随后在终端选择服务器）"),
+                        ("reconnect", "重连已断开的服务器（随后在终端选择服务器）"),
+                    ],
+                    "MCP 动作",
+                ),
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+
+    items
+}
+
+/// Resolve the second-level picker for a built-in command. Runtime/cwd come
+/// from the persisted session, never from the webview.
+#[tauri::command]
+pub fn agent_list_slash_children(
+    persistence: tauri::State<'_, Arc<Persistence>>,
+    id: String,
+    parent: String,
+) -> Result<Vec<SlashItem>, String> {
+    let session = persistence
+        .db_tolerant()
+        .ok_or_else(|| "persistence unavailable".to_string())?
+        .get(&id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("agent not found: {id}"))?;
+    Ok(discover_children(&session.runtime, &session.cwd, &parent))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{builtin_commands, discover, read_frontmatter};
+    use super::{builtin_commands, discover, discover_children, read_frontmatter};
     use std::collections::HashSet;
     use std::fs;
     use std::path::PathBuf;
@@ -1661,13 +1478,7 @@ mod tests {
         let claude = discover("claude", &root);
         assert_eq!(
             claude.first().map(|item| item.invocation.as_str()),
-            Some("/add-dir")
-        );
-
-        let omp = discover("omp", &root);
-        assert_eq!(
-            omp.first().map(|item| item.invocation.as_str()),
-            Some("/security")
+            Some("/advisor")
         );
 
         fs::remove_dir_all(&root).unwrap();
@@ -1675,7 +1486,7 @@ mod tests {
 
     #[test]
     fn every_builtin_has_a_unique_name_and_chinese_description() {
-        for runtime in ["claude", "codex", "opencode", "omp"] {
+        for runtime in ["claude", "codex", "opencode"] {
             let mut names = HashSet::new();
             for command in builtin_commands(runtime) {
                 assert!(names.insert(command.name), "{runtime}: {}", command.name);
@@ -1689,5 +1500,150 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn dynamic_picker_commands_are_excluded_from_menu() {
+        let root = fixture_root("excluded");
+        fs::create_dir_all(root.join(".git")).unwrap();
+
+        let claude = discover("claude", &root);
+        for excluded in [
+            "/resume",
+            "/fork",
+            "/rewind",
+            "/memory",
+            "/config",
+            "/plugins",
+            "/cd",
+            "/background",
+            "/tasks",
+        ] {
+            assert!(
+                !claude.iter().any(|item| item.invocation == excluded),
+                "claude menu should not contain {excluded}"
+            );
+        }
+        assert!(claude.iter().any(|item| item.invocation == "/model"));
+        assert!(claude.iter().any(|item| item.invocation == "/clear"));
+
+        let opencode = discover("opencode", &root);
+        assert!(!opencode.iter().any(|item| item.invocation == "/sessions"));
+        assert!(opencode.iter().any(|item| item.invocation == "/models"));
+
+        let codex = discover("codex", &root);
+        assert!(!codex.iter().any(|item| item.invocation == "/resume"));
+        assert!(!codex.iter().any(|item| item.invocation == "/apps"));
+        assert!(codex.iter().any(|item| item.invocation == "/model"));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn static_children_are_marked_and_leaves_are_not() {
+        let root = fixture_root("has_children");
+        fs::create_dir_all(root.join(".git")).unwrap();
+
+        let claude = discover("claude", &root);
+        for parent in ["/model", "/permissions", "/effort", "/fast", "/mcp"] {
+            assert!(
+                claude
+                    .iter()
+                    .find(|item| item.invocation == parent)
+                    .unwrap_or_else(|| panic!("claude menu should contain {parent}"))
+                    .has_children,
+                "claude {parent} should have a second-level picker"
+            );
+        }
+        // `/agents` and `/theme` take no inline argument; they stay leaves.
+        for leaf in ["/agents", "/theme", "/clear"] {
+            assert!(
+                !claude
+                    .iter()
+                    .find(|item| item.invocation == leaf)
+                    .unwrap()
+                    .has_children,
+                "claude {leaf} should be a leaf"
+            );
+        }
+
+        // Codex built-ins take no inline arguments, so none has children.
+        let codex = discover("codex", &root);
+        for leaf in ["/model", "/fast", "/permissions", "/vim", "/theme", "/mcp"] {
+            assert!(
+                !codex
+                    .iter()
+                    .find(|item| item.invocation == leaf)
+                    .unwrap()
+                    .has_children,
+                "codex {leaf} should be a leaf"
+            );
+        }
+
+        // OpenCode's `/models` and `/themes` are interactive pickers.
+        let opencode = discover("opencode", &root);
+        assert!(!opencode
+            .iter()
+            .find(|item| item.invocation == "/models")
+            .unwrap()
+            .has_children);
+        assert!(!opencode
+            .iter()
+            .find(|item| item.invocation == "/themes")
+            .unwrap()
+            .has_children);
+        assert!(!opencode
+            .iter()
+            .find(|item| item.invocation == "/connect")
+            .unwrap()
+            .has_children);
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn children_use_cli_native_values() {
+        let root = fixture_root("children");
+        fs::create_dir_all(root.join(".git")).unwrap();
+
+        let invocations = |runtime: &str, parent: &str| {
+            discover_children(runtime, &root, parent)
+                .iter()
+                .map(|item| item.invocation.clone())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(invocations("claude", "fast"), ["on", "off"]);
+
+        // `/effort` must emit Claude's native levels, never the internal
+        // speed vocabulary (`fast`, `mid`).
+        let effort = invocations("claude", "effort");
+        assert_eq!(
+            effort,
+            ["low", "medium", "high", "xhigh", "max", "ultracode", "auto"]
+        );
+
+        // `/permissions` must emit native modes; internal `ask`/`yolo` and the
+        // launch-flag-gated `bypassPermissions` are excluded.
+        let permissions = invocations("claude", "permissions");
+        assert_eq!(permissions, ["default", "acceptEdits", "plan", "auto"]);
+
+        // `/mcp` offers actions (claude), not server names.
+        assert_eq!(invocations("claude", "mcp"), ["enable", "disable", "reconnect"]);
+
+        let models = discover_children("claude", &root, "model");
+        assert_eq!(models.len(), 3);
+        assert!(models.iter().all(|item| item.kind == "command"));
+        assert!(models.iter().all(|item| item.invocation.starts_with("claude-")));
+
+        // Removed parents return empty rather than stale internal-id text.
+        assert!(discover_children("codex", &root, "model").is_empty());
+        assert!(discover_children("claude", &root, "theme").is_empty());
+        assert!(discover_children("claude", &root, "agents").is_empty());
+
+        // Unknown parent → empty, not an error.
+        assert!(discover_children("claude", &root, "unknown").is_empty());
+
+        fs::remove_dir_all(&root).unwrap();
     }
 }
