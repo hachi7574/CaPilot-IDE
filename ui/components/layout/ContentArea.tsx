@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useStore, Tab } from "../../state/store";
 import { XTermPanel } from "../terminal/XTermPanel";
 import { EditorPanel } from "../editor/EditorPanel";
@@ -9,36 +9,23 @@ type DropEdge = "left" | "right" | "top" | "bottom" | null;
 /** A single tab's panel (terminal / editor), reused in split panes. */
 function Panel({
   tab,
-  onRemove,
   active,
 }: {
   tab: Tab;
-  onRemove?: () => void;
   /** True for the panel of the active tab (drives F1 terminal-focus gating). */
   active?: boolean;
 }) {
-  const agents = useStore((s) => s.agents);
-  const agent = tab.agentId ? agents.get(tab.agentId) : undefined;
   return (
     <div className="content-panel">
-      <div className="panel-header">
-        <span className="panel-header-title">
-          PANEL · {tab.title}
-          {tab.type === "agent" ? ` (${agent?.runtime || "claude"})` : ""}
-        </span>
-        {onRemove && (
-          <button className="panel-close" onClick={onRemove} title="关闭此面板">
-            ×
-          </button>
-        )}
-      </div>
       {tab.type === "agent" && tab.agentId && (
         <XTermPanel agentId={tab.agentId} active={active} />
       )}
       {tab.type === "agent" && !tab.agentId && (
         <div className="panel-placeholder">会话未启动 — 在输入框发消息自动创建</div>
       )}
-      {tab.type === "editor" && tab.filePath && <EditorPanel filePath={tab.filePath} />}
+      {tab.type === "editor" && tab.filePath && (
+        <EditorPanel filePath={tab.filePath} active={active} />
+      )}
       {tab.type === "diff" && (
         <DiffPanel oldText={tab.diffOld ?? ""} newText={tab.diffNew ?? ""} />
       )}
@@ -56,12 +43,43 @@ export function ContentArea() {
   const splitRatio = useStore((s) => s.splitRatio);
   const draggedTabId = useStore((s) => s.draggedTabId);
   const setSplit = useStore((s) => s.setSplit);
-  const removeSplitPane = useStore((s) => s.removeSplitPane);
   const setSplitRatio = useStore((s) => s.setSplitRatio);
   const setActiveTab = useStore((s) => s.setActiveTab);
+  const requestSearch = useStore((s) => s.requestSearch);
 
   const [dropEdge, setDropEdge] = useState<DropEdge>(null);
   const [resizing, setResizing] = useState(false);
+
+  // Global Ctrl+F → search the active tab's content. CodeMirror handles Ctrl+F
+  // itself when its editor has focus (bubble phase: CM's own keydown runs first
+  // and opens its native panel); any other input/textarea (composer, an already
+  // open search bar) keeps its text-editing semantics. Otherwise route by tab
+  // type through the store directive, mirroring the F1 focus toggle.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === "f")) {
+        return;
+      }
+      const el = document.activeElement as HTMLElement | null;
+      const inCm = !!el?.closest?.(".cm-editor");
+      const inTerm = !!el?.closest?.(".xterm");
+      if (inCm) return; // CodeMirror owns Ctrl+F (native search panel)
+      if (!inTerm && el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA")) {
+        return; // composer / native inputs / an open search bar
+      }
+      const st = useStore.getState();
+      const activeTab = st.tabs.find((t) => t.id === st.activeTabId);
+      if (!activeTab) return;
+      e.preventDefault();
+      if (activeTab.type === "editor" && activeTab.filePath) {
+        requestSearch("editor");
+      } else if (activeTab.type === "agent" && activeTab.agentId) {
+        requestSearch("terminal");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [requestSearch]);
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const paneA = tabs.find((t) => t.id === splitPaneA);
@@ -157,7 +175,7 @@ export function ContentArea() {
         <div className="empty-state">
           <img src="/logo.png" alt="CaPilot" />
           <h3>CaPilot IDE</h3>
-          <p style={{ fontFamily: "var(--mono)", fontSize: "var(--fs-sm)", color: "var(--muted)" }}>
+          <p style={{ fontFamily: "var(--mono)", fontSize: "var(--fs-sm)", color: "var(--ink2)" }}>
             Press + to start a new agent session
           </p>
         </div>
@@ -172,22 +190,14 @@ export function ContentArea() {
       <div className="content-area" {...dropHandlers}>
         <div className={`split-container ${row ? "split-row" : "split-column"}`}>
           <div className="split-pane" style={{ flexBasis: `${splitRatio * 100}%` }}>
-            <Panel
-              tab={paneA}
-              onRemove={() => removeSplitPane(paneA.id)}
-              active={paneA.id === activeTabId}
-            />
+            <Panel tab={paneA} active={paneA.id === activeTabId} />
           </div>
           <div
             className={`split-divider ${row ? "split-divider-col" : "split-divider-row"}${resizing ? " active" : ""}`}
             onMouseDown={startResize}
           />
           <div className="split-pane" style={{ flex: 1 }}>
-            <Panel
-              tab={paneB}
-              onRemove={() => removeSplitPane(paneB.id)}
-              active={paneB.id === activeTabId}
-            />
+            <Panel tab={paneB} active={paneB.id === activeTabId} />
           </div>
         </div>
         {draggedTabId && dropEdge && <div className={`drop-zone ${dropEdge}`} />}

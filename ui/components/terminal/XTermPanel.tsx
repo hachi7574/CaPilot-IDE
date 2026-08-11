@@ -3,7 +3,10 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
 import { useStore, AgentInfo } from "../../state/store";
+import { pathsFromDataTransfer } from "../../state/dropPaths";
+import { Icon } from "../Icon";
 import "@xterm/xterm/css/xterm.css";
 
 interface XTermPanelProps {
@@ -91,6 +94,21 @@ const resumeInFlight = new Set<string>();
  *  can't re-steal focus for a request a different terminal already handled. */
 let lastFocusHandledSeq = 0;
 
+/** Last `searchRequest.seq` an active terminal has consumed for Ctrl+F search. */
+let lastSearchHandledSeq = 0;
+
+/** Resolve a `:root` CSS custom property to its concrete value. xterm.js theme
+ *  and decoration options need literal color strings, so instead of duplicating
+ *  the palette we read it from the CSS (single source of truth). */
+const cssVar = (name: string, fallback: string): string => {
+  const root = typeof document !== "undefined" ? document.documentElement : null;
+  return (root ? getComputedStyle(root).getPropertyValue(name).trim() : "") || fallback;
+};
+
+/** Terminal search match highlight colors (xterm decorations need `#RRGGBB`). */
+const SEARCH_MATCH_BG = cssVar("--search-match-bg", "#2E2A4A");
+const SEARCH_ACTIVE_BG = cssVar("--brand", "#8B5CF6");
+
 /** xterm panel bound to an agent's PTY channel.
  *
  * Race handling: the Composer starts buffering channel output into
@@ -114,6 +132,19 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
   const channel = useStore((s) => s.agentChannels.get(agentId));
   const fontScale = useStore((s) => s.fontScale);
   const focusRequest = useStore((s) => s.focusRequest);
+  const searchRequest = useStore((s) => s.searchRequest);
+
+  // Terminal Ctrl+F search bar state. The SearchAddon instance itself lives in
+  // searchAddonRef (created in the terminal init effect); only the UI state and
+  // query live here so typing stays on the React side, never the PTY.
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<{
+    resultIndex: number;
+    resultCount: number;
+  } | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const searchAddonRef = useRef<SearchAddon | null>(null);
 
   // DevPlan §4.2 ④ — dragging a file onto the terminal pastes its path
   // (shell-escaped) into the PTY. Guards against double-insert when both the DOM
@@ -155,6 +186,61 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     [agentId]
   );
 
+  /** Run the terminal search. Empty query clears decorations; otherwise jumps to
+   *  the next/previous match and paints all matches via the SearchAddon. */
+  const runFind = useCallback((query: string, dir: "next" | "prev") => {
+    const addon = searchAddonRef.current;
+    if (!addon) return;
+    if (!query) {
+      addon.clearDecorations();
+      setSearchResults(null);
+      return;
+    }
+    const opts = {
+      decorations: {
+        matchBackground: SEARCH_MATCH_BG,
+        matchOverviewRuler: SEARCH_MATCH_BG,
+        activeMatchBackground: SEARCH_ACTIVE_BG,
+        activeMatchColorOverviewRuler: SEARCH_ACTIVE_BG,
+      },
+    };
+    if (dir === "next") addon.findNext(query, opts);
+    else addon.findPrevious(query, opts);
+  }, []);
+
+  /** Close the search bar: drop decorations, clear the count, return focus. */
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false);
+    searchAddonRef.current?.clearDecorations();
+    setSearchResults(null);
+    termRef.current?.focus();
+  }, []);
+
+  // Opening the bar focuses the query input and selects the old text so typing
+  // a new term replaces it (re-search is a single keystroke).
+  useEffect(() => {
+    if (!searchOpen) return;
+    const raf = requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [searchOpen]);
+
+  // While the bar is open, F3/Shift+F3 navigate matches from anywhere in the
+  // terminal (the input's own Enter/Shift+Enter cover the input-focused case).
+  useEffect(() => {
+    if (!searchOpen) return;
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "F3") {
+        e.preventDefault();
+        runFind(searchQuery, e.shiftKey ? "prev" : "next");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [searchOpen, searchQuery, runFind]);
+
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -168,26 +254,26 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
       fontSize: TERMINAL_FONT_SIZES[fontScale] ?? 13,
       fontFamily: "'JetBrainsMono', ui-monospace, monospace",
       theme: {
-        background: "#05070D",
-        foreground: "#E8ECF1",
-        cursor: "#8B5CF6",
-        selectionBackground: "rgba(139, 92, 246, 0.3)",
-        black: "#161B22",
-        red: "#F87171",
-        green: "#4ADE80",
-        yellow: "#FACC15",
-        blue: "#A78BFA",
-        magenta: "#C4B5FD",
-        cyan: "#8B5CF6",
-        white: "#E8ECF1",
-        brightBlack: "#30363D",
-        brightRed: "#F87171",
-        brightGreen: "#4ADE80",
-        brightYellow: "#FACC15",
-        brightBlue: "#A78BFA",
-        brightMagenta: "#C4B5FD",
-        brightCyan: "#8B5CF6",
-        brightWhite: "#E8ECF1",
+        background: cssVar("--term-bg", "#05070D"),
+        foreground: cssVar("--ink", "#E8ECF1"),
+        cursor: cssVar("--brand", "#8B5CF6"),
+        selectionBackground: cssVar("--brand-selection", "rgba(139, 92, 246, 0.3)"),
+        black: cssVar("--bg3", "#161B22"),
+        red: cssVar("--danger", "#F87171"),
+        green: cssVar("--success", "#4ADE80"),
+        yellow: cssVar("--warn", "#FACC15"),
+        blue: cssVar("--primary", "#A78BFA"),
+        magenta: cssVar("--lane-3", "#E84BA5"),
+        cyan: cssVar("--lane-1", "#47E8D4"),
+        white: cssVar("--ink", "#E8ECF1"),
+        brightBlack: cssVar("--rule2", "#30363D"),
+        brightRed: cssVar("--danger", "#F87171"),
+        brightGreen: cssVar("--success", "#4ADE80"),
+        brightYellow: cssVar("--warn", "#FACC15"),
+        brightBlue: cssVar("--primary", "#A78BFA"),
+        brightMagenta: cssVar("--lane-3", "#E84BA5"),
+        brightCyan: cssVar("--lane-1", "#47E8D4"),
+        brightWhite: cssVar("--ink", "#E8ECF1"),
       },
       allowProposedApi: true,
     });
@@ -217,6 +303,19 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
       ) {
         return false;
       }
+      // Ctrl+F opens terminal search. Swallow it here so the PTY never receives
+      // the `^F` control code — most shells bind Ctrl+F to forward-char.
+      if (
+        ev.type === "keydown" &&
+        ev.ctrlKey &&
+        !ev.shiftKey &&
+        !ev.altKey &&
+        !ev.metaKey &&
+        ev.key.toLowerCase() === "f"
+      ) {
+        setSearchOpen(true);
+        return false;
+      }
       if (
         ev.type === "keydown" &&
         ev.ctrlKey &&
@@ -244,6 +343,16 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     let redrawPulseRequested = false;
     let pendingClaudeMode: string | null = null;
     let modePersistTimer: ReturnType<typeof setTimeout> | null = null;
+
+    // Ctrl+F search: the SearchAddon scans xterm's live buffer and paints match
+    // decorations. One instance per terminal; its results callback updates the
+    // React-side `n/N` counter.
+    const searchAddon = new SearchAddon();
+    term.loadAddon(searchAddon);
+    searchAddonRef.current = searchAddon;
+    const searchResultsSub = searchAddon.onDidChangeResults((results) => {
+      if (!disposed) setSearchResults(results);
+    });
 
     const persistClaudeMode = () => {
       modePersistTimer = null;
@@ -464,6 +573,8 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
       cancelAnimationFrame(raf1);
       cancelAnimationFrame(raf2);
       observer.disconnect();
+      searchResultsSub.dispose();
+      searchAddonRef.current = null;
       term.dispose();
       // Route output back to the buffer so a reopened tab catches up.
       const ch = channelRef.current;
@@ -534,6 +645,16 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     termRef.current?.focus();
   }, [focusRequest, active]);
 
+  // Ctrl+F routed from the window (when the terminal itself does not have
+  // focus). Same seq discipline as the F1 handler above.
+  useEffect(() => {
+    if (!active || !searchRequest) return;
+    if (searchRequest.target !== "terminal") return;
+    if (searchRequest.seq <= lastSearchHandledSeq) return;
+    lastSearchHandledSeq = searchRequest.seq;
+    setSearchOpen(true);
+  }, [searchRequest, active]);
+
   return (
     <div
       ref={containerRef}
@@ -549,7 +670,7 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
         minHeight: 0,
         overflow: "hidden",
         padding: "10px 14px",
-        background: "#05070D",
+        background: "var(--term-bg)",
         position: "relative",
       }}
       onDragEnter={(e) => {
@@ -578,20 +699,79 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
           setDragHover(false);
           return;
         }
-        // Some webviews still expose `.path` on File (Tauri v1 heritage / v2
-        // dragDropEnabled). If present, insert directly; otherwise defer to the
-        // Tauri drag-drop event, which carries the real absolute paths.
-        const f = e.dataTransfer.files?.[0] as
-          | (File & { path?: string })
-          | undefined;
-        if (f?.path) {
-          insertPathToPty([f.path]);
+        // Extract absolute paths straight from the DOM dataTransfer. On Tauri
+        // v2 + WebKitGTK the legacy `File.path` is gone and the Tauri drag-drop
+        // event can be unreliable, so this is the primary source (the file
+        // manager's `text/uri-list`, plus `text/plain` for app-internal drags).
+        const paths = pathsFromDataTransfer(e.dataTransfer);
+        if (paths.length) {
+          insertPathToPty(paths);
           dropHandledRef.current = true;
           dragDepthRef.current = 0;
           setDragHover(false);
         }
+        // No path at all → leave dragDepthRef/dropHandledRef untouched so the
+        // Tauri drag-drop event (which fires next) can still detect the terminal.
       }}
     >
+      {searchOpen && (
+        <div className="term-search-bar">
+          <input
+            ref={searchInputRef}
+            className="term-search-input"
+            type="text"
+            placeholder="搜索终端…"
+            value={searchQuery}
+            onChange={(e) => {
+              const q = e.target.value;
+              setSearchQuery(q);
+              // runFind handles the empty query by clearing decorations.
+              runFind(q, "next");
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                e.stopPropagation();
+                runFind(searchQuery, e.shiftKey ? "prev" : "next");
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                e.stopPropagation();
+                closeSearch();
+              }
+            }}
+          />
+          <span className="term-search-count">
+            {searchQuery && searchResults && searchResults.resultCount > 0
+              ? `${Math.max(searchResults.resultIndex, 0) + 1}/${searchResults.resultCount}`
+              : searchQuery
+                ? "无结果"
+                : ""}
+          </span>
+          <button
+            className="term-search-btn"
+            title="上一个匹配 (Shift+Enter / Shift+F3)"
+            onClick={() => runFind(searchQuery, "prev")}
+            disabled={!searchQuery}
+          >
+            <Icon name="arrow-up" size={12} />
+          </button>
+          <button
+            className="term-search-btn"
+            title="下一个匹配 (Enter / F3)"
+            onClick={() => runFind(searchQuery, "next")}
+            disabled={!searchQuery}
+          >
+            <Icon name="arrow-down" size={12} />
+          </button>
+          <button
+            className="term-search-close"
+            title="关闭搜索 (Esc)"
+            onClick={closeSearch}
+          >
+            ×
+          </button>
+        </div>
+      )}
     </div>
   );
 }

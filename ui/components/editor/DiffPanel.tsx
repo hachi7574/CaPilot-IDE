@@ -1,8 +1,8 @@
 import { useEffect, useRef } from "react";
 import { EditorState } from "@codemirror/state";
 import { EditorView, lineNumbers } from "@codemirror/view";
-import { oneDark } from "@codemirror/theme-one-dark";
 import { MergeView } from "@codemirror/merge";
+import { capilotTheme } from "./capilotTheme";
 
 interface DiffPanelProps {
   oldText: string;
@@ -23,7 +23,7 @@ export function DiffPanel({ oldText, newText }: DiffPanelProps) {
     // Clear any leftover DOM (StrictMode double-mount safety).
     el.textContent = "";
     const readOnlyExt = [
-      oneDark,
+      capilotTheme,
       lineNumbers(),
       EditorState.readOnly.of(true),
       EditorView.editable.of(false),
