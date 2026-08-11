@@ -96,18 +96,21 @@ impl AgentRuntimeAdapter for ClaudeAdapter {
                 name: "Claude Sonnet 5".into(),
                 provider: "anthropic".into(),
                 is_default: true,
+                efforts: None,
             },
             ModelInfo {
                 id: "claude-opus-5".into(),
                 name: "Claude Opus 5".into(),
                 provider: "anthropic".into(),
                 is_default: false,
+                efforts: None,
             },
             ModelInfo {
                 id: "claude-haiku-4-5".into(),
                 name: "Claude Haiku 4.5".into(),
                 provider: "anthropic".into(),
                 is_default: false,
+                efforts: None,
             },
         ]
     }

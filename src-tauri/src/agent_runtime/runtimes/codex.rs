@@ -1,5 +1,6 @@
 use crate::agent_runtime::adapter::{
-    AgentRuntimeAdapter, AgentSession, ModelInfo, PermissionModeInfo, ThinkingOptionInfo,
+    AgentRuntimeAdapter, AgentSession, EffortInfo, ModelInfo, PermissionModeInfo,
+    ThinkingOptionInfo,
 };
 use serde_json::Value;
 use std::io::{BufRead, Write};
@@ -122,15 +123,60 @@ impl CodexAdapter {
                         .get("isDefault")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
+                    // The native reasoning popup lists these efforts in catalog
+                    // order with the model's default highlighted. CaPilot drives
+                    // that popup from the GUI, so the order + default must match.
+                    let efforts = row
+                        .get("supportedReasoningEfforts")
+                        .and_then(Value::as_array)
+                        .map(|options| {
+                            let default = row
+                                .get("defaultReasoningEffort")
+                                .and_then(Value::as_str);
+                            options
+                                .iter()
+                                .filter_map(|option| {
+                                    let id = option
+                                        .get("reasoningEffort")?
+                                        .as_str()?
+                                        .to_string();
+                                    let description = option
+                                        .get("description")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_string();
+                                    Some(EffortInfo {
+                                        is_default: default == Some(id.as_str()),
+                                        label: Self::effort_label(&id),
+                                        description,
+                                        id,
+                                    })
+                                })
+                                .collect()
+                        });
                     Some(ModelInfo {
                         id,
                         name,
                         provider: "openai".into(),
                         is_default,
+                        efforts,
                     })
                 })
                 .collect(),
         )
+    }
+
+    fn effort_label(id: &str) -> String {
+        match id {
+            "low" => "Low",
+            "medium" => "Medium",
+            "high" => "High",
+            "xhigh" => "Extra high",
+            "max" => "Max",
+            "ultra" => "Ultra",
+            other => other,
+        }
+        .to_string()
     }
 
     fn sessions_dir() -> Option<PathBuf> {
@@ -383,5 +429,25 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "gpt-x");
         assert_eq!(models[0].name, "GPT X");
+    }
+
+    #[test]
+    fn parses_reasoning_efforts_in_catalog_order_with_default() {
+        let line = concat!(
+            r#"{"id":2,"result":{"data":[{"id":"gpt-5.6-sol","model":"gpt-5.6-sol","#,
+            r#""displayName":"GPT-5.6-Sol","supportedReasoningEfforts":["#,
+            r#"{"reasoningEffort":"low","description":"Fast responses"},"#,
+            r#"{"reasoningEffort":"medium","description":"Balanced"},"#,
+            r#"{"reasoningEffort":"high","description":"Deep"}],"#,
+            r#""defaultReasoningEffort":"low","isDefault":true}]}}"#
+        );
+        let models = CodexAdapter::parse_model_list_response(line).unwrap();
+        let efforts = models[0].efforts.as_ref().expect("efforts parsed");
+        assert_eq!(efforts.len(), 3);
+        assert_eq!(efforts[0].id, "low");
+        assert!(efforts[0].is_default);
+        assert_eq!(efforts[1].id, "medium");
+        assert!(!efforts[1].is_default);
+        assert_eq!(efforts[2].label, "High");
     }
 }

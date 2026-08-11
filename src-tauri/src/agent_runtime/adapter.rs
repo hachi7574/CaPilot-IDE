@@ -19,6 +19,17 @@ pub enum AgentStatus {
     Failed,
 }
 
+/// One provider-native reasoning effort a model supports.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffortInfo {
+    /// Provider-native effort id (e.g. `low`, `xhigh`).
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    /// True when this is the model's native default reasoning effort.
+    pub is_default: bool,
+}
+
 /// Metadata about a runtime model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
@@ -26,6 +37,10 @@ pub struct ModelInfo {
     pub name: String,
     pub provider: String,
     pub is_default: bool,
+    /// Per-model reasoning efforts (currently only codex). `None` = the runtime
+    /// exposes a single global list (`thinking_options`) or none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub efforts: Option<Vec<EffortInfo>>,
 }
 
 /// One permission preset exposed by a runtime. `id` is CaPilot's persisted

@@ -119,13 +119,98 @@ impl OpenCodeAdapter {
                     name: Self::display_name(id),
                     provider: provider.to_string(),
                     is_default: default_model == Some(id),
+                    efforts: None,
                 }
             })
             .collect()
     }
 
+    /// Push one parsed `provider/model` entry, using the catalog `name` from
+    /// the JSON block that `--verbose` appends (falling back to the id-derived
+    /// name when the block is absent or unparsable).
+    fn push_model(
+        models: &mut Vec<ModelInfo>,
+        header: Option<&str>,
+        block: &[&str],
+        default_model: Option<&str>,
+    ) {
+        let Some(id_line) = header else {
+            return;
+        };
+        let id = id_line.to_string();
+        let provider = id_line
+            .split_once('/')
+            .map(|(provider, _)| provider)
+            .unwrap_or("opencode")
+            .to_string();
+        let name = if block.is_empty() {
+            Self::display_name(&id)
+        } else {
+            serde_json::from_str::<Value>(&block.join("\n"))
+                .ok()
+                .and_then(|value| value.get("name").and_then(Value::as_str).map(str::to_owned))
+                .unwrap_or_else(|| Self::display_name(&id))
+        };
+        models.push(ModelInfo {
+            id,
+            name,
+            provider,
+            is_default: default_model == Some(id_line),
+            efforts: None,
+        });
+    }
+
+    /// Parse `opencode models --verbose`: a column-0 `provider/model` header
+    /// line followed by that model's catalog JSON (indented fields).
+    fn parse_verbose_models(output: &str, default_model: Option<&str>) -> Vec<ModelInfo> {
+        let mut models = Vec::new();
+        let mut header: Option<&str> = None;
+        let mut block: Vec<&str> = Vec::new();
+        for line in output.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            // JSON braces sit at column 0 too; only treat a line as a new
+            // model header when it starts at column 0 and is `provider/model`.
+            let is_header = !trimmed.starts_with('{')
+                && !trimmed.starts_with('}')
+                && trimmed.contains('/')
+                && line.chars().next().is_some_and(|ch| !ch.is_whitespace());
+            if is_header {
+                Self::push_model(&mut models, header, &block, default_model);
+                header = Some(trimmed);
+                block.clear();
+            } else {
+                block.push(line);
+            }
+        }
+        Self::push_model(&mut models, header, &block, default_model);
+        models
+    }
+
     fn discover_models() -> Vec<ModelInfo> {
         let default_model = Self::native_default_model();
+        // --verbose emits the same provider/model lines as the plain listing
+        // but also appends each model's catalog entry, which carries the display
+        // name OpenCode's TUI shows in its model dialog. CaPilot selects a model
+        // by typing that exact name into the dialog, so the catalog name (not
+        // the id-derived one) must be used.
+        if let Ok(output) = Command::new("opencode")
+            .args(["models", "--verbose"])
+            .output()
+        {
+            if output.status.success() {
+                let models = Self::parse_verbose_models(
+                    &String::from_utf8_lossy(&output.stdout),
+                    default_model.as_deref(),
+                );
+                if !models.is_empty() {
+                    return models;
+                }
+            }
+        }
+        // Fall back to the plain listing (older OpenCode without --verbose).
         let Ok(output) = Command::new("opencode").arg("models").output() else {
             return vec![];
         };
@@ -290,6 +375,42 @@ mod tests {
         assert_eq!(models[0].provider, "opencode");
         assert_eq!(models[0].name, "Big Pickle");
         assert!(models[1].is_default);
+    }
+
+    #[test]
+    fn parses_verbose_catalog_names_used_for_tui_selection() {
+        let output = concat!(
+            "opencode/deepseek-v4-flash-free\n",
+            "{\n",
+            "  \"id\": \"deepseek-v4-flash-free\",\n",
+            "  \"providerID\": \"opencode\",\n",
+            "  \"name\": \"DeepSeek V4 Flash Free\"\n",
+            "}\n",
+            "opencode-go/deepseek-v4-flash\n",
+            "{\n",
+            "  \"id\": \"deepseek-v4-flash\",\n",
+            "  \"providerID\": \"opencode-go\",\n",
+            "  \"name\": \"DeepSeek V4 Flash (2x usage)\"\n",
+            "}\n",
+            "opencode/big-pickle\n",
+            "{\n",
+            "  \"id\": \"big-pickle\",\n",
+            "  \"providerID\": \"opencode\",\n",
+            "  \"name\": \"Big Pickle\"\n",
+            "}\n",
+        );
+        let models = OpenCodeAdapter::parse_verbose_models(
+            output,
+            Some("opencode/deepseek-v4-flash-free"),
+        );
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0].id, "opencode/deepseek-v4-flash-free");
+        assert_eq!(models[0].name, "DeepSeek V4 Flash Free");
+        assert!(models[0].is_default);
+        assert_eq!(models[1].id, "opencode-go/deepseek-v4-flash");
+        assert_eq!(models[1].name, "DeepSeek V4 Flash (2x usage)");
+        assert!(!models[1].is_default);
+        assert_eq!(models[2].name, "Big Pickle");
     }
 
     #[test]
