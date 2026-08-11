@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore, Tab, AgentInfo } from "../../state/store";
 import { closeAgent as closeAgentAction } from "../../state/agentActions";
 import { TerminalTemplatePicker } from "./TerminalTemplatePicker";
+import { Icon, runtimeIcon } from "../Icon";
 
 function projectOf(cwd: string): string {
   const m = cwd.match(/workspaces\/([^/]+)/);
@@ -9,6 +10,17 @@ function projectOf(cwd: string): string {
   const parts = cwd.split("/").filter(Boolean);
   return parts[parts.length - 1] || cwd;
 }
+
+/** Agent status → colored text shown in the tab bar (the runtime logo replaces
+ *  the old claude/codex text). `st-<key>` classes carry the color. */
+const STATUS_TEXT = {
+  idle: "空闲",
+  running: "运行中",
+  waiting_input: "待确认",
+  busy: "思考中",
+  done: "已结束",
+  failed: "异常",
+} as const;
 
 /** Longest-matching project root for an editor file path (or undefined). */
 function projectRootOfPath(
@@ -62,12 +74,79 @@ export function TabBar() {
   const draggedTabId = useStore((s) => s.draggedTabId);
   const setActiveTab = useStore((s) => s.setActiveTab);
   const setDraggedTabId = useStore((s) => s.setDraggedTabId);
-  const toggleLeftSidebar = useStore((s) => s.toggleLeftSidebar);
-  const leftSidebarOpen = useStore((s) => s.leftSidebarOpen);
-  const rightSidebarOpen = useStore((s) => s.rightSidebarOpen);
-  const toggleRightSidebar = useStore((s) => s.toggleRightSidebar);
   const closeTab = useStore((s) => s.closeTab);
   const dropAgentChannel = useStore((s) => s.dropAgentChannel);
+  const reorderTabs = useStore((s) => s.reorderTabs);
+
+  // Drag-reorder state. During a drag we DON'T mutate the store's tabs array
+  // (that would re-render ContentArea and its live terminals on every move);
+  // instead siblings are shifted with CSS transforms toward the hover slot and
+  // `reorderTabs` commits only on drop.
+  const [dragTargetIdx, setDragTargetIdx] = useState<number | null>(null);
+  const [dragHidden, setDragHidden] = useState(false);
+  const tabElsRef = useRef<Map<string, HTMLDivElement | null>>(new Map());
+  const dragWRef = useRef(0);
+  const lastSwitchXRef = useRef(0);
+  const TAB_GAP = 2;
+  // The cursor must travel this far past a slot boundary before the target
+  // switches, so sub-pixel jitter at a midpoint can't flip-flop the strip.
+  const DRAG_DEAD_ZONE = 6;
+
+  // Right-click tab context menu state.
+  const [tabMenu, setTabMenu] = useState<{
+    x: number;
+    y: number;
+    tabId: string;
+  } | null>(null);
+
+  // Close the tab context menu on outside click / Escape (same discipline as
+  // the sidebar context menu).
+  useEffect(() => {
+    if (!tabMenu) return;
+    const close = () => setTabMenu(null);
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
+    window.addEventListener("click", close);
+    window.addEventListener("contextmenu", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("contextmenu", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [tabMenu]);
+
+  // Close a single tab exactly like the × button: active/restored sessions get
+  // terminated via closeAgentAction; ended sessions stay recoverable.
+  const closeTabById = (id: string) => {
+    const tab = tabs.find((t) => t.id === id);
+    if (!tab) return;
+    const agent = tab.agentId ? agents.get(tab.agentId) : undefined;
+    if (tab.type === "agent" && tab.agentId) {
+      if (agent?.status === "done") {
+        closeTab(tab.id);
+        dropAgentChannel(tab.agentId);
+      } else {
+        closeAgentAction(tab.agentId);
+      }
+    } else {
+      closeTab(tab.id);
+    }
+  };
+
+  // "关闭其它": close every *visible* tab except the one right-clicked.
+  const closeOtherTabs = (keepId: string) => {
+    visibleTabs.forEach((t) => {
+      if (t.id !== keepId) closeTabById(t.id);
+    });
+    setActiveTab(keepId);
+  };
+
+  // "关闭所有文件": close editor/diff tabs only — terminals stay running.
+  const closeAllFiles = () => {
+    visibleTabs.forEach((t) => {
+      if (t.type === "editor" || t.type === "diff") closeTab(t.id);
+    });
+  };
 
   // Project-scoped view: when a project is focused, show only its tabs. Tabs
   // whose project can't be determined (e.g. mid-spawn) stay visible, and tabs
@@ -101,15 +180,102 @@ export function TabBar() {
     setTermPicker({ x: r.right, y: r.bottom, project });
   };
 
+  // While dragging over the strip, resolve the hover slot from the natural
+  // positions of the non-dragged tabs (the dragged tab's slot collapses, which
+  // is exactly what the CSS shifts later reproduce — no feedback loop).
+  const handleTabBarDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    if (!draggedTabId) return;
+    // The first move past dragstart hides the source tab (its drag image was
+    // already snapshotted), leaving only the ghost + the drop-slot gap.
+    if (!dragHidden) setDragHidden(true);
+    const fromIndex = tabs.findIndex((t) => t.id === draggedTabId);
+    if (fromIndex < 0) return;
+    if (visibleTabs.length <= 1) {
+      if (dragTargetIdx !== null) setDragTargetIdx(null);
+      return;
+    }
+    const bar = e.currentTarget as HTMLElement;
+    const barRect = bar.getBoundingClientRect();
+    // `.tab-bar` has `padding: 0 6px`, so neighbours start 6px in. The bar
+    // content is scrolled by `scrollLeft`, so subtract it to hit-test in the
+    // same (content) coordinate space the transforms use.
+    let acc = barRect.left - bar.scrollLeft + 6;
+    // Natural slot midpoints of the non-dragged tabs.
+    const slots: { tabIndex: number; mid: number }[] = [];
+    for (const tv of visibleTabs) {
+      if (tv.id === draggedTabId) continue;
+      const w = tabElsRef.current.get(tv.id)?.offsetWidth ?? 120;
+      slots.push({ tabIndex: tabs.indexOf(tv), mid: acc + w / 2 });
+      acc += w + TAB_GAP;
+    }
+
+    // Candidate slot: the first whose midpoint is right of the cursor, else
+    // the last slot (drop after everything). The dragged tab's own index is a
+    // no-op (drop in place).
+    let cand = slots.findIndex((s) => e.clientX < s.mid);
+    if (cand === -1) cand = slots.length - 1;
+    const candidate = slots[cand].tabIndex;
+    const next = candidate === fromIndex ? null : candidate;
+
+    // Distance hysteresis: once the target changes, don't change it again until
+    // the cursor has moved DRAG_DEAD_ZONE px — sub-pixel jitter at a boundary
+    // can't make the strip oscillate between two slots.
+    if (next !== dragTargetIdx) {
+      if (
+        dragTargetIdx === null ||
+        Math.abs(e.clientX - lastSwitchXRef.current) >= DRAG_DEAD_ZONE
+      ) {
+        setDragTargetIdx(next);
+        lastSwitchXRef.current = e.clientX;
+      }
+    }
+  };
+
+  const handleTabBarDragLeave = (e: React.DragEvent) => {
+    // Ignore transitions between child tabs; only clear when leaving the bar.
+    if ((e.currentTarget as Node).contains(e.relatedTarget as Node)) return;
+    setDragTargetIdx(null);
+  };
+
+  const handleTabBarDrop = (e: React.DragEvent) => e.preventDefault();
+
+  // On release the in-strip position is the drop slot; dropping elsewhere
+  // (content area → split) left dragTargetIdx cleared, so nothing reorders.
+  const endTabDrag = () => {
+    if (dragTargetIdx !== null) {
+      const fromIndex = tabs.findIndex((t) => t.id === draggedTabId);
+      if (fromIndex >= 0 && fromIndex !== dragTargetIdx) {
+        reorderTabs(fromIndex, dragTargetIdx);
+      }
+    }
+    setDragHidden(false);
+    setDraggedTabId(null);
+    setDragTargetIdx(null);
+    tabElsRef.current.clear();
+  };
+
   return (
-    <div className="tab-bar">
-      <button
-        className="tab-btn-icon"
-        onClick={toggleLeftSidebar}
-        title={leftSidebarOpen ? "折叠左侧栏" : "展开左侧栏"}
-      >
-        {leftSidebarOpen ? "«" : "»"}
-      </button>
+    <div
+      className={`tab-bar${draggedTabId ? " tab-drag-active" : ""}`}
+      onDragOver={handleTabBarDragOver}
+      onDrop={handleTabBarDrop}
+      onDragLeave={handleTabBarDragLeave}
+      onWheel={(e) => {
+        // Vertical wheel rotates the tab strip horizontally when it overflows;
+        // horizontal (shift+wheel) delta passes through untouched.
+        const el = e.currentTarget;
+        if (el.scrollWidth <= el.clientWidth) return;
+        const delta = e.deltaY !== 0 ? e.deltaY : e.deltaX;
+        if (delta === 0) return;
+        const maxScroll = el.scrollWidth - el.clientWidth;
+        const next = Math.max(0, Math.min(el.scrollLeft + delta, maxScroll));
+        if (next !== el.scrollLeft) {
+          el.scrollLeft = next;
+          e.preventDefault();
+        }
+      }}
+    >
       {visibleTabs.map((tab) => {
         const agent = tab.agentId ? agents.get(tab.agentId) : undefined;
         const status = agent?.status || "idle";
@@ -119,41 +285,67 @@ export function TabBar() {
         // update that replaces AgentInfo). The sidebar already renders from
         // `agents`; doing the same here keeps both labels in lockstep.
         const title = tab.type === "agent" ? agent?.title || tab.title : tab.title;
+        const isDragging = draggedTabId === tab.id;
+        const fromIndex = draggedTabId
+          ? tabs.findIndex((t) => t.id === draggedTabId)
+          : -1;
+        const idx = tabs.indexOf(tab);
+        // Live position during a drag: the dragged tab's slot rides the hover
+        // index while siblings slide out of its path (empty-space = original
+        // slot, so dropping there is a no-op).
+        let dx = 0;
+        if (draggedTabId && dragTargetIdx !== null && fromIndex >= 0) {
+          const step = dragWRef.current + TAB_GAP;
+          if (idx === fromIndex) dx = (dragTargetIdx - fromIndex) * step;
+          else if (dragTargetIdx > fromIndex && idx > fromIndex && idx <= dragTargetIdx)
+            dx = -step;
+          else if (dragTargetIdx < fromIndex && idx >= dragTargetIdx && idx < fromIndex)
+            dx = step;
+        }
         return (
           <div
             key={tab.id}
-            className={`tab-item${tab.id === activeTabId ? " active" : ""}${draggedTabId === tab.id ? " dragging" : ""}${status === "done" ? " tab-done" : ""}`}
+            ref={(el) => {
+              if (el) tabElsRef.current.set(tab.id, el);
+              else tabElsRef.current.delete(tab.id);
+            }}
+            className={`tab-item${tab.id === activeTabId ? " active" : ""}${isDragging ? " dragging" : ""}${isDragging && dragHidden ? " drag-hidden" : ""}${status === "done" ? " tab-done" : ""}`}
+            style={dx ? { transform: `translateX(${dx}px)` } : undefined}
             draggable
             onDragStart={(e) => {
               e.dataTransfer.setData("text/plain", tab.id);
               e.dataTransfer.effectAllowed = "copy";
+              dragWRef.current = (e.currentTarget as HTMLElement).offsetWidth;
+              lastSwitchXRef.current = 0;
+              setDragHidden(false);
               setDraggedTabId(tab.id);
             }}
-            onDragEnd={() => setDraggedTabId(null)}
+            onDragEnd={endTabDrag}
             onClick={() => setActiveTab(tab.id)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setTabMenu({ x: e.clientX, y: e.clientY, tabId: tab.id });
+            }}
           >
-            <span className={`tab-dot ${status}`} />
             <span>
-              {tab.type === "agent" ? "🤖" : "📄"}{title}
+              <Icon
+                name={tab.type === "agent" ? runtimeIcon(agent?.runtime ?? "") : "file-text"}
+                size={12}
+                style={{ marginRight: 5 }}
+              />
+              {title}
             </span>
-            {agent?.runtime && (
-              <span className="tab-runtime">{agent.runtime}</span>
+            {tab.type === "agent" && (
+              <span className={`tab-status st-${status}`}>
+                {STATUS_TEXT[status as keyof typeof STATUS_TEXT] ?? status}
+              </span>
             )}
             <button
               className="tab-close"
               onClick={(e) => {
                 e.stopPropagation();
-                // Ended sessions stay recoverable from the sidebar.
-                if (tab.type === "agent" && tab.agentId) {
-                  if (agent?.status === "done") {
-                    closeTab(tab.id);
-                    dropAgentChannel(tab.agentId);
-                  } else {
-                    closeAgentAction(tab.agentId);
-                  }
-                } else {
-                  closeTab(tab.id);
-                }
+                closeTabById(tab.id);
               }}
               title={
                 tab.type === "agent" && tab.agentId
@@ -171,15 +363,42 @@ export function TabBar() {
       <button className="tab-add" title="新建终端" onClick={openPicker}>
         +
       </button>
-      {/* Collapse / expand the right sidebar (mirrors the ☰ left-toggle, pinned
-          to the right edge; glyph flips to show the sidebar's state). */}
-      <button
-        className="tab-btn-icon tab-btn-right"
-        onClick={toggleRightSidebar}
-        title={rightSidebarOpen ? "折叠右侧栏" : "展开右侧栏"}
-      >
-        {rightSidebarOpen ? "»" : "«"}
-      </button>
+      {tabMenu && (
+        <div
+          className="ctx-menu"
+          style={{ position: "fixed", left: tabMenu.x, top: tabMenu.y, zIndex: 1000 }}
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.stopPropagation()}
+        >
+          <div
+            className="ctx-item"
+            onClick={() => {
+              closeTabById(tabMenu.tabId);
+              setTabMenu(null);
+            }}
+          >
+            <Icon name="x" size={13} /> 关闭
+          </div>
+          <div
+            className="ctx-item"
+            onClick={() => {
+              closeOtherTabs(tabMenu.tabId);
+              setTabMenu(null);
+            }}
+          >
+            <Icon name="x" size={13} /> 关闭其它
+          </div>
+          <div
+            className="ctx-item"
+            onClick={() => {
+              closeAllFiles();
+              setTabMenu(null);
+            }}
+          >
+            <Icon name="file-text" size={13} /> 关闭所有文件
+          </div>
+        </div>
+      )}
       {termPicker && (
         <TerminalTemplatePicker
           project={termPicker.project}

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useStore, AgentInfo, ResourcePoint } from "../../state/store";
 import { connectEsp, disconnectEsp } from "../../state/esp";
 import { fetchResourceHistory, fmtCpu, fmtMem } from "../../state/resource";
+import { Icon } from "../Icon";
 
 export function StatusBar() {
   const agents = useStore((s) => s.agents);
@@ -44,16 +45,36 @@ export function StatusBar() {
         title={espStatus.connected ? "ESP connected — click to disconnect" : "Click to connect ESP (BLE)"}
       >
         <span className={`sb-dot ${espStatus.connected ? "bt" : ""}`} />
-        {espStatus.connected
-          ? `${espStatus.kind === "wifi" ? "📶 WiFi" : espStatus.kind === "usb" ? "🔌 USB" : "🔵 BLE"}`
-          : espConnecting
-          ? "connecting…"
-          : "📡 ESP off"}
+        {espStatus.connected ? (
+          <span style={{ display: "inline-flex", alignItems: "center" }}>
+            <Icon
+              name={espStatus.kind === "wifi" ? "wifi" : espStatus.kind === "usb" ? "usb" : "bluetooth"}
+              size={12}
+              style={{ marginRight: 4 }}
+            />
+            {espStatus.kind === "wifi" ? "WiFi" : espStatus.kind === "usb" ? "USB" : "BLE"}
+          </span>
+        ) : espConnecting ? (
+          "connecting…"
+        ) : (
+          <span style={{ display: "inline-flex", alignItems: "center" }}>
+            <Icon name="radio" size={12} style={{ marginRight: 4 }} />
+            ESP off
+          </span>
+        )}
       </span>
-      <span className="sb-item">📶 WiFi</span>
+      <span className="sb-item">
+        <span style={{ display: "inline-flex", alignItems: "center" }}>
+          <Icon name="wifi" size={12} style={{ marginRight: 4 }} />
+          WiFi
+        </span>
+      </span>
       <span className="sb-sep" />
       <span className={`sb-item sb-battery`}>
-        🔋 {espStatus.battery_pct !== null ? `${espStatus.battery_pct}%` : "—"}
+        <span style={{ display: "inline-flex", alignItems: "center" }}>
+          <Icon name="battery-full" size={12} style={{ marginRight: 4 }} />
+          {espStatus.battery_pct !== null ? `${espStatus.battery_pct}%` : "—"}
+        </span>
       </span>
       <span className="sb-sep" />
       <span
@@ -62,7 +83,10 @@ export function StatusBar() {
         style={{ cursor: "pointer", position: "relative" }}
         title="资源监视（点击查看全部 agent 曲线）"
       >
-        ⚙ CPU {fmtCpu(activeRes?.cpu_pct)} MEM {fmtMem(activeRes?.mem_bytes)}
+        <span style={{ display: "inline-flex", alignItems: "center" }}>
+          <Icon name="settings" size={12} style={{ marginRight: 4 }} />
+          CPU {fmtCpu(activeRes?.cpu_pct)} MEM {fmtMem(activeRes?.mem_bytes)}
+        </span>
         {resourceOpen && (
           <ResourcePopover
             agents={agents}
@@ -116,7 +140,12 @@ function ResourcePopover({
 
   return (
     <div className="resource-popover" onMouseLeave={onClose}>
-      <div className="resource-popover-title">⚙ 资源监视</div>
+      <div className="resource-popover-title">
+        <span style={{ display: "inline-flex", alignItems: "center" }}>
+          <Icon name="settings" size={13} style={{ marginRight: 4 }} />
+          资源监视
+        </span>
+      </div>
       <div className="resource-list">
         {rows.length === 0 && (
           <div className="resource-empty">没有运行中的 agent</div>
@@ -163,7 +192,7 @@ function Sparkline({ points, width = 220, height = 40 }: { points: ResourcePoint
 
   return (
     <svg width={width} height={height} className="resource-spark">
-      <path d={area} fill="rgba(139,92,246,.14)" stroke="none" />
+      <path d={area} fill="rgb(var(--brand-rgb) / .14)" stroke="none" />
       <path
         d={line}
         fill="none"

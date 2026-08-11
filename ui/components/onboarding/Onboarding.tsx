@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useStore } from "../../state/store";
 import { connectEsp } from "../../state/esp";
 import { spawnAgent } from "../../state/agentActions";
+import { Icon } from "../Icon";
 
 /**
  * First-run onboarding overlay (shown until the user completes it).
@@ -97,11 +98,21 @@ export function Onboarding() {
                     className="onboarding-runtime-status"
                     data-ok={rt.available}
                   >
-                    {rt.available
-                      ? rt.authenticated
-                        ? "✓ 已登录"
-                        : "✓ 已安装"
-                      : "✕ 未安装"}
+                    {rt.available ? (
+                      rt.authenticated ? (
+                        <>
+                          <Icon name="check" size={12} style={{ marginRight: 4 }} /> 已登录
+                        </>
+                      ) : (
+                        <>
+                          <Icon name="check" size={12} style={{ marginRight: 4 }} /> 已安装
+                        </>
+                      )
+                    ) : (
+                      <>
+                        <Icon name="x" size={12} style={{ marginRight: 4 }} /> 未安装
+                      </>
+                    )}
                   </span>
                 </div>
               ))}
@@ -122,9 +133,15 @@ export function Onboarding() {
             <div className="onboarding-esp">
               {espStatus.connected ? (
                 <div className="onboarding-esp-ok">
-                  ✓ 已连接 {espStatus.name ?? "ESP32-C5"}
-                  {espStatus.battery_pct !== null &&
-                    ` · 🔋 ${espStatus.battery_pct}%`}
+                  <Icon name="check" size={14} style={{ marginRight: 4 }} /> 已连接{" "}
+                  {espStatus.name ?? "ESP32-C5"}
+                  {espStatus.battery_pct !== null && (
+                    <span style={{ display: "inline-flex", alignItems: "center" }}>
+                      {" · "}
+                      <Icon name="battery-full" size={12} style={{ marginRight: 3 }} />
+                      {espStatus.battery_pct}%
+                    </span>
+                  )}
                 </div>
               ) : (
                 <button
@@ -160,7 +177,14 @@ export function Onboarding() {
                 onClick={handleCreateAgent}
                 disabled={creatingAgent}
               >
-                {creatingAgent ? "正在创建…" : "🚀 创建 Agent 会话并开始"}
+                {creatingAgent ? (
+                  "正在创建…"
+                ) : (
+                  <>
+                    <Icon name="rocket" size={14} style={{ marginRight: 4 }} />
+                    创建 Agent 会话并开始
+                  </>
+                )}
               </button>
               <div className="onboarding-agent-hint">
                 也可以点击下方「下一步」跳过，稍后从项目侧栏或底部输入框创建。

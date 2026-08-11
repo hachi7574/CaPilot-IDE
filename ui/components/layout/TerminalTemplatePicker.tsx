@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useStore, TermTemplate } from "../../state/store";
 import { spawnTerminal } from "../../state/agentActions";
+import { Icon, runtimeIcon } from "../Icon";
 
 /**
  * New-terminal template picker for the project "+" / tab-bar "+" buttons.
@@ -59,14 +60,16 @@ export function TerminalTemplatePicker({
             }}
             title={t.fixed ? "固定模板" : "右键编辑 / 重命名"}
           >
-            <span className="tt-icon">{t.runtime.startsWith("bash") ? "🐚" : "🤖"}</span>
+            <span className="tt-icon">
+              <Icon name={runtimeIcon(t.runtime)} size={16} />
+            </span>
             <span className="tt-name">{t.name}</span>
             {t.command && <span className="tt-cmd">{t.command}</span>}
           </div>
         ))}
         <div className="tt-sep" />
         <div className="tt-item tt-add" onClick={() => setAdding(true)}>
-          ＋ 添加快速启动
+          <Icon name="plus" size={12} /> 添加快速启动
         </div>
       </div>
       {edit && (
