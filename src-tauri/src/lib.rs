@@ -14,6 +14,7 @@ use persistence::{
     Persistence, DEFAULT_PROJECT,
 };
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::ipc::Channel;
@@ -956,6 +957,8 @@ async fn runtime_models(runtime: String) -> Vec<agent_runtime::adapter::ModelInf
 pub struct FsEntryBrief {
     pub name: String,
     pub is_dir: bool,
+    /// Unix executable bit set (for non-directories) — runnable scripts.
+    pub executable: bool,
 }
 
 #[tauri::command]
@@ -1048,9 +1051,26 @@ async fn fs_list(dir: String) -> Result<Vec<FsEntryBrief>, String> {
         let file_type = entry
             .file_type()
             .map_err(|e| format!("Failed to read file type: {}", e))?;
+        let executable = if file_type.is_dir() {
+            false
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                entry
+                    .metadata()
+                    .map(|m| m.permissions().mode() & 0o111 != 0)
+                    .unwrap_or(false)
+            }
+            #[cfg(not(unix))]
+            {
+                false
+            }
+        };
         entries.push(FsEntryBrief {
             name: entry.file_name().to_string_lossy().to_string(),
             is_dir: file_type.is_dir(),
+            executable,
         });
     }
     Ok(entries)
@@ -1477,10 +1497,39 @@ pub struct GitBranch {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GitLogEntry {
+    /// Full commit hash (`%H`) — parents reference these exact values.
     pub hash: String,
+    /// Full parent hashes (`%P`, space separated in the raw log line).
+    pub parents: Vec<String>,
+    /// Local refs (branches + `tag:` prefixed tags) pointing at this commit.
+    pub refs: Vec<String>,
     pub subject: String,
     pub author: String,
+    pub email: String,
     pub ts: i64,
+}
+
+/// One file touched by a commit (from `git diff-tree --numstat --name-status`).
+#[derive(Debug, Clone, Serialize)]
+pub struct GitFileStat {
+    pub path: String,
+    pub status: String,
+    pub add: i32,
+    pub del: i32,
+}
+
+/// Full commit payload for the "查看提交详情" modal: message + author/date plus
+/// per-file stats. `body` is the multi-line message after the subject ("" when
+/// the commit has no body).
+#[derive(Debug, Clone, Serialize)]
+pub struct GitCommitDetail {
+    pub hash: String,
+    pub subject: String,
+    pub body: String,
+    pub author: String,
+    pub email: String,
+    pub ts: i64,
+    pub files: Vec<GitFileStat>,
 }
 
 /// Parse `git branch` porcelain output into (name, current) pairs. The current
@@ -1514,8 +1563,10 @@ fn parse_branches(text: &str) -> Vec<GitBranch> {
     branches
 }
 
-/// Parse `git log --pretty=format:%h%x1f%s%x1f%an%x1f%ct` output. Each commit
-/// is one line; `%x1f` (unit separator) delimits hash/subject/author/ts.
+/// Parse `git log --pretty=format:%H%x1f%P%x1f%s%x1f%an%x1f%ae%x1f%ct` output.
+/// Each commit is one line; `%x1f` (unit separator) delimits the six fields
+/// hash / parents / subject / author / email / timestamp. `refs` are filled in
+/// separately by `git_log` from `for-each-ref` (a hash→name map).
 fn parse_log(text: &str) -> Vec<GitLogEntry> {
     let mut entries = Vec::new();
     for line in text.lines() {
@@ -1528,8 +1579,15 @@ fn parse_log(text: &str) -> Vec<GitLogEntry> {
         if hash.is_empty() {
             continue;
         }
+        let parents = parts
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
         let subject = parts.next().unwrap_or("").trim().to_string();
         let author = parts.next().unwrap_or("").trim().to_string();
+        let email = parts.next().unwrap_or("").trim().to_string();
         let ts = parts
             .next()
             .unwrap_or("0")
@@ -1538,12 +1596,53 @@ fn parse_log(text: &str) -> Vec<GitLogEntry> {
             .unwrap_or(0);
         entries.push(GitLogEntry {
             hash,
+            parents,
+            refs: vec![],
             subject,
             author,
+            email,
             ts,
         });
     }
     entries
+}
+
+/// Parse `git for-each-ref --format=%(objectname) %(refname)` into a
+/// full-hash → ref-names map. Local branches, tags and remote-tracking refs are
+/// kept: `git_log` reads `--all`, so a lane that diverges from HEAD (e.g. a
+/// branch only reachable via `refs/remotes/…`) must still get a label. Tags are
+/// emitted as `tag: <name>` so the frontend can distinguish tags from branches.
+///
+/// NOTE: the format is space-separated, NOT `%x1f`: `git for-each-ref` does not
+/// interpret `%x1f` the way `git log --pretty` does (it prints it literally),
+/// so a byte separator would never match. Object names are exactly 40 hex chars,
+/// so splitting on the first space is unambiguous.
+fn parse_ref_map(text: &str) -> HashMap<String, Vec<String>> {
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(2, ' ');
+        let Some(hash) = parts.next().map(str::trim).filter(|h| !h.is_empty()) else {
+            continue;
+        };
+        let Some(full_name) = parts.next().map(str::trim).filter(|n| !n.is_empty()) else {
+            continue;
+        };
+        let name = if let Some(tag) = full_name.strip_prefix("refs/tags/") {
+            format!("tag: {tag}")
+        } else if let Some(head) = full_name.strip_prefix("refs/heads/") {
+            head.to_string()
+        } else if let Some(remote) = full_name.strip_prefix("refs/remotes/") {
+            remote.to_string()
+        } else {
+            continue;
+        };
+        map.entry(hash.to_string()).or_default().push(name);
+    }
+    map
 }
 
 #[tauri::command]
@@ -1751,6 +1850,145 @@ async fn git_checkout(repo: String, branch: String) -> Result<(), String> {
     git_run(&repo, &["checkout", branch.as_str(), "--"]).map(|_| ())
 }
 
+/// Validate a branch name before it reaches `git branch` / `git switch`.
+/// Mirrors `git check-ref-format`'s hard rules loosely (enough to stop `-`-prefixed
+/// or whitespace args from being misread as flags — git_gate passes every arg via
+/// `Command::arg`, so there is no shell to break, but a name that starts with `-`
+/// would still be parsed as an option).
+fn validate_branch_name(name: &str) -> Result<(), String> {
+    if name.trim() != name {
+        return Err("分支名不能包含首尾空白".to_string());
+    }
+    if name.is_empty() {
+        return Err("分支名不能为空".to_string());
+    }
+    if name.starts_with('-') {
+        return Err("分支名不能以 - 开头".to_string());
+    }
+    if name.starts_with('.') || name.ends_with('.') {
+        return Err("分支名不能以 . 开头或结尾".to_string());
+    }
+    if name.ends_with(".lock") {
+        return Err("分支名不能以 .lock 结尾".to_string());
+    }
+    if name.contains(char::is_whitespace) {
+        return Err("分支名不能包含空白字符".to_string());
+    }
+    if name.contains("..") || name.contains("@{") {
+        return Err("分支名包含非法序列 .. 或 @{".to_string());
+    }
+    for bad in ['~', '^', ':', '?', '*', '[', '\\', '\u{7f}'] {
+        if name.contains(bad) {
+            return Err(format!("分支名包含非法字符: {bad}"));
+        }
+    }
+    Ok(())
+}
+
+/// Create a branch pointing at `start_at` (a hash from our own `git_log`, or a
+/// branch name) WITHOUT checking it out — the commit context menu's "从此提交新建分支".
+#[tauri::command]
+async fn git_create_branch(repo: String, name: String, start_at: String) -> Result<(), String> {
+    validate_branch_name(&name)?;
+    git_run(&repo, &["branch", name.as_str(), start_at.as_str()]).map(|_| ())
+}
+
+/// Create a branch AND switch to it — the branch-chip menu's "新建分支".
+#[tauri::command]
+async fn git_switch_new(repo: String, name: String) -> Result<(), String> {
+    validate_branch_name(&name)?;
+    git_run(&repo, &["switch", "-c", name.as_str()]).map(|_| ())
+}
+
+/// Force-delete a branch. Only ever called for a non-current branch (the menu
+/// hides the delete affordance on the current one) and only after a frontend
+/// confirm dialog.
+#[tauri::command]
+async fn git_delete_branch(repo: String, name: String) -> Result<(), String> {
+    validate_branch_name(&name)?;
+    git_run(&repo, &["branch", "-D", name.as_str()]).map(|_| ())
+}
+
+/// Detach HEAD at a historical commit (`git switch --detach`) — the commit
+/// context menu's "检出此提交". Uncommitted changes block the switch, which
+/// surfaces git's error to the panel.
+#[tauri::command]
+async fn git_checkout_commit(repo: String, hash: String) -> Result<(), String> {
+    git_run(&repo, &["switch", "--detach", hash.as_str()]).map(|_| ())
+}
+
+/// Full detail for one commit (message + author/date + file stats) — powers the
+/// "查看提交详情" modal. `hash` comes from our own `git_log`, so it is trusted.
+#[tauri::command]
+async fn git_show_commit(repo: String, hash: String) -> Result<GitCommitDetail, String> {
+    let info = git_run(
+        &repo,
+        &[
+            "log",
+            "-1",
+            "--pretty=format:%H%x1f%s%x1f%b%x1f%an%x1f%ae%x1f%ct",
+            hash.as_str(),
+        ],
+    )?;
+    let detail = parse_commit_detail(&info)?;
+
+    let names = parse_name_status(&git_run(
+        &repo,
+        &["diff-tree", "--no-commit-id", "--name-status", "-r", hash.as_str()],
+    )?);
+    let stats = parse_numstat(&git_run(
+        &repo,
+        &["diff-tree", "--no-commit-id", "--numstat", "-r", hash.as_str()],
+    )?);
+    let files = names
+        .into_iter()
+        .map(|e| {
+            let (add, del) = stats.get(&e.path).copied().unwrap_or((0, 0));
+            GitFileStat {
+                path: e.path,
+                status: e.index,
+                add,
+                del,
+            }
+        })
+        .collect();
+    Ok(GitCommitDetail {
+        files,
+        ..detail
+    })
+}
+
+/// Parse `git log -1 --pretty=format:%H%x1f%s%x1f%b%x1f%an%x1f%ae%x1f%ct`
+/// output into a `GitCommitDetail` (with an empty `files` vec; the caller fills
+/// it). `%b` is the multi-line body, so the whole text is split on the FIRST
+/// five `\x1f` separators (newlines inside the body never appear as `\x1f`).
+fn parse_commit_detail(text: &str) -> Result<GitCommitDetail, String> {
+    let mut parts = text.splitn(6, '\x1f');
+    let hash = parts.next().unwrap_or("").trim();
+    if hash.is_empty() {
+        return Err("无法解析提交信息".to_string());
+    }
+    let subject = parts.next().unwrap_or("").trim().to_string();
+    let body = parts.next().unwrap_or("").trim().to_string();
+    let author = parts.next().unwrap_or("").trim().to_string();
+    let email = parts.next().unwrap_or("").trim().to_string();
+    let ts = parts
+        .next()
+        .unwrap_or("0")
+        .trim()
+        .parse::<i64>()
+        .unwrap_or(0);
+    Ok(GitCommitDetail {
+        hash: hash.to_string(),
+        subject,
+        body,
+        author,
+        email,
+        ts,
+        files: vec![],
+    })
+}
+
 /// Recent commit history (short hash, subject, author, timestamp) for the Git
 /// panel's "提交历史" section (DevPlan §7.4B). Defaults to the latest 20.
 #[tauri::command]
@@ -1760,12 +1998,44 @@ async fn git_log(repo: String, count: Option<i32>) -> Result<Vec<GitLogEntry>, S
         &repo,
         &[
             "log",
-            "--pretty=format:%h%x1f%s%x1f%an%x1f%ct",
+            // `--all` = all local branches + tags + remote-tracking refs. A plain
+            // `git log` only walks HEAD's ancestors, so a divergent branch (e.g.
+            // one only reachable via `refs/remotes/…`) would never appear and the
+            // commit tree would collapse to a single lane.
+            "--all",
+            // Parents always after their children (a child's commit date can be
+            // older than its parent's after `--amend`/rebase/clock skew, and the
+            // default date order would then draw the parent ABOVE the child).
+            "--date-order",
+            "--pretty=format:%H%x1f%P%x1f%s%x1f%an%x1f%ae%x1f%ct",
             "-n",
             n.as_str(),
         ],
     )?;
-    Ok(parse_log(&text))
+    let mut entries = parse_log(&text);
+    // Annotate each commit with its refs (local + remote-tracking) so the
+    // frontend's commit tree can label every lane, including ones only reachable
+    // via a remote. Best-effort: a for-each-ref failure leaves
+    // refs empty and the panel still renders (single-lane history) rather than
+    // failing the whole git panel.
+    if let Ok(refs_text) = git_run(
+        &repo,
+        &[
+            "for-each-ref",
+            "--format=%(objectname) %(refname)",
+            "refs/heads",
+            "refs/tags",
+            "refs/remotes",
+        ],
+    ) {
+        let ref_map = parse_ref_map(&refs_text);
+        for entry in entries.iter_mut() {
+            if let Some(names) = ref_map.get(&entry.hash) {
+                entry.refs.clone_from(names);
+            }
+        }
+    }
+    Ok(entries)
 }
 
 /// Read a file's content from a git object (`git show <rev>:<file>`). `rev` is a
@@ -1809,13 +2079,38 @@ fn validate_git_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Clone a remote git repository into `<parent_dir>/<name>`. The parent dir must
+/// Payload emitted on `git://cloned` — a background clone finished and the
+/// target dir is ready. `id` matches the value `git_clone` returned.
+#[derive(Clone, Serialize)]
+struct GitCloneDone {
+    id: String,
+    name: String,
+    root: String,
+}
+
+/// Payload emitted on `git://clone-error` — a background clone failed.
+#[derive(Clone, Serialize)]
+struct GitCloneError {
+    id: String,
+    name: String,
+    error: String,
+}
+
+/// Start cloning a remote git repository into `<parent_dir>/<name>`, then
+/// return immediately so the UI can close the import dialog and show the
+/// project as "正在克隆中" in the sidebar. The actual `git clone` runs on the
+/// background runtime; completion is reported on `git://cloned` (with the real
+/// root) or `git://clone-error` (with the git error). The parent dir must
 /// already exist; the URL is validated and passed via `Command::arg` (no shell)
-/// after `--`, so a `-`-prefixed URL is never treated as a flag. Runs off the
-/// async runtime so a slow network clone doesn't block other IPC. On success
-/// returns the clone dir.
+/// after `--`, so a `-`-prefixed URL is never treated as a flag. Returns
+/// `(clone_id, target_dir)` — the target dir may not exist yet.
 #[tauri::command]
-async fn git_clone(url: String, name: String, parent_dir: String) -> Result<String, String> {
+async fn git_clone(
+    app: tauri::AppHandle,
+    url: String,
+    name: String,
+    parent_dir: String,
+) -> Result<(String, String), String> {
     validate_git_url(&url)?;
     sanitize_project(&name)?;
     let parent = std::path::Path::new(&parent_dir)
@@ -1828,19 +2123,56 @@ async fn git_clone(url: String, name: String, parent_dir: String) -> Result<Stri
     if target.exists() {
         return Err(format!("目标目录已存在: {}", target.display()));
     }
-    let target_for_cmd = target.clone();
-    let out =
-        tauri::async_runtime::spawn_blocking(move || git_gate::clone_into(&url, &target_for_cmd))
-            .await
-            .map_err(|e| format!("git clone 任务失败: {}", e))?
-            .map_err(|e| format!("git 启动失败: {}", e))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("git clone 失败: {}", err.trim()));
-    }
-    // Persist the cloned folder as the project root so terminals open there.
-    let _ = persistence::write_project_root(&name, &target);
-    Ok(target.to_string_lossy().to_string())
+    // Unique id lets the frontend match the completion event back to the exact
+    // placeholder project it put in the sidebar.
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let id_for_task = id.clone();
+    let name_for_task = name.clone();
+    let target_for_task = target.clone();
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let url_for_cmd = url.clone();
+        let target_for_cmd = target_for_task.clone();
+        let out = tauri::async_runtime::spawn_blocking(move || {
+            git_gate::clone_into(&url_for_cmd, &target_for_cmd)
+        })
+        .await;
+        let result: Result<(), String> = match out {
+            Ok(Ok(o)) if o.status.success() => Ok(()),
+            Ok(Ok(o)) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                Err(format!("git clone 失败: {}", err.trim()))
+            }
+            Ok(Err(e)) => Err(format!("git 启动失败: {}", e)),
+            Err(e) => Err(format!("git clone 任务失败: {}", e)),
+        };
+        match result {
+            Ok(()) => {
+                // Persist the cloned folder as the project root so terminals
+                // open there.
+                let _ = persistence::write_project_root(&name_for_task, &target_for_task);
+                let _ = app_for_task.emit(
+                    "git://cloned",
+                    GitCloneDone {
+                        id: id_for_task,
+                        name: name_for_task,
+                        root: target_for_task.to_string_lossy().to_string(),
+                    },
+                );
+            }
+            Err(error) => {
+                let _ = app_for_task.emit(
+                    "git://clone-error",
+                    GitCloneError {
+                        id: id_for_task,
+                        name: name_for_task,
+                        error,
+                    },
+                );
+            }
+        }
+    });
+    Ok((id, target.to_string_lossy().to_string()))
 }
 
 #[tauri::command]
@@ -1861,8 +2193,9 @@ async fn git_push(repo: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_project, delete_project_dir, git_run, parse_branches, parse_log,
-        parse_name_status, parse_porcelain, persistence, rename_project_inner,
+        create_project, delete_project_dir, git_run, parse_branches, parse_commit_detail,
+        parse_log, parse_name_status, parse_porcelain, parse_ref_map, persistence,
+        rename_project_inner, validate_branch_name,
     };
 
     #[test]
@@ -1892,18 +2225,87 @@ mod tests {
     }
 
     #[test]
-    fn parses_log_lines() {
-        let text =
-            "abc1234\u{1f}Fix crash on startup\u{1f}Alice\u{1f}1712345678\nd111111\u{1f}Add docs\u{1f}Bob\u{1f}1712345600\n";
+    fn parses_log_lines_with_parents_email_and_refs_placeholder() {
+        let text = "abc1234\u{1f}deadbeef f00f00\u{1f}Fix crash on startup\u{1f}Alice\u{1f}alice@x.dev\u{1f}1712345678\n\
+                     d111111\u{1f}\u{1f}Add docs\u{1f}Bob\u{1f}bob@x.dev\u{1f}1712345600\n";
         let log = parse_log(text);
         assert_eq!(log.len(), 2);
         assert_eq!(log[0].hash, "abc1234");
+        assert_eq!(log[0].parents, vec!["deadbeef", "f00f00"]);
         assert_eq!(log[0].subject, "Fix crash on startup");
         assert_eq!(log[0].author, "Alice");
+        assert_eq!(log[0].email, "alice@x.dev");
         assert_eq!(log[0].ts, 1712345678);
-        assert_eq!(log[1].hash, "d111111");
+        // Root commit has an empty `%P` parent field.
+        assert_eq!(log[1].parents, Vec::<String>::new());
         assert_eq!(log[1].subject, "Add docs");
         assert_eq!(log[1].author, "Bob");
+    }
+
+    #[test]
+    fn parses_commit_detail_with_multiline_body() {
+        let text = "abc1234\u{1f}Fix crash on startup\u{1f}First line of body.\nSecond line.\n\u{1f}Alice\u{1f}alice@x.dev\u{1f}1712345678\n";
+        let d = parse_commit_detail(text).unwrap();
+        assert_eq!(d.hash, "abc1234");
+        assert_eq!(d.subject, "Fix crash on startup");
+        assert_eq!(d.body, "First line of body.\nSecond line.");
+        assert_eq!(d.author, "Alice");
+        assert_eq!(d.email, "alice@x.dev");
+        assert_eq!(d.ts, 1712345678);
+        assert!(d.files.is_empty());
+    }
+
+    #[test]
+    fn parse_commit_detail_rejects_empty_line() {
+        assert!(parse_commit_detail("").is_err());
+    }
+
+    #[test]
+    fn branch_name_validation_accepts_common_names() {
+        for ok in ["main", "feature/foo", "fix-issue-42", "a_b", "v1.2.3", "user/very-long-name"] {
+            assert!(validate_branch_name(ok).is_ok(), "should accept {ok}");
+        }
+    }
+
+    #[test]
+    fn branch_name_validation_rejects_unsafe_names() {
+        for bad in [
+            "",
+            "  ",
+            "-flag",
+            " has space",
+            "has\ttab",
+            "..", "foo..bar",
+            "@{", "foo@{",
+            "a~b", "a^b", "a:b", "a?b", "a*b", "a[b", "a\\b",
+            "ends.lock", ".hidden", "trailing.",
+        ] {
+            assert!(validate_branch_name(bad).is_err(), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn parses_ref_map_branches_tags_and_remotes() {
+        let text = "aaa refs/heads/main\n\
+                    aaa refs/remotes/origin/main\n\
+                    bbb refs/heads/feature/foo\n\
+                    bbb refs/tags/v1.0\n\
+                    ccc refs/remotes/origin/HEAD\n";
+        let map = parse_ref_map(text);
+        assert_eq!(
+            map.get("aaa").unwrap(),
+            &vec!["main".to_string(), "origin/main".to_string()],
+            "local branch sorts first, then its remote-tracking twin"
+        );
+        assert_eq!(
+            map.get("bbb").unwrap(),
+            &vec!["feature/foo".to_string(), "tag: v1.0".to_string()]
+        );
+        assert_eq!(
+            map.get("ccc").unwrap(),
+            &vec!["origin/HEAD".to_string()],
+            "remote-tracking refs are labeled so --all lanes stay readable"
+        );
     }
 
     #[test]
@@ -2304,6 +2706,7 @@ pub fn run() {
             runtime_list_available,
             runtime_models,
             slash::agent_list_slash_items,
+            slash::agent_list_slash_children,
             fs_read,
             fs_write,
             fs_list,
@@ -2326,6 +2729,11 @@ pub fn run() {
             git_checkout,
             git_log,
             git_show,
+            git_show_commit,
+            git_create_branch,
+            git_switch_new,
+            git_delete_branch,
+            git_checkout_commit,
             git_pull,
             git_push,
             git_clone,

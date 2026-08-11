@@ -8,6 +8,7 @@ import { useResourceSync } from "./state/resource";
 import { useRuntimeSync } from "./state/runtime";
 import { useSessionRestore, useAgentEvents } from "./state/session";
 import { useNotifications } from "./state/notifications";
+import { useCloneEvents } from "./state/clone";
 import { useStore } from "./state/store";
 import "./App.css";
 
@@ -18,6 +19,7 @@ function App() {
   useSessionRestore();
   useAgentEvents();
   useNotifications();
+  useCloneEvents();
   const onboarded = useStore((s) => s.onboarded);
   const fontScale = useStore((s) => s.fontScale);
   // Reflect the chosen font-size preset on <html> so the CSS `html[data-fs=…]`

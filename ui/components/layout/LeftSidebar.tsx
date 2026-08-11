@@ -6,6 +6,7 @@ import { useStore, AgentInfo, AgentStatus } from "../../state/store";
 import { spawnAgent, closeAgent as closeAgentAction } from "../../state/agentActions";
 import { SettingsModal } from "./SettingsModal";
 import { TerminalTemplatePicker } from "./TerminalTemplatePicker";
+import { Icon, runtimeIcon } from "../Icon";
 
 /** Derive the workspace project name from an agent cwd. Prefers the
  *  `workspaces/<name>` segment; for custom-rooted projects falls back to the
@@ -82,6 +83,7 @@ interface CtxState {
 
 export function LeftSidebar() {
   const leftSidebarOpen = useStore((s) => s.leftSidebarOpen);
+  const toggleLeftSidebar = useStore((s) => s.toggleLeftSidebar);
   const agents = useStore((s) => s.agents);
   const tabs = useStore((s) => s.tabs);
   const activeTabId = useStore((s) => s.activeTabId);
@@ -95,6 +97,8 @@ export function LeftSidebar() {
   const focusedProject = useStore((s) => s.focusedProject);
   const setFocusedProject = useStore((s) => s.setFocusedProject);
   const addProject = useStore((s) => s.addProject);
+  const beginClone = useStore((s) => s.beginClone);
+  const pendingClones = useStore((s) => s.pendingClones);
   const setActiveTab = useStore((s) => s.setActiveTab);
   const addTab = useStore((s) => s.addTab);
 
@@ -116,6 +120,9 @@ export function LeftSidebar() {
   const renameProject = useStore((s) => s.renameProject);
   const moveProject = useStore((s) => s.moveProject);
   const sleepProject = useStore((s) => s.sleepProject);
+  // Resize-handle mousedown position: distinguishes a click (toggle) from a
+  // drag (resize) on the divider.
+  const resizeStartRef = useRef<{ x: number; y: number } | null>(null);
   const [draggedProj, setDraggedProj] = useState<string | null>(null);
   // New-terminal template picker: open menu position (project + anchor).
   const [termMenu, setTermMenu] = useState<{
@@ -267,6 +274,7 @@ export function LeftSidebar() {
           id: string;
           title: string;
           status: AgentStatus;
+          runtime: string;
           createdAt?: number;
         }[];
       }
@@ -282,11 +290,19 @@ export function LeftSidebar() {
         id,
         title: a.title || `agent-${id.slice(0, 4)}`,
         status: a.status,
+        runtime: a.runtime,
         createdAt: a.createdAt,
       });
     });
     return map;
   }, [agents, projectRoots]);
+
+  // Names of projects whose git clone is still in flight (see clone.ts). Shown
+  // as a "正在克隆中" badge next to the project label.
+  const cloningNames = useMemo(
+    () => new Set(Object.values(pendingClones)),
+    [pendingClones]
+  );
 
   // The tree is DRIVEN BY the store's project list (which includes empty
   // projects). Any project that only exists via an agent's cwd — e.g. before
@@ -302,10 +318,26 @@ export function LeftSidebar() {
     (n) => (agentsByProject.get(n)?.agents?.length ?? 0) > 0
   );
   const allCollapsed = expandableProjects.every((n) => collapsedProjs.has(n));
+  // Snapshot of the projects that were expanded at the moment the button
+  // collapsed everything. "展开全部项目" restores exactly this set, so projects
+  // that were already collapsed before the collapse-all stay collapsed.
+  const collapseSnapshot = useRef<Set<string> | null>(null);
   const toggleAllProjects = () => {
     if (allCollapsed) {
-      setCollapsedProjs(new Set());
+      // Expand only what was expanded before the collapse-all; everything else
+      // (including manually-collapsed projects) stays collapsed. Falls back to
+      // expanding all when no snapshot exists (e.g. everything was collapsed by
+      // hand via the triangles).
+      const snapshot = collapseSnapshot.current;
+      setCollapsedProjs(
+        new Set(expandableProjects.filter((n) => !snapshot?.has(n)))
+      );
+      collapseSnapshot.current = null;
     } else {
+      // Collapse all — remember what was expanded so it can be restored.
+      collapseSnapshot.current = new Set(
+        expandableProjects.filter((n) => !collapsedProjs.has(n))
+      );
       setCollapsedProjs(new Set(expandableProjects));
     }
   };
@@ -356,10 +388,13 @@ export function LeftSidebar() {
     }
   };
 
-  // [🔄 从 Git 克隆] clone a remote repo into a chosen parent dir, then surface
-  // it in the tree like any other project (addProject + auto-spawn + expand).
-  // The Rust `git_clone` validates the URL + name + parent dir; we only check
-  // the fields are present here so the errors surface through `nprojError`.
+  // [🔄 从 Git 克隆] start a clone of a remote repo into a chosen parent dir,
+  // then surface it in the tree immediately as "正在克隆中". The Rust `git_clone`
+  // returns the moment the background clone starts; `git://cloned` /
+  // `git://clone-error` (handled in state/clone.ts) reconcile the placeholder —
+  // auto-opening a terminal on success, dropping the project on failure. We only
+  // check the fields are present here so validation errors surface through
+  // `nprojError` and keep the modal open.
   const handleGitClone = async (
     url: string,
     name: string,
@@ -380,7 +415,7 @@ export function LeftSidebar() {
       return "请选择父目录";
     }
     try {
-      const root = await invoke<string>("git_clone", {
+      const [cloneId, root] = await invoke<[string, string]>("git_clone", {
         url: trimmedUrl,
         name: trimmedName,
         parentDir,
@@ -396,14 +431,9 @@ export function LeftSidebar() {
       });
       setFocusedProject(trimmedName);
       setNprojError(null);
-      // Auto-open a fresh agent terminal in the clone. Best-effort: a failed
-      // spawn must not block the modal close or undo the cloned project.
-      try {
-        await spawnAgent(trimmedName);
-      } catch (e) {
-        console.error("自动打开终端失败:", e);
-        setNprojError(`项目已创建，但自动打开终端失败：${String(e)}`);
-      }
+      // Mark the placeholder as cloning — the sidebar shows 【name】【正在克隆中】
+      // until git://cloned / git://clone-error arrives (state/clone.ts).
+      beginClone(cloneId, trimmedName);
       return null;
     } catch (e) {
       setNprojError(String(e));
@@ -419,20 +449,17 @@ export function LeftSidebar() {
       >
         {leftSidebarOpen && (
           <>
-            {/* Zone 1: Brand */}
-            <div className="sidebar-brand">CaPilot</div>
-
             {/* Zone 2: Op bar */}
             <div className="sidebar-actions">
               <span className="sidebar-btn" onClick={() => setSettingsOpen(true)} title="设置">
-                ⚙
+                <Icon name="settings" size={16} />
               </span>
               <span
                 className={`sidebar-btn${allCollapsed ? " active" : ""}`}
                 onClick={toggleAllProjects}
                 title={allCollapsed ? "展开全部项目" : "收起全部项目"}
               >
-                ☰
+                <Icon name="menu" size={16} />
               </span>
               <span className="sidebar-btn" onClick={() => setNprojOpen(true)} title="新建项目">
                 +
@@ -506,28 +533,38 @@ export function LeftSidebar() {
                               toggleProj(name);
                             }}
                           >
-                            ▾
+                            <Icon name="chevron-down" size={10} />
                           </span>
                         ) : (
                           // Empty projects get the same triangle for a unified
                           // look, but it is decorative — the click falls through
                           // to the header (focus).
                           <span className="pj-arrow" aria-hidden>
-                            ▾
+                            <Icon name="chevron-down" size={10} />
                           </span>
                         )}
                         <span className="pj-name">{name}</span>
-                        <button
-                          className="um-new-term"
-                          title="新建终端"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                            setTermMenu({ x: r.right, y: r.bottom, project: name });
-                          }}
-                        >
-                          +
-                        </button>
+                        {cloningNames.has(name) && (
+                          <span
+                            className="proj-cloning"
+                            title="克隆进行中，完成后自动打开终端"
+                          >
+                            <Icon name="refresh-cw" size={10} /> 正在克隆中
+                          </span>
+                        )}
+                        {!cloningNames.has(name) && (
+                          <button
+                            className="um-new-term"
+                            title="新建终端"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                              setTermMenu({ x: r.right, y: r.bottom, project: name });
+                            }}
+                          >
+                            +
+                          </button>
+                        )}
                       </div>
                       {liveAgents.map((a) => (
                         <div
@@ -540,7 +577,9 @@ export function LeftSidebar() {
                             setCtx({ x: e.clientX, y: e.clientY, agentId: a.id });
                           }}
                         >
-                          <span className="tm-icon">🤖</span>
+                          <span className="tm-icon">
+                            <Icon name={runtimeIcon(a.runtime)} size={14} />
+                          </span>
                           <span className="tm-name">{a.title}</span>
                           <span className="tm-time">{fmtAge(a.createdAt)}</span>
                           <button
@@ -562,7 +601,13 @@ export function LeftSidebar() {
                             onClick={() => toggleEnded(name)}
                             title={endedOpen.has(name) ? "收起已结束" : "展开已结束"}
                           >
-                            <span className="pj-arrow">{endedOpen.has(name) ? "▾" : "▸"}</span>
+                            <span className="pj-arrow">
+                              {endedOpen.has(name) ? (
+                                <Icon name="chevron-down" size={10} />
+                              ) : (
+                                <Icon name="chevron-right" size={10} />
+                              )}
+                            </span>
                             <span className="tm-name">已结束 ({endedAgents.length})</span>
                             <button
                               className="tm-close"
@@ -600,7 +645,9 @@ export function LeftSidebar() {
                                   setCtx({ x: e.clientX, y: e.clientY, agentId: a.id });
                                 }}
                               >
-                                <span className="tm-icon">🕸</span>
+                                <span className="tm-icon">
+                                  <Icon name="network" size={14} />
+                                </span>
                                 <span className="tm-name">{a.title}</span>
                                 <span className="tm-time">{fmtAge(a.createdAt)}</span>
                                 <button
@@ -686,8 +733,40 @@ export function LeftSidebar() {
         />
       )}
 
-      {/* Resize handle */}
-      <div className="resize-handle" id="resize-left" onMouseDown={startLeftResize} />
+      {/* Resize handle: drag to resize; the hover button collapses/expands the
+          sidebar (always rendered so a collapsed sidebar can be reopened). */}
+      <div
+        className="resize-handle"
+        id="resize-left"
+        onMouseDown={(e) => {
+          resizeStartRef.current = { x: e.clientX, y: e.clientY };
+          startLeftResize(e);
+        }}
+        onClick={(e) => {
+          // A click (no movement) toggles the sidebar; a drag resizes instead.
+          const start = resizeStartRef.current;
+          resizeStartRef.current = null;
+          if (
+            start &&
+            Math.hypot(e.clientX - start.x, e.clientY - start.y) > 5
+          ) {
+            return;
+          }
+          toggleLeftSidebar();
+        }}
+      >
+        <button
+          className="resize-collapse"
+          title={leftSidebarOpen ? "收起左侧栏" : "展开左侧栏"}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleLeftSidebar();
+          }}
+        >
+          <Icon name={leftSidebarOpen ? "chevron-left" : "chevron-right"} size={10} />
+        </button>
+      </div>
     </>
   );
 }
@@ -792,7 +871,9 @@ function NewProjectModal({
   return (
     <div className="nproj-overlay" onClick={onClose}>
       <div className="nproj-card" onClick={(e) => e.stopPropagation()}>
-        <div className="nproj-title">📁+ 新建项目</div>
+        <div className="nproj-title">
+          <Icon name="folder-plus" size={16} /> 新建项目
+        </div>
 
         <div className="ug-nproj-label">新建文件夹</div>
         <input
@@ -824,12 +905,14 @@ function NewProjectModal({
 
         <div className="ug-nproj-label">或选择现有文件夹</div>
         <button className="ug-nproj-folder" onClick={pickFolder} disabled={busy}>
-          📂 选择现有文件夹…
+          <Icon name="folder-open" size={13} /> 选择现有文件夹…
         </button>
 
         <div className="ug-nproj-sep" />
 
-        <div className="ug-nproj-label">🔄 从 Git 克隆</div>
+        <div className="ug-nproj-label">
+          <Icon name="refresh-cw" size={12} /> 从 Git 克隆
+        </div>
         <input
           className="nproj-input"
           placeholder="https://github.com/owner/repo.git"
@@ -846,7 +929,7 @@ function NewProjectModal({
             onClick={pickParentDir}
             disabled={busy}
           >
-            📂 选择父目录…
+            <Icon name="folder-open" size={13} /> 选择父目录…
           </button>
           {parentDir ? (
             <span className="un-git-parent" title={parentDir}>
@@ -910,7 +993,9 @@ function RenameProjectModal({
   return (
     <div className="nproj-overlay" onClick={onClose}>
       <div className="nproj-card" onClick={(e) => e.stopPropagation()}>
-        <div className="nproj-title">✏ 重命名项目</div>
+        <div className="nproj-title">
+          <Icon name="pencil" size={16} /> 重命名项目
+        </div>
         <div className="ug-nproj-label">新项目名称</div>
         <input
           ref={inputRef}
@@ -978,7 +1063,7 @@ function ContextMenu({
             onClose();
           }}
         >
-          🖥 新建终端
+          <Icon name="monitor" size={13} /> 新建终端
         </div>
         {ctx.cwd && (
           <div
@@ -988,7 +1073,7 @@ function ContextMenu({
               onClose();
             }}
           >
-            📁 在文件管理器中显示
+            <Icon name="folder" size={13} /> 在文件管理器中显示
           </div>
         )}
         {ctx.cwd && (
@@ -999,7 +1084,7 @@ function ContextMenu({
               onClose();
             }}
           >
-            📋 复制路径
+            <Icon name="clipboard" size={13} /> 复制路径
           </div>
         )}
         <div className="ctx-sep" />
@@ -1010,7 +1095,7 @@ function ContextMenu({
             onClose();
           }}
         >
-          💤 休眠
+          <Icon name="moon" size={13} /> 休眠
         </div>
         {/* 重命名项目：功能已实现，暂时隐藏（改 `false` 为 `true` 恢复） */}
         {false && (
@@ -1023,7 +1108,7 @@ function ContextMenu({
                 onClose();
               }}
             >
-              ✏ 重命名项目
+              <Icon name="pencil" size={13} /> 重命名项目
             </div>
           </>
         )}
@@ -1036,7 +1121,7 @@ function ContextMenu({
             onClose();
           }}
         >
-          🗑 移除项目
+          <Icon name="trash-2" size={13} /> 移除项目
         </div>
       </div>
     );
@@ -1113,7 +1198,7 @@ function ContextMenu({
       ))}
       <div className="ctx-sep" />
       <div className="ctx-item danger" onClick={closeAgent}>
-        ✕ 终止并关闭
+        <Icon name="x" size={13} /> 终止并关闭
       </div>
       {project && projCount === 1 && (
         <div
@@ -1125,7 +1210,7 @@ function ContextMenu({
             onClose();
           }}
         >
-          🗑 关闭并移除项目
+          <Icon name="trash-2" size={13} /> 关闭并移除项目
         </div>
       )}
     </div>

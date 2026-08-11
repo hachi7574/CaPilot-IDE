@@ -3,9 +3,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { EditorState } from "@codemirror/state";
 import { EditorView, lineNumbers } from "@codemirror/view";
-import { oneDark } from "@codemirror/theme-one-dark";
+import { capilotTheme } from "../editor/capilotTheme";
 import { MergeView } from "@codemirror/merge";
 import { useStore } from "../../state/store";
+import { spawnBashAt } from "../../state/agentActions";
+import { CommitGraph, type GitLogEntry } from "./CommitGraph";
+import { Icon } from "../Icon";
 
 type RightTab = "overview" | "files" | "git";
 
@@ -14,6 +17,10 @@ export function RightSidebar() {
   const rightWidth = useStore((s) => s.rightWidth);
   const setRightWidth = useStore((s) => s.setRightWidth);
   const rightSidebarOpen = useStore((s) => s.rightSidebarOpen);
+  const toggleRightSidebar = useStore((s) => s.toggleRightSidebar);
+  // Resize-handle mousedown position: distinguishes a click (toggle) from a
+  // drag (resize) on the divider.
+  const resizeStartRef = useRef<{ x: number; y: number } | null>(null);
 
   // Draggable right sidebar resize (drag right → narrower).
   const startRightResize = (e: React.MouseEvent) => {
@@ -34,9 +41,40 @@ export function RightSidebar() {
 
   return (
     <>
-      {rightSidebarOpen && (
-        <div className="resize-handle" id="resize-right" onMouseDown={startRightResize} />
-      )}
+      {/* Resize handle: drag to resize; the hover button collapses/expands the
+          sidebar (always rendered so a collapsed sidebar can be reopened). */}
+      <div
+        className="resize-handle"
+        id="resize-right"
+        onMouseDown={(e) => {
+          resizeStartRef.current = { x: e.clientX, y: e.clientY };
+          startRightResize(e);
+        }}
+        onClick={(e) => {
+          // A click (no movement) toggles the sidebar; a drag resizes instead.
+          const start = resizeStartRef.current;
+          resizeStartRef.current = null;
+          if (
+            start &&
+            Math.hypot(e.clientX - start.x, e.clientY - start.y) > 5
+          ) {
+            return;
+          }
+          toggleRightSidebar();
+        }}
+      >
+        <button
+          className="resize-collapse"
+          title={rightSidebarOpen ? "收起右侧栏" : "展开右侧栏"}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleRightSidebar();
+          }}
+        >
+          <Icon name={rightSidebarOpen ? "chevron-right" : "chevron-left"} size={10} />
+        </button>
+      </div>
       <div
         className={`right-sidebar${!rightSidebarOpen ? " collapsed" : ""}`}
         style={rightSidebarOpen ? { width: rightWidth } : undefined}
@@ -46,20 +84,23 @@ export function RightSidebar() {
           <div
             className={`right-tab${activeTab === "overview" ? " active" : ""}`}
             onClick={() => setActiveTab("overview")}
+            title="概览"
           >
-            ∿ 概览
+            <Icon name="activity" size={15} />
           </div>
           <div
             className={`right-tab${activeTab === "files" ? " active" : ""}`}
             onClick={() => setActiveTab("files")}
+            title="文件"
           >
-            📄 文件
+            <Icon name="file-text" size={15} />
           </div>
           <div
             className={`right-tab${activeTab === "git" ? " active" : ""}`}
             onClick={() => setActiveTab("git")}
+            title="Git"
           >
-            ⚒ Git
+            <Icon name="git" size={15} />
           </div>
         </div>
 
@@ -157,17 +198,36 @@ function OverviewDashboard() {
       ? Math.max(0, Math.min(100, (stats.mem_used / stats.mem_total) * 100))
       : 0;
 
-  const espKind =
-    esp.kind === "ble" ? "🔵BLE" : esp.kind === "wifi" ? "📶WiFi" : esp.kind === "usb" ? "🔌USB" : "";
-  const espSummary = `🔌 ESP 设备状态 ${esp.connected ? (esp.name ?? "ESP") : "未连接"}${espKind ? ` · ${espKind}` : ""}${esp.battery_pct != null ? ` · 🔋${esp.battery_pct}%` : ""}`;
+  const espKind = esp.kind === "ble" ? "bluetooth" : esp.kind === "wifi" ? "wifi" : esp.kind === "usb" ? "plug" : "";
+  const espKindLabel =
+    esp.kind === "ble" ? "BLE" : esp.kind === "wifi" ? "WiFi" : esp.kind === "usb" ? "USB" : "";
+  const espSummary = (
+    <>
+      {esp.connected ? (esp.name ?? "ESP") : "未连接"}
+      {espKind && (
+        <>
+          {" · "}
+          <Icon name={espKind} size={11} />
+          {espKindLabel}
+        </>
+      )}
+      {esp.battery_pct != null && (
+        <>
+          {" · "}
+          <Icon name="battery-full" size={11} />
+          {esp.battery_pct}%
+        </>
+      )}
+    </>
+  );
 
   return (
     <div className="tab-panel" id="tab-overview">
       {/* Runtime */}
-      <CollapsibleSection title="📊 运行时" summary="📊 运行时 0/1M · 缓存—">
+      <CollapsibleSection icon="chart-column" title="运行时" summary="0/1M · 缓存—">
         <div className="ov-row">
           <span className="ov-label">上下文窗口</span>
-          <span className="ov-value gr">🟢 充足</span>
+          <span className="ov-value gr"><Icon name="circle-dot" size={12} style={{ marginRight: 4 }} /> 充足</span>
         </div>
         <div className="ov-row">
           <span className="ov-label">已用 / 上限</span>
@@ -202,7 +262,7 @@ function OverviewDashboard() {
       </CollapsibleSection>
 
       {/* Usage */}
-      <CollapsibleSection title="📈 用量分析" summary="📈 用量分析 当前会话—">
+      <CollapsibleSection icon="chart-line" title="用量分析" summary="当前会话—">
         <div className="ov-usage-item">
           <div className="ov-usage-label">当前会话</div>
           <div className="ov-bar">
@@ -217,9 +277,9 @@ function OverviewDashboard() {
       </CollapsibleSection>
 
       {/* Remaining quota */}
-      <CollapsibleSection title="⏱ 剩余用量" summary="⏱ 剩余用量 5h — · 周— · 月—">
+      <CollapsibleSection icon="timer" title="剩余用量" summary="5h — · 周— · 月—">
         <div className="ov-bar-row">
-          <div className="ov-bar-label">⏱ 5小时窗口</div>
+          <div className="ov-bar-label"><Icon name="timer" size={12} style={{ marginRight: 4 }} /> 5小时窗口</div>
           <div className="ov-bar">
             <div className="ov-bar-fill gr" style={{ width: "0%" }} />
           </div>
@@ -229,7 +289,7 @@ function OverviewDashboard() {
           </div>
         </div>
         <div className="ov-bar-row">
-          <div className="ov-bar-label">📅 周额度</div>
+          <div className="ov-bar-label"><Icon name="calendar" size={12} style={{ marginRight: 4 }} /> 周额度</div>
           <div className="ov-bar">
             <div className="ov-bar-fill ye" style={{ width: "0%" }} />
           </div>
@@ -239,7 +299,7 @@ function OverviewDashboard() {
           </div>
         </div>
         <div className="ov-bar-row">
-          <div className="ov-bar-label">🗓 月额度</div>
+          <div className="ov-bar-label"><Icon name="calendar-days" size={12} style={{ marginRight: 4 }} /> 月额度</div>
           <div className="ov-bar">
             <div className="ov-bar-fill gr" style={{ width: "0%" }} />
           </div>
@@ -252,8 +312,9 @@ function OverviewDashboard() {
 
       {/* Computer */}
       <CollapsibleSection
-        title="💻 电脑状态"
-        summary={`💻 电脑状态 CPU ${fmtCpu(cpuPct)} · 内存 ${memText}`}
+        icon="laptop"
+        title="电脑状态"
+        summary={`CPU ${fmtCpu(cpuPct)} · 内存 ${memText}`}
       >
         <div className="ov-bar-row">
           <div className="ov-row">
@@ -276,7 +337,7 @@ function OverviewDashboard() {
       </CollapsibleSection>
 
       {/* ESP */}
-      <CollapsibleSection title="🔌 ESP 设备状态" summary={espSummary}>
+      <CollapsibleSection icon="plug" title="ESP 设备状态" summary={espSummary}>
         <div className="ov-esp-status">
           <span
             className="ov-esp-dot"
@@ -293,18 +354,29 @@ function OverviewDashboard() {
         <div className="ov-row">
           <span className="ov-label">Connection</span>
           <span className="ov-esp-conn">
-            {esp.connected
-              ? esp.kind === "wifi"
-                ? "📶 WiFi"
-                : esp.kind === "usb"
-                ? "🔌 USB"
-                : "🔵 Bluetooth"
-              : "—"}
+            {esp.connected ? (
+              esp.kind === "wifi" ? (
+                <>
+                  <Icon name="wifi" size={12} style={{ marginRight: 4 }} /> WiFi
+                </>
+              ) : esp.kind === "usb" ? (
+                <>
+                  <Icon name="plug" size={12} style={{ marginRight: 4 }} /> USB
+                </>
+              ) : (
+                <>
+                  <Icon name="bluetooth" size={12} style={{ marginRight: 4 }} /> Bluetooth
+                </>
+              )
+            ) : (
+              "—"
+            )}
           </span>
         </div>
         <div className="ov-bar-row">
           <div className="ov-bar-label">
-            🔋 Battery {esp.battery_pct != null ? `${esp.battery_pct}%` : "—"}
+            <Icon name="battery-full" size={12} style={{ marginRight: 4 }} />
+            Battery {esp.battery_pct != null ? `${esp.battery_pct}%` : "—"}
           </div>
           <div className="ov-bar">
             <div
@@ -333,23 +405,17 @@ function OverviewDashboard() {
 /* ── Collapsible Section ──────────────────────────────────────── */
 
 function CollapsibleSection({
+  icon,
   title,
   summary,
   children,
 }: {
-  title: string;
-  summary: string;
+  icon?: string;
+  title: React.ReactNode;
+  summary?: React.ReactNode;
   children: React.ReactNode;
 }) {
   const [collapsed, setCollapsed] = useState(false);
-
-  // The summary strings include the title prefix (e.g. "📊 运行时 0/1M · 缓存—").
-  // The header already shows the title, so strip the prefix and show only the
-  // condensed VALUES inline when collapsed — the title bar keeps its exact
-  // font/height/color in both states.
-  const value = summary.startsWith(title)
-    ? summary.slice(title.length).trimStart()
-    : summary;
 
   return (
     <div className={`ov-section uk-section${collapsed ? " collapsed" : ""}`}>
@@ -357,11 +423,18 @@ function CollapsibleSection({
         className="ov-section-header"
         onClick={() => setCollapsed(!collapsed)}
       >
+        {icon && <Icon name={icon} size={12} style={{ marginRight: 6 }} />}
         {title}
-        {collapsed && value && (
-          <span className="ov-summary-inline">{value}</span>
+        {collapsed && summary && (
+          <span className="ov-summary-inline">{summary}</span>
         )}
-        <span className="ov-toggle">{collapsed ? "▲" : "▼"}</span>
+        <span className="ov-toggle">
+          {collapsed ? (
+            <Icon name="chevron-up" size={12} />
+          ) : (
+            <Icon name="chevron-down" size={12} />
+          )}
+        </span>
       </div>
       {!collapsed && <div className="ov-section-body">{children}</div>}
     </div>
@@ -373,6 +446,7 @@ function CollapsibleSection({
 interface FsEntry {
   name: string;
   is_dir: boolean;
+  executable?: boolean;
 }
 
 const SKIP_DIRS = new Set([".git", "node_modules", "target", ".claude", "dist", "build"]);
@@ -381,9 +455,56 @@ const SKIP_DIRS = new Set([".git", "node_modules", "target", ".claude", "dist", 
 function fileClass(name: string): { cls: string; icon: string } {
   const isWeb = name === "index.html" || /\.html?$/.test(name);
   const isConf = name === "tauri.conf.json" || /\.(conf|config)\.json$/.test(name);
-  if (isWeb) return { cls: "file file-web", icon: "🌐" };
-  if (isConf) return { cls: "file rtx-file-conf", icon: "📄" };
-  return { cls: "file", icon: "📄" };
+  if (isWeb) return { cls: "file file-web", icon: "globe" };
+  if (isConf) return { cls: "file rtx-file-conf", icon: "file-text" };
+  return { cls: "file", icon: "file-text" };
+}
+
+/** Single-quote a path for a bash command line (handles embedded single quotes). */
+function shq(p: string): string {
+  return `'${p.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Resolve the project that owns an absolute path: focused project wins, then
+ *  any project whose recorded root is a path prefix, then the `workspaces/<name>`
+ *  segment, then the path's base name. */
+function projectForPath(path: string): string {
+  const s = useStore.getState();
+  const roots = s.projectRoots;
+  const under = (root: string | undefined) =>
+    !!root && (path === root || path.startsWith(root.endsWith("/") ? root : root + "/"));
+  if (s.focusedProject && under(roots[s.focusedProject])) return s.focusedProject;
+  for (const [name, root] of Object.entries(roots)) {
+    if (under(root)) return name;
+  }
+  const m = path.match(/workspaces\/([^/]+)/);
+  if (m) return m[1];
+  const parts = path.split("/").filter(Boolean);
+  return parts[parts.length - 1] || "default";
+}
+
+/** Build the shell command that runs a file from its own directory (cwd = dir),
+ *  or null when the file isn't runnable. Uses the file's relative `./name`. */
+function runCommandFor(e: FsEntry): string | null {
+  const dot = e.name.lastIndexOf(".");
+  const ext = dot >= 0 ? e.name.slice(dot).toLowerCase() : "";
+  const rel = `./${e.name}`;
+  const q = shq(rel);
+  switch (ext) {
+    case ".py": return `python3 ${q}`;
+    case ".sh":
+    case ".bash": return `bash ${q}`;
+    case ".js":
+    case ".mjs":
+    case ".cjs": return `node ${q}`;
+    case ".ts":
+    case ".tsx": return `npx tsx ${q}`;
+    case ".rb": return `ruby ${q}`;
+    case ".php": return `php ${q}`;
+    case ".pl": return `perl ${q}`;
+    case ".go": return `go run ${q}`;
+    default: return e.executable ? q : null;
+  }
 }
 
 /** Copy text to the OS clipboard (navigator API with execCommand fallback). */
@@ -422,8 +543,21 @@ function FilesPanel() {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [renameError, setRenameError] = useState("");
+  // Single-click select target in the tree; second click / double-click opens.
+  // `isDir` lets keyboard actions (paste-into, delete, rename) target folders.
+  const [selected, setSelected] = useState<{ path: string; isDir: boolean } | null>(null);
   const addTab = useStore((s) => s.addTab);
   const closeTab = useStore((s) => s.closeTab);
+  const setActiveTab = useStore((s) => s.setActiveTab);
+  const tabs = useStore((s) => s.tabs);
+  const agents = useStore((s) => s.agents);
+  // Exactly one open bash terminal (agent sessions excluded) → the
+  // "open in current terminal" folder action becomes available.
+  const bashIds = tabs
+    .filter((t) => t.type === "agent" && t.agentId)
+    .map((t) => t.agentId!)
+    .filter((id) => agents.get(id)?.runtime.startsWith("bash"));
+  const singleBashId = bashIds.length === 1 ? bashIds[0] : null;
 
   useEffect(() => {
     loadChildren(root);
@@ -494,7 +628,10 @@ function FilesPanel() {
               cur &&
               cur.length === fresh.length &&
               cur.every(
-                (e, i) => e.name === fresh[i].name && e.is_dir === fresh[i].is_dir
+                (e, i) =>
+                  e.name === fresh[i].name &&
+                  e.is_dir === fresh[i].is_dir &&
+                  e.executable === fresh[i].executable
               )
             ) {
               return prev;
@@ -552,6 +689,12 @@ function FilesPanel() {
 
   const openFile = (path: string, name: string) => {
     addTab({ id: `file:${path}`, type: "editor", filePath: path, title: name });
+  };
+
+  const clickFile = (path: string, name: string) => {
+    // First click selects; clicking the already-selected file opens it.
+    if (selected?.path === path && !selected.isDir) openFile(path, name);
+    else setSelected({ path, isDir: false });
   };
 
   const startCreate = (dir: string, kind: "file" | "dir") => {
@@ -650,6 +793,59 @@ function FilesPanel() {
     closeMenu();
   };
 
+  /** cd the single open bash terminal to a folder (req: open in current terminal). */
+  const doOpenInCurrentTerminal = () => {
+    if (!menu?.path || !singleBashId) return;
+    invoke("agent_write", {
+      id: singleBashId,
+      data: `cd ${shq(menu.path)}`,
+      raw: false,
+    }).catch(() => {});
+    setActiveTab(singleBashId);
+    closeMenu();
+  };
+
+  /** Spawn a new bash terminal rooted at a folder. */
+  const doOpenInNewTerminal = () => {
+    if (!menu?.path) return;
+    const proj = projectForPath(menu.path);
+    spawnBashAt(proj, menu.path).catch((e) =>
+      setNotice({ text: String(e), err: true })
+    );
+    closeMenu();
+  };
+
+  /** Resolve the runnable command for the menu's file path (null = not runnable). */
+  const fileRunCommand = (path: string | undefined): string | null => {
+    if (!path) return null;
+    const parent = path.slice(0, path.lastIndexOf("/"));
+    const entry = dirs.get(parent)?.find((e) => `${parent}/${e.name}` === path);
+    return entry ? runCommandFor(entry) : null;
+  };
+
+  /** Run a file: reuse the single bash terminal if present (cd + run), else
+   *  spawn a fresh bash terminal in the file's directory and run it there. */
+  const doRunFile = () => {
+    if (!menu?.path) return;
+    const cmd = fileRunCommand(menu.path);
+    if (!cmd) return;
+    const dir = menu.path.slice(0, menu.path.lastIndexOf("/"));
+    if (singleBashId) {
+      invoke("agent_write", {
+        id: singleBashId,
+        data: `cd ${shq(dir)} && ${cmd}`,
+        raw: false,
+      }).catch(() => {});
+      setActiveTab(singleBashId);
+    } else {
+      const proj = projectForPath(dir);
+      spawnBashAt(proj, dir, cmd).catch((e) =>
+        setNotice({ text: String(e), err: true })
+      );
+    }
+    closeMenu();
+  };
+
   const doNew = (kind: "file" | "dir") => {
     startCreate(menuDir(), kind);
     closeMenu();
@@ -661,23 +857,30 @@ function FilesPanel() {
     closeMenu();
   };
 
-  const doDelete = async () => {
-    if (!menu?.path) return;
-    const name = menu.path.slice(menu.path.lastIndexOf("/") + 1);
+  /** Delete a file/dir after confirmation. Shared by the context menu and the
+   *  Del keyboard shortcut. Clears the tree selection when it targeted `path`. */
+  const deletePath = async (path: string) => {
+    const name = path.slice(path.lastIndexOf("/") + 1);
     const ok = await confirm(`确定删除「${name}」？此操作不可撤销。`, {
       title: "删除",
       kind: "warning",
     });
-    closeMenu();
     if (!ok) return;
-    const parent = menu.path.slice(0, menu.path.lastIndexOf("/"));
+    const parent = path.slice(0, path.lastIndexOf("/"));
     try {
-      await invoke("fs_delete", { path: menu.path });
+      await invoke("fs_delete", { path });
       loadChildren(parent);
+      if (selected?.path === path) setSelected(null);
       setNotice({ text: `已删除 ${name}` });
     } catch (err) {
       setNotice({ text: String(err), err: true });
     }
+  };
+
+  const doDelete = () => {
+    if (!menu?.path) return;
+    closeMenu();
+    void deletePath(menu.path);
   };
 
   const startRename = (path: string) => {
@@ -721,6 +924,10 @@ function FilesPanel() {
       });
       loadChildren(parent);
       loadChildren(newPath);
+      // Keep the tree selection pointing at the renamed entry.
+      if (selected?.path === renaming) {
+        setSelected({ path: newPath, isDir: selected.isDir });
+      }
       // If the renamed file is open in an editor tab, point it at the new path.
       if (useStore.getState().tabs.some((t) => t.id === `file:${renaming}`)) {
         closeTab(`file:${renaming}`);
@@ -734,6 +941,79 @@ function FilesPanel() {
       setRenameError(String(err));
     }
   };
+
+  /** Paste destination for keyboard paste: a selected folder, a selected file's
+   *  parent directory, or the tree root when nothing is selected. */
+  const pasteTarget = (): string => {
+    if (!selected) return root;
+    if (selected.isDir) return selected.path;
+    return selected.path.slice(0, selected.path.lastIndexOf("/")) || root;
+  };
+
+  /** Cmd/Ctrl+V: paste the app-internal clipboard into the selection target. */
+  const doPasteKeyboard = async () => {
+    if (!clip) return;
+    const dest = pasteTarget();
+    const isMove = clip.mode === "cut";
+    try {
+      const created = await invoke<string>("fs_paste", { src: clip.path, destDir: dest, isMove });
+      const name = created.slice(created.lastIndexOf("/") + 1);
+      setNotice({ text: `已${isMove ? "移动" : "复制"}为 ${name}` });
+      loadChildren(dest);
+      const srcParent = clip.path.slice(0, clip.path.lastIndexOf("/"));
+      if (srcParent !== dest) loadChildren(srcParent);
+      if (isMove) setClip(null);
+    } catch (err) {
+      setNotice({ text: String(err), err: true });
+    }
+    closeMenu();
+  };
+
+  // File-system keyboard shortcuts (modifiers follow the platform: Ctrl on
+  // Win/Linux, Cmd on macOS): Del 删除 / F2 重命名 / Cmd/Ctrl+C 复制 / V 粘贴 /
+  // X 剪切. They operate on the currently selected file/folder. Keys typed into
+  // an input / textarea (rename, search, editor) are left alone.
+  useEffect(() => {
+    const isMac = navigator.platform?.toLowerCase().includes("mac");
+    const onKeyDown = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) {
+        return;
+      }
+      const mod = e.metaKey || e.ctrlKey;
+      const k = e.key.toLowerCase();
+      if (mod && !e.shiftKey && !e.altKey && k === "c") {
+        if (!selected) return;
+        e.preventDefault();
+        closeMenu();
+        setClip({ path: selected.path, mode: "copy" });
+        setNotice({ text: `已复制 ${selected.path.slice(selected.path.lastIndexOf("/") + 1)}` });
+      } else if (mod && !e.shiftKey && !e.altKey && k === "x") {
+        if (!selected) return;
+        e.preventDefault();
+        closeMenu();
+        setClip({ path: selected.path, mode: "cut" });
+        setNotice({ text: `已剪切 ${selected.path.slice(selected.path.lastIndexOf("/") + 1)}` });
+      } else if (mod && !e.shiftKey && !e.altKey && k === "v") {
+        if (!clip) return;
+        e.preventDefault();
+        void doPasteKeyboard();
+      } else if (e.key === "Delete" || (isMac && mod && e.key === "Backspace")) {
+        if (!selected) return;
+        e.preventDefault();
+        closeMenu();
+        void deletePath(selected.path);
+      } else if (e.key === "F2") {
+        if (!selected) return;
+        e.preventDefault();
+        closeMenu();
+        startRename(selected.path);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, clip, root]);
 
   const isFiltering = filter.trim() !== "";
   const q = filter.trim().toLowerCase();
@@ -754,7 +1034,7 @@ function FilesPanel() {
             return (
               <div key={path}>
                 <div className="files-new" style={{ paddingLeft: depth * 14 }}>
-                  <span>{e.is_dir ? "📁" : "📄"}</span>
+                  <span>{e.is_dir ? <Icon name="folder" size={14} /> : <Icon name="file-text" size={14} />}</span>
                   <input
                     autoFocus
                     value={renameValue}
@@ -787,10 +1067,16 @@ function FilesPanel() {
             return (
               <div key={path}>
                 <div
-                  className={`dir${isCutSource ? " files-ctx-cut" : ""}`}
+                  className={`dir${isCutSource ? " files-ctx-cut" : ""}${selected?.path === path ? " selected" : ""}`}
                   style={{ paddingLeft: depth * 14 }}
-                  onClick={() => toggleDir(path)}
-                  onContextMenu={(ev) => openCtx(ev, "dir", path)}
+                  onClick={() => {
+                    toggleDir(path);
+                    setSelected({ path, isDir: true });
+                  }}
+                  onContextMenu={(ev) => {
+                    setSelected({ path, isDir: true });
+                    openCtx(ev, "dir", path);
+                  }}
                   draggable
                   onDragStart={(ev) => {
                     ev.dataTransfer.setData("text/plain", path);
@@ -798,7 +1084,7 @@ function FilesPanel() {
                   }}
                   title={path}
                 >
-                  <span>{open ? "▾" : "▸"} 📁</span>
+                  <span>{open ? <Icon name="chevron-down" size={12} /> : <Icon name="chevron-right" size={12} />} <Icon name="folder" size={14} /></span>
                   <span className="dir-label">{e.name}</span>
                   <span
                     className="dir-actions"
@@ -808,13 +1094,13 @@ function FilesPanel() {
                       title="新建文件"
                       onClick={() => startCreate(path, "file")}
                     >
-                      ＋📄
+                      <Icon name="file-plus" size={14} />
                     </button>
                     <button
                       title="新建文件夹"
                       onClick={() => startCreate(path, "dir")}
                     >
-                      ＋📁
+                      <Icon name="folder-plus" size={14} />
                     </button>
                   </span>
                 </div>
@@ -826,10 +1112,14 @@ function FilesPanel() {
           return (
             <div
               key={path}
-              className={`${cls}${isCutSource ? " files-ctx-cut" : ""}`}
+              className={`${cls}${isCutSource ? " files-ctx-cut" : ""}${selected?.path === path ? " selected" : ""}`}
               style={{ paddingLeft: depth * 14 }}
-              onClick={() => openFile(path, e.name)}
-              onContextMenu={(ev) => openCtx(ev, "file", path)}
+              onClick={() => clickFile(path, e.name)}
+              onDoubleClick={() => openFile(path, e.name)}
+              onContextMenu={(ev) => {
+                setSelected({ path, isDir: false });
+                openCtx(ev, "file", path);
+              }}
               title={path}
               draggable
               onDragStart={(ev) => {
@@ -837,14 +1127,14 @@ function FilesPanel() {
                 ev.dataTransfer.effectAllowed = "copy";
               }}
             >
-              {icon} {e.name}
+              <Icon name={icon} size={14} /> {e.name}
             </div>
           );
         })}
         {creating && creating.dir === dir && (
           <div style={{ paddingLeft: (depth + 1) * 14 }}>
             <div className="files-new">
-              <span>{creating.kind === "dir" ? "📁" : "📄"}</span>
+              <span>{creating.kind === "dir" ? <Icon name="folder" size={14} /> : <Icon name="file-text" size={14} />}</span>
               <input
                 autoFocus
                 value={newName}
@@ -876,13 +1166,17 @@ function FilesPanel() {
       className="tab-panel"
       id="tab-files"
       style={{ padding: "8px 0" }}
-      onContextMenu={(e) => openCtx(e, "space")}
+      onContextMenu={(e) => {
+        openCtx(e, "space");
+        setSelected(null);
+      }}
     >
       <div className="files-search" style={{ padding: "0 12px 8px" }}>
-        <div style={{ display: "flex", gap: 6 }}>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <Icon name="search" size={14} style={{ flex: "none", opacity: 0.6 }} />
           <input
             type="text"
-            placeholder="🔍 搜索文件…"
+            placeholder="搜索文件…"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             style={{ flex: 1, minWidth: 0 }}
@@ -892,14 +1186,14 @@ function FilesPanel() {
             title="新建文件"
             onClick={() => startCreate(root, "file")}
           >
-            ＋📄
+            <Icon name="file-plus" size={14} />
           </button>
           <button
             className="files-new-btn"
             title="新建文件夹"
             onClick={() => startCreate(root, "dir")}
           >
-            ＋📁
+            <Icon name="folder-plus" size={14} />
           </button>
         </div>
       </div>
@@ -914,6 +1208,23 @@ function FilesPanel() {
           {menu.kind !== "space" && (
             <div className="ctx-item" onClick={doOpen}>
               打开
+            </div>
+          )}
+          {menu.kind === "dir" && (
+            <>
+              {singleBashId && (
+                <div className="ctx-item" onClick={doOpenInCurrentTerminal}>
+                  <Icon name="folder-open" size={13} /> 在当前终端中打开此文件夹
+                </div>
+              )}
+              <div className="ctx-item" onClick={doOpenInNewTerminal}>
+                <Icon name="monitor" size={13} /> 在新终端中打开此文件夹
+              </div>
+            </>
+          )}
+          {menu.kind === "file" && fileRunCommand(menu.path) && (
+            <div className="ctx-item" onClick={doRunFile}>
+              <Icon name="play" size={13} /> 运行此文件
             </div>
           )}
           {menu.kind !== "file" && (
@@ -946,11 +1257,11 @@ function FilesPanel() {
               </div>
               <div className="ctx-sep" />
               <div className="ctx-item" onClick={() => menu?.path && startRename(menu.path)}>
-                ✏️ 重命名
+                <Icon name="pencil" size={13} /> 重命名
               </div>
               <div className="ctx-sep" />
               <div className="ctx-item danger" onClick={doDelete}>
-                🗑 删除
+                <Icon name="trash-2" size={13} /> 删除
               </div>
             </>
           ) : (
@@ -987,13 +1298,6 @@ interface GitBranch {
   current: boolean;
 }
 
-interface GitLogEntry {
-  hash: string;
-  subject: string;
-  author: string;
-  ts: number;
-}
-
 /** Rust `RepoInfo` from `git_repo_info` — whether the root is a git repo. */
 interface RepoInfo {
   is_repo: boolean;
@@ -1015,22 +1319,29 @@ function glyphFor(code: string): { glyph: string; cls: string } {
   return { glyph: c || "·", cls: "gm" };
 }
 
-/** Unix-seconds timestamp → compact "MM-DD HH:mm" (zh-CN). */
-function fmtTs(sec: number): string {
-  if (!sec) return "—";
-  const d = new Date(sec * 1000);
-  return d.toLocaleString("zh-CN", {
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
 /** OLD (left) / NEW (right) file content feeding the @codemirror/merge view. */
 interface DiffContent {
   old: string;
   new: string;
+}
+
+/** One file touched by a commit (`git_show_commit`). */
+interface GitFileStat {
+  path: string;
+  status: string;
+  add: number;
+  del: number;
+}
+
+/** Full commit payload for the "查看提交详情" modal. */
+interface GitCommitDetail {
+  hash: string;
+  subject: string;
+  body: string;
+  author: string;
+  email: string;
+  ts: number;
+  files: GitFileStat[];
 }
 
 /**
@@ -1046,7 +1357,7 @@ function InlineMergeDiff({ oldText, newText }: { oldText: string; newText: strin
     // Clear any leftover DOM (StrictMode double-mount safety).
     el.textContent = "";
     const readOnlyExt = [
-      oneDark,
+      capilotTheme,
       lineNumbers(),
       EditorState.readOnly.of(true),
       EditorView.editable.of(false),
@@ -1085,6 +1396,17 @@ function GitPanel() {
   const [diffFor, setDiffFor] = useState<string | null>(null);
   const [diffContent, setDiffContent] = useState<Record<string, DiffContent>>({});
   const [menuOpen, setMenuOpen] = useState(false);
+  // Commit-tree right-click menu (commit under cursor + position).
+  const [commitMenu, setCommitMenu] = useState<{ x: number; y: number; commit: GitLogEntry } | null>(null);
+  // Branch-chip popover (switch / create / pull / push / delete).
+  const [branchMenuOpen, setBranchMenuOpen] = useState(false);
+  // Inline "新建分支" name input. `{}` = from the chip (create + switch);
+  // `{ startAt }` = from a commit (create there, don't switch).
+  const [branchPrompt, setBranchPrompt] = useState<{ startAt?: string } | null>(null);
+  const [branchName, setBranchName] = useState("");
+  const [branchErr, setBranchErr] = useState("");
+  // Commit detail modal; "loading" is the transient fetch state.
+  const [commitDetail, setCommitDetail] = useState<GitCommitDetail | "loading" | null>(null);
   const addTab = useStore((s) => s.addTab);
   const setActiveTab = useStore((s) => s.setActiveTab);
 
@@ -1131,7 +1453,7 @@ function GitPanel() {
       setBranches([]);
     }
     try {
-      const lg = await invoke<GitLogEntry[]>("git_log", { repo: root, count: 20 });
+      const lg = await invoke<GitLogEntry[]>("git_log", { repo: root, count: 100 });
       setLog(lg ?? []);
     } catch {
       setLog([]);
@@ -1197,6 +1519,36 @@ function GitPanel() {
       document.removeEventListener("visibilitychange", tick);
     };
   }, []);
+
+  // Close the commit context menu / branch popover on any click, right-click, or
+  // Escape (the detail modal closes on Escape too). The timestamp guard ignores
+  // events fired within 150 ms of opening — some compositors synthesize a click
+  // right after a contextmenu, which would otherwise close the menu instantly.
+  useEffect(() => {
+    if (!commitMenu && !branchMenuOpen && !commitDetail) return;
+    const openedAt = Date.now();
+    const close = () => {
+      if (Date.now() - openedAt > 150) {
+        setCommitMenu(null);
+        setBranchMenuOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setCommitMenu(null);
+      setBranchMenuOpen(false);
+      setCommitDetail(null);
+      setBranchPrompt(null);
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("contextmenu", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("contextmenu", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [commitMenu, branchMenuOpen, commitDetail]);
 
   const runAction = async (fn: () => Promise<unknown>, okMsg: string) => {
     setBusy(true);
@@ -1336,6 +1688,110 @@ function GitPanel() {
     await refresh();
   };
 
+  /** Open the commit-tree right-click menu for a commit row. */
+  const openCommitMenu = (e: React.MouseEvent, commit: GitLogEntry) => {
+    setBranchMenuOpen(false);
+    setBranchPrompt(null);
+    setCommitDetail(null);
+    // Clamp so the ~220px menu stays inside the viewport.
+    const x = Math.min(e.clientX, window.innerWidth - 220);
+    const y = Math.min(e.clientY, window.innerHeight - 200);
+    setCommitMenu({ x, y, commit });
+  };
+
+  /** Copy text to the clipboard, falling back to execCommand (WebKitGTK may not
+   *  grant navigator.clipboard outside a secure context). */
+  const copyText = async (text: string) => {
+    let ok = false;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        ok = true;
+      }
+    } catch {
+      ok = false;
+    }
+    if (!ok) {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+      } catch {
+        ok = false;
+      }
+    }
+    setFeedback(ok ? "已复制到剪贴板" : "复制失败");
+  };
+
+  /** Fetch + open the commit detail modal. */
+  const viewCommitDetail = async (c: GitLogEntry) => {
+    setCommitMenu(null);
+    setCommitDetail("loading");
+    try {
+      const d = await invoke<GitCommitDetail>("git_show_commit", { repo: root, hash: c.hash });
+      setCommitDetail(d);
+    } catch (e) {
+      setCommitDetail(null);
+      setFeedback(String(e));
+    }
+  };
+
+  /** Detach HEAD at a historical commit (with a confirm — moves the working tree). */
+  const checkoutCommit = async (c: GitLogEntry) => {
+    setCommitMenu(null);
+    const short = c.hash.slice(0, 7);
+    const ok = await confirm(
+      `检出到提交 ${short}（游离 HEAD）？\n\n未提交的更改会阻止切换；之后可从分支菜单切回原分支。`,
+      { title: "检出提交", kind: "warning" }
+    );
+    if (!ok) return;
+    await runAction(
+      () => invoke("git_checkout_commit", { repo: root, hash: c.hash }),
+      `已检出 ${short}（游离 HEAD）`
+    );
+  };
+
+  /** Create a branch: from a commit (stay put) or from the chip (create + switch). */
+  const submitBranch = async () => {
+    const name = branchName.trim();
+    if (!name) return;
+    setBranchErr("");
+    const startAt = branchPrompt?.startAt;
+    try {
+      if (startAt) {
+        await invoke("git_create_branch", { repo: root, name, startAt });
+        setFeedback(`已创建分支 ${name}`);
+      } else {
+        await invoke("git_switch_new", { repo: root, name });
+        setFeedback(`已创建并切换到分支 ${name}`);
+      }
+    } catch (e) {
+      setBranchErr(String(e));
+      return;
+    }
+    setBranchPrompt(null);
+    setBranchName("");
+    setCommitMenu(null);
+    setBranchMenuOpen(false);
+    await refresh();
+  };
+
+  /** Force-delete a branch (confirm first; the current branch is never offered). */
+  const deleteBranch = async (name: string) => {
+    const ok = await confirm(
+      `强制删除分支「${name}」？未合并的提交会一并删除（仍可从 reflog 找回）。`,
+      { title: "删除分支", kind: "warning" }
+    );
+    if (!ok) return;
+    setBranchMenuOpen(false);
+    await runAction(() => invoke("git_delete_branch", { repo: root, name }), `已删除分支 ${name}`);
+  };
+
   const openInEditor = (path: string) => {
     const abs = root.endsWith("/") ? `${root}${path}` : `${root}/${path}`;
     const name = path.split("/").pop() || path;
@@ -1462,7 +1918,7 @@ function GitPanel() {
                   void discardFile(e);
                 }}
               >
-                ⌫
+                <Icon name="x" size={14} />
               </span>
             )}
             <span
@@ -1531,7 +1987,7 @@ function GitPanel() {
   ) => (
     <div className="gv-group">
       <div className="gv-group-header" onClick={() => onToggle(!open)}>
-        <span className="gv-arrow">{open ? "▾" : "▸"}</span>
+        <span className="gv-arrow">{open ? <Icon name="chevron-down" size={12} /> : <Icon name="chevron-right" size={12} />}</span>
         <span className="gv-group-title">
           {title} ({list.length})
         </span>
@@ -1557,7 +2013,7 @@ function GitPanel() {
   );
 
   return (
-    <div className="tab-panel" id="tab-git" style={{ padding: 12 }}>
+    <div className="tab-panel gv-panel" id="tab-git" style={{ padding: 12 }}>
       {repoInfo && !repoInfo.is_repo ? (
         <div className="gv-scroll">
           <div className="up-git-init">
@@ -1575,14 +2031,114 @@ function GitPanel() {
           <div className="gv-scroll">
           {/* Header row: branch + indicators left, refresh/more right */}
           <div className="gv-head">
-            <span className="gv-branch" title={branch ? `当前分支: ${branch}` : "无分支"}>
-              ⎇ {branch || "无分支"}
+            <span className="gv-branch-wrap">
+              <span
+                className={`gv-branch${branchMenuOpen ? " open" : ""}`}
+                title={branch ? `当前分支: ${branch}（点击管理分支）` : "无分支（点击管理分支）"}
+                onClick={() => {
+                  setBranchMenuOpen((o) => !o);
+                  setMenuOpen(false);
+                  setCommitMenu(null);
+                  setCommitDetail(null);
+                }}
+              >
+                <Icon name="git-branch" size={12} /> {branch || "无分支"}
+              </span>
+              {branchMenuOpen && (
+                <div
+                  className="gv-branch-pop"
+                  onClick={(e) => e.stopPropagation()}
+                  onContextMenu={(e) => e.stopPropagation()}
+                >
+                  <div className="gv-menu-label">分支管理</div>
+                  {branchPrompt == null ? (
+                    <div
+                      className="gv-branch-new"
+                      onClick={() => {
+                        setBranchPrompt({});
+                        setBranchName("");
+                        setBranchErr("");
+                      }}
+                    >
+                      <Icon name="plus" size={12} /> 新建分支…
+                    </div>
+                  ) : (
+                    <div className="gv-branch-new-input">
+                      <input
+                        autoFocus
+                        value={branchName}
+                        placeholder="新分支名…"
+                        onChange={(e) => {
+                          setBranchName(e.target.value);
+                          setBranchErr("");
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            void submitBranch();
+                          } else if (e.key === "Escape") setBranchPrompt(null);
+                        }}
+                      />
+                      {branchErr && <div className="ctx-newbranch-err">{branchErr}</div>}
+                    </div>
+                  )}
+                  <div className="gv-menu-label">切换分支</div>
+                  <div className="gv-menu-branches">
+                    {branchList.length === 0 && <div className="gv-empty">无分支</div>}
+                    {branchList.map((b) => (
+                      <div key={b.name} className="gv-menu-branch-row">
+                        <div
+                          className={`gv-menu-branch${b.current ? " current" : ""}`}
+                          title={b.current ? `当前分支: ${b.name}` : `切换到 ${b.name}`}
+                          onClick={() => {
+                            setBranchMenuOpen(false);
+                            void switchBranch(b.name);
+                          }}
+                        >
+                          {b.current ? (
+                            <Icon name="dot" size={12} style={{ marginRight: 4 }} />
+                          ) : (
+                            <Icon name="circle" size={12} style={{ marginRight: 4 }} />
+                          )}
+                          <span className="gv-menu-branch-name">{b.name}</span>
+                        </div>
+                        {!b.current && (
+                          <span
+                            className="gv-branch-del"
+                            title="强制删除分支"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void deleteBranch(b.name);
+                            }}
+                          >
+                            <Icon name="x" size={12} />
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="gv-menu-sep" />
+                  <div className="gv-menu-item" onClick={() => { setBranchMenuOpen(false); pull(); }}>
+                    拉取 (pull)
+                  </div>
+                  <div className="gv-menu-item" onClick={() => { setBranchMenuOpen(false); push(); }}>
+                    推送 (push)
+                  </div>
+                </div>
+              )}
             </span>
             <span className="gv-icon" onClick={refresh} title="刷新">
-              ↻
+              <Icon name="rotate-cw" size={14} />
             </span>
-            <span className="gv-icon gv-more" onClick={() => setMenuOpen(!menuOpen)} title="更多">
-              ⋯
+            <span
+              className="gv-icon gv-more"
+              onClick={() => {
+                setMenuOpen(!menuOpen);
+                setBranchMenuOpen(false);
+              }}
+              title="更多"
+            >
+              <Icon name="ellipsis" size={14} />
             </span>
             {menuOpen && <div className="gv-backdrop" onClick={() => setMenuOpen(false)} />}
             {menuOpen && (
@@ -1608,7 +2164,11 @@ function GitPanel() {
                         setMenuOpen(false);
                       }}
                     >
-                      {b.current ? "● " : "○ "}
+                      {b.current ? (
+                        <Icon name="dot" size={12} style={{ marginRight: 4 }} />
+                      ) : (
+                        <Icon name="circle" size={12} style={{ marginRight: 4 }} />
+                      )}
                       {b.name}
                     </div>
                   ))}
@@ -1651,7 +2211,7 @@ function GitPanel() {
 
           {noRemote && (
             <div className="up-git-hint" title="未配置远程仓库">
-              🚫 无远程仓库（Pull / Push 不可用）
+              <Icon name="circle-slash" size={12} /> 无远程仓库（Pull / Push 不可用）
             </div>
           )}
 
@@ -1681,32 +2241,156 @@ function GitPanel() {
           {/* 「已提交的更改」组已按用户要求隐藏（git_committed 拉取一并移除，
               恢复时从 git 历史找回 committed 组 JSX 即可）。 */}
 
-          {entries.length === 0 && !error && <div className="gv-clean">工作区干净 ✅</div>}
+          </div>
 
-          {/* Commit history (DevPlan §7.4B) */}
-          <div className="gv-group gg-log">
+          {/* Commit history (DevPlan §7.4B): top-anchored below the change groups
+              — `.gv-scroll` above sizes to its content, and this group grows
+              (flex: 1 1 auto) to fill down to the panel bottom, never past it.
+              When collapsed, flexGrow drops to 0 so the header alone doesn't
+              stretch a tall empty box. */}
+          <div className="gv-group gg-log" style={{ flexGrow: logOpen ? 1 : 0, flexShrink: logOpen ? 1 : 0 }}>
             <div className="gv-group-header gg-log-head" onClick={() => setLogOpen(!logOpen)}>
-              <span className="gv-arrow">{logOpen ? "▾" : "▸"}</span>
+              <span className="gv-arrow">{logOpen ? <Icon name="chevron-down" size={12} /> : <Icon name="chevron-right" size={12} />}</span>
               <span className="gv-group-title">提交历史</span>
             </div>
             {logOpen && (
               <div className="gg-log-body">
-                {log.length === 0 && <div className="gg-log-empty">暂无提交记录</div>}
-                {log.map((c) => (
-                  <div
-                    key={c.hash}
-                    className="gg-log-row"
-                    title={`${c.author} · ${fmtTs(c.ts)}`}
-                  >
-                    <span className="gg-log-hash">{c.hash}</span>
-                    <span className="gg-log-subject">{c.subject}</span>
-                  </div>
-                ))}
+                {log.length === 0 ? (
+                  <div className="gg-log-empty">暂无提交记录</div>
+                ) : (
+                  <CommitGraph log={log} menuOpen={!!commitMenu} onCommitContextMenu={openCommitMenu} />
+                )}
               </div>
             )}
           </div>
-          </div>
         </>
+      )}
+
+      {/* Commit-tree right-click menu */}
+      {commitMenu && (
+        <div
+          className="ctx-menu gv-commit-menu"
+          style={{ left: commitMenu.x, top: commitMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.stopPropagation()}
+        >
+          <div className="ctx-label">{commitMenu.commit.hash.slice(0, 7)}</div>
+          <div
+            className="ctx-item"
+            onClick={() => {
+              void copyText(commitMenu.commit.hash);
+              setCommitMenu(null);
+            }}
+          >
+            <Icon name="copy" size={13} /> 复制提交哈希
+          </div>
+          <div
+            className="ctx-item"
+            onClick={() => {
+              void copyText(commitMenu.commit.subject);
+              setCommitMenu(null);
+            }}
+          >
+            <Icon name="clipboard" size={13} /> 复制提交信息
+          </div>
+          <div className="ctx-sep" />
+          <div className="ctx-item" onClick={() => viewCommitDetail(commitMenu.commit)}>
+            <Icon name="eye" size={13} /> 查看提交详情
+          </div>
+          <div className="ctx-item" onClick={() => checkoutCommit(commitMenu.commit)}>
+            <Icon name="git-pull-request" size={13} /> 检出此提交（游离 HEAD）
+          </div>
+          <div className="ctx-sep" />
+          {branchPrompt?.startAt === commitMenu.commit.hash ? (
+            <div className="ctx-newbranch">
+              <input
+                autoFocus
+                value={branchName}
+                placeholder="新分支名…"
+                onChange={(e) => {
+                  setBranchName(e.target.value);
+                  setBranchErr("");
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void submitBranch();
+                  } else if (e.key === "Escape") setBranchPrompt(null);
+                }}
+              />
+              {branchErr && <div className="ctx-newbranch-err">{branchErr}</div>}
+            </div>
+          ) : (
+            <div
+              className="ctx-item"
+              onClick={() => {
+                setBranchPrompt({ startAt: commitMenu.commit.hash });
+                setBranchName("");
+                setBranchErr("");
+              }}
+            >
+              <Icon name="git-branch" size={13} /> 从此提交新建分支…
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Commit detail modal */}
+      {commitDetail && (
+        <div className="gv-detail-backdrop" onClick={() => setCommitDetail(null)}>
+          <div className="gv-detail" onClick={(e) => e.stopPropagation()}>
+            {commitDetail === "loading" ? (
+              <div className="gv-detail-loading">加载中…</div>
+            ) : (
+              <>
+                <div className="gv-detail-head">
+                  <span className="gv-detail-hash">{commitDetail.hash.slice(0, 7)}</span>
+                  <span
+                    className="gv-detail-icon"
+                    title="复制完整哈希"
+                    onClick={() => copyText(commitDetail.hash)}
+                  >
+                    <Icon name="copy" size={14} />
+                  </span>
+                  <span
+                    className="gv-detail-icon gv-detail-close"
+                    title="关闭"
+                    onClick={() => setCommitDetail(null)}
+                  >
+                    <Icon name="x" size={14} />
+                  </span>
+                </div>
+                <div className="gv-detail-subject">{commitDetail.subject}</div>
+                <div className="gv-detail-meta">
+                  {commitDetail.author}
+                  {commitDetail.email ? ` <${commitDetail.email}>` : ""} ·{" "}
+                  {new Date(commitDetail.ts * 1000).toLocaleString("zh-CN")}
+                </div>
+                {commitDetail.body && (
+                  <pre className="gv-detail-body">{commitDetail.body}</pre>
+                )}
+                <div className="gv-detail-files">
+                  {commitDetail.files.length === 0 ? (
+                    <div className="gv-detail-files-empty">（无文件改动）</div>
+                  ) : (
+                    commitDetail.files.map((f) => (
+                      <div key={f.path} className="gv-detail-file">
+                        <span className="gv-detail-file-status">{f.status}</span>
+                        <span className="gv-detail-file-path" title={f.path}>
+                          {f.path}
+                        </span>
+                        <span className="gv-detail-file-num">
+                          {f.add > 0 && <span className="gv-detail-add">+{f.add}</span>}
+                          {f.del > 0 && <span className="gv-detail-del">−{f.del}</span>}
+                        </span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );
