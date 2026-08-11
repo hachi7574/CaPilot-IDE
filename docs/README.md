@@ -17,4 +17,16 @@ Linux system dependencies: `libwebkit2gtk-4.1-dev librsvg2-dev libgtk-3-dev libs
 
 - `CaPilot-IDE-RUNBOOK.md` — running, maintenance, known issues, and security notes
 - `security-review.md` — security review and release checklist
+- `ai-runtime-references.md` — official docs + hard-coded integration facts for the claude / codex / opencode runtimes
+- `keyboard-shortcuts.md` — 快捷键速查：bash 终端 + claude / codex / opencode 全部 runtime
 - `styleguide/` / `Assets/` — LUCY design guide and assets
+
+## SVG 图标集（GUI 图标标准）
+
+**规则：GUI 一律不允许使用 emoji，全部使用 SVG 图标。**
+
+- 图标源文件：`docs/Assets/Icons/` — 根目录 104 个 Lucide 线性图标（`stroke` + `currentColor`），`brands/` 子目录 7 个品牌单色 logo（`fill="currentColor"`，来源 Simple Icons）。
+- React 组件：`ui/components/Icon.tsx`（**由脚本生成，勿手改**）。用法：`import { Icon } from "../Icon"`，`<Icon name="activity" size={16} />`。运行时 logo 用 `runtimeIcon(runtime)`：`bash→gnubash`、`claude→claude`、`codex→openai`、`opencode→opencode`、其它→`terminal`。
+- 颜色：默认继承元素 `color`（CSS 变量 `--icon-color: currentColor`）；在任意作用域设置 `--icon-color: <color>` 即可整体换色。
+- 重新生成组件：`python3 scripts/gen_icon_component.py`。
+- 完整 emoji → SVG 文件 → lucide 图标名对照表：见 `docs/Assets/Icons/README.md`。

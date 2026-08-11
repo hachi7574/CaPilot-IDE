@@ -22,6 +22,7 @@ Linux requires `libwebkit2gtk-4.1-dev`, `librsvg2-dev`, `libgtk-3-dev`, `libsoup
 
 - `src-tauri/` contains the Rust core. Tauri commands live in `src-tauri/src/lib.rs` and cover agent sessions, persistence, files, Git, settings, ESP, and resource history.
 - `src-tauri/src/agent_runtime/` contains runtime adapters and the shared PTY lifecycle manager.
+- `docs/ai-runtime-references.md` maps each agent CLI's official docs and the integration facts CaPilot hard-codes (keybindings, flags, permission cycles, session layout). Consult it before changing runtime adapters.
 - `ui/` contains the React 19 frontend. Zustand state lives in `ui/state/store.ts`, and Tauri channels stream PTY bytes to `XTermPanel`.
 - Session state is stored in `~/CaPilot/sessions.db` and per-session `.agent-meta.json` files. Opening a restored tab resumes its saved runtime session lazily.
 
