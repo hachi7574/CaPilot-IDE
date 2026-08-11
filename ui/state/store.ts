@@ -43,7 +43,19 @@ export interface RuntimeInfo {
   name: string;
   available: boolean;
   authenticated: boolean;
-  models?: { id: string; name: string; provider: string; is_default: boolean }[];
+  models?: {
+    id: string;
+    name: string;
+    provider: string;
+    is_default: boolean;
+    /** Per-model reasoning efforts (codex). Absent = not exposed per model. */
+    efforts?: {
+      id: string;
+      label: string;
+      description: string;
+      is_default: boolean;
+    }[];
+  }[];
   /** Provider-native permission choices. Empty means this runtime has no
    * permission policy control (for example Bash). */
   permission_modes?: PermissionModeInfo[];
@@ -207,6 +219,9 @@ interface AppState {
   /** One-shot focus directive for the F1 input↔terminal toggle. `seq` bumps on
    *  every request so subscribers can skip stale/mount-time values. */
   focusRequest: { target: "composer" | "terminal"; seq: number } | null;
+  /** One-shot Ctrl+F search directive routed to the active panel (terminal or
+   *  editor). Same `seq` discipline as `focusRequest`. */
+  searchRequest: { target: "terminal" | "editor"; seq: number } | null;
   permissionMode: PermissionMode;
   speed: Speed;
   /** Runtime model id chosen via composer `[模型↑]` (null = runtime default). */
@@ -230,6 +245,9 @@ interface AppState {
   projectRoots: Record<string, string>;
   /** Single-select focused project; null = unfocused (tab bar shows all tabs). */
   focusedProject: string | null;
+  /** In-flight git clones keyed by clone id (id → project name). A project
+   *  listed here renders "正在克隆中" in the sidebar and is dropped on failure. */
+  pendingClones: Record<string, string>;
 
   // Sidebars
   leftSidebarOpen: boolean;
@@ -271,6 +289,8 @@ interface AppState {
   addTab: (tab: Tab) => void;
   /** Add a tab without changing the active tab (used by session restore). */
   addTabSilent: (tab: Tab) => void;
+  /** Move a tab to a new index in the tab strip (drag-reorder). */
+  reorderTabs: (fromIndex: number, toIndex: number) => void;
   closeTab: (id: string) => void;
   setActiveTab: (id: string) => void;
   setSplit: (paneA: string, paneB: string, direction: "row" | "column") => void;
@@ -280,6 +300,7 @@ interface AppState {
   setDraggedTabId: (id: string | null) => void;
   toggleComposer: () => void;
   requestFocus: (target: "composer" | "terminal") => void;
+  requestSearch: (target: "terminal" | "editor") => void;
   setPermissionMode: (mode: PermissionMode) => void;
   setSpeed: (speed: Speed) => void;
   setSelectedModel: (model: string | null) => void;
@@ -296,6 +317,10 @@ interface AppState {
   projectRoot: (name: string) => string | undefined;
   addProject: (name: string, root?: string) => void;
   removeProject: (name: string) => void;
+  /** Track a background `git_clone`; `name` shows as "正在克隆中" until
+   *  `finishClone` (from `git://cloned` / `git://clone-error`). */
+  beginClone: (id: string, name: string) => void;
+  finishClone: (id: string) => void;
   /** Move `name` to `targetName`'s position in the sidebar project list. */
   moveProject: (name: string, targetName: string) => void;
   /** Sleep a project: kill all its agent processes + close its tabs/panels to
@@ -348,7 +373,7 @@ export interface TermTemplate {
   id: string;
   name: string;
   command: string;
-  runtime: "bash" | "bash-rc" | "claude" | "codex" | "opencode" | "omp";
+  runtime: "bash" | "bash-rc" | "claude" | "codex" | "opencode";
   fixed?: boolean;
 }
 
@@ -358,15 +383,15 @@ const DEFAULT_TEMPLATES: TermTemplate[] = [
   { id: "claude", name: "claude", command: "", runtime: "claude" },
   { id: "codex", name: "codex", command: "", runtime: "codex" },
   { id: "opencode", name: "opencode", command: "", runtime: "opencode" },
-  { id: "omp", name: "omp", command: "", runtime: "omp" },
 ];
 function loadTermTemplates(): TermTemplate[] {
   try {
     const raw = localStorage.getItem(TERM_TEMPLATES_KEY);
     const stored: TermTemplate[] = raw ? (JSON.parse(raw) as TermTemplate[]) : [];
     // Drop the old minimal `--norc` "bash" template (superseded by the full
-    // bash), and re-label the old "正常 bash" default to just "bash".
-    const list = stored.filter((t) => t.id !== "bash");
+    // bash), re-label the old "正常 bash" default to just "bash", and drop
+    // persisted omp templates (runtime removed).
+    const list = stored.filter((t) => t.id !== "bash" && t.id !== "omp");
     for (const t of list) {
       if (t.id === "bash-rc" && t.name === "正常 bash") t.name = "bash";
     }
@@ -402,6 +427,7 @@ export const useStore = create<AppState>((set, get) => ({
   activeTabId: null,
   composerOpen: true,
   focusRequest: null,
+  searchRequest: null,
   permissionMode: "ask",
   speed: "auto",
   selectedModel: null,
@@ -433,6 +459,7 @@ export const useStore = create<AppState>((set, get) => ({
   projects: [],
   projectRoots: {},
   focusedProject: null,
+  pendingClones: {},
   onboarded: loadOnboarded(),
   termTemplates: loadTermTemplates(),
   fontScale: loadFontScale(),
@@ -570,6 +597,17 @@ export const useStore = create<AppState>((set, get) => ({
       tabs: [...s.tabs.filter((t) => t.id !== tab.id), tab],
     })),
 
+  reorderTabs: (fromIndex, toIndex) =>
+    set((s) => {
+      if (fromIndex === toIndex) return {};
+      const n = s.tabs.length;
+      if (fromIndex < 0 || toIndex < 0 || fromIndex >= n || toIndex >= n) return {};
+      const tabs = [...s.tabs];
+      const [moved] = tabs.splice(fromIndex, 1);
+      tabs.splice(toIndex, 0, moved);
+      return { tabs };
+    }),
+
   closeTab: (id) =>
     set((s) => {
       const tabs = s.tabs.filter((t) => t.id !== id);
@@ -666,6 +704,11 @@ export const useStore = create<AppState>((set, get) => ({
       focusRequest: { target, seq: (s.focusRequest?.seq ?? 0) + 1 },
     })),
 
+  requestSearch: (target) =>
+    set((s) => ({
+      searchRequest: { target, seq: (s.searchRequest?.seq ?? 0) + 1 },
+    })),
+
   setPermissionMode: (mode) => set({ permissionMode: mode }),
 
   setSpeed: (speed) => set({ speed }),
@@ -716,6 +759,17 @@ export const useStore = create<AppState>((set, get) => ({
           ? { projectRoots: { ...s.projectRoots, [name]: root } }
           : {}),
       };
+    }),
+
+  beginClone: (id, name) =>
+    set((s) => ({ pendingClones: { ...s.pendingClones, [id]: name } })),
+
+  finishClone: (id) =>
+    set((s) => {
+      if (!(id in s.pendingClones)) return {};
+      const pendingClones = { ...s.pendingClones };
+      delete pendingClones[id];
+      return { pendingClones };
     }),
 
   removeProject: (name) => {

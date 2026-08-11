@@ -59,6 +59,44 @@ export async function spawnTerminal(
   return id;
 }
 
+/** Spawn a bash terminal whose cwd is an arbitrary directory (e.g. a folder
+ *  picked in the file tree). `command` (optional) runs after the shell reaches
+ *  its prompt. The session is grouped under `project` for the sidebar. */
+export async function spawnBashAt(
+  project: string,
+  dir: string,
+  command?: string
+): Promise<string> {
+  const s = useStore.getState();
+  const { channel, flush } = createBufferedChannel();
+  const info = (await invoke("agent_spawn", {
+    runtime: "bash-rc",
+    project,
+    projectRoot: dir,
+    resumeKey: null,
+    model: null,
+    speed: "auto",
+    mode: "ask",
+    onData: channel,
+  })) as AgentInfo;
+  flush(info.id);
+  s.addAgent({ ...info, project }, channel);
+  s.addTab({
+    id: info.id,
+    type: "agent",
+    agentId: info.id,
+    title: info.title || "bash",
+  });
+  if (command) {
+    // Wait for the shell prompt, then send the command (raw:false appends \r).
+    await new Promise((r) => setTimeout(r, 400));
+    await invoke("agent_write", { id: info.id, data: command, raw: false }).catch(
+      () => {}
+    );
+  }
+  return info.id;
+}
+
 /** Ensure the target agent has a live PTY channel (resume restored sessions).
  *  Returns true if a resume was required (caller may want to delay input). */
 export async function ensureAgentChannel(agentId: string): Promise<boolean> {
