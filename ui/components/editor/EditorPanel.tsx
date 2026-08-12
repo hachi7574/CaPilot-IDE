@@ -459,7 +459,7 @@ export function EditorPanel({ filePath, active = true }: EditorPanelProps) {
                 ref={searchInputRef}
                 className="term-search-input"
                 type="text"
-                placeholder="搜索文件…"
+                placeholder="搜索文本…"
                 value={searchQuery}
                 onChange={(e) => {
                   const q = e.target.value;

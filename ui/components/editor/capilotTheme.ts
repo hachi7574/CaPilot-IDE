@@ -10,8 +10,8 @@ import { tags as t } from "@lezer/highlight";
 const capilotThemeSpec = EditorView.theme(
   {
     "&": {
-      backgroundColor: "var(--bg)",
-      color: "var(--ink)",
+      backgroundColor: "var(--bg2)",
+      color: "var(--pl-fg)",
     },
     ".cm-content": {
       caretColor: "var(--brand)",
@@ -24,8 +24,8 @@ const capilotThemeSpec = EditorView.theme(
         backgroundColor: "var(--brand-selection)",
       },
     ".cm-gutters": {
-      backgroundColor: "var(--bg)",
-      color: "var(--ink2)",
+      backgroundColor: "var(--bg2)",
+      color: "var(--pl-comment)",
       border: "none",
     },
     ".cm-activeLine": {
@@ -140,34 +140,36 @@ const capilotThemeSpec = EditorView.theme(
   { dark: true },
 );
 
-/** Syntax highlighting driven by the CaPilot palette. */
+/** Syntax highlighting in the Atom One Dark palette (nathanbuchar/
+ *  atom-one-dark-terminal). Foreground text keeps the app's --pl-fg; only the
+ *  token colors are Atom One Dark. */
 const capilotHighlight = HighlightStyle.define([
-  { tag: t.comment, color: "var(--ink2)", fontStyle: "italic" },
-  { tag: [t.meta, t.docComment], color: "var(--ink2)" },
-  { tag: t.keyword, color: "var(--primary)" },
-  { tag: t.operator, color: "var(--brand)" },
-  { tag: t.punctuation, color: "var(--ink2)" },
-  { tag: [t.bool, t.null, t.atom], color: "var(--lane-1)" },
-  { tag: t.number, color: "var(--lane-2)" },
-  { tag: t.string, color: "var(--success)" },
-  { tag: t.regexp, color: "var(--success)" },
-  { tag: t.tagName, color: "var(--brand)" },
-  { tag: t.attributeName, color: "var(--warn)" },
-  { tag: t.propertyName, color: "var(--ai)" },
-  { tag: t.typeName, color: "var(--lane-1)" },
-  { tag: t.className, color: "var(--lane-2)" },
-  { tag: t.namespace, color: "var(--lane-5)" },
+  { tag: t.comment, color: "var(--pl-comment)", fontStyle: "italic" },
+  { tag: [t.meta, t.docComment], color: "var(--pl-comment)" },
+  { tag: t.keyword, color: "var(--pl-red)" },
+  { tag: t.operator, color: "var(--pl-cyan)" },
+  { tag: t.punctuation, color: "var(--pl-white)" },
+  { tag: [t.bool, t.null, t.atom], color: "var(--pl-red)" },
+  { tag: t.number, color: "var(--pl-orange)" },
+  { tag: t.string, color: "var(--pl-green)" },
+  { tag: t.regexp, color: "var(--pl-green)" },
+  { tag: t.tagName, color: "var(--pl-red)" },
+  { tag: t.attributeName, color: "var(--pl-yellow)" },
+  { tag: t.propertyName, color: "var(--pl-cyan)" },
+  { tag: t.typeName, color: "var(--pl-yellow)" },
+  { tag: t.className, color: "var(--pl-orange)" },
+  { tag: t.namespace, color: "var(--pl-blue-purple)" },
   {
     tag: [t.function(t.variableName), t.function(t.name), t.definition(t.function(t.variableName))],
-    color: "var(--ai)",
+    color: "var(--pl-blue)",
   },
   {
     tag: t.definition(t.variableName),
-    color: "var(--ink)",
+    color: "var(--pl-white)",
   },
-  { tag: t.variableName, color: "var(--ink2)" },
-  { tag: t.invalid, color: "var(--danger)" },
-  { tag: t.heading, color: "var(--brand)" },
+  { tag: t.variableName, color: "var(--pl-white)" },
+  { tag: t.invalid, color: "var(--pl-red)" },
+  { tag: t.heading, color: "var(--pl-yellow)" },
 ]);
 
 /** Full editor extension: UI theme + syntax highlighting. */

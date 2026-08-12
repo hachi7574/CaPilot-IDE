@@ -97,6 +97,187 @@ let lastFocusHandledSeq = 0;
 /** Last `searchRequest.seq` an active terminal has consumed for Ctrl+F search. */
 let lastSearchHandledSeq = 0;
 
+/** True when an xterm onData payload is a mouse MOTION event (hover / drag
+ *  without a fresh button press). The CLIs enable motion tracking (DECSET
+ *  1002/1003, SGR 1006), so merely having the mouse over the canvas emits a
+ *  continuous stream of `ESC [ < b ; x ; y M` sequences — bit 5 of `b` marks
+ *  motion. Forwarding those makes the CLI redraw on every move and stamps the
+ *  tab bar's 运行中/空闲 clock, so a hover reads as 运行中. Clicks (`b & 32 == 0`)
+ *  and wheel (`b & 64`) are real interactions and pass through. */
+function isMouseMotion(data: string): boolean {
+  // SGR (DECSET 1006): ESC [ < b ; x ; y (M|m)
+  if (data.startsWith("\x1b[<")) {
+    const m = /^\x1b\[<(\d+);\d+;\d+[Mm]$/.exec(data);
+    return !!m && (Number(m[1]) & 32) !== 0;
+  }
+  // Legacy (DECSET 1000/1002): ESC [ M b x y (each byte +32).
+  if (
+    data.length === 6 &&
+    data.charCodeAt(0) === 0x1b &&
+    data.charCodeAt(1) === 0x5b &&
+    data.charCodeAt(2) === 0x4d
+  ) {
+    return ((data.charCodeAt(3) - 32) & 32) !== 0;
+  }
+  return false;
+}
+
+/**
+ * Text selection vs. mouse tracking. The claude/opencode TUIs enable xterm's
+ * mouse-reporting modes (DECSET 1000/1002/1003 + SGR 1006), and once any is
+ * active xterm routes mouse drags to the PTY instead of selecting — which is
+ * exactly why selection works in codex (no tracking) but not in the TUIs.
+ *
+ * `STRIP_MOUSE_MODES` filters the tracking *enables* out of the incoming stream
+ * so xterm stays in its default non-reporting mode and native drag / double-
+ * click selection is restored. SGR encoding (1006) is deliberately kept: on its
+ * own it makes xterm emit nothing, and the wheel/click forwarders below need
+ * the CLI to still accept SGR mouse reports.
+ *
+ *   1000 button · 1002 button+drag · 1003 any-motion · 1004 focus · 1005 UTF-8
+ *   · 1015 urxvt encoding
+ */
+const STRIP_MOUSE_MODES = new Set([1000, 1002, 1003, 1004, 1005, 1015]);
+
+/** Alt-buffer TUIs that request mouse tracking. Their viewport scrolls via
+ *  mouse wheel *reports*, so after the tracking strip the wheel has to be
+ *  forwarded to them by hand. Codex/bash scroll through xterm's native
+ *  scrollback and must not receive synthetic mouse bytes. */
+const MOUSE_TUI_RUNTIMES = new Set(["claude", "opencode"]);
+
+/** True if `bytes` contains a complete `ESC [ ?` (DECSET/DECRST) marker. */
+function hasDecsetMarker(bytes: Uint8Array): boolean {
+  for (let i = 0; i + 2 < bytes.length; i++) {
+    if (bytes[i] === 0x1b && bytes[i + 1] === 0x5b && bytes[i + 2] === 0x3f) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Length of a trailing `ESC…`, `ESC […` or `ESC [?…` prefix that could become
+ *  a DECSET sequence once the rest of the bytes arrive in a later flush. */
+function decsetPrefixLength(bytes: Uint8Array): number {
+  const n = bytes.length;
+  if (n >= 3 && bytes[n - 3] === 0x1b && bytes[n - 2] === 0x5b && bytes[n - 1] === 0x3f) return 3;
+  if (n >= 2 && bytes[n - 2] === 0x1b && bytes[n - 1] === 0x5b) return 2;
+  if (n >= 1 && bytes[n - 1] === 0x1b) return 1;
+  return 0;
+}
+
+/** Stateful DECSET filter. Mode sequences can be split across PTY writes, so a
+ *  truncated `ESC [ ? <digits…` prefix is carried into the next call. */
+function createModeSequenceFilter() {
+  let carry: number[] = [];
+  let sgr = false;
+  return {
+    /** True once `CSI ? 1006 h` (SGR mouse encoding) was requested by the CLI. */
+    get sgr(): boolean {
+      return sgr;
+    },
+    /** Strip mouse-tracking enables, pass everything else through untouched.
+     *  Returns null when the frame contained only stripped sequences. */
+    filter(bytes: Uint8Array): Uint8Array | null {
+      // Fast path: no ESC byte at all (plain text), or ESC present but nothing
+      // here that could become a DECSET sequence — hand the frame through
+      // without a copy. (Color-rich TUI frames hit this: they contain ESC but
+      // almost never `ESC [?`.)
+      if (carry.length === 0) {
+        if (bytes.indexOf(0x1b) === -1) return bytes;
+        if (!hasDecsetMarker(bytes) && decsetPrefixLength(bytes) === 0) {
+          return bytes;
+        }
+      }
+      const src = carry.length ? [...carry, ...bytes] : [...bytes];
+      carry = [];
+      const out: number[] = [];
+      let i = 0;
+      while (i < src.length) {
+        if (src[i] !== 0x1b) {
+          out.push(src[i]);
+          i++;
+          continue;
+        }
+        // ESC — only interesting as the start of `ESC [ ? <modes> <h|l>`.
+        if (i + 1 >= src.length || src[i + 1] !== 0x5b) {
+          if (i + 1 >= src.length) {
+            carry = src.slice(i); // trailing ESC may open a marker next flush
+            break;
+          }
+          out.push(src[i]);
+          i++;
+          continue;
+        }
+        if (i + 2 >= src.length || src[i + 2] !== 0x3f) {
+          if (i + 2 >= src.length) {
+            carry = src.slice(i); // trailing `ESC [` — wait for the rest
+            break;
+          }
+          out.push(src[i]);
+          i++;
+          continue;
+        }
+        // `ESC [ ?` — parse the (possibly `;`-separated) mode list.
+        let k = i + 3;
+        const modes: number[] = [];
+        let cur = -1;
+        while (k < src.length) {
+          const c = src[k];
+          if (c >= 0x30 && c <= 0x39) {
+            cur = cur === -1 ? c - 0x30 : cur * 10 + (c - 0x30);
+            k++;
+            continue;
+          }
+          if (c === 0x3b) {
+            if (cur !== -1) modes.push(cur);
+            cur = -1;
+            k++;
+            continue;
+          }
+          break;
+        }
+        if (k >= src.length) {
+          carry = src.slice(i); // digits/params truncated mid-sequence
+          break;
+        }
+        if (cur !== -1) modes.push(cur);
+        const final = src[k];
+        if (final !== 0x68 && final !== 0x6c) {
+          out.push(src[i]);
+          i++;
+          continue;
+        }
+        if (modes.length === 0) {
+          out.push(src[i]);
+          i++;
+          continue;
+        }
+        if (final === 0x68) {
+          if (modes.includes(1006)) sgr = true;
+          const keep = modes.filter((m) => !STRIP_MOUSE_MODES.has(m));
+          if (keep.length !== modes.length) {
+            // Rewrite with the tracking modes removed (and drop entirely if none
+            // remain). A `;`-combined enable like `?1000;1006h` keeps 1006.
+            if (keep.length) {
+              out.push(0x1b, 0x5b, 0x3f);
+              keep.forEach((m, j) => {
+                if (j) out.push(0x3b);
+                for (const d of String(m)) out.push(d.charCodeAt(0));
+              });
+              out.push(0x68);
+            }
+            i = k + 1;
+            continue;
+          }
+        }
+        out.push(...src.slice(i, k + 1));
+        i = k + 1;
+      }
+      return out.length ? new Uint8Array(out) : null;
+    },
+  };
+}
+
 /** Resolve a `:root` CSS custom property to its concrete value. xterm.js theme
  *  and decoration options need literal color strings, so instead of duplicating
  *  the palette we read it from the CSS (single source of truth). */
@@ -257,26 +438,26 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
       fontSize: TERMINAL_FONT_SIZES[fontScale] ?? 13,
       fontFamily: "'JetBrainsMono', ui-monospace, monospace",
       theme: {
-        background: cssVar("--term-bg", "#05070D"),
-        foreground: cssVar("--ink", "#E8ECF1"),
-        cursor: cssVar("--brand", "#8B5CF6"),
-        selectionBackground: cssVar("--brand-selection", "rgba(139, 92, 246, 0.3)"),
-        black: cssVar("--bg3", "#161B22"),
-        red: cssVar("--danger", "#F87171"),
-        green: cssVar("--success", "#4ADE80"),
-        yellow: cssVar("--warn", "#FACC15"),
-        blue: cssVar("--primary", "#A78BFA"),
-        magenta: cssVar("--lane-3", "#E84BA5"),
-        cyan: cssVar("--lane-1", "#47E8D4"),
-        white: cssVar("--ink", "#E8ECF1"),
-        brightBlack: cssVar("--rule2", "#30363D"),
-        brightRed: cssVar("--danger", "#F87171"),
-        brightGreen: cssVar("--success", "#4ADE80"),
-        brightYellow: cssVar("--warn", "#FACC15"),
-        brightBlue: cssVar("--primary", "#A78BFA"),
-        brightMagenta: cssVar("--lane-3", "#E84BA5"),
-        brightCyan: cssVar("--lane-1", "#47E8D4"),
-        brightWhite: cssVar("--ink", "#E8ECF1"),
+        background: cssVar("--term-bg", "#0D1117"),
+        foreground: cssVar("--pl-fg", "#ABB2BF"),
+        cursor: cssVar("--pl-cursor", "#5C6370"),
+        selectionBackground: cssVar("--pl-selection", "#3A3F4B"),
+        black: cssVar("--pl-black", "#1E2127"),
+        red: cssVar("--pl-red", "#E06C75"),
+        green: cssVar("--pl-green", "#98C379"),
+        yellow: cssVar("--pl-yellow", "#D19A66"),
+        blue: cssVar("--pl-blue", "#61AFEF"),
+        magenta: cssVar("--pl-magenta", "#C678DD"),
+        cyan: cssVar("--pl-cyan", "#56B6C2"),
+        white: cssVar("--pl-white", "#ABB2BF"),
+        brightBlack: cssVar("--pl-bright-black", "#5C6370"),
+        brightRed: cssVar("--pl-bright-red", "#E06C75"),
+        brightGreen: cssVar("--pl-bright-green", "#98C379"),
+        brightYellow: cssVar("--pl-bright-yellow", "#D19A66"),
+        brightBlue: cssVar("--pl-bright-blue", "#61AFEF"),
+        brightMagenta: cssVar("--pl-bright-magenta", "#C678DD"),
+        brightCyan: cssVar("--pl-bright-cyan", "#56B6C2"),
+        brightWhite: cssVar("--pl-bright-white", "#FFFFFF"),
       },
       allowProposedApi: true,
     });
@@ -284,6 +465,11 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(containerRef.current);
+    // Belt-and-suspenders for selection: force xterm out of any mouse-reporting
+    // mode a PTY may have enabled before this instance existed (e.g. a session
+    // started before the tracking strip shipped). The DECSET filter below keeps
+    // the modes off for everything that streams in afterwards.
+    term.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l");
 
     // Keyboard copy: xterm.js maps Ctrl+C to a PTY SIGINT (^C), so the browser's
     // default Ctrl+Shift+C — which terminals use for copy — is never produced,
@@ -346,6 +532,11 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     let redrawPulseRequested = false;
     let pendingClaudeMode: string | null = null;
     let modePersistTimer: ReturnType<typeof setTimeout> | null = null;
+
+    // Selection-vs-tracking fix: strip DECSET mouse-tracking enables from the
+    // byte stream before xterm parses it (see STRIP_MOUSE_MODES). One instance
+    // per terminal — its carry tracks this PTY's own stream.
+    const modeFilter = createModeSequenceFilter();
 
     // Ctrl+F search: the SearchAddon scans xterm's live buffer and paints match
     // decorations. One instance per terminal; its results callback updates the
@@ -414,7 +605,8 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
       pendingChunks = [];
       pendingBytes = 0;
       try {
-        term.write(merged, syncClaudeModeFromScreen);
+        const filtered = modeFilter.filter(merged);
+        if (filtered) term.write(filtered, syncClaudeModeFromScreen);
       } catch {
         // terminal disposed
       }
@@ -551,10 +743,100 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
       }
     }
 
-    // Forward user input to the PTY (raw keystroke passthrough).
+    // Forward user input to the PTY (raw keystroke passthrough). Marking the
+    // agent active keeps the tab bar's 运行中/空闲 split honest when a command
+    // is submitted from the terminal itself. Mouse MOTION events are dropped
+    // before either step — a hover is not input, and neither the PTY nor the
+    // activity clock should see it.
     term.onData((data) => {
+      if (isMouseMotion(data)) return;
       invoke("agent_write", { id: agentId, data, raw: true }).catch(() => {});
+      useStore.getState().markAgentActive(agentId);
     });
+
+    /** Convert a DOM event's clientX/Y into terminal cell coordinates
+     *  (1-based, matching xterm's mouse-report encoding). */
+    const cellFromEvent = (clientX: number, clientY: number) => {
+      const screen = containerRef.current?.querySelector<HTMLElement>(
+        ".xterm-screen"
+      );
+      const cols = term.cols || 80;
+      const rows = term.rows || 24;
+      let left = clientX;
+      let top = clientY;
+      let cw = 14;
+      let ch = 24;
+      if (screen) {
+        const r = screen.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) {
+          left = clientX - r.left;
+          top = clientY - r.top;
+          cw = r.width / cols;
+          ch = r.height / rows;
+        }
+      }
+      const col = Math.max(1, Math.min(cols, 1 + Math.floor(left / cw)));
+      const row = Math.max(1, Math.min(rows, 1 + Math.floor(top / ch)));
+      return { col, row };
+    };
+
+    // The TUIs scroll their own alternate screen via mouse wheel *reports*.
+    // With the tracking modes stripped, xterm no longer emits them, so forward
+    // the wheel to the PTY as an SGR report (the CLI kept SGR encoding 1006
+    // enabled even though the tracking modes were suppressed). Codex/bash keep
+    // xterm's native scrollback handling — no synthetic bytes for them.
+    const onWheel = (ev: WheelEvent) => {
+      if (ev.deltaY === 0) return;
+      const runtime = useStore.getState().agents.get(agentId)?.runtime;
+      if (!runtime || !MOUSE_TUI_RUNTIMES.has(runtime)) return;
+      if (!modeFilter.sgr) return; // CLI didn't ask for SGR encoding — leave it
+      ev.preventDefault();
+      const { col, row } = cellFromEvent(ev.clientX, ev.clientY);
+      const dir = ev.deltaY < 0 ? 64 : 65; // wheel up / down
+      invoke("agent_write", {
+        id: agentId,
+        data: `\x1b[<${dir};${col};${row}M`,
+        raw: true,
+      }).catch(() => {});
+    };
+    containerRef.current.addEventListener("wheel", onWheel, { passive: false });
+
+    // Preserve the TUIs' click interactions, which tracking used to deliver as
+    // mouse reports. Forward a plain left-click as press+release on mouseup —
+    // but only if the press never turned into a drag: a drag is a native xterm
+    // selection and must not also reach the PTY.
+    let mouseDownPos: { x: number; y: number } | null = null;
+    const onMouseDown = (ev: MouseEvent) => {
+      if (ev.button !== 0) return;
+      if (ev.shiftKey || ev.ctrlKey || ev.altKey || ev.metaKey) return;
+      const runtime = useStore.getState().agents.get(agentId)?.runtime;
+      if (!runtime || !MOUSE_TUI_RUNTIMES.has(runtime)) return;
+      mouseDownPos = { x: ev.clientX, y: ev.clientY };
+    };
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!mouseDownPos) return;
+      const dx = ev.clientX - mouseDownPos.x;
+      const dy = ev.clientY - mouseDownPos.y;
+      if (dx * dx + dy * dy > 25) mouseDownPos = null; // became a drag → select
+    };
+    const onMouseUp = (ev: MouseEvent) => {
+      if (!mouseDownPos) return;
+      mouseDownPos = null;
+      if (ev.button !== 0) return;
+      if (!modeFilter.sgr) return;
+      const { col, row } = cellFromEvent(ev.clientX, ev.clientY);
+      // Press + release so the TUI sees a complete click. Deliberately does NOT
+      // stamp activity: a click is passive navigation, not the agent working
+      // (and with ACTIVE_WINDOW_MS = 0 the stamp would be inert anyway).
+      invoke("agent_write", {
+        id: agentId,
+        data: `\x1b[<0;${col};${row}M\x1b[<0;${col};${row}m`,
+        raw: true,
+      }).catch(() => {});
+    };
+    containerRef.current.addEventListener("mousedown", onMouseDown);
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
 
     // Resize handler
     const handleResize = () => {
@@ -576,6 +858,10 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
       cancelAnimationFrame(raf1);
       cancelAnimationFrame(raf2);
       observer.disconnect();
+      containerRef.current?.removeEventListener("wheel", onWheel);
+      containerRef.current?.removeEventListener("mousedown", onMouseDown);
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
       searchResultsSub.dispose();
       searchAddonRef.current = null;
       term.dispose();

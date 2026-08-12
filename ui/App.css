@@ -2,18 +2,30 @@
 
 :root {
   --bg: #07090F; --bg2: #0D1117; --bg3: #161B22; --bg4: #1E2530;
-  --ink: #E8ECF1; --ink2: #C9D1D9; --muted: #7D8590;
+  --ink: #F2F5F8; --ink2: #DCE2EA; --muted: #7D8590;
   --rule: #21262D; --rule2: #30363D;
   --brand: #8B5CF6; --brand-dim: #5B21B6;
   --primary: #A78BFA; --primary-dim: #6D28D9;
   --ai: #C4B5FD; --ai-dim: #6D28D9;
   --success: #4ADE80; --warn: #FACC15; --danger: #F87171;
-  --accent-ink: #F5F3FF; --term-bg: #05070D; --search-match-bg: #2E2A4A;
+  --accent-ink: #F5F3FF; --term-bg: var(--bg2); --search-match-bg: #2E2A4A;
   --brand-selection: rgba(139, 92, 246, 0.3);
   --brand-rgb: 139 92 246; --success-rgb: 74 222 128; --warn-rgb: 250 204 21;
   --danger-rgb: 248 113 113; --white-rgb: 255 255 255; --black-rgb: 0 0 0;
   --lane-0: #8B5CF6; --lane-1: #47E8D4; --lane-2: #FFA657; --lane-3: #E84BA5;
   --lane-4: #6BDB52; --lane-5: #008fb5; --lane-6: #f1c109;
+  /* Atom One Dark (nathanbuchar/atom-one-dark-terminal) terminal + editor
+     palette. Referenced only by the xterm theme and the CodeMirror highlight
+     style, so the rest of the app keeps its own palette. */
+  --pl-fg: #ABB2BF; --pl-black: #1E2127; --pl-red: #E06C75; --pl-green: #98C379;
+  --pl-yellow: #D19A66; --pl-blue: #61AFEF; --pl-magenta: #C678DD; --pl-cyan: #56B6C2;
+  --pl-white: #ABB2BF; --pl-orange: #D19A66; --pl-purple: #C678DD;
+  --pl-blue-purple: #56B6C2; --pl-comment: #5C6370;
+  --pl-bright-black: #5C6370; --pl-bright-red: #E06C75;
+  --pl-bright-green: #98C379; --pl-bright-yellow: #D19A66;
+  --pl-bright-blue: #61AFEF; --pl-bright-magenta: #C678DD;
+  --pl-bright-cyan: #56B6C2; --pl-bright-white: #FFFFFF;
+  --pl-cursor: #5C6370; --pl-selection: #3A3F4B;
   --pixel: 'Silkscreen', monospace;
   --pixel-body: 'PixelifySans', sans-serif;
   --body: 'Tektur', system-ui, sans-serif;
@@ -69,13 +81,9 @@ html, body, #root {
   user-select: none;
 }
 
-body::before {
-  content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 9999;
-  background: repeating-linear-gradient(0deg, transparent 0px, transparent 2px, rgb(var(--black-rgb) / .06) 2px, rgb(var(--black-rgb) / .06) 4px);
-}
+body::before,
 body::after {
-  content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 9998;
-  background: radial-gradient(ellipse at center, transparent 50%, rgb(var(--black-rgb) / .35) 100%);
+  content: none;
 }
 
 ::-webkit-scrollbar { width: 4px; height: 4px; }
@@ -2431,13 +2439,13 @@ body::after {
 .diff-panel {
   flex: 1;
   overflow: auto;
-  background: var(--bg);
+  background: var(--bg2);
 }
 .diff-panel .cm-mergeView {
   min-height: 100%;
-  background: var(--bg);
+  background: var(--bg2);
 }
-.diff-panel .cm-editor { background: var(--bg); }
+.diff-panel .cm-editor { background: var(--bg2); }
 .diff-panel .cm-gutters {
   background: var(--bg2);
   color: var(--ink2);
