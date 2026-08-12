@@ -10,6 +10,8 @@ import { useSessionRestore, useAgentEvents } from "./state/session";
 import { useNotifications } from "./state/notifications";
 import { useCloneEvents } from "./state/clone";
 import { useStore } from "./state/store";
+import { AnnotationLayer } from "./components/annotations/AnnotationLayer";
+import { AnnotationTray } from "./components/annotations/AnnotationTray";
 import "./App.css";
 
 function App() {
@@ -33,6 +35,8 @@ function App() {
         <RightSidebar />
       </div>
       <StatusBar />
+      <AnnotationLayer />
+      <AnnotationTray />
       {!onboarded && <Onboarding />}
     </div>
   );

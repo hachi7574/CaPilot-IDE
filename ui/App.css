@@ -2441,3 +2441,189 @@ body::after {
   font-family: var(--mono);
   font-size: var(--fs-sm);
 }
+
+/* ── 注释页面元素 (page-element annotator) ─────────────────────── */
+
+/* Crosshair over everything except the annotator's own chrome while picking. */
+body.annot-mode,
+body.annot-mode *:not([data-annot-ui]) { cursor: crosshair !important; }
+body.annot-mode [data-annot-ui],
+body.annot-mode [data-annot-ui] * { cursor: default !important; }
+
+/* Selection layer — full-window, transparent to the mouse so clicks reach the
+   elements underneath (the capture-phase handler in AnnotationLayer picks). */
+.annot-layer { position: fixed; inset: 0; z-index: 3200; pointer-events: none; }
+
+/* Hover fill: the picked element's whole box is covered by a translucent
+   light-purple block, so you can see exactly which component is under the
+   cursor; the component name sits in a chip above it. pointer-events: none on
+   every piece keeps elementFromPoint hitting the real element below. */
+.annot-highlight {
+  position: fixed; z-index: 3201; pointer-events: none; display: none;
+  background: rgb(167 139 250 / 0.38);
+  outline: 2px solid rgb(196 181 253 / 0.95); outline-offset: -2px;
+  border-radius: 2px;
+}
+.annot-name {
+  position: fixed; z-index: 3202; pointer-events: none; display: none;
+  max-width: 340px; padding: 2px 8px; border-radius: 6px;
+  background: var(--brand); color: var(--accent-ink);
+  font-family: var(--mono); font-size: var(--fs-2xs); line-height: 1.6;
+  box-shadow: 0 2px 8px rgb(var(--black-rgb) / 0.5);
+  border: 1px solid rgb(var(--black-rgb) / 0.35);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Numbered markers pinned over annotated elements. */
+.annot-markers { position: fixed; inset: 0; z-index: 3300; pointer-events: none; }
+.annot-marker {
+  position: fixed; width: 18px; height: 18px; border-radius: 9px;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--pixel); font-size: 9px; color: var(--accent-ink);
+  border: 2px solid var(--bg); box-shadow: 0 2px 8px rgb(var(--black-rgb) / 0.5);
+}
+.annot-marker-change { background: var(--brand); }
+.annot-marker-question { background: var(--warn); color: var(--bg); }
+.annot-marker-error { background: var(--danger); color: var(--bg); }
+
+/* Comment popup. */
+.annot-popup {
+  position: fixed; z-index: 3305; width: 320px;
+  pointer-events: auto;
+  background: var(--bg3); border: 1px solid var(--rule2); border-radius: 10px;
+  box-shadow: var(--shadow-hard), 0 10px 30px rgb(var(--black-rgb) / 0.5);
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;
+  user-select: text;
+}
+.annot-popup-head { display: flex; flex-direction: column; gap: 2px; cursor: grab; }
+.annot-popup-head:active { cursor: grabbing; }
+.annot-popup-title {
+  font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 2px;
+  text-transform: uppercase; color: var(--brand);
+}
+.annot-popup-el {
+  font-family: var(--mono); font-size: var(--fs-2xs); color: var(--ink2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.annot-popup-text {
+  resize: none; height: 76px; width: 100%;
+  background: var(--bg); border: 1px solid var(--rule2); border-radius: 6px;
+  color: var(--ink); font-family: var(--mono); font-size: var(--fs-sm);
+  padding: 8px; outline: none; line-height: 1.5;
+}
+.annot-popup-text:focus { border-color: var(--brand); }
+.annot-popup-intents { display: flex; gap: 6px; }
+.annot-intent-btn {
+  flex: 1; padding: 5px 8px; border-radius: 6px; cursor: pointer;
+  background: var(--bg); border: 1px solid var(--rule2); color: var(--ink2);
+  font-family: var(--mono); font-size: var(--fs-2xs); transition: all .15s var(--ease-apple);
+}
+.annot-intent-btn.active { color: var(--accent-ink); border-color: var(--brand); background: var(--brand-dim); }
+.annot-intent-btn.question.active { color: var(--bg); border-color: var(--warn); background: var(--warn); }
+.annot-intent-btn.error.active { color: var(--bg); border-color: var(--danger); background: var(--danger); }
+.annot-popup-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.annot-popup-cancel, .annot-popup-add {
+  padding: 5px 14px; border-radius: 6px; cursor: pointer;
+  font-family: var(--mono); font-size: var(--fs-sm);
+  border: 1px solid var(--rule2); transition: all .15s var(--ease-apple);
+}
+.annot-popup-cancel { background: var(--bg); color: var(--ink2); }
+.annot-popup-cancel:hover { border-color: var(--danger); color: var(--danger); }
+.annot-popup-add { background: var(--brand-dim); color: var(--accent-ink); border-color: var(--brand); }
+.annot-popup-add:hover { background: var(--brand); }
+.annot-popup-add:disabled { opacity: .4; cursor: not-allowed; }
+
+/* Comment tray (bottom-right, above the status bar). */
+.annot-tray {
+  position: fixed; right: 12px; bottom: 36px; z-index: 3400;
+  width: 320px; max-width: calc(100vw - 24px);
+  background: var(--bg2); border: 1px solid var(--rule2); border-radius: 10px;
+  box-shadow: var(--shadow-hard), 0 10px 30px rgb(var(--black-rgb) / 0.5);
+  overflow: hidden;
+}
+.annot-tray-head {
+  display: flex; align-items: center; gap: 7px; padding: 8px 12px;
+  cursor: pointer; color: var(--ink2); user-select: none;
+  border-bottom: 1px solid var(--rule);
+}
+.annot-tray-head:hover { color: var(--brand); }
+.annot-tray-title {
+  font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 2px;
+  text-transform: uppercase; color: var(--ink2); flex: 1;
+}
+.annot-tray-head:hover .annot-tray-title { color: var(--brand); }
+.annot-tray-count {
+  min-width: 17px; height: 17px; display: flex; align-items: center; justify-content: center;
+  background: var(--brand); color: var(--accent-ink); border-radius: 9px;
+  font-family: var(--pixel); font-size: 9px; padding: 0 4px;
+}
+.annot-tray-chevron { font-size: var(--fs-xs); color: var(--muted); }
+.annot-tray-toggle {
+  display: flex; align-items: center; gap: 4px; padding: 3px 8px;
+  border-radius: 6px; cursor: pointer; user-select: none;
+  background: var(--bg); border: 1px solid var(--rule2); color: var(--ink2);
+  font-family: var(--mono); font-size: var(--fs-2xs); line-height: 1.3;
+  transition: all .15s var(--ease-apple);
+}
+.annot-tray-toggle:hover { color: var(--brand); border-color: var(--brand); }
+.annot-tray-toggle.active { color: var(--accent-ink); border-color: var(--brand); background: var(--brand-dim); }
+.annot-tray-body { max-height: 320px; overflow-y: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+.annot-tray-hint {
+  font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 1px;
+  color: var(--warn); padding: 2px 0 4px;
+}
+.annot-tray-item {
+  display: flex; align-items: flex-start; gap: 8px;
+  background: var(--bg3); border: 1px solid var(--rule); border-radius: 8px;
+  padding: 7px 8px;
+}
+.annot-tray-num {
+  width: 18px; height: 18px; flex: none; margin-top: 1px; border-radius: 9px;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--pixel); font-size: 9px; color: var(--accent-ink);
+  border: 1px solid var(--bg);
+}
+.annot-num-change { background: var(--brand); }
+.annot-num-question { background: var(--warn); color: var(--bg); }
+.annot-num-error { background: var(--danger); color: var(--bg); }
+.annot-tray-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.annot-tray-item-text {
+  font-family: var(--mono); font-size: var(--fs-sm); color: var(--ink); line-height: 1.4;
+  word-break: break-word; white-space: pre-wrap;
+}
+.annot-tray-item-el {
+  font-family: var(--mono); font-size: var(--fs-2xs); color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.annot-tray-item-sel { color: var(--ai-dim); margin-left: 6px; }
+.annot-tray-del {
+  flex: none; width: 20px; height: 20px; border: none; background: none;
+  color: var(--muted); font-size: var(--fs-md); cursor: pointer; line-height: 1;
+  border-radius: 4px;
+}
+.annot-tray-del:hover { color: var(--danger); background: var(--bg4); }
+.annot-tray-empty { display: flex; flex-direction: column; gap: 6px; }
+.annot-tray-empty-hint {
+  font-size: var(--fs-xs); color: var(--ink2); font-family: var(--mono); line-height: 1.6;
+}
+.annot-tray-lastel {
+  background: var(--bg3); border: 1px solid var(--rule); border-radius: 8px;
+  padding: 7px 8px;
+}
+.annot-tray-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.annot-tray-copy, .annot-tray-shot, .annot-tray-clear {
+  padding: 6px 12px; border-radius: 6px; cursor: pointer;
+  font-family: var(--mono); font-size: var(--fs-xs);
+  border: 1px solid var(--rule2); transition: all .15s var(--ease-apple);
+}
+.annot-tray-copy { background: var(--brand-dim); color: var(--accent-ink); border-color: var(--brand); flex: 1; }
+.annot-tray-copy:hover { background: var(--brand); }
+.annot-tray-shot { background: var(--bg); color: var(--ink2); }
+.annot-tray-shot:hover { border-color: var(--brand); color: var(--brand); }
+.annot-tray-clear { background: var(--bg); color: var(--ink2); }
+.annot-tray-clear:hover { border-color: var(--danger); color: var(--danger); }
+.annot-tray-status {
+  font-family: var(--mono); font-size: var(--fs-2xs); color: var(--success);
+  padding: 2px 2px 0;
+}
+
