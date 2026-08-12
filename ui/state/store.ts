@@ -942,6 +942,7 @@ export const useStore = create<AppState>((set, get) => ({
     set((s) => ({ usageState: { ...s.usageState, [runtime]: usage } })),
   bumpUsageRevision: () => set((s) => ({ usageRevision: s.usageRevision + 1 })),
 
+  addTab: (tab) =>
     set((s) => {
       const tabs = [...s.tabs.filter((t) => t.id !== tab.id), tab];
       // With an active split, surface a newly opened tab in the first pane.
