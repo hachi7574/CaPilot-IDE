@@ -167,6 +167,39 @@ export interface PermissionModeInfo {
   requires_confirmation: boolean;
 }
 
+// ── Rate-limit usage (Settings → 已安装 → ⚙ → 用量统计, status bar) ──
+
+export interface UsageWindow {
+  /** "5h" | "7d" | "30d" (provider window length). */
+  label: string;
+  window_minutes: number;
+  /** Percent of the window already used (0..100). */
+  used_pct: number | null;
+  /** 100 - used_pct — the "剩余用量" the status bar shows. */
+  remaining_pct: number | null;
+  /** Epoch seconds the window resets. */
+  resets_at: number | null;
+}
+
+export interface RuntimeUsage {
+  runtime: string;
+  available: boolean;
+  /** Human reason when unavailable (shown in the settings availability check). */
+  error: string | null;
+  /** e.g. codex "plus". */
+  plan_type: string | null;
+  windows: UsageWindow[];
+  checked_at: number;
+}
+
+/** Per-runtime fetch config persisted under the `usage_config` setting. */
+export interface UsageConfig {
+  /** opencode.ai `auth` cookie value (bare token, or a full `k=v` pair). */
+  auth_cookie?: string;
+  /** Workspace id from `https://opencode.ai/workspace/<id>/go`; empty → probe. */
+  workspace_id?: string;
+}
+
 export interface Tab {
   id: string;
   type: "agent" | "editor" | "diff";
@@ -427,6 +460,10 @@ interface AppState {
 
   // Runtimes
   runtimes: RuntimeInfo[];
+  /** Latest fetched remaining-usage per runtime (codex/opencode). */
+  usageState: Record<string, RuntimeUsage>;
+  /** Bumped when settings change usage config/enabled — re-triggers the poller. */
+  usageRevision: number;
 
   // UI tabs
   tabs: Tab[];
@@ -514,6 +551,8 @@ interface AppState {
   dropAgentChannel: (id: string) => void;
   setSessionsRestored: () => void;
   setRuntimes: (runtimes: RuntimeInfo[]) => void;
+  setUsage: (runtime: string, usage: RuntimeUsage) => void;
+  bumpUsageRevision: () => void;
   addTab: (tab: Tab) => void;
   /** Add a tab without changing the active tab (used by session restore). */
   addTabSilent: (tab: Tab) => void;
@@ -586,7 +625,7 @@ function loadOnboarded(): boolean {
   }
 }
 
-/** Persisted UI font size preset. Fallback: the smallest ("s"). */
+/** Persisted UI font size preset. Fallback: medium ("m"). */
 const FONT_SCALE_KEY = "capilot.fontScale";
 const FONT_SCALES: FontScale[] = ["s", "m", "l", "xl", "xxl"];
 function loadFontScale(): FontScale {
@@ -596,7 +635,7 @@ function loadFontScale(): FontScale {
   } catch {
     // storage unavailable — use base
   }
-  return "s";
+  return "m";
 }
 
 // ── New-terminal templates ──────────────────────────────────────
@@ -927,7 +966,10 @@ export const useStore = create<AppState>((set, get) => ({
 
   setRuntimes: (runtimes) => set({ runtimes }),
 
-  addTab: (tab) =>
+  setUsage: (runtime, usage) =>
+    set((s) => ({ usageState: { ...s.usageState, [runtime]: usage } })),
+  bumpUsageRevision: () => set((s) => ({ usageRevision: s.usageRevision + 1 })),
+
     set((s) => {
       const tabs = [...s.tabs.filter((t) => t.id !== tab.id), tab];
       // With an active split, surface a newly opened tab in the first pane.

@@ -1,33 +1,39 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { useStore, FontScale } from "../../state/store";
-import { connectEsp, disconnectEsp } from "../../state/esp";
+import { useStore, FontScale, RuntimeInfo, UsageConfig } from "../../state/store";
 import { Icon } from "../Icon";
 
 interface SettingsModalProps {
   onClose: () => void;
 }
 
-/** Persisted preference: system notifications on/off (default on). */
-const NOTIFICATIONS_KEY = "capilot.notifications";
-
 const APP_VERSION = "0.1.0";
+
+/** Adapter defaults, mirrored from the Rust spawn_interactive() implementations.
+ *  Shown in the launch editor when the user has not overridden a runtime. */
+const DEFAULT_LAUNCH: Record<string, { command: string; args: string }> = {
+  claude: { command: "claude", args: "--model claude-sonnet-5" },
+  codex: { command: "codex", args: "--no-alt-screen" },
+  opencode: { command: "opencode", args: "" },
+};
 
 export function SettingsModal({ onClose }: SettingsModalProps) {
   const runtimes = useStore((s) => s.runtimes);
-  const espStatus = useStore((s) => s.espStatus);
-  const espConnecting = useStore((s) => s.espConnecting);
+  const setRuntimes = useStore((s) => s.setRuntimes);
   const setOnboarded = useStore((s) => s.setOnboarded);
   const fontScale = useStore((s) => s.fontScale);
   const setFontScale = useStore((s) => s.setFontScale);
 
-  const [notifEnabled, setNotifEnabled] = useState(() => {
-    try {
-      return localStorage.getItem(NOTIFICATIONS_KEY) !== "0";
-    } catch {
-      return true;
-    }
-  });
+  const [scanning, setScanning] = useState(false);
+  const reDetect = () => {
+    setScanning(true);
+    invoke<RuntimeInfo[]>("runtime_list_available")
+      .then((runtimes) => {
+        setRuntimes(Array.isArray(runtimes) ? runtimes : []);
+      })
+      .catch(() => {})
+      .finally(() => setScanning(false));
+  };
 
   // Session-end handling: "keep" (default) marks a naturally-exited session done
   // (recoverable from the sidebar's "已结束" group); "delete" removes it.
@@ -49,29 +55,170 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     );
   };
 
-  const toggleNotifications = () => {
-    const next = !notifEnabled;
-    setNotifEnabled(next);
-    try {
-      localStorage.setItem(NOTIFICATIONS_KEY, next ? "1" : "0");
-    } catch {
-      // ignore storage errors
-    }
-  };
-
-  const handleEsp = async () => {
-    if (espStatus.connected) {
-      await disconnectEsp();
-    } else {
-      const err = await connectEsp();
-      if (err) console.error("ESP connect failed:", err);
-    }
-  };
-
   const reShowOnboarding = () => {
     setOnboarded(false);
     onClose();
   };
+
+  // Per-runtime launch overrides (Settings → 已安装 → ⚙): edits the binary and
+  // args used to spawn an agent session. Persisted as a JSON map in the same KV
+  // store as other settings; empty fields fall back to adapter defaults.
+  const [overrides, setOverrides] = useState<
+    Record<string, { command: string; args: string }>
+  >({});
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editCmd, setEditCmd] = useState("");
+  const [editArgs, setEditArgs] = useState("");
+
+  // Rate-limit usage stats (Settings → 已安装 → ⚙ → 用量统计): enable flag +
+  // per-runtime fetch config, persisted in the settings KV. The status bar reads
+  // the fetched result via store.usageState; this modal only edits config.
+  const [usageEnabled, setUsageEnabled] = useState<Record<string, boolean>>({});
+  const [usageConfig, setUsageConfig] = useState<Record<string, UsageConfig>>({});
+  const [usageCookie, setUsageCookie] = useState("");
+  const [usageWorkspace, setUsageWorkspace] = useState("");
+  const [usageChecks, setUsageChecks] = useState<
+    Record<string, { ok: boolean; message: string } | null>
+  >({});
+  const [checkingId, setCheckingId] = useState<string | null>(null);
+  const usageState = useStore((s) => s.usageState);
+  const bumpUsageRevision = useStore((s) => s.bumpUsageRevision);
+
+  useEffect(() => {
+    invoke<string | null>("setting_get", { key: "usage_enabled" })
+      .then((raw) => {
+        if (raw) {
+          try {
+            setUsageEnabled(JSON.parse(raw));
+          } catch {
+            // malformed — keep defaults
+          }
+        }
+      })
+      .catch(() => {});
+    invoke<string | null>("setting_get", { key: "usage_config" })
+      .then((raw) => {
+        if (raw) {
+          try {
+            setUsageConfig(JSON.parse(raw));
+          } catch {
+            // malformed — keep defaults
+          }
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    invoke<string | null>("setting_get", { key: "runtime_overrides" })
+      .then((raw) => {
+        if (!raw) return;
+        try {
+          const parsed = JSON.parse(raw) as Record<
+            string,
+            { command: string; args: string }
+          >;
+          if (parsed && typeof parsed === "object") setOverrides(parsed);
+        } catch {
+          // malformed JSON — keep defaults
+        }
+      })
+      .catch(() => {
+        // backend may still be starting
+      });
+  }, []);
+
+  const persistOverrides = (
+    next: Record<string, { command: string; args: string }>
+  ) => {
+    setOverrides(next);
+    invoke("setting_set", {
+      key: "runtime_overrides",
+      value: JSON.stringify(next),
+    }).catch(() => {});
+  };
+
+  const toggleEditor = (id: string) => {
+    // Clicking the gear of the already-open editor saves and collapses.
+    if (editingId === id) {
+      saveOverride();
+      return;
+    }
+    // Prefill with the currently effective launch line: the user override when
+    // present, otherwise the runtime's default command/args.
+    const effective = overrides[id] ?? DEFAULT_LAUNCH[id] ?? { command: "", args: "" };
+    setEditingId(id);
+    setEditCmd(effective.command);
+    setEditArgs(effective.args);
+    // Prefill the rate-limit usage config (cookie / workspace id) for this runtime.
+    const cfg = usageConfig[id];
+    setUsageCookie(cfg?.auth_cookie ?? "");
+    setUsageWorkspace(cfg?.workspace_id ?? "");
+  };
+
+  const saveOverride = () => {
+    if (!editingId) return;
+    const next = { ...overrides };
+    const command = editCmd.trim();
+    const args = editArgs.trim();
+    if (command || args) {
+      next[editingId] = { command, args };
+    } else {
+      delete next[editingId];
+    }
+    setEditingId(null);
+    persistOverrides(next);
+  };
+
+  const resetOverride = (id: string) => {
+    const next = { ...overrides };
+    delete next[id];
+    persistOverrides(next);
+  };
+
+  // ── Rate-limit usage helpers ──────────────────────────────────
+
+  const persistUsageEnabled = (id: string, value: boolean) => {
+    const next = { ...usageEnabled, [id]: value };
+    setUsageEnabled(next);
+    invoke("setting_set", {
+      key: "usage_enabled",
+      value: JSON.stringify(next),
+    }).catch(() => {});
+    bumpUsageRevision();
+  };
+
+  const updateUsageConfig = (id: string, patch: Partial<UsageConfig>) => {
+    const next = { ...usageConfig, [id]: { ...usageConfig[id], ...patch } };
+    setUsageConfig(next);
+    invoke("setting_set", {
+      key: "usage_config",
+      value: JSON.stringify(next),
+    }).catch(() => {});
+    bumpUsageRevision();
+  };
+
+  const runUsageCheck = async (id: string) => {
+    setCheckingId(id);
+    setUsageChecks((c) => ({ ...c, [id]: null }));
+    try {
+      const res = await invoke<{ available: boolean; message: string }>(
+        "usage_check",
+        { runtime: id }
+      );
+      setUsageChecks((c) => ({ ...c, [id]: { ok: res.available, message: res.message } }));
+    } catch (e) {
+      setUsageChecks((c) => ({ ...c, [id]: { ok: false, message: String(e) } }));
+    } finally {
+      setCheckingId(null);
+    }
+  };
+
+  // The "已安装" list shows only installed agent runtimes — plain shells
+  // (bash) are excluded.
+  const installedAgents = runtimes.filter(
+    (rt) => rt.available && !rt.id.startsWith("bash")
+  );
 
   return (
     <div
@@ -109,80 +256,234 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           </button>
         </div>
 
-        {/* Runtime management */}
-        <div className="modal-section" style={{ marginBottom: 20 }}>
-          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-2xs)", color: "var(--ink2)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
-            Runtime 管理
+        {/* Installed agents */}
+        <div className="modal-section" style={{ marginBottom: 24 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-sm)", color: "var(--ink2)", letterSpacing: 1, textTransform: "uppercase" }}>
+              已安装
+            </div>
+            <button
+              onClick={reDetect}
+              disabled={scanning}
+              style={{
+                fontFamily: "var(--pixel)",
+                fontSize: "var(--fs-2xs)",
+                padding: "4px 12px",
+                border: "1px solid var(--rule2)",
+                color: "var(--ink2)",
+                background: "transparent",
+                borderRadius: 6,
+                cursor: "pointer",
+              }}
+            >
+              {scanning ? "检测中…" : "重新检测"}
+            </button>
           </div>
-          {runtimes.length === 0 && (
-            <div style={{ fontSize: "var(--fs-sm)", color: "var(--ink2)" }}>No runtimes detected</div>
+          {installedAgents.length === 0 && (
+            <div style={{ fontSize: "var(--fs-sm)", color: "var(--ink2)" }}>未检测到已安装的 Agent</div>
           )}
-          {runtimes.map((rt) => (
-            <div key={rt.id} className="modal-row" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: "1px solid var(--rule)", fontSize: "var(--fs-sm)" }}>
-              <span style={{ color: "var(--ink2)" }}>{rt.name}</span>
-              <span style={{ color: rt.available ? "var(--success)" : "var(--danger)", fontFamily: "var(--mono)", fontSize: "var(--fs-xs)" }}>
-                {rt.available ? (
-                  rt.authenticated ? (
-                    <>
-                      <Icon name="check" size={12} style={{ marginRight: 4 }} /> 已登录
-                    </>
-                  ) : (
-                    <>
-                      <Icon name="check" size={12} style={{ marginRight: 4 }} /> 已安装
-                    </>
-                  )
-                ) : (
-                  <>
-                    <Icon name="x" size={12} style={{ marginRight: 4 }} /> 未安装
-                  </>
-                )}
-              </span>
+          {installedAgents.map((rt) => (
+            <div key={rt.id} style={{ borderBottom: "1px solid var(--rule)" }}>
+              <div className="modal-row" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", fontSize: "var(--fs-sm)" }}>
+                <span style={{ color: "var(--ink2)" }}>{rt.name}</span>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ color: "var(--success)", fontFamily: "var(--mono)", fontSize: "var(--fs-xs)" }}>
+                    <Icon name="check" size={12} style={{ marginRight: 4 }} />
+                    {rt.authenticated ? "已登录" : "已安装"}
+                  </span>
+                  <button
+                    onClick={() => toggleEditor(rt.id)}
+                    style={{
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      width: 22, height: 22, borderRadius: 6, cursor: "pointer",
+                      background: editingId === rt.id ? "rgb(var(--brand-rgb) / .1)" : "transparent",
+                      border: `1px solid ${editingId === rt.id ? "var(--brand)" : "var(--rule2)"}`,
+                      color: editingId === rt.id ? "var(--brand)" : "var(--ink2)",
+                    }}
+                    title="点击展开/收起启动命令配置（收起即保存）"
+                  >
+                    <Icon name="settings" size={12} />
+                  </button>
+                </div>
+              </div>
+              {editingId === rt.id && (
+                <div style={{ padding: "0 0 10px", display: "flex", flexDirection: "column", gap: 6 }}>
+                  <div>
+                    <div style={{ fontSize: "var(--fs-2xs)", color: "var(--ink2)", marginBottom: 2 }}>
+                      启动命令
+                    </div>
+                    <input
+                      className="modal-text-input"
+                      value={editCmd}
+                      onChange={(e) => setEditCmd(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") saveOverride(); }}
+                      placeholder={`例如 ${rt.id}`}
+                    />
+                  </div>
+                  <div>
+                    <div style={{ fontSize: "var(--fs-2xs)", color: "var(--ink2)", marginBottom: 2 }}>
+                      命令参数
+                    </div>
+                    <input
+                      className="modal-text-input"
+                      value={editArgs}
+                      onChange={(e) => setEditArgs(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") saveOverride(); }}
+                      placeholder="留空使用默认参数（空格分隔）"
+                    />
+                  </div>
+                  <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
+                    <button
+                      onClick={saveOverride}
+                      style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-2xs)", padding: "4px 12px", border: "1px solid var(--brand)", color: "var(--brand)", background: "rgb(var(--brand-rgb) / .08)", borderRadius: 6, cursor: "pointer" }}
+                    >
+                      保存
+                    </button>
+                    <button
+                      onClick={() => setEditingId(null)}
+                      style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-2xs)", padding: "4px 12px", border: "1px solid var(--rule2)", color: "var(--ink2)", background: "transparent", borderRadius: 6, cursor: "pointer" }}
+                    >
+                      取消
+                    </button>
+                    {overrides[rt.id] && (
+                      <button
+                        onClick={() => resetOverride(rt.id)}
+                        style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-2xs)", padding: "4px 12px", border: "1px solid var(--rule2)", color: "var(--warn)", background: "transparent", borderRadius: 6, cursor: "pointer" }}
+                      >
+                        恢复默认
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Rate-limit usage stats (codex/opencode only) */}
+                  {(rt.id === "codex" || rt.id === "opencode") && (
+                    <div style={{ borderTop: "1px solid var(--rule)", marginTop: 10, paddingTop: 8 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 4, fontFamily: "var(--pixel)", fontSize: "var(--fs-2xs)", color: "var(--ink2)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
+                        <Icon name="activity" size={11} /> 用量统计（剩余用量）
+                      </div>
+
+                      {/* Enable toggle */}
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, fontSize: "var(--fs-2xs)", color: "var(--ink2)" }}>
+                        <span>启用：状态栏显示剩余用量</span>
+                        <button
+                          onClick={() => persistUsageEnabled(rt.id, !usageEnabled[rt.id])}
+                          style={{
+                            fontFamily: "var(--pixel)",
+                            fontSize: "var(--fs-2xs)",
+                            padding: "4px 12px",
+                            border: `1px solid ${usageEnabled[rt.id] ? "var(--brand)" : "var(--rule2)"}`,
+                            color: usageEnabled[rt.id] ? "var(--brand)" : "var(--ink2)",
+                            background: usageEnabled[rt.id] ? "rgb(var(--brand-rgb) / .08)" : "transparent",
+                            borderRadius: 6,
+                            cursor: "pointer",
+                          }}
+                        >
+                          {usageEnabled[rt.id] ? "已启用" : "已停用"}
+                        </button>
+                      </div>
+
+                      {/* opencode: cookie + workspace id */}
+                      {rt.id === "opencode" && (
+                        <>
+                          <div style={{ marginBottom: 6 }}>
+                            <div style={{ fontSize: "var(--fs-2xs)", color: "var(--ink2)", marginBottom: 2 }}>
+                              opencode.ai 登录 Cookie（以 auth= 开头）
+                            </div>
+                            <input
+                              className="modal-text-input"
+                              type="password"
+                              value={usageCookie}
+                              onChange={(e) => {
+                                setUsageCookie(e.target.value);
+                                updateUsageConfig("opencode", { auth_cookie: e.target.value });
+                              }}
+                              placeholder="浏览器登录 opencode.ai 后复制 auth cookie"
+                            />
+                          </div>
+                          <div style={{ marginBottom: 6 }}>
+                            <div style={{ fontSize: "var(--fs-2xs)", color: "var(--ink2)", marginBottom: 2 }}>
+                              Workspace ID（可留空自动探测）
+                            </div>
+                            <input
+                              className="modal-text-input"
+                              value={usageWorkspace}
+                              onChange={(e) => {
+                                setUsageWorkspace(e.target.value);
+                                updateUsageConfig("opencode", { workspace_id: e.target.value });
+                              }}
+                              placeholder="https://opencode.ai/workspace/<id>/go 中的 <id>"
+                            />
+                          </div>
+                        </>
+                      )}
+
+                      {/* codex: no config (auth auto-discovered) */}
+                      {rt.id === "codex" && (
+                        <div style={{ fontSize: "var(--fs-2xs)", color: "var(--ink2)", marginBottom: 8 }}>
+                          自动读取 ~/.codex/auth.json 登录态，无需配置。
+                          当前：<span style={{ color: rt.authenticated ? "var(--success)" : "var(--warn)" }}>
+                            {rt.authenticated ? "已登录" : "未登录"}
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Availability check */}
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 4 }}>
+                        <button
+                          onClick={() => runUsageCheck(rt.id)}
+                          disabled={checkingId === rt.id}
+                          style={{
+                            display: "flex", alignItems: "center", gap: 4,
+                            fontFamily: "var(--pixel)",
+                            fontSize: "var(--fs-2xs)",
+                            padding: "4px 12px",
+                            border: "1px solid var(--rule2)",
+                            color: "var(--ink2)",
+                            background: "transparent",
+                            borderRadius: 6,
+                            cursor: checkingId === rt.id ? "default" : "pointer",
+                          }}
+                        >
+                          <Icon name="refresh-cw" size={11} />
+                          {checkingId === rt.id ? "检查中…" : "检查可用性"}
+                        </button>
+                        {(() => {
+                          const uc = usageChecks[rt.id];
+                          if (!uc) return null;
+                          return (
+                            <span
+                              style={{
+                                display: "inline-flex", alignItems: "center", gap: 4,
+                                fontSize: "var(--fs-2xs)",
+                                color: uc.ok ? "var(--success)" : "var(--warn)",
+                              }}
+                            >
+                              <Icon name={uc.ok ? "circle-check" : "triangle-alert"} size={12} />
+                              {uc.message}
+                            </span>
+                          );
+                        })()}
+                      </div>
+
+                      {/* Live status-bar summary */}
+                      {usageState[rt.id]?.available && (
+                        <div style={{ fontSize: "var(--fs-2xs)", color: "var(--ink2)" }}>
+                          状态栏显示：{usageState[rt.id].windows
+                            .map((w) => `${w.label} ${w.remaining_pct != null ? `剩余 ${Math.round(w.remaining_pct)}%` : ""}`.trim())
+                            .join(" · ")}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           ))}
         </div>
 
-        {/* ESP pairing */}
-        <div className="modal-section" style={{ marginBottom: 20 }}>
-          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-2xs)", color: "var(--ink2)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
-            ESP 设备
-          </div>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: "var(--fs-sm)" }}>
-            <span style={{ color: "var(--ink2)" }}>
-              {espStatus.connected ? (espStatus.name ?? "ESP32-C5") : "未连接"}
-            </span>
-            <button
-              onClick={handleEsp}
-              className="modal-btn"
-              style={{
-                fontFamily: "var(--pixel)",
-                fontSize: "var(--fs-2xs)",
-                padding: "5px 12px",
-                border: "1px solid var(--brand)",
-                color: "var(--brand)",
-                background: espStatus.connected ? "rgb(var(--brand-rgb) / .08)" : "transparent",
-                cursor: "pointer",
-              }}
-            >
-              {espConnecting ? "连接中…" : espStatus.connected ? "断开" : "连接 (BLE)"}
-            </button>
-          </div>
-          {espStatus.connected && (
-            <div style={{ fontSize: "var(--fs-xs)", color: "var(--ink2)", fontFamily: "var(--mono)", marginTop: 4 }}>
-              {espStatus.address}
-              {espStatus.battery_pct !== null && (
-                <span style={{ display: "inline-flex", alignItems: "center" }}>
-                  {" · "}
-                  <Icon name="battery-full" size={12} style={{ marginRight: 3 }} />
-                  {espStatus.battery_pct}%
-                </span>
-              )}
-            </div>
-          )}
-        </div>
-
         {/* Preferences */}
-        <div className="modal-section">
-          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-2xs)", color: "var(--ink2)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
+        <div className="modal-section" style={{ marginBottom: 16 }}>
+          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-sm)", color: "var(--ink2)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
             通用偏好
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: "var(--fs-sm)" }}>
@@ -191,11 +492,11 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             {(
               [
-                { key: "s", label: "小" },
-                { key: "m", label: "中" },
-                { key: "l", label: "大" },
-                { key: "xl", label: "特大" },
-                { key: "xxl", label: "巨大" },
+                { key: "s", label: "最小" },
+                { key: "m", label: "小" },
+                { key: "l", label: "中" },
+                { key: "xl", label: "大" },
+                { key: "xxl", label: "最大" },
               ] as { key: FontScale; label: string }[]
             ).map((opt) => (
               <button
@@ -218,8 +519,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
         </div>
 
         {/* Session end handling */}
-        <div className="modal-section" style={{ marginBottom: 20 }}>
-          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-2xs)", color: "var(--ink2)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
+        <div className="modal-section" style={{ marginBottom: 16, borderTop: "1px solid var(--rule)", paddingTop: 10 }}>
+          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-sm)", color: "var(--ink2)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
             会话
           </div>
           <div style={{ fontSize: "var(--fs-xs)", color: "var(--ink2)", marginBottom: 8 }}>
@@ -257,36 +558,9 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           </div>
         </div>
 
-        {/* Notifications */}
-        <div className="modal-section" style={{ marginBottom: 20 }}>
-          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-2xs)", color: "var(--ink2)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
-            通知
-          </div>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: "var(--fs-sm)" }}>
-            <span style={{ color: "var(--ink2)" }}>系统通知（ESP 断连）</span>
-            <button
-              onClick={toggleNotifications}
-              style={{
-                fontFamily: "var(--pixel)",
-                fontSize: "var(--fs-2xs)",
-                padding: "4px 10px",
-                border: `1px solid ${notifEnabled ? "var(--success)" : "var(--rule2)"}`,
-                color: notifEnabled ? "var(--success)" : "var(--ink2)",
-                background: notifEnabled ? "rgb(var(--success-rgb) / .08)" : "transparent",
-                cursor: "pointer",
-              }}
-            >
-              {notifEnabled ? "开" : "关"}
-            </button>
-          </div>
-        </div>
-
         {/* First-run onboarding */}
-        <div className="modal-section" style={{ marginBottom: 20 }}>
-          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-2xs)", color: "var(--ink2)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
-            首次引导
-          </div>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: "var(--fs-sm)" }}>
+        <div className="modal-section" style={{ marginBottom: 16, borderTop: "1px solid var(--rule)", paddingTop: 10 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "var(--fs-sm)" }}>
             <span style={{ color: "var(--ink2)" }}>重新显示引导流程</span>
             <button
               onClick={reShowOnboarding}
@@ -307,8 +581,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
         </div>
 
         {/* About */}
-        <div className="modal-section">
-          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-2xs)", color: "var(--ink2)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
+        <div className="modal-section" style={{ borderTop: "1px solid var(--rule)", paddingTop: 10 }}>
+          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-sm)", color: "var(--ink2)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
             关于
           </div>
           <div style={{ fontSize: "var(--fs-sm)", color: "var(--ink2)" }}>

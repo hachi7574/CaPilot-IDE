@@ -616,21 +616,27 @@ body::after {
   letter-spacing: 1px; text-transform: uppercase;
   display: flex; align-items: center; gap: 4px;
 }
+/* Divider between status bar items (all but the first get a leading rule). */
+.sb-item + .sb-item { border-left: 1px solid var(--rule); padding-left: 14px; }
+/* Item name vs. its value: name keeps the pixel/uppercase look, value uses the
+   panel mono face at a slightly larger size, lowercase with no tracking. */
+.sb-name { font-family: 'Silkscreen', monospace; font-size: var(--fs-2xs); letter-spacing: 1px; text-transform: uppercase; }
+.sb-val { font-family: 'JetBrainsMono', ui-monospace, monospace; font-size: var(--fs-xs); letter-spacing: 0; text-transform: none; }
 .sb-dot { width: 6px; height: 6px; }
 .sb-dot.bt { background: var(--primary); }
 .sb-sep { width: 1px; height: 12px; background: var(--rule); }
 .sb-battery { color: var(--success); }
 .sb-spacer { flex: 1; }
 .sb-mode { color: var(--ai); }
+/* Remaining-usage readout (codex/opencode quota) — accent like the resource item. */
+.sb-usage { color: var(--ai); }
 
 /* ── Resource monitor (DevPlan §10) ──────────────────────────── */
 
 .resource-item { color: var(--ai); }
 
 .resource-popover {
-  position: absolute;
-  bottom: calc(100% + 10px);
-  left: -60px;
+  position: fixed;
   z-index: 1000;
   width: 320px;
   background: var(--bg3);
@@ -2473,10 +2479,16 @@ body::after {
 }
 .diff-panel .cm-activeLine,
 .diff-panel .cm-activeLineGutter { background: transparent; }
-.diff-panel .cm-scroller {
-  font-family: var(--mono);
-  font-size: var(--fs-sm);
+
+/* ── Settings modal: text inputs for launch overrides ─────────── */
+.modal-text-input {
+  width: 100%; box-sizing: border-box; padding: 5px 8px;
+  background: var(--bg); border: 1px solid var(--rule2); border-radius: 6px;
+  color: var(--ink); font-family: var(--mono); font-size: var(--fs-xs);
+  outline: none; transition: border-color .15s var(--ease-apple);
 }
+.modal-text-input:focus { border-color: var(--brand); }
+.modal-text-input::placeholder { color: var(--muted); }
 
 /* ── 注释页面元素 (page-element annotator) ─────────────────────── */
 

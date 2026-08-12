@@ -9,6 +9,8 @@ import { useRuntimeSync } from "./state/runtime";
 import { useSessionRestore, useAgentEvents } from "./state/session";
 import { useNotifications } from "./state/notifications";
 import { useCloneEvents } from "./state/clone";
+import { useUsageSync } from "./state/usage";
+import { useContextUsageSync } from "./state/usageContext";
 import { useStore } from "./state/store";
 import { AnnotationLayer } from "./components/annotations/AnnotationLayer";
 import { AnnotationTray } from "./components/annotations/AnnotationTray";
@@ -22,6 +24,8 @@ function App() {
   useAgentEvents();
   useNotifications();
   useCloneEvents();
+  useUsageSync();
+  useContextUsageSync();
   const onboarded = useStore((s) => s.onboarded);
   const fontScale = useStore((s) => s.fontScale);
   // Reflect the chosen font-size preset on <html> so the CSS `html[data-fs=…]`
