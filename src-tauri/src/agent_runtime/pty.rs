@@ -325,6 +325,7 @@ impl PtyManager {
             mode: String::new(),
             speed: String::new(),
             model: None,
+            last_usage: None,
         })
     }
 

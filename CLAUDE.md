@@ -28,7 +28,7 @@ Linux requires `libwebkit2gtk-4.1-dev`, `librsvg2-dev`, `libgtk-3-dev`, `libsoup
 
 ## Constraints
 
-- Do not install hooks into third-party agent CLIs or create managed agent home directories.
+- Do not create managed agent home directories. Hooks may be installed into third-party agent CLIs only for session-status reporting, and only via per-session invocation flags (e.g. `--settings` / environment on the spawned process) that leave the user's global CLI config and standalone usage untouched.
 - Run Cargo commands from `src-tauri/` or pass `--manifest-path src-tauri/Cargo.toml`.
 - Claude project-directory encoding replaces every non-alphanumeric character with `-`; keep `claude_project_key` compatible.
 - Keep terminal rendering hot paths inexpensive on WebKitGTK.

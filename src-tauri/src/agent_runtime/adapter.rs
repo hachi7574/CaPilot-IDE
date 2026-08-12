@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Agent runtime identifier
 pub type RuntimeId = String;
@@ -97,6 +97,23 @@ pub struct AgentInfo {
     pub speed: String,
     /// Selected model id, or None for the runtime default.
     pub model: Option<String>,
+    /// Provider's estimate of the CURRENT active-context occupancy, when the
+    /// runtime can supply a trustworthy value. Daemon-memory only (not
+    /// persisted); a restart clears it, a model switch / reconnect preserves it.
+    pub last_usage: Option<AgentUsage>,
+}
+
+/// Provider's estimate of the current active-context occupancy for an agent.
+///
+/// These are NOT cumulative token-spend counters: compaction can reduce
+/// `context_window_used_tokens`, and `context_window_max_tokens` is the selected
+/// model's capacity (never guessed from visible text). Both fields stay optional
+/// — a provider with no trustworthy value omits the field instead of estimating.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentUsage {
+    pub context_window_used_tokens: Option<u64>,
+    pub context_window_max_tokens: Option<u64>,
 }
 
 /// Summary of an available runtime detected on the system
@@ -140,6 +157,16 @@ pub trait AgentRuntimeAdapter: Send + Sync {
     /// Returns (command, args) to execute.
     fn spawn_interactive(&self, session: &AgentSession) -> Result<(String, Vec<String>), String>;
 
+    /// Args that are CaPilot infrastructure and must survive a user launch
+    /// override (Settings → 已安装 → ⚙), which replaces the adapter's arg list
+    /// wholesale. The status-hook injection (claude `--settings`, codex `-p`
+    /// profile) is what makes lifecycle status reporting work; without it the
+    /// tab strip silently falls back to PTY-activity heuristics. `lib.rs`
+    /// re-appends this set after applying an override. Default: no args.
+    fn status_hook_args(&self, _session: &AgentSession) -> Vec<String> {
+        vec![]
+    }
+
     /// Provider-specific environment injected into this one PTY process.
     /// Keeping this session-scoped avoids modifying the user's global CLI
     /// configuration just to make an IDE integration reliable.
@@ -160,6 +187,14 @@ pub trait AgentRuntimeAdapter: Send + Sync {
     /// session the just-started process created, so a later `agent_resume` can
     /// continue it. `None` when nothing is detectable yet / not applicable.
     fn capture_resume_key(&self, _cwd: &std::path::Path) -> Option<String> {
+        None
+    }
+
+    /// Provider's estimate of the current active-context occupancy for the agent
+    /// running in `cwd` with `model`. Default: the runtime reports no context
+    /// usage (so the UI renders no meter). Implementations should return
+    /// `None` when no trustworthy value exists rather than estimating.
+    fn context_usage(&self, _cwd: &Path, _model: Option<&str>) -> Option<AgentUsage> {
         None
     }
 

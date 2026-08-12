@@ -4,8 +4,9 @@ mod git_gate;
 mod persistence;
 mod resource;
 mod slash;
+mod usage;
 
-use agent_runtime::adapter::{AgentInfo, AgentSession};
+use agent_runtime::adapter::{AgentInfo, AgentRuntimeAdapter, AgentSession, AgentUsage};
 use agent_runtime::pty::{OnExit, PtyManager};
 use agent_runtime::runtimes::{get_adapter, known_runtimes};
 use esp::manager::EspManager;
@@ -13,10 +14,11 @@ use persistence::{
     agent_dir, ensure_project, read_agent_meta, write_agent_meta, AgentMeta, AgentSessionRecord,
     Persistence, DEFAULT_PROJECT,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
 use tauri::{Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
@@ -58,6 +60,53 @@ fn sanitize_project(project: &str) -> Result<(), String> {
 /// `"keep"` (default) marks it done (recoverable from the sidebar "已结束"
 /// group, never auto-restored as a tab); `"delete"` removes the record entirely.
 const SESSION_END_MODE_KEY: &str = "session_end_mode";
+
+/// Settings KV key: per-runtime launch overrides persisted from
+/// Settings → 已安装 → ⚙. Value is a JSON map of `runtime_id` → RuntimeOverride;
+/// empty `command`/`args` leave the adapter's default launch untouched.
+const RUNTIME_OVERRIDES_KEY: &str = "runtime_overrides";
+
+/// Settings KV keys for the rate-limit usage readout (Settings → 已安装 → ⚙ →
+/// 用量统计). `usage_enabled` is `{"<runtime>": bool}`; `usage_config` is
+/// `{"<runtime>": usage::UsageConfig}`. Both are allow-listed in `setting_set`.
+const USAGE_ENABLED_KEY: &str = usage::USAGE_ENABLED_KEY;
+const USAGE_CONFIG_KEY: &str = usage::USAGE_CONFIG_KEY;
+
+/// User-configured launch override for one runtime (the adapter's defaults win
+/// unless a field is set to a non-empty string).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct RuntimeOverride {
+    /// Replaces the adapter's executable (binary path or name).
+    #[serde(default)]
+    command: Option<String>,
+    /// Replaces the adapter's argument list (whitespace-separated).
+    #[serde(default)]
+    args: Option<String>,
+}
+
+/// Daemon-side `lastUsage` cache: agent id → (last computed context-window
+/// usage, computed-at). Lives ONLY in daemon memory (never persisted) — a
+/// daemon restart clears it, while a model switch / reconnect preserves it.
+/// Mirrors the context-window contract: the value is the provider's current
+/// active-context estimate, not cumulative token spend.
+pub struct ContextUsageCache {
+    inner: Mutex<HashMap<String, (AgentUsage, Instant)>>,
+}
+
+/// Reuse a computed sample for this long before the next `agent_context_usage`
+/// recomputes it. Short on purpose: it only dedups the burst when the frontend's
+/// immediate on-open poll and the 3s scheduled tick land in the same window —
+/// it does not cap how often the meter refreshes (the poll cadence already
+/// bounds freshness).
+const CONTEXT_USAGE_TTL: Duration = Duration::from_millis(800);
+
+impl ContextUsageCache {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+        }
+    }
+}
 
 /// Payload emitted on `agent://exited` — a session's process ended naturally
 /// and the record was kept (marked done).
@@ -214,9 +263,14 @@ fn build_and_spawn(
         resume_key: resume_key.clone(),
     };
 
-    let (cmd, mut args) = adapter
-        .spawn_interactive(&session)
-        .map_err(|e| format!("Failed to build command: {}", e))?;
+    let (cmd, mut args) = apply_launch_overrides(
+        adapter.as_ref(),
+        &session,
+        &load_runtime_overrides(persistence),
+        adapter
+            .spawn_interactive(&session)
+            .map_err(|e| format!("Failed to build command: {}", e))?,
+    );
     // Resume an existing conversation in the same context dir — only when the
     // caller asked for a resume (restored session / runtime switch). A brand-new
     // spawn stays fresh so it can never hijack the newest session in a shared
@@ -319,6 +373,35 @@ fn build_and_spawn(
     }
 
     Ok(info)
+}
+
+/// Apply user-configured launch overrides (Settings → 已安装 → ⚙) to the
+/// adapter's spawn argv. A non-empty command replaces the adapter's executable;
+/// a non-empty args string replaces the adapter's argument list wholesale.
+/// Because a wholesale replacement would drop the adapter's mandatory
+/// infrastructure — permission/speed flags and the status-hook injection
+/// (claude `--settings`, codex `-p` profile) — those are re-appended on top of
+/// the user's args so lifecycle status keeps reporting. Without them the tab
+/// strip silently falls back to PTY-activity heuristics: a long tool gap reads
+/// as a false 空闲 and input echo reads as a false 运行中.
+fn apply_launch_overrides(
+    adapter: &dyn AgentRuntimeAdapter,
+    session: &AgentSession,
+    overrides: &HashMap<String, RuntimeOverride>,
+    (mut cmd, mut args): (String, Vec<String>),
+) -> (String, Vec<String>) {
+    if let Some(ov) = overrides.get(session.runtime.as_str()) {
+        if let Some(c) = ov.command.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            cmd = c.to_string();
+        }
+        if let Some(a) = ov.args.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            args = a.split_whitespace().map(|t| t.to_string()).collect();
+            args.extend(adapter.mode_args(&session.mode));
+            args.extend(adapter.speed_args(&session.speed));
+            args.extend(adapter.status_hook_args(&session));
+        }
+    }
+    (cmd, args)
 }
 
 #[tauri::command]
@@ -488,6 +571,103 @@ async fn agent_resume(
     )
 }
 
+/// Payload emitted on `agent://usage` — an agent's context-window usage was
+/// (re)computed. `usage` is null when the runtime has no trustworthy value.
+#[derive(Clone, Serialize)]
+struct AgentUsageUpdate {
+    id: String,
+    usage: Option<AgentUsage>,
+}
+
+/// Per-agent status sidecar read by the frontend (`~/CaPilot/status/<id>.json`).
+/// Written by the claude adapter's lifecycle hook script; `status` is one of
+/// `idle`/`working`/`waiting_input`/`dormant`, `ts` is epoch seconds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HookStatus {
+    status: String,
+    ts: i64,
+}
+
+/// Compute + cache an agent's current context-window usage and emit it as
+/// `agent://usage`. Best-effort by design: an unknown agent or a runtime with
+/// no usage value returns `Ok(None)` — the command never fails on a missing
+/// session. The result is also cached daemon-side (agent id → usage) so the
+/// `lastUsage` contract holds in memory without persisting to the DB.
+#[tauri::command]
+async fn agent_context_usage(
+    persistence: tauri::State<'_, Arc<Persistence>>,
+    cache: tauri::State<'_, ContextUsageCache>,
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<Option<AgentUsage>, String> {
+    let record = {
+        let db = persistence.db().lock().unwrap();
+        db.get(&id).map_err(|e| e.to_string())?
+    };
+    let Some(rec) = record else {
+        return Ok(None);
+    };
+
+    // Reuse a recent sample. The frontend's immediate on-open poll and its 3s
+    // scheduled tick can both fire inside the same window; recomputing (file
+    // I/O, possibly an opencode catalog subprocess) would be wasted work.
+    // The TTL is short, so this only dedups bursts — it does not throttle the
+    // meter's refresh rate.
+    {
+        let cache = cache.inner.lock().unwrap();
+        if let Some((usage, at)) = cache.get(&id) {
+            if at.elapsed() < CONTEXT_USAGE_TTL {
+                return Ok(Some(usage.clone()));
+            }
+        }
+    }
+
+    // The read is blocking file I/O and can shell out to a subprocess (opencode
+    // catalog refresh) — run it on the blocking pool so it never stalls the
+    // async runtime's other commands. Build the adapter inside the closure so
+    // the boxed trait object never crosses threads.
+    let cwd = rec.cwd.clone();
+    let model = rec.model.clone();
+    let runtime = rec.runtime.clone();
+    let usage = tauri::async_runtime::spawn_blocking(move || {
+        get_adapter(&runtime).context_usage(&cwd, model.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    {
+        let mut cache = cache.inner.lock().unwrap();
+        match &usage {
+            Some(u) => {
+                cache.insert(id.clone(), (u.clone(), Instant::now()));
+            }
+            // A runtime that now reports nothing clears the stale cached value
+            // (e.g. after switching to a non-tracking runtime).
+            None => {
+                cache.remove(&id);
+            }
+        }
+    }
+    let _ = app.emit(
+        "agent://usage",
+        AgentUsageUpdate {
+            id: id.clone(),
+            usage: usage.clone(),
+        },
+    );
+    Ok(usage)
+}
+
+/// Read a claude agent's hook-reported lifecycle status from its sidecar file
+/// (`~/CaPilot/status/<id>.json`). Returns `null` when the file is missing or
+/// unparseable — non-claude runtimes and freshly spawned sessions have no
+/// sidecar yet, and the frontend falls back to activity-based derivation.
+#[tauri::command]
+fn agent_status_read(id: String) -> Option<HookStatus> {
+    let raw = std::fs::read_to_string(persistence::status_file(&id)).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
 #[tauri::command]
 async fn agent_write(
     pty: tauri::State<'_, Arc<PtyManager>>,
@@ -650,6 +830,45 @@ async fn agent_set_session_config(
         let _ = write_agent_meta(&project, &meta);
     }
     Ok(())
+}
+
+/// Rename a terminal session (tab-bar / sidebar right-click → 重命名).
+/// Persists to the DB row + `.agent-meta.json` so the new title survives a
+/// restart, sleepProject and `agent_resume` (which keeps the stored title).
+/// Returns the updated record so the frontend can sync its store atomically.
+#[tauri::command]
+async fn agent_rename(
+    persistence: tauri::State<'_, Arc<Persistence>>,
+    id: String,
+    title: String,
+) -> Result<AgentSessionRecord, String> {
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        return Err("终端名称不能为空".to_string());
+    }
+    if title.chars().count() > 80 {
+        return Err("终端名称不能超过 80 个字符".to_string());
+    }
+    let rec = {
+        let db = persistence.db().lock().unwrap();
+        db.get(&id).map_err(|e| e.to_string())?
+    };
+    let Some(mut rec) = rec else {
+        return Err(format!("Session not found: {id}"));
+    };
+    {
+        let db = persistence.db().lock().unwrap();
+        db.update_title(&id, &title, now_ms())
+            .map_err(|e| e.to_string())?;
+    }
+    // Keep `.agent-meta.json` in sync (mirrors agent_set_session_config).
+    if let Ok(mut meta) = read_agent_meta(&rec.project, &id) {
+        meta.title = title.clone();
+        meta.updated_at = now_ms();
+        let _ = write_agent_meta(&rec.project, &meta);
+    }
+    rec.title = title;
+    Ok(rec)
 }
 
 #[tauri::command]
@@ -888,6 +1107,15 @@ async fn sessions_delete(
     if dir.starts_with(persistence::workspace_root()) && dir.exists() {
         let _ = std::fs::remove_dir_all(&dir);
     }
+    // Drop the hook-reported status sidecar so the closed agent can't leave a
+    // stale 运行中 file behind.
+    let _ = std::fs::remove_file(persistence::status_file(&id));
+    // Remove the session's codex status-hook config profile (no-op for other
+    // runtimes — `$CODEX_HOME/capilot-<id>.config.toml` simply never exists).
+    crate::agent_runtime::runtimes::codex::CodexAdapter::remove_status_profile(&id);
+    // Remove the session's opencode status-plugin config dir (no-op for other
+    // runtimes — `$XDG_CACHE_HOME/capilot-ide/opencode-status/<id>` never exists).
+    crate::agent_runtime::runtimes::opencode::OpenCodeAdapter::remove_status_plugin(&id);
     if let Some(db) = persistence.db_tolerant() {
         let _ = db.delete(&id);
     }
@@ -895,6 +1123,18 @@ async fn sessions_delete(
 }
 
 // ── Settings KV commands ─────────────────────────────────────────
+
+/// Read the persisted per-runtime launch overrides map (empty when unset or
+/// malformed). Callers fall back to each adapter's default command/args.
+fn load_runtime_overrides(
+    persistence: &Arc<Persistence>,
+) -> HashMap<String, RuntimeOverride> {
+    let db = persistence.db().lock().unwrap();
+    match db.get_setting(RUNTIME_OVERRIDES_KEY) {
+        Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or_default(),
+        _ => HashMap::new(),
+    }
+}
 
 /// Read a persisted app setting (`settings` KV table), or null when unset.
 #[tauri::command]
@@ -916,7 +1156,12 @@ fn setting_set(
     value: String,
 ) -> Result<(), String> {
     // Allow-listed setting keys. Add future settings here.
-    const ALLOWED: &[&str] = &[SESSION_END_MODE_KEY];
+    const ALLOWED: &[&str] = &[
+        SESSION_END_MODE_KEY,
+        RUNTIME_OVERRIDES_KEY,
+        USAGE_ENABLED_KEY,
+        USAGE_CONFIG_KEY,
+    ];
     if !ALLOWED.contains(&key.as_str()) {
         return Err(format!("unknown setting key: {}", key));
     }
@@ -949,6 +1194,28 @@ async fn runtime_list_available() -> Vec<agent_runtime::adapter::RuntimeInfo> {
 #[tauri::command]
 async fn runtime_models(runtime: String) -> Vec<agent_runtime::adapter::ModelInfo> {
     get_adapter(&runtime).list_models()
+}
+
+// ── Rate-limit usage commands ───────────────────────────────────
+
+/// Fetch the current remaining usage for a runtime. The status bar polls this
+/// for every runtime enabled under Settings → 已安装 → ⚙ → 用量统计.
+#[tauri::command]
+async fn usage_fetch(
+    persistence: tauri::State<'_, Arc<Persistence>>,
+    runtime: String,
+) -> Result<usage::RuntimeUsage, String> {
+    usage::fetch(&runtime, &persistence).await
+}
+
+/// Settings availability check: fetch usage regardless of the enable toggle and
+/// report a short human verdict (可用/不可用 + reason).
+#[tauri::command]
+async fn usage_check(
+    persistence: tauri::State<'_, Arc<Persistence>>,
+    runtime: String,
+) -> Result<usage::UsageCheck, String> {
+    usage::check(&runtime, &persistence).await
 }
 
 // ── Filesystem commands ─────────────────────────────────────────
@@ -2193,9 +2460,9 @@ async fn git_push(repo: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_project, delete_project_dir, git_run, parse_branches, parse_commit_detail,
-        parse_log, parse_name_status, parse_porcelain, parse_ref_map, persistence,
-        rename_project_inner, validate_branch_name,
+        apply_launch_overrides, create_project, delete_project_dir, git_run, parse_branches,
+        parse_commit_detail, parse_log, parse_name_status, parse_porcelain, parse_ref_map,
+        persistence, rename_project_inner, validate_branch_name, RuntimeOverride,
     };
 
     #[test]
@@ -2555,6 +2822,118 @@ mod tests {
         std::env::remove_var("HOME");
         std::fs::remove_dir_all(&home).ok();
     }
+
+    /// The Settings → 已安装 → ⚙ launch override replaces the adapter's arg list
+    /// wholesale. Regression: the re-append must keep the permission/speed flags
+    /// and the status-hook injection (claude `--settings`, codex `-p` profile)
+    /// on top of the user's args — dropping them silently killed hook reporting
+    /// (false 空闲 during runs, false 运行中 on input echo). Mirrors the user's
+    /// actual override config.
+    #[test]
+    fn launch_override_reappends_hooks_and_mode_flags() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        use crate::agent_runtime::adapter::{AgentRuntimeAdapter, AgentSession};
+        use crate::agent_runtime::runtimes::claude::ClaudeAdapter;
+        use crate::agent_runtime::runtimes::codex::CodexAdapter;
+        use std::collections::HashMap;
+
+        let prev_home = std::env::var_os("HOME");
+        let prev_codex_home = std::env::var_os("CODEX_HOME");
+        let base = std::env::temp_dir().join(format!(
+            "capilot_override_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        std::env::set_var("HOME", &base);
+        let codex_home = base.join(".codex");
+        std::fs::create_dir_all(&codex_home).unwrap();
+        std::env::set_var("CODEX_HOME", &codex_home);
+
+        let overrides = HashMap::from([
+            (
+                "claude".to_string(),
+                RuntimeOverride {
+                    command: Some("claude".into()),
+                    args: Some("--model claude-sonnet-5".into()),
+                },
+            ),
+            (
+                "codex".to_string(),
+                RuntimeOverride {
+                    command: Some("codex".into()),
+                    args: Some("--no-alt-screen".into()),
+                },
+            ),
+        ]);
+
+        let session = AgentSession {
+            id: "ovr".into(),
+            runtime: "claude".into(),
+            mode: "ask".into(),
+            speed: "mid".into(),
+            model: Some("claude-opus-5".into()),
+            cwd: "/tmp/p".into(),
+            context_dir: "/tmp/p".into(),
+            rows: 24,
+            cols: 80,
+            resume_key: None,
+        };
+
+        // claude: the override's own args win over the adapter's model pick...
+        let claude = ClaudeAdapter::new();
+        let (cmd, args) = apply_launch_overrides(
+            &claude,
+            &session,
+            &overrides,
+            claude.spawn_interactive(&session).unwrap(),
+        );
+        assert_eq!(cmd, "claude");
+        assert!(args.windows(2).any(|v| v == ["--model", "claude-sonnet-5"]));
+        assert!(!args.windows(2).any(|v| v == ["--model", "claude-opus-5"]));
+        // ...but mode + the status-hook injection survive the replacement.
+        assert!(args
+            .windows(2)
+            .any(|v| v == ["--permission-mode", "manual"]));
+        let hooks_path = crate::persistence::status_dir().join("hooks.json");
+        assert!(args
+            .windows(2)
+            .any(|v| v == ["--settings", hooks_path.to_string_lossy().as_ref()]));
+
+        // codex: the override drops alt-screen; the `-p` profile + trust bypass
+        // must still reach the process so hook status reports.
+        let codex_session = AgentSession {
+            id: "ovr".into(),
+            runtime: "codex".into(),
+            ..session
+        };
+        let codex = CodexAdapter::new();
+        let (cmd, args) = apply_launch_overrides(
+            &codex,
+            &codex_session,
+            &overrides,
+            codex.spawn_interactive(&codex_session).unwrap(),
+        );
+        assert_eq!(cmd, "codex");
+        assert!(args.iter().any(|a| a == "--no-alt-screen"));
+        assert!(args.windows(2).any(|v| v == ["-p", "capilot-ovr"]));
+        assert!(args
+            .iter()
+            .any(|a| a == "--dangerously-bypass-hook-trust"));
+
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match prev_codex_home {
+            Some(v) => std::env::set_var("CODEX_HOME", v),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(base);
+    }
 }
 
 // ── Notification command ────────────────────────────────────────
@@ -2678,7 +3057,28 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::new().build())
-        .plugin(tauri_plugin_log::Builder::new().build())
+        .plugin(
+            // Console/webview logging. The default filter would forward every
+            // DEBUG/TRACE record from the HTTP stack — reqwest/rustls/hyper emit
+            // "starting new connection" / "tunneling HTTPS over proxy" / CA-load
+            // chatter on EVERY network call (usage fetch, updater) and drown the
+            // terminal. Keep those crates' logs at/above Info; everything else
+            // (including the app's own `log::warn!`) passes through untouched.
+            tauri_plugin_log::Builder::new()
+                .filter(|metadata| {
+                    let target = metadata.target();
+                    let noisy_http = target.starts_with("reqwest")
+                        || target.starts_with("rustls")
+                        || target.starts_with("hyper")
+                        || target.starts_with("h2")
+                        || target.starts_with("tower")
+                        || target.starts_with("tungstenite")
+                        || target.starts_with("want")
+                        || target.starts_with("mio");
+                    !noisy_http || metadata.level() <= log::LevelFilter::Info
+                })
+                .build()
+        )
         .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {}))
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -2686,14 +3086,18 @@ pub fn run() {
         .manage(persistence)
         .manage(EspManager::new())
         .manage(resource)
+        .manage(ContextUsageCache::new())
         .invoke_handler(tauri::generate_handler![
             agent_spawn,
             agent_resume,
+            agent_context_usage,
+            agent_status_read,
             agent_write,
             agent_kill,
             agent_resize,
             agent_switch_runtime,
             agent_set_session_config,
+            agent_rename,
             sessions_list,
             sessions_delete,
             setting_get,
@@ -2705,6 +3109,8 @@ pub fn run() {
             rename_project,
             runtime_list_available,
             runtime_models,
+            usage_fetch,
+            usage_check,
             slash::agent_list_slash_items,
             slash::agent_list_slash_children,
             fs_read,

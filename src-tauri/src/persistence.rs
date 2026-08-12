@@ -112,6 +112,20 @@ pub fn agent_dir(project: &str, agent_id: &str) -> PathBuf {
     project_dir(project).join("agents").join(agent_id)
 }
 
+/// Sidecar dir for hook-reported agent status (`~/CaPilot/status/`). Claude Code
+/// lifecycle hooks (injected per-session via `--settings`, see the claude
+/// adapter) write one JSON file per agent here; the frontend polls it to drive
+/// the accurate 运行中/空闲 split. App-owned, never inside a project workspace.
+pub fn status_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    PathBuf::from(home).join("CaPilot").join("status")
+}
+
+/// The per-agent status sidecar path (`~/CaPilot/status/<agent_id>.json`).
+pub fn status_file(agent_id: &str) -> PathBuf {
+    status_dir().join(format!("{agent_id}.json"))
+}
+
 /// Persist a custom project root (picked folder / git clone) to
 /// `~/CaPilot/workspaces/<name>/project.json`. Written at create/clone time so
 /// the root survives even with zero agents (agent-meta recovery needs one).

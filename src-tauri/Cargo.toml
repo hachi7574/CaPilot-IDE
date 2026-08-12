@@ -23,6 +23,13 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Rate-limit usage fetch (opencode.ai workspace page). reqwest 0.13 is already
+# in the dependency tree (via tauri-plugin-updater) with `rustls-no-provider`
+# TLS enabled, so this adds no new compiled crates. rustls (ring provider) is
+# also already in the tree via the updater; usage.rs installs the process-global
+# crypto provider so the reqwest Client can be built before the updater runs.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tauri-plugin-updater = "2.10.1"
 tauri-plugin-notification = "2.3.3"
 tauri-plugin-dialog = "2.7.2"
