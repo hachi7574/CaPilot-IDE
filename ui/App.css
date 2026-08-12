@@ -664,15 +664,10 @@ body::after {
 .resource-name {
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--ink2); font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 1px;
+  display: inline-flex; align-items: center; gap: 5px; min-width: 0;
 }
 .resource-val { color: var(--ink2); white-space: nowrap; }
 .resource-empty { font-size: var(--fs-xs); color: var(--ink2); font-family: var(--mono); }
-.resource-curve { border-top: 1px solid var(--rule); padding-top: 8px; }
-.resource-curve-label {
-  font-family: var(--pixel); font-size: var(--fs-2xs); color: var(--ink2);
-  letter-spacing: 1px; margin-bottom: 4px;
-}
-.resource-spark { display: block; width: 100%; }
 
 /* ── Tab panels (right sidebar) ───────────────────────────────── */
 
@@ -2453,16 +2448,10 @@ body::after {
 }
 .diff-panel .cm-activeLine,
 .diff-panel .cm-activeLineGutter { background: transparent; }
-
-/* ── Settings modal: text inputs for launch overrides ─────────── */
-.modal-text-input {
-  width: 100%; box-sizing: border-box; padding: 5px 8px;
-  background: var(--bg); border: 1px solid var(--rule2); border-radius: 6px;
-  color: var(--ink); font-family: var(--mono); font-size: var(--fs-xs);
-  outline: none; transition: border-color .15s var(--ease-apple);
+.diff-panel .cm-scroller {
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
 }
-.modal-text-input:focus { border-color: var(--brand); }
-.modal-text-input::placeholder { color: var(--muted); }
 
 /* ── 注释页面元素 (page-element annotator) ─────────────────────── */
 
@@ -2649,3 +2638,12 @@ body.annot-mode [data-annot-ui] * { cursor: default !important; }
   padding: 2px 2px 0;
 }
 
+/* ── Settings modal: text inputs for launch overrides ─────────── */
+.modal-text-input {
+  width: 100%; box-sizing: border-box; padding: 5px 8px;
+  background: var(--bg); border: 1px solid var(--rule2); border-radius: 6px;
+  color: var(--ink); font-family: var(--mono); font-size: var(--fs-xs);
+  outline: none; transition: border-color .15s var(--ease-apple);
+}
+.modal-text-input:focus { border-color: var(--brand); }
+.modal-text-input::placeholder { color: var(--muted); }
