@@ -6,6 +6,7 @@ import { useStore, AgentInfo, AgentStatus } from "../../state/store";
 import { spawnAgent, closeAgent as closeAgentAction } from "../../state/agentActions";
 import { SettingsModal } from "./SettingsModal";
 import { TerminalTemplatePicker } from "./TerminalTemplatePicker";
+import { RenameAgentModal } from "./RenameAgentModal";
 import { Icon, runtimeIcon } from "../Icon";
 
 /** Derive the workspace project name from an agent cwd. Prefers the
@@ -117,6 +118,8 @@ export function LeftSidebar() {
   const [nprojOpen, setNprojOpen] = useState(false);
   const [nprojError, setNprojError] = useState<string | null>(null);
   const [renameTarget, setRenameTarget] = useState<string | null>(null);
+  // The terminal being renamed via the agent context menu (右键 → 重命名).
+  const [renameAgentId, setRenameAgentId] = useState<string | null>(null);
   const renameProject = useStore((s) => s.renameProject);
   const moveProject = useStore((s) => s.moveProject);
   const sleepProject = useStore((s) => s.sleepProject);
@@ -698,6 +701,10 @@ export function LeftSidebar() {
           onSpawnInProject={spawnInProject}
           onRenameProject={setRenameTarget}
           onSleepProject={sleepProject}
+          onRenameAgent={(id) => {
+            setRenameAgentId(id);
+            setCtx(null);
+          }}
         />
       )}
       {termMenu && (
@@ -730,6 +737,13 @@ export function LeftSidebar() {
             if (!err) setRenameTarget(null);
             return err;
           }}
+        />
+      )}
+      {renameAgentId && (
+        <RenameAgentModal
+          agentId={renameAgentId}
+          initial={agents.get(renameAgentId)?.title ?? ""}
+          onClose={() => setRenameAgentId(null)}
         />
       )}
 
@@ -1034,13 +1048,25 @@ function ContextMenu({
   onSpawnInProject,
   onRenameProject,
   onSleepProject,
+  onRenameAgent,
 }: {
   ctx: CtxState;
   onClose: () => void;
   onSpawnInProject?: (project: string) => void;
   onRenameProject?: (project: string) => void;
   onSleepProject?: (project: string) => void;
+  onRenameAgent?: (agentId: string) => void;
 }) {
+  // All hooks must run unconditionally (Rules of Hooks). The project branch
+  // below early-returns, so any hook call after it would change the hook count
+  // between renders (project menu → agent menu) and make React throw "Rendered
+  // more hooks than during the previous render". Compute the agent-derived
+  // values up here even though the project branch doesn't use them.
+  const agent = useStore((s) => s.agents.get(ctx.agentId ?? ""));
+  const allAgents = useStore((s) => s.agents);
+  const runtimes = useStore((s) => s.runtimes);
+  const addAgent = useStore((s) => s.addAgent);
+
   // ── Project context ───────────────────────────────────────────
   if (ctx.project) {
     const proj = ctx.project;
@@ -1128,11 +1154,6 @@ function ContextMenu({
   }
 
   // ── Agent context ─────────────────────────────────────────────
-  const agent = useStore((s) => s.agents.get(ctx.agentId ?? ""));
-  const allAgents = useStore((s) => s.agents);
-  const runtimes = useStore((s) => s.runtimes);
-  const addAgent = useStore((s) => s.addAgent);
-
   // Count terminals in this project (same `projectOf` grouping as the tree).
   // When it is the project's ONLY terminal, the context menu swaps the normal
   // "关闭并终止" for "关闭并移除项目" (removes the whole project).
@@ -1184,6 +1205,18 @@ function ContextMenu({
       onClick={(e) => e.stopPropagation()}
       onContextMenu={(e) => e.stopPropagation()}
     >
+      {ctx.agentId && (
+        <div
+          className="ctx-item"
+          onClick={() => {
+            if (onRenameAgent && ctx.agentId) onRenameAgent(ctx.agentId);
+            onClose();
+          }}
+        >
+          <Icon name="pencil" size={13} /> 重命名
+        </div>
+      )}
+      {ctx.agentId && <div className="ctx-sep" />}
       <div className="ctx-label">切换 runtime</div>
       {runtimes.map((rt) => (
         <div

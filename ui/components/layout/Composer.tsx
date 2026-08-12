@@ -19,6 +19,7 @@ import type {
 } from "../../state/store";
 import { spawnAgent, ensureAgentChannel } from "../../state/agentActions";
 import { PermissionConfirmationDialog } from "./PermissionConfirmationDialog";
+import { ContextWindowMeter } from "./ContextWindowMeter";
 import { Icon } from "../Icon";
 
 const DEFAULT_RUNTIME = "claude";
@@ -1334,6 +1335,9 @@ export function Composer() {
         await new Promise((r) => setTimeout(r, 800));
       }
       const runtime = useStore.getState().agents.get(agentId)?.runtime;
+      // A submitted message starts a task — stamp the activity clock so the tab
+      // bar reads 运行中 immediately, before the first output chunk arrives.
+      useStore.getState().markAgentActive(agentId);
       if (runtime === "codex") {
         // Codex's TUI detects a text+Enter burst as pasted input. When both are
         // delivered in one PTY write, the trailing CR may remain in the editor
@@ -1625,6 +1629,7 @@ export function Composer() {
             ? activeTab.title || "agent"
             : "(无标签)"}
         </span>
+        <ContextWindowMeter agentId={targetAgentId} />
         <span className="composer-target-right">
           {isBangInput && (
             <span className="composer-bang">

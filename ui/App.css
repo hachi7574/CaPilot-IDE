@@ -261,6 +261,7 @@ body::after {
   letter-spacing: 1px; flex-shrink: 0;
 }
 .tab-status.st-idle { color: var(--muted); }
+.tab-status.st-dormant { color: var(--muted); }
 .tab-status.st-running { color: var(--primary); }
 .tab-status.st-waiting_input { color: var(--warn); }
 .tab-status.st-busy { color: var(--warn); }
@@ -506,6 +507,36 @@ body::after {
 }
 .composer-f1-hint:hover { color: var(--brand); }
 .composer-f1-hint:hover kbd { border-color: var(--brand); color: var(--brand); }
+
+/* Composer: live context-window usage meter (docs/context-window-usage.md).
+   Sits between the agent name and .composer-target-right; the divider only
+   renders when the meter itself renders. */
+.cw-meter {
+  display: inline-flex; align-items: center; gap: 6px;
+  flex-shrink: 0; min-width: 0;
+}
+.cw-divider {
+  width: 1px; height: 12px; background: var(--rule); flex-shrink: 0;
+}
+.cw-track {
+  position: relative; width: 96px; height: 4px;
+  border-radius: 2px; background: var(--bg4);
+  border: 1px solid var(--rule2); overflow: hidden; flex-shrink: 0;
+}
+.cw-fill {
+  position: absolute; left: 0; top: 0; bottom: 0;
+  border-radius: 2px; background: var(--brand);
+  transition: width .3s var(--ease-apple);
+}
+.cw-fill.tone-warn { background: var(--warn); }
+.cw-fill.tone-danger { background: var(--danger); }
+.cw-pct {
+  display: inline-block; min-width: 3ch; white-space: nowrap;
+  font-family: var(--mono); font-size: var(--fs-2xs); line-height: 1;
+  letter-spacing: 0; color: var(--brand);
+}
+.cw-pct.tone-warn { color: var(--warn); }
+.cw-pct.tone-danger { color: var(--danger); }
 
 /* Composer: `@` 文件补全 menu (DevPlan §3.2) */
 .composer-at-menu {

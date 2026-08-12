@@ -1,7 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { useStore, Tab, AgentInfo } from "../../state/store";
+import { invoke } from "@tauri-apps/api/core";
+import {
+  useStore,
+  Tab,
+  AgentInfo,
+  HookStatus,
+  effectiveAgentStatus,
+  ACTIVE_WINDOW_MS,
+} from "../../state/store";
 import { closeAgent as closeAgentAction } from "../../state/agentActions";
 import { TerminalTemplatePicker } from "./TerminalTemplatePicker";
+import { RenameAgentModal } from "./RenameAgentModal";
 import { Icon, runtimeIcon } from "../Icon";
 
 function projectOf(cwd: string): string {
@@ -12,15 +21,24 @@ function projectOf(cwd: string): string {
 }
 
 /** Agent status → colored text shown in the tab bar (the runtime logo replaces
- *  the old claude/codex text). `st-<key>` classes carry the color. */
+ *  the old claude/codex text). `st-<key>` classes carry the color. `dormant`
+ *  is derived (no live PTY — restored after restart / sleepProject / killed);
+ *  it is never persisted. */
 const STATUS_TEXT = {
   idle: "空闲",
   running: "运行中",
   waiting_input: "待确认",
-  busy: "思考中",
-  done: "已结束",
+  busy: "运行中",
+  done: "待验收",
   failed: "异常",
+  dormant: "休眠中",
 } as const;
+
+/** Runtimes whose backend adapter installs lifecycle status hooks (claude's
+ *  `--settings`, codex's per-session config profile, opencode's status
+ *  plugin). The tab strip polls the sidecar these hooks write; other runtimes
+ *  keep PTY-activity heuristics. */
+const HOOK_STATUS_RUNTIMES = new Set(["claude", "codex", "opencode"]);
 
 /** Longest-matching project root for an editor file path (or undefined). */
 function projectRootOfPath(
@@ -69,6 +87,9 @@ export function TabBar() {
   const tabs = useStore((s) => s.tabs);
   const activeTabId = useStore((s) => s.activeTabId);
   const agents = useStore((s) => s.agents);
+  const agentChannels = useStore((s) => s.agentChannels);
+  const agentActiveAt = useStore((s) => s.agentActiveAt);
+  const hookStatus = useStore((s) => s.hookStatus);
   const projectRoots = useStore((s) => s.projectRoots);
   const focusedProject = useStore((s) => s.focusedProject);
   const draggedTabId = useStore((s) => s.draggedTabId);
@@ -98,6 +119,8 @@ export function TabBar() {
     y: number;
     tabId: string;
   } | null>(null);
+  // The tab being renamed via the context menu (agent tabs only).
+  const [renameTabId, setRenameTabId] = useState<string | null>(null);
 
   // Close the tab context menu on outside click / Escape (same discipline as
   // the sidebar context menu).
@@ -157,6 +180,53 @@ export function TabBar() {
         return tp === undefined || tp === focusedProject;
       })
     : tabs;
+
+  // The 运行中 → 空闲 flip is time-driven: once the activity window lapses, a
+  // connected-but-quiet session reads as idle. Re-render on a 1s tick only
+  // while some visible tab is still inside the window (an idle strip doesn't
+  // tick).
+  const hasActive = visibleTabs.some(
+    (t) =>
+      t.agentId != null &&
+      Date.now() - (agentActiveAt.get(t.agentId) ?? 0) < ACTIVE_WINDOW_MS
+  );
+  const [, setActivityTick] = useState(0);
+  useEffect(() => {
+    if (!hasActive) return;
+    const t = setInterval(() => setActivityTick((v) => v + 1), 1000);
+    return () => clearInterval(t);
+  }, [hasActive]);
+
+  // hook-status poll: the backend sidecar (`~/CaPilot/status/<id>.json`,
+  // written by lifecycle hooks — claude's `--settings`, codex's per-session
+  // config profile) is the authoritative 运行中/空闲 source. Poll once a second
+  // for connected hook-enabled agents. The store's setter is
+  // reference-preserving, so an unchanged status doesn't re-render the strip —
+  // and a removed agent is skipped (no stale re-add).
+  useEffect(() => {
+    const t = setInterval(() => {
+      const s = useStore.getState();
+      const targets: string[] = [];
+      for (const [id, agent] of s.agents) {
+        if (HOOK_STATUS_RUNTIMES.has(agent.runtime) && s.agentChannels.has(id)) {
+          targets.push(id);
+        }
+      }
+      if (targets.length === 0) return;
+      Promise.allSettled(
+        targets.map((id) => invoke<HookStatus | null>("agent_status_read", { id }))
+      ).then((results) => {
+        const st = useStore.getState();
+        targets.forEach((id, i) => {
+          const r = results[i];
+          if (r.status === "fulfilled" && st.agents.has(id)) {
+            st.setHookStatus(id, r.value);
+          }
+        });
+      });
+    }, 1000);
+    return () => clearInterval(t);
+  }, []);
 
   // New-terminal template picker (the "+" button), anchored at the button.
   const [termPicker, setTermPicker] = useState<{
@@ -278,7 +348,22 @@ export function TabBar() {
     >
       {visibleTabs.map((tab) => {
         const agent = tab.agentId ? agents.get(tab.agentId) : undefined;
-        const status = agent?.status || "idle";
+        // A PTY channel is attached on spawn/resume and dropped when a session
+        // is killed/removed — it is the "connected" signal. Restored sessions
+        // have no channel yet, so they must not display as 运行中.
+        const connected = tab.agentId ? agentChannels.has(tab.agentId) : false;
+        // Connected-but-quiet sessions read as 空闲; recent output/input (a task
+        // in flight) reads as 运行中. `agentActiveAt` is throttled so streaming
+        // doesn't re-render the strip per chunk.
+        const active = tab.agentId
+          ? Date.now() - (agentActiveAt.get(tab.agentId) ?? 0) < ACTIVE_WINDOW_MS
+          : false;
+        const status = effectiveAgentStatus(
+          agent,
+          connected,
+          active,
+          tab.agentId ? hookStatus.get(tab.agentId) : null
+        );
         // Agent records are the live source of truth for terminal names. A
         // tab's title is only the snapshot taken when it was opened, so it can
         // become stale after restoring/resuming a session (or any runtime
@@ -370,6 +455,18 @@ export function TabBar() {
           onClick={(e) => e.stopPropagation()}
           onContextMenu={(e) => e.stopPropagation()}
         >
+          {tabMenuTab?.type === "agent" && (
+            <div
+              className="ctx-item"
+              onClick={() => {
+                setRenameTabId(tabMenu.tabId);
+                setTabMenu(null);
+              }}
+            >
+              <Icon name="pencil" size={13} /> 重命名
+            </div>
+          )}
+          {tabMenuTab?.type === "agent" && <div className="ctx-sep" />}
           <div
             className="ctx-item"
             onClick={() => {
@@ -404,6 +501,13 @@ export function TabBar() {
           project={termPicker.project}
           anchor={termPicker}
           onClose={() => setTermPicker(null)}
+        />
+      )}
+      {renameTabId && (
+        <RenameAgentModal
+          agentId={renameTabId}
+          initial={agents.get(renameTabId)?.title ?? ""}
+          onClose={() => setRenameTabId(null)}
         />
       )}
     </div>

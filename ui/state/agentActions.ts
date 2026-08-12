@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useStore, AgentInfo, createBufferedChannel } from "./store";
+import { useStore, AgentInfo, RestoredSession, createBufferedChannel } from "./store";
 
 const DEFAULT_RUNTIME = "claude";
 
@@ -52,6 +52,9 @@ export async function spawnTerminal(
   if (template.command && template.runtime.startsWith("bash")) {
     // Wait for the shell prompt, then send the command (raw:false appends \r).
     await new Promise((r) => setTimeout(r, 400));
+    // The template command is user-intended work, not boot output — end the
+    // spawn wake so its output reads as 运行中 in the tab bar.
+    useStore.getState().markAgentActive(id);
     await invoke("agent_write", { id, data: template.command, raw: false }).catch(
       () => {}
     );
@@ -90,6 +93,9 @@ export async function spawnBashAt(
   if (command) {
     // Wait for the shell prompt, then send the command (raw:false appends \r).
     await new Promise((r) => setTimeout(r, 400));
+    // The launch command is user-intended work — end the spawn wake so its
+    // output reads as 运行中 rather than being dismissed as boot noise.
+    useStore.getState().markAgentActive(info.id);
     await invoke("agent_write", { id: info.id, data: command, raw: false }).catch(
       () => {}
     );
@@ -110,6 +116,18 @@ export async function ensureAgentChannel(agentId: string): Promise<boolean> {
   flush(info.id);
   s.addAgent(info, channel);
   return true;
+}
+
+/** Rename a terminal: the backend (`agent_rename`) persists the new title to the
+ *  DB row + `.agent-meta.json`; then we update the live store (agent record +
+ *  tab title) so the tab bar and sidebar labels move together. Throws on
+ *  validation/backend errors — callers surface the message. */
+export async function renameAgent(agentId: string, title: string): Promise<void> {
+  const updated = await invoke<RestoredSession>("agent_rename", {
+    id: agentId,
+    title,
+  });
+  useStore.getState().updateAgentTitle(agentId, updated.title);
 }
 
 /** Close an agent: kill PTY, remove session row (so it won't resurrect), close tabs. */

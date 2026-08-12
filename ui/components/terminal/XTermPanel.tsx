@@ -176,6 +176,9 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     (paths: string[]) => {
       if (!paths.length) return;
       const escaped = paths.map(shellEscape).join(" ");
+      // Dropping a path is explicit terminal engagement — end the spawn wake so
+      // the command the user runs against it reads as 运行中 in the tab bar.
+      useStore.getState().markAgentActive(agentId);
       // Leading space so the path doesn't glue to preceding text (typing a path
       // in a shell); raw:true sends the keystrokes verbatim (no \r appended).
       const payload = ` ${escaped}`;

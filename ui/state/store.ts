@@ -16,6 +16,20 @@ export type Speed = string;
  *  CSS `--fs-*` tokens. */
 export type FontScale = "s" | "m" | "l" | "xl" | "xxl";
 
+/**
+ * Provider's estimate of the CURRENT active-context occupancy for an agent
+ * (wire camelCase; backend `AgentUsage`, serialized via serde rename_all).
+ *
+ * These are NOT cumulative token-spend counters: compaction can reduce
+ * `contextWindowUsedTokens`, and `contextWindowMaxTokens` is the selected
+ * model's capacity (never guessed from visible text). Both fields stay optional
+ * — a provider with no trustworthy value omits instead of estimating.
+ */
+export interface AgentUsage {
+  contextWindowUsedTokens: number | null;
+  contextWindowMaxTokens: number | null;
+}
+
 export interface AgentInfo {
   id: string;
   workspace_id?: string | null;
@@ -36,7 +50,85 @@ export interface AgentInfo {
    *  this real timestamp (NOT the activity heartbeat). Restored sessions carry
    *  the DB `created_at`; fresh spawns get `Date.now()` at spawn. */
   createdAt?: number;
+  /** Live context-window occupancy pushed by the agent adapter (see
+   *  `AgentUsage`). Daemon-memory only; absent until the first sample. */
+  last_usage?: AgentUsage | null;
 }
+
+/** Hook-reported lifecycle status read from the backend sidecar
+ *  (`~/CaPilot/status/<agent_id>.json`, written by the claude adapter's
+ *  `--settings` hooks). `status`: `idle` | `working` | `waiting_input` |
+ *  `dormant`; `ts` is epoch seconds. Absent for non-claude runtimes. */
+export interface HookStatus {
+  status: string;
+  ts: number;
+}
+
+/**
+ * Live-status derivation (Orca-aligned). The persisted `status` field is a
+ * lifecycle record — "running" means the process was alive when the row was
+ * last written, and it is NOT corrected on app quit or PTY channel loss.
+ * Treating it as live state makes a restored-but-dead session display as
+ * "运行中" in the tab bar. Derive the true "connected" signal from the PTY
+ * channel instead: attached on spawn/resume, absent for restored or dead
+ * sessions. Terminal states (`done`/`failed`/`waiting_input`/`busy`) are
+ * authoritative regardless of connectivity.
+ *
+ * `hook` is the claude hook-reported lifecycle status (authoritative where
+ * present). `waiting_input` defers to recency: a permission prompt is a static
+ * screen, but the tool that runs after the user grants it streams output — that
+ * must read as 运行中, not 待确认.
+ */
+export function effectiveAgentStatus(
+  agent: AgentInfo | undefined,
+  connected: boolean,
+  active: boolean,
+  hook?: HookStatus | null
+): AgentStatus | "dormant" {
+  if (!agent) return "idle";
+  if (agent.status === "done") return "done";
+  if (agent.status === "failed") return "failed";
+  // No live PTY → dormant (restored after restart, sleepProject, killed-kept).
+  // These sessions are resumable, not dead and not running.
+  if (!connected) return "dormant";
+  if (hook) {
+    switch (hook.status) {
+      case "working":
+        return "running";
+      case "idle":
+        return "idle";
+      case "waiting_input":
+        return active ? "running" : "waiting_input";
+      case "dormant":
+        return "dormant";
+      default:
+        break;
+    }
+  }
+  if (agent.status === "waiting_input") return "waiting_input";
+  // `busy` is the explicit "working" flag; otherwise a connected session is
+  // 运行中 while it has produced/consumed activity recently, else 空闲.
+  if (agent.status === "busy") return "running";
+  return active ? "running" : "idle";
+}
+
+/**
+ * A connected session counts as 运行中 while activity (PTY output or user
+ * input) arrived within this window. The old false 运行中 reports had three
+ * sources, all now fixed: boot output (wake markers), TUI mouse-tracking
+ * reports read as activity (DECSET filter + no activity stamp on click), and
+ * idle redraws (verified static for claude/opencode). With those gone the
+ * window is a sound recency heuristic again for the non-hook runtimes
+ * (codex/opencode/bash). claude sessions are overridden by hook-reported
+ * status (see effectiveAgentStatus), so this window never makes claude show a
+ * false 运行中 either.
+ */
+export const ACTIVE_WINDOW_MS = 2000;
+
+/** Minimum gap between activity stamps (appendAgentOutput / markAgentActive).
+ *  Kept small (0.5s) so a future non-zero window still tracks liveness without
+ *  re-rendering the tab strip on every PTY chunk. */
+export const ACTIVE_STAMP_THROTTLE_MS = 500;
 
 export interface RuntimeInfo {
   id: string;
@@ -193,6 +285,21 @@ interface AppState {
   // Agents
   agents: Map<string, AgentInfo>;
   agentChannels: Map<string, Channel<number[]>>;
+  /** Last input/output activity epoch-ms per agent, for the 运行中/空闲 split.
+   *  Updated throttled (≈1/s) so a streaming PTY doesn't re-render the tab
+   *  strip per chunk. */
+  agentActiveAt: Map<string, number>;
+  /** "Waking" marker (epoch-ms set, value unused) per agent. Set whenever a
+   *  process is freshly spawned or a dormant session is resumed — the CLI is
+   *  booting / showing its prompt, not working. While set, output is excluded
+   *  from the activity stamp; the first user engagement (see markAgentActive)
+   *  clears it so real task output reads as 运行中. */
+  agentWakeAt: Map<string, number>;
+  /** Hook-reported lifecycle status per agent (claude only; see `HookStatus`).
+   *  Polled from the backend sidecar; `effectiveAgentStatus` prefers it over the
+   *  activity heuristic so the 运行中/空闲 split follows real claude lifecycle
+   *  events (submit → working, stop → idle, permission → waiting). */
+  hookStatus: Map<string, HookStatus>;
   /** Output buffered before a terminal attached (and between mounts). */
   agentOutputs: Map<string, number[]>;
   /** Whether the initial persisted-session lookup has settled. */
@@ -277,8 +384,21 @@ interface AppState {
   addAgent: (info: AgentInfo, channel: Channel<number[]> | null, createdAtTs?: number) => void;
   removeAgent: (id: string) => void;
   updateAgentStatus: (id: string, status: AgentStatus) => void;
+  /** Replace an agent's live context-window usage (`null` = runtime has no
+   *  trustworthy value). Separate from the rate-limit `setUsage` — do not
+   *  merge the two. */
+  updateAgentUsage: (id: string, usage: AgentUsage | null) => void;
+  /** Rename a terminal: updates the live agent record AND the tab's title
+   *  snapshot, so the tab bar + sidebar labels move together immediately. The
+   *  backend (`agent_rename`) already persisted the new title. */
+  updateAgentTitle: (id: string, title: string) => void;
   appendAgentOutput: (id: string, data: number[]) => void;
   clearAgentOutput: (id: string) => void;
+  /** Stamp an agent as active (user input sent to its PTY). Combined with
+   *  output activity in `appendAgentOutput`, drives the 运行中/空闲 split. */
+  markAgentActive: (id: string) => void;
+  /** Update (or clear with `null`) an agent's hook-reported lifecycle status. */
+  setHookStatus: (id: string, hook: HookStatus | null) => void;
   requestResume: (id: string) => void;
   consumeResume: (id: string) => void;
   /** Drop a finished agent's dead channel, keeping its record + output so the
@@ -418,11 +538,16 @@ function saveTermTemplates(list: TermTemplate[]) {
 export const useStore = create<AppState>((set, get) => ({
   agents: new Map(),
   agentChannels: new Map(),
+  agentActiveAt: new Map(),
+  agentWakeAt: new Map(),
+  hookStatus: new Map(),
   agentOutputs: new Map(),
   sessionsRestored: false,
   resumeOnOpen: new Set(),
   closedAgentIds: new Set(),
   runtimes: [],
+  usageState: {},
+  usageRevision: 0,
   tabs: [],
   activeTabId: null,
   composerOpen: true,
@@ -485,12 +610,36 @@ export const useStore = create<AppState>((set, get) => ({
         project: info.project ?? previous?.project,
         workspace_id: info.workspace_id ?? previous?.workspace_id,
         createdAt: created,
+        // `info` (spawn/resume payloads) never carries live usage; keep the
+        // last sample across addAgent so a resume/model switch doesn't wipe it.
+        last_usage:
+          info.last_usage !== undefined ? info.last_usage : previous?.last_usage,
       });
       const channels = new Map(s.agentChannels);
       // Only overwrite the PTY channel when a new one is supplied. A restored
       // session has no live PTY yet, so preserve the agent's existing live
       // channel so XTermPanel doesn't lose it and fall into the resume path.
-      if (channel) channels.set(info.id, channel);
+      if (channel) {
+        channels.set(info.id, channel);
+        // Dormant → connected (resume) or a brand-new spawn: the CLI's welcome
+        // screen / idle prompt is not task activity. Mark the session "waking"
+        // so appendAgentOutput excludes that output from the 运行中/空闲 signal
+        // until the user engages it. A runtime switch (already connected, new
+        // channel object) is not a boot and keeps no marker. If the user typed
+        // while the resume was in flight (activeAt stamped before this resolve),
+        // they already engaged — don't resurrect a wake that would swallow the
+        // very task they started.
+        const wakeAt = new Map(s.agentWakeAt);
+        const now = Date.now();
+        const recentlyEngaged =
+          now - (s.agentActiveAt.get(info.id) ?? 0) < ACTIVE_WINDOW_MS;
+        if ((!previous || !s.agentChannels.has(info.id)) && !recentlyEngaged) {
+          wakeAt.set(info.id, now);
+        } else {
+          wakeAt.delete(info.id);
+        }
+        return { agents, agentChannels: channels, agentWakeAt: wakeAt };
+      }
       return { agents, agentChannels: channels };
     }),
 
@@ -500,6 +649,12 @@ export const useStore = create<AppState>((set, get) => ({
       agents.delete(id);
       const channels = new Map(s.agentChannels);
       channels.delete(id);
+      const activeAt = new Map(s.agentActiveAt);
+      activeAt.delete(id);
+      const wakeAt = new Map(s.agentWakeAt);
+      wakeAt.delete(id);
+      const hookStatus = new Map(s.hookStatus);
+      hookStatus.delete(id);
       const outputs = new Map(s.agentOutputs);
       outputs.delete(id);
       const resources = new Map(s.agentResources);
@@ -513,6 +668,9 @@ export const useStore = create<AppState>((set, get) => ({
       return {
         agents,
         agentChannels: channels,
+        agentActiveAt: activeAt,
+        agentWakeAt: wakeAt,
+        hookStatus,
         agentOutputs: outputs,
         agentResources: resources,
         resourceHistory: history,
@@ -527,6 +685,26 @@ export const useStore = create<AppState>((set, get) => ({
       const a = agents.get(id);
       if (a) agents.set(id, { ...a, status });
       return { agents };
+    }),
+
+  updateAgentUsage: (id, usage) =>
+    set((s) => {
+      const agents = new Map(s.agents);
+      const a = agents.get(id);
+      if (a) agents.set(id, { ...a, last_usage: usage });
+      return { agents };
+    }),
+
+  updateAgentTitle: (id, title) =>
+    set((s) => {
+      const agents = new Map(s.agents);
+      const a = agents.get(id);
+      if (a) agents.set(id, { ...a, title });
+      // Keep the tab's title snapshot in lockstep so the tab bar label stays
+      // consistent even after the agent record is removed (or while a stale tab
+      // lingers during close).
+      const tabs = s.tabs.map((t) => (t.agentId === id ? { ...t, title } : t));
+      return { agents, tabs };
     }),
 
   appendAgentOutput: (id, data) =>
@@ -548,7 +726,61 @@ export const useStore = create<AppState>((set, get) => ({
         prev.splice(0, prev.length - MAX_OUTPUT_BUFFER);
       }
       outputs.set(id, prev);
+      // Output = liveness: stamp the activity clock so a streaming session
+      // reads as 运行中. Throttled to ~0.5/s and reference-preserving — a fresh
+      // Map (and the resulting tab strip re-render) per chunk would be too hot.
+      // While the session is "waking" (freshly spawned/resumed, see addAgent),
+      // its output is the CLI's welcome screen — and for TUI runtimes, idle
+      // status redraws — so exclude it from the stamp. The marker is only
+      // cleared by user engagement (markAgentActive), after which output is
+      // real task work. (With ACTIVE_WINDOW_MS = 0 the stamp no longer drives
+      // 运行中, but the bookkeeping is kept for a future non-zero window.)
+      const now = Date.now();
+      const waking = s.agentWakeAt.has(id);
+      if (!waking && now - (s.agentActiveAt.get(id) ?? 0) >= ACTIVE_STAMP_THROTTLE_MS) {
+        const activeAt = new Map(s.agentActiveAt);
+        activeAt.set(id, now);
+        return { agentOutputs: outputs, agentActiveAt: activeAt };
+      }
       return { agentOutputs: outputs };
+    }),
+
+  markAgentActive: (id) =>
+    set((s) => {
+      const now = Date.now();
+      // User interaction ends the wake: output that follows is a real task,
+      // not the CLI's welcome screen.
+      const wakeAt = s.agentWakeAt.has(id) ? new Map(s.agentWakeAt) : undefined;
+      if (wakeAt) wakeAt.delete(id);
+      if (now - (s.agentActiveAt.get(id) ?? 0) < ACTIVE_STAMP_THROTTLE_MS) {
+        return wakeAt ? { agentWakeAt: wakeAt } : {};
+      }
+      const activeAt = new Map(s.agentActiveAt);
+      activeAt.set(id, now);
+      return wakeAt
+        ? { agentActiveAt: activeAt, agentWakeAt: wakeAt }
+        : { agentActiveAt: activeAt };
+    }),
+
+  setHookStatus: (id, hook) =>
+    set((s) => {
+      // Value-preserving: `invoke` parses a fresh object each poll, so compare
+      // by value — an unchanged status must not re-render the tab strip (an
+      // idle strip doesn't tick).
+      const prev = s.hookStatus.get(id);
+      if (
+        prev &&
+        hook &&
+        prev.status === hook.status &&
+        prev.ts === hook.ts
+      ) {
+        return {};
+      }
+      if (!hook && prev === undefined) return {};
+      const hookStatus = new Map(s.hookStatus);
+      if (hook) hookStatus.set(id, hook);
+      else hookStatus.delete(id);
+      return { hookStatus };
     }),
 
   clearAgentOutput: (id) =>
