@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
-import { useStore, Tab } from "../../state/store";
+import { useEffect, useState, ReactNode } from "react";
+import { useStore, Tab, SplitNode } from "../../state/store";
+import { splitLeafTabIds } from "../../state/store";
 import { XTermPanel } from "../terminal/XTermPanel";
 import { EditorPanel } from "../editor/EditorPanel";
 import { DiffPanel } from "../editor/DiffPanel";
@@ -33,22 +34,141 @@ function Panel({
   );
 }
 
+/** Which edge band a drop position falls in (left/right first, then top/bottom). */
+function computeEdge(clientX: number, clientY: number, el: HTMLElement): DropEdge {
+  const rect = el.getBoundingClientRect();
+  const x = clientX - rect.left;
+  const y = clientY - rect.top;
+  if (x < rect.width * 0.3) return "left";
+  if (x > rect.width * 0.7) return "right";
+  if (y < rect.height * 0.3) return "top";
+  if (y > rect.height * 0.7) return "bottom";
+  return null;
+}
+
+/** A pane box that accepts edge drops: middle drop activates the dragged tab,
+ *  an edge drop splits this pane with it. `targetTabId` is the tab this shell
+ *  currently holds — the pane that would be split. */
+function DropShell({
+  targetTabId,
+  draggedTabId,
+  onSplit,
+  children,
+}: {
+  targetTabId: string;
+  draggedTabId: string | null;
+  onSplit: (targetTabId: string, draggedTabId: string, edge: DropEdge) => void;
+  children: ReactNode;
+}) {
+  const [dropEdge, setDropEdge] = useState<DropEdge>(null);
+
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!draggedTabId) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    setDropEdge(computeEdge(e.clientX, e.clientY, e.currentTarget));
+  };
+
+  const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    // Ignore transitions between the shell's own children (xterm canvas etc.).
+    if ((e.currentTarget as Node).contains(e.relatedTarget as Node)) return;
+    setDropEdge(null);
+  };
+
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const edge = computeEdge(e.clientX, e.clientY, e.currentTarget);
+    setDropEdge(null);
+    if (!draggedTabId) return;
+    onSplit(targetTabId, draggedTabId, edge);
+  };
+
+  return (
+    <div
+      className="pane-shell"
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {children}
+      {draggedTabId && dropEdge && <div className={`drop-zone ${dropEdge}`} />}
+    </div>
+  );
+}
+
+/** Recursive renderer for the split tree. A leaf renders its tab in a
+ *  drop-capable shell; a split renders a flex row/column with a draggable
+ *  divider between its two subtrees. */
+function SplitView({
+  node,
+  tabs,
+  activeTabId,
+  draggedTabId,
+  resizingId,
+  onSplit,
+  onResizeStart,
+}: {
+  node: SplitNode;
+  tabs: Tab[];
+  activeTabId: string | null;
+  draggedTabId: string | null;
+  resizingId: string | null;
+  onSplit: (targetTabId: string, draggedTabId: string, edge: DropEdge) => void;
+  onResizeStart: (
+    e: React.MouseEvent<HTMLDivElement>,
+    node: Extract<SplitNode, { kind: "split" }>
+  ) => void;
+}) {
+  if (node.kind === "leaf") {
+    const tab = tabs.find((t) => t.id === node.tabId);
+    if (!tab) return null;
+    return (
+      <DropShell
+        targetTabId={tab.id}
+        draggedTabId={draggedTabId}
+        onSplit={onSplit}
+      >
+        <Panel tab={tab} active={tab.id === activeTabId} />
+      </DropShell>
+    );
+  }
+  const row = node.direction === "row";
+  const childProps = {
+    tabs,
+    activeTabId,
+    draggedTabId,
+    resizingId,
+    onSplit,
+    onResizeStart,
+  };
+  return (
+    <div className={`split-container ${row ? "split-row" : "split-column"}`}>
+      <div className="split-pane" style={{ flexBasis: `${node.ratio * 100}%` }}>
+        <SplitView node={node.a} {...childProps} />
+      </div>
+      <div
+        className={`split-divider ${row ? "split-divider-col" : "split-divider-row"}${resizingId === node.id ? " active" : ""}`}
+        onMouseDown={(e) => onResizeStart(e, node)}
+      />
+      <div className="split-pane" style={{ flex: 1 }}>
+        <SplitView node={node.b} {...childProps} />
+      </div>
+    </div>
+  );
+}
+
 export function ContentArea() {
   const tabs = useStore((s) => s.tabs);
   const agents = useStore((s) => s.agents);
   const activeTabId = useStore((s) => s.activeTabId);
-  const splitPaneA = useStore((s) => s.splitPaneA);
-  const splitPaneB = useStore((s) => s.splitPaneB);
-  const splitDirection = useStore((s) => s.splitDirection);
-  const splitRatio = useStore((s) => s.splitRatio);
+  const splitTree = useStore((s) => s.splitTree);
   const draggedTabId = useStore((s) => s.draggedTabId);
-  const setSplit = useStore((s) => s.setSplit);
   const setSplitRatio = useStore((s) => s.setSplitRatio);
+  const splitPane = useStore((s) => s.splitPane);
   const setActiveTab = useStore((s) => s.setActiveTab);
   const requestSearch = useStore((s) => s.requestSearch);
 
-  const [dropEdge, setDropEdge] = useState<DropEdge>(null);
-  const [resizing, setResizing] = useState(false);
+  const [resizingId, setResizingId] = useState<string | null>(null);
 
   // Global Ctrl+F → search the active tab's content. CodeMirror handles Ctrl+F
   // itself when its editor has focus (bubble phase: CM's own keydown runs first
@@ -82,80 +202,44 @@ export function ContentArea() {
   }, [requestSearch]);
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
-  const paneA = tabs.find((t) => t.id === splitPaneA);
-  const paneB = tabs.find((t) => t.id === splitPaneB);
-  const splitActive =
-    splitPaneA !== null && splitPaneB !== null && splitDirection !== null;
   const openCodeTabs = tabs.filter(
     (tab) => tab.type === "agent" && tab.agentId && agents.get(tab.agentId)?.runtime === "opencode"
   );
   const activeIsOpenCode = openCodeTabs.some((tab) => tab.id === activeTab?.id);
 
-  /** Which edge band a drop position falls in (left/right first, then top/bottom). */
-  const computeEdge = (clientX: number, clientY: number, el: HTMLElement): DropEdge => {
-    const rect = el.getBoundingClientRect();
-    const x = clientX - rect.left;
-    const y = clientY - rect.top;
-    if (x < rect.width * 0.3) return "left";
-    if (x > rect.width * 0.7) return "right";
-    if (y < rect.height * 0.3) return "top";
-    if (y > rect.height * 0.7) return "bottom";
-    return null;
-  };
-
-  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
-    if (!draggedTabId) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "copy";
-    setDropEdge(computeEdge(e.clientX, e.clientY, e.currentTarget));
-  };
-
-  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setDropEdge(null);
-    const draggedId = draggedTabId || e.dataTransfer.getData("text/plain");
-    const dragged = tabs.find((t) => t.id === draggedId);
-    if (!dragged) return;
-    const edge = computeEdge(e.clientX, e.clientY, e.currentTarget);
+  /** Drop a dragged tab onto a pane: middle → activate it; edge → split that
+   *  pane so the dragged tab joins on that side (no-op if it's already shown). */
+  const handleSplit = (targetTabId: string, draggedId: string, edge: DropEdge) => {
     if (!edge) {
-      // Dropped in the middle → just activate the tab.
-      setActiveTab(dragged.id);
+      setActiveTab(draggedId);
       return;
     }
-    const primary = splitActive ? splitPaneA! : activeTabId;
-    if (dragged.id === primary || dragged.id === splitPaneB) return; // already visible
-    if (!primary) {
-      setActiveTab(dragged.id);
-      return;
-    }
+    if (draggedId === targetTabId) return; // already in this pane
+    if (splitTree && splitLeafTabIds(splitTree).includes(draggedId)) return; // already visible
     const direction = edge === "left" || edge === "right" ? "row" : "column";
-    const draggedFirst = edge === "left" || edge === "top";
-    const newA = draggedFirst ? dragged.id : primary;
-    const newB = draggedFirst ? primary : dragged.id;
-    setSplit(newA, newB, direction);
-    // Keep the active tab visible: if the replaced pane was focused, move
-    // focus onto the tab that just took its place.
-    const st = useStore.getState();
-    if (st.activeTabId !== newA && st.activeTabId !== newB) {
-      setActiveTab(dragged.id);
-    }
+    const newOnFirst = edge === "left" || edge === "top";
+    splitPane(targetTabId, draggedId, direction, newOnFirst);
+    setActiveTab(draggedId);
   };
 
-  const startResize = (e: React.MouseEvent<HTMLDivElement>) => {
+  const startResize = (
+    e: React.MouseEvent<HTMLDivElement>,
+    node: Extract<SplitNode, { kind: "split" }>
+  ) => {
     e.preventDefault();
-    const row = splitDirection === "row";
+    const row = node.direction === "row";
     const container = e.currentTarget.parentElement!;
     const rect = container.getBoundingClientRect();
     const start = row ? e.clientX : e.clientY;
     const total = row ? rect.width : rect.height;
-    const initial = splitRatio;
-    setResizing(true);
+    const initial = node.ratio;
+    setResizingId(node.id);
     const onMove = (ev: MouseEvent) => {
       const delta = (row ? ev.clientX : ev.clientY) - start;
-      setSplitRatio(initial + delta / total);
+      setSplitRatio(node.id, initial + delta / total);
     };
     const onUp = () => {
-      setResizing(false);
+      setResizingId(null);
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
@@ -163,13 +247,8 @@ export function ContentArea() {
     window.addEventListener("mouseup", onUp);
   };
 
-  const dropHandlers = {
-    onDragOver: handleDragOver,
-    onDrop: handleDrop,
-  };
-
   // Empty state (no tab to show anywhere).
-  if (!activeTab && !paneA && !paneB) {
+  if (!activeTab && !splitTree) {
     return (
       <div className="content-area">
         <div className="empty-state">
@@ -183,45 +262,44 @@ export function ContentArea() {
     );
   }
 
-  // Split view: two panes side by side (row) or stacked (column).
-  if (splitActive && paneA && paneB) {
-    const row = splitDirection === "row";
+  // Split view: render the recursive pane tree.
+  if (splitTree) {
     return (
-      <div className="content-area" {...dropHandlers}>
-        <div className={`split-container ${row ? "split-row" : "split-column"}`}>
-          <div className="split-pane" style={{ flexBasis: `${splitRatio * 100}%` }}>
-            <Panel tab={paneA} active={paneA.id === activeTabId} />
-          </div>
-          <div
-            className={`split-divider ${row ? "split-divider-col" : "split-divider-row"}${resizing ? " active" : ""}`}
-            onMouseDown={startResize}
-          />
-          <div className="split-pane" style={{ flex: 1 }}>
-            <Panel tab={paneB} active={paneB.id === activeTabId} />
-          </div>
-        </div>
-        {draggedTabId && dropEdge && <div className={`drop-zone ${dropEdge}`} />}
+      <div className="content-area">
+        <SplitView
+          node={splitTree}
+          tabs={tabs}
+          activeTabId={activeTabId}
+          draggedTabId={draggedTabId}
+          resizingId={resizingId}
+          onSplit={handleSplit}
+          onResizeStart={startResize}
+        />
       </div>
     );
   }
 
   // Default single-panel view.
   return (
-    <div className="content-area" {...dropHandlers}>
-      {activeTab && !activeIsOpenCode && <Panel tab={activeTab} active />}
-      {/* OpenCode owns an alternate-screen TUI whose complete frame is held by
-          xterm, not replayed by the PTY. Keep each opened OpenCode panel mounted
-          across tab changes so returning to it cannot produce an empty canvas. */}
-      {openCodeTabs.map((tab) => (
-        <div
-          key={tab.id}
-          className={`resident-terminal-panel${tab.id === activeTab?.id ? " active" : " hidden"}`}
-          aria-hidden={tab.id !== activeTab?.id}
-        >
-          <Panel tab={tab} active={tab.id === activeTab?.id} />
-        </div>
-      ))}
-      {draggedTabId && dropEdge && <div className={`drop-zone ${dropEdge}`} />}
+    <div className="content-area">
+      {activeTab && (
+        <DropShell targetTabId={activeTab.id} draggedTabId={draggedTabId} onSplit={handleSplit}>
+          {!activeIsOpenCode && <Panel tab={activeTab} active />}
+          {/* OpenCode owns an alternate-screen TUI whose complete frame is held
+              by xterm, not replayed by the PTY. Keep each opened OpenCode panel
+              mounted across tab changes so returning to it cannot produce an
+              empty canvas. */}
+          {openCodeTabs.map((tab) => (
+            <div
+              key={tab.id}
+              className={`resident-terminal-panel${tab.id === activeTab?.id ? " active" : " hidden"}`}
+              aria-hidden={tab.id !== activeTab?.id}
+            >
+              <Panel tab={tab} active={tab.id === activeTab?.id} />
+            </div>
+          ))}
+        </DropShell>
+      )}
     </div>
   );
 }

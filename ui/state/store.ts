@@ -180,6 +180,117 @@ export interface Tab {
   title: string;
 }
 
+// ── Split layout ──────────────────────────────────────────────────
+//
+// The content area is a recursive binary tree of panes. A leaf holds a tab id;
+// a split node divides its box between two children along a row (side-by-side)
+// or column (stacked) axis, with `ratio` = fraction taken by `a`. This
+// generalizes the old two-pane model to arbitrary rows × columns (2×2 grid,
+// 3 columns, nested splits, …).
+
+export type SplitNode =
+  | { kind: "leaf"; id: string; tabId: string }
+  | {
+      kind: "split";
+      id: string;
+      direction: "row" | "column";
+      ratio: number;
+      a: SplitNode;
+      b: SplitNode;
+    };
+
+let splitUidSeq = 0;
+function splitUid(): string {
+  splitUidSeq += 1;
+  return `sp-${splitUidSeq.toString(36)}`;
+}
+
+/** Tab ids of every leaf, in layout order (left-to-right, top-to-bottom). */
+export function splitLeafTabIds(node: SplitNode): string[] {
+  return node.kind === "leaf"
+    ? [node.tabId]
+    : [...splitLeafTabIds(node.a), ...splitLeafTabIds(node.b)];
+}
+
+/** The first (leftmost/topmost) leaf's tab id — the pane that `setActiveTab` /
+ *  `addTab` bring a hidden tab into while a split is active. */
+function splitFirstLeaf(node: SplitNode): string {
+  return node.kind === "leaf" ? node.tabId : splitFirstLeaf(node.a);
+}
+
+/** Number of leaves in the tree. */
+function splitLeafCount(node: SplitNode): number {
+  return node.kind === "leaf" ? 1 : splitLeafCount(node.a) + splitLeafCount(node.b);
+}
+
+/** Replace the leaf holding `targetTabId` with a leaf holding `newTabId`. */
+function splitReplaceLeaf(
+  node: SplitNode,
+  targetTabId: string,
+  newTabId: string
+): SplitNode {
+  if (node.kind === "leaf") {
+    return node.tabId === targetTabId ? { ...node, tabId: newTabId } : node;
+  }
+  return {
+    ...node,
+    a: splitReplaceLeaf(node.a, targetTabId, newTabId),
+    b: splitReplaceLeaf(node.b, targetTabId, newTabId),
+  };
+}
+
+/** Split the leaf holding `targetTabId` into two leaves along `direction`;
+ *  when `newOnFirst` the new tab takes the `a` (left/top) side. */
+function splitInsert(
+  node: SplitNode,
+  targetTabId: string,
+  newTabId: string,
+  direction: "row" | "column",
+  newOnFirst: boolean
+): SplitNode {
+  if (node.kind === "leaf") {
+    if (node.tabId !== targetTabId) return node;
+    const existing: SplitNode = { kind: "leaf", id: splitUid(), tabId: targetTabId };
+    const fresh: SplitNode = { kind: "leaf", id: splitUid(), tabId: newTabId };
+    return {
+      kind: "split",
+      id: splitUid(),
+      direction,
+      ratio: 0.5,
+      a: newOnFirst ? fresh : existing,
+      b: newOnFirst ? existing : fresh,
+    };
+  }
+  return {
+    ...node,
+    a: splitInsert(node.a, targetTabId, newTabId, direction, newOnFirst),
+    b: splitInsert(node.b, targetTabId, newTabId, direction, newOnFirst),
+  };
+}
+
+/** Remove the leaf holding `tabId`, collapsing its parent split to the sibling.
+ *  Returns null when the whole tree is gone. */
+function splitRemoveLeaf(node: SplitNode | null, tabId: string): SplitNode | null {
+  if (!node) return null;
+  if (node.kind === "leaf") return node.tabId === tabId ? null : node;
+  const a = splitRemoveLeaf(node.a, tabId);
+  const b = splitRemoveLeaf(node.b, tabId);
+  if (!a) return b;
+  if (!b) return a;
+  return a === node.a && b === node.b ? node : { ...node, a, b };
+}
+
+/** Set the ratio of the split node with the given id. */
+function splitSetRatio(node: SplitNode, nodeId: string, ratio: number): SplitNode {
+  if (node.kind === "leaf") return node;
+  if (node.id === nodeId) return { ...node, ratio };
+  return {
+    ...node,
+    a: splitSetRatio(node.a, nodeId, ratio),
+    b: splitSetRatio(node.b, nodeId, ratio),
+  };
+}
+
 /** Matches the Rust `AgentSessionRecord` (snake_case keys). */
 export interface RestoredSession {
   id: string;
@@ -336,13 +447,10 @@ interface AppState {
   draftHistory: string[];
   draftIndex: number;
 
-  // Split layout (DevPlan §3.1.2) — paneA/paneB hold tab ids; a null pair
-  // means the default single-panel view.
-  splitPaneA: string | null;
-  splitPaneB: string | null;
-  splitDirection: "row" | "column" | null;
-  /** 0..1 fraction of the container taken by paneA. */
-  splitRatio: number;
+  // Split layout — a recursive binary tree of panes (a leaf holds a tab id; a
+  // split node divides its box along a row/column axis). Null = the default
+  // single-panel view.
+  splitTree: SplitNode | null;
   /** Tab id currently being dragged (for edge-drop feedback). */
   draggedTabId: string | null;
 
@@ -413,10 +521,19 @@ interface AppState {
   reorderTabs: (fromIndex: number, toIndex: number) => void;
   closeTab: (id: string) => void;
   setActiveTab: (id: string) => void;
-  setSplit: (paneA: string, paneB: string, direction: "row" | "column") => void;
+  setSplitTree: (tree: SplitNode | null) => void;
+  /** Split the pane showing `targetTabId` so `newTabId` joins it along
+   *  `direction` (`newOnFirst` → the new tab takes the left/top side). */
+  splitPane: (
+    targetTabId: string,
+    newTabId: string,
+    direction: "row" | "column",
+    newOnFirst: boolean
+  ) => void;
   clearSplit: () => void;
   removeSplitPane: (id: string) => void;
-  setSplitRatio: (ratio: number) => void;
+  /** Set the ratio of a specific split node (by id). */
+  setSplitRatio: (nodeId: string, ratio: number) => void;
   setDraggedTabId: (id: string | null) => void;
   toggleComposer: () => void;
   requestFocus: (target: "composer" | "terminal") => void;
@@ -563,10 +680,7 @@ export const useStore = create<AppState>((set, get) => ({
   leftWidth: 248,
   rightWidth: 340,
   composerH: null,
-  splitPaneA: null,
-  splitPaneB: null,
-  splitDirection: null,
-  splitRatio: 0.5,
+  splitTree: null,
   draggedTabId: null,
   espStatus: {
     connected: false,
@@ -816,10 +930,14 @@ export const useStore = create<AppState>((set, get) => ({
   addTab: (tab) =>
     set((s) => {
       const tabs = [...s.tabs.filter((t) => t.id !== tab.id), tab];
-      // With an active split, surface a newly opened tab in the primary pane.
-      const splitActive = s.splitPaneA !== null && s.splitPaneB !== null;
-      if (splitActive && s.splitPaneA !== tab.id && s.splitPaneB !== tab.id) {
-        return { tabs, activeTabId: tab.id, splitPaneA: tab.id };
+      // With an active split, surface a newly opened tab in the first pane.
+      const tree = s.splitTree;
+      if (tree && !splitLeafTabIds(tree).includes(tab.id)) {
+        return {
+          tabs,
+          activeTabId: tab.id,
+          splitTree: splitReplaceLeaf(tree, splitFirstLeaf(tree), tab.id),
+        };
       }
       return { tabs, activeTabId: tab.id };
     }),
@@ -843,37 +961,39 @@ export const useStore = create<AppState>((set, get) => ({
   closeTab: (id) =>
     set((s) => {
       const tabs = s.tabs.filter((t) => t.id !== id);
-      // Closing a tab that occupies a split pane collapses the split so the
-      // remaining pane becomes the single view.
-      const splitActive = s.splitPaneA !== null && s.splitPaneB !== null;
-      if (splitActive) {
-        if (s.splitPaneA === id && s.splitPaneB === id) {
+      // Closing a tab that occupies a split leaf prunes that leaf and collapses
+      // its parent split to the surviving sibling.
+      const tree = s.splitTree;
+      if (tree && splitLeafTabIds(tree).includes(id)) {
+        const pruned = splitRemoveLeaf(tree, id);
+        if (!pruned) {
+          // The last visible tab was closed → back to the (possibly empty)
+          // single-panel view.
           return {
             tabs,
             activeTabId: tabs[tabs.length - 1]?.id ?? null,
-            splitPaneA: null,
-            splitPaneB: null,
-            splitDirection: null,
+            splitTree: null,
           };
         }
-        if (s.splitPaneA === id) {
+        if (splitLeafCount(pruned) === 1) {
+          // One pane left → collapse to the single-panel view (keeps the
+          // OpenCode resident-terminal handling).
           return {
             tabs,
-            activeTabId: s.splitPaneB,
-            splitPaneA: null,
-            splitPaneB: null,
-            splitDirection: null,
+            activeTabId:
+              s.activeTabId === id ? splitFirstLeaf(pruned) : s.activeTabId,
+            splitTree: null,
           };
         }
-        if (s.splitPaneB === id) {
-          return {
-            tabs,
-            activeTabId: s.splitPaneA,
-            splitPaneA: null,
-            splitPaneB: null,
-            splitDirection: null,
-          };
-        }
+        const visible = splitLeafTabIds(pruned);
+        return {
+          tabs,
+          activeTabId:
+            s.activeTabId !== null && visible.includes(s.activeTabId)
+              ? s.activeTabId
+              : splitFirstLeaf(pruned),
+          splitTree: pruned,
+        };
       }
       const activeTabId =
         s.activeTabId === id ? (tabs[tabs.length - 1]?.id ?? null) : s.activeTabId;
@@ -883,49 +1003,74 @@ export const useStore = create<AppState>((set, get) => ({
   setActiveTab: (id) =>
     set((s) => {
       // With an active split, clicking a tab that isn't already visible focuses
-      // it in the primary pane (paneA).
-      const splitActive = s.splitPaneA !== null && s.splitPaneB !== null;
-      if (splitActive && s.splitPaneA !== id && s.splitPaneB !== id) {
-        return { activeTabId: id, splitPaneA: id };
+      // it in the first pane.
+      const tree = s.splitTree;
+      if (tree && !splitLeafTabIds(tree).includes(id)) {
+        return {
+          activeTabId: id,
+          splitTree: splitReplaceLeaf(tree, splitFirstLeaf(tree), id),
+        };
       }
       return { activeTabId: id };
     }),
 
-  setSplit: (paneA, paneB, direction) =>
-    set({
-      splitPaneA: paneA,
-      splitPaneB: paneB,
-      splitDirection: direction,
-      splitRatio: 0.5,
+  splitPane: (targetTabId, newTabId, direction, newOnFirst) =>
+    set((s) => {
+      const fresh: SplitNode = { kind: "leaf", id: splitUid(), tabId: newTabId };
+      if (!s.splitTree) {
+        const existing: SplitNode = { kind: "leaf", id: splitUid(), tabId: targetTabId };
+        return {
+          splitTree: {
+            kind: "split",
+            id: splitUid(),
+            direction,
+            ratio: 0.5,
+            a: newOnFirst ? fresh : existing,
+            b: newOnFirst ? existing : fresh,
+          },
+        };
+      }
+      return {
+        splitTree: splitInsert(s.splitTree, targetTabId, newTabId, direction, newOnFirst),
+      };
     }),
 
-  clearSplit: () =>
-    set({ splitPaneA: null, splitPaneB: null, splitDirection: null }),
+  setSplitTree: (tree) => set({ splitTree: tree }),
+
+  clearSplit: () => set({ splitTree: null }),
 
   removeSplitPane: (id) =>
     set((s) => {
-      if (s.splitPaneA === null || s.splitPaneB === null) return {};
-      if (s.splitPaneA === id) {
+      const tree = s.splitTree;
+      if (!tree || !splitLeafTabIds(tree).includes(id)) return {};
+      const pruned = splitRemoveLeaf(tree, id);
+      if (!pruned) {
         return {
-          activeTabId: s.splitPaneB,
-          splitPaneA: null,
-          splitPaneB: null,
-          splitDirection: null,
+          splitTree: null,
+          activeTabId: s.tabs[s.tabs.length - 1]?.id ?? null,
         };
       }
-      if (s.splitPaneB === id) {
-        return {
-          activeTabId: s.splitPaneA,
-          splitPaneA: null,
-          splitPaneB: null,
-          splitDirection: null,
-        };
-      }
-      return {};
+      const visible = splitLeafTabIds(pruned);
+      return {
+        splitTree: splitLeafCount(pruned) === 1 ? null : pruned,
+        activeTabId:
+          s.activeTabId !== null && visible.includes(s.activeTabId)
+            ? s.activeTabId
+            : splitFirstLeaf(pruned),
+      };
     }),
 
-  setSplitRatio: (ratio) =>
-    set({ splitRatio: Math.max(0.2, Math.min(0.8, ratio)) }),
+  setSplitRatio: (nodeId, ratio) =>
+    set((s) => {
+      if (!s.splitTree) return {};
+      return {
+        splitTree: splitSetRatio(
+          s.splitTree,
+          nodeId,
+          Math.max(0.2, Math.min(0.8, ratio))
+        ),
+      };
+    }),
 
   setDraggedTabId: (id) => set({ draggedTabId: id }),
 

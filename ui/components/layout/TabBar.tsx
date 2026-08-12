@@ -106,7 +106,6 @@ export function TabBar() {
   const [dragTargetIdx, setDragTargetIdx] = useState<number | null>(null);
   const [dragHidden, setDragHidden] = useState(false);
   const tabElsRef = useRef<Map<string, HTMLDivElement | null>>(new Map());
-  const dragWRef = useRef(0);
   const lastSwitchXRef = useRef(0);
   const TAB_GAP = 2;
   // The cursor must travel this far past a slot boundary before the target
@@ -269,24 +268,51 @@ export function TabBar() {
     const barRect = bar.getBoundingClientRect();
     // `.tab-bar` has `padding: 0 6px`, so neighbours start 6px in. The bar
     // content is scrolled by `scrollLeft`, so subtract it to hit-test in the
-    // same (content) coordinate space the transforms use.
-    let acc = barRect.left - bar.scrollLeft + 6;
-    // Natural slot midpoints of the non-dragged tabs.
-    const slots: { tabIndex: number; mid: number }[] = [];
+    // same (content) coordinate space the preview transforms use.
+    const originX = barRect.left - bar.scrollLeft + 6;
+    const widthOf = (id: string) => tabElsRef.current.get(id)?.offsetWidth ?? 120;
+    // Resting left edge of every rendered tab. Transforms don't affect
+    // offsetWidth, so this is the geometry the strip settles back to — it must
+    // include the dragged tab's own slot (packing only the non-dragged tabs
+    // from the left edge shifts every boundary left by the dragged tab's
+    // width, which made the drop slot open too early).
+    const leftById = new Map<string, number>();
+    {
+      let acc = 0;
+      for (const tv of visibleTabs) {
+        leftById.set(tv.id, acc);
+        acc += widthOf(tv.id) + TAB_GAP;
+      }
+    }
+    // Midpoints of the non-dragged tabs' resting slots.
+    const rest: { id: string; mid: number }[] = [];
     for (const tv of visibleTabs) {
       if (tv.id === draggedTabId) continue;
-      const w = tabElsRef.current.get(tv.id)?.offsetWidth ?? 120;
-      slots.push({ tabIndex: tabs.indexOf(tv), mid: acc + w / 2 });
-      acc += w + TAB_GAP;
+      rest.push({
+        id: tv.id,
+        mid: originX + (leftById.get(tv.id) ?? 0) + widthOf(tv.id) / 2,
+      });
     }
 
-    // Candidate slot: the first whose midpoint is right of the cursor, else
-    // the last slot (drop after everything). The dragged tab's own index is a
-    // no-op (drop in place).
-    let cand = slots.findIndex((s) => e.clientX < s.mid);
-    if (cand === -1) cand = slots.length - 1;
-    const candidate = slots[cand].tabIndex;
-    const next = candidate === fromIndex ? null : candidate;
+    // The drop index (reorderTabs `to`) equals how many of those midpoints sit
+    // left of the cursor: hover over b's right half / c's left half to put a
+    // between b and c, over the source slot to leave it in place.
+    let vis = rest.findIndex((r) => e.clientX < r.mid);
+    if (vis === -1) vis = rest.length;
+
+    // Map the visible insertion point back to a full-tabs index for reorderTabs
+    // (needed when a focused project hides some tabs): insert just before the
+    // full-tabs position of the tab now at the insertion point, or after the
+    // last rendered tab when the cursor is past every midpoint.
+    const atId = vis < rest.length ? rest[vis].id : rest[rest.length - 1].id;
+    const atFull = tabs.findIndex((t) => t.id === atId);
+    let to: number;
+    if (vis < rest.length) {
+      to = atFull > fromIndex ? atFull - 1 : atFull;
+    } else {
+      to = atFull >= fromIndex ? atFull : atFull + 1;
+    }
+    const next = to === fromIndex ? null : to;
 
     // Distance hysteresis: once the target changes, don't change it again until
     // the cursor has moved DRAG_DEAD_ZONE px — sub-pixel jitter at a boundary
@@ -324,6 +350,52 @@ export function TabBar() {
     setDragTargetIdx(null);
     tabElsRef.current.clear();
   };
+
+  // Preview positions during a drag. Each tab's shift is its exact post-drop
+  // flex position minus its resting position, so the preview (and the empty gap
+  // that trails the hidden dragged tab) always lines up — even when tab widths
+  // differ, which a single `step`-per-slot constant would not.
+  const dxById = new Map<string, number>();
+  if (draggedTabId && dragTargetIdx !== null) {
+    // Positions are relative to the rendered strip (`visibleTabs`), not the
+    // full store array, since hidden tabs aren't in the flex layout. We
+    // simulate the exact commit on the full array (mirroring reorderTabs) and
+    // filter back to the strip, so the preview tracks the commit even when a
+    // focused project hides some tabs.
+    const order = visibleTabs.map((t) => t.id);
+    const fromIndex = order.indexOf(draggedTabId);
+    const full = tabs.map((t) => t.id);
+    const fullFrom = full.indexOf(draggedTabId);
+    if (fromIndex >= 0 && fullFrom >= 0) {
+      const [moved] = full.splice(fullFrom, 1);
+      full.splice(dragTargetIdx, 0, moved);
+      const visibleIds = new Set(order);
+      const final = full.filter((id) => visibleIds.has(id));
+      if (final.indexOf(draggedTabId) !== fromIndex) {
+        const widthOf = (id: string) => tabElsRef.current.get(id)?.offsetWidth ?? 120;
+        const origLeft = new Map<string, number>();
+        const finalLeft = new Map<string, number>();
+        for (let acc = 0, i = 0; i < order.length; i++) {
+          origLeft.set(order[i], acc);
+          acc += widthOf(order[i]) + TAB_GAP;
+        }
+        for (let acc = 0, i = 0; i < final.length; i++) {
+          finalLeft.set(final[i], acc);
+          acc += widthOf(final[i]) + TAB_GAP;
+        }
+        for (const id of order) {
+          const base = origLeft.get(id) ?? 0;
+          dxById.set(id, (finalLeft.get(id) ?? base) - base);
+        }
+      }
+    }
+  }
+
+  // The tab the context menu is open on (for the rename entry, which only shows
+  // for agent tabs — editor/diff titles come from their file paths).
+  const tabMenuTab = tabMenu
+    ? tabs.find((t) => t.id === tabMenu.tabId)
+    : undefined;
 
   return (
     <div
@@ -371,22 +443,11 @@ export function TabBar() {
         // `agents`; doing the same here keeps both labels in lockstep.
         const title = tab.type === "agent" ? agent?.title || tab.title : tab.title;
         const isDragging = draggedTabId === tab.id;
-        const fromIndex = draggedTabId
-          ? tabs.findIndex((t) => t.id === draggedTabId)
-          : -1;
-        const idx = tabs.indexOf(tab);
         // Live position during a drag: the dragged tab's slot rides the hover
         // index while siblings slide out of its path (empty-space = original
-        // slot, so dropping there is a no-op).
-        let dx = 0;
-        if (draggedTabId && dragTargetIdx !== null && fromIndex >= 0) {
-          const step = dragWRef.current + TAB_GAP;
-          if (idx === fromIndex) dx = (dragTargetIdx - fromIndex) * step;
-          else if (dragTargetIdx > fromIndex && idx > fromIndex && idx <= dragTargetIdx)
-            dx = -step;
-          else if (dragTargetIdx < fromIndex && idx >= dragTargetIdx && idx < fromIndex)
-            dx = step;
-        }
+        // slot, so dropping there is a no-op). `dxById` is keyed off the exact
+        // post-drop layout, so widths are naturally accounted for.
+        const dx = dxById.get(tab.id) ?? 0;
         return (
           <div
             key={tab.id}
@@ -400,7 +461,6 @@ export function TabBar() {
             onDragStart={(e) => {
               e.dataTransfer.setData("text/plain", tab.id);
               e.dataTransfer.effectAllowed = "copy";
-              dragWRef.current = (e.currentTarget as HTMLElement).offsetWidth;
               lastSwitchXRef.current = 0;
               setDragHidden(false);
               setDraggedTabId(tab.id);

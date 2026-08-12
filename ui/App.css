@@ -1005,6 +1005,9 @@ body::after {
 .split-row { flex-direction: row; }
 .split-column { flex-direction: column; }
 .split-pane { display: flex; min-width: 0; min-height: 0; overflow: hidden; }
+/* A leaf pane: fills its split-pane, is position:relative so the edge drop-zone
+   overlay anchors to it, and hosts the per-pane drop handlers. */
+.pane-shell { position: relative; flex: 1; display: flex; min-width: 0; min-height: 0; overflow: hidden; }
 
 .split-divider { flex-shrink: 0; background: var(--rule); transition: background .2s; position: relative; z-index: 5; }
 .split-divider:hover, .split-divider.active { background: var(--brand); }
@@ -1020,13 +1023,15 @@ body::after {
 .drop-zone.top { top: 0; left: 0; right: 0; height: 30%; }
 .drop-zone.bottom { bottom: 0; left: 0; right: 0; height: 30%; }
 
-/* Drag-reorder: during the drag every tab-item drops its 0.2s transition, so
-   the strip snaps discretely to the hover slot instead of having 200ms
-   animations constantly chasing the cursor (that chase was the flicker). The
-   scoped will-change keeps the compositor on WebKitGTK from repainting at full
-   cost during the drag. */
-.tab-bar.tab-drag-active .tab-item { will-change: transform; transition: none; }
-.tab-item.dragging { transition: none; }
+/* Drag-reorder: during the drag, every tab glides between slots on a short
+   transform transition instead of snapping — discrete snapping (transition:
+   none) read as the other tabs "jumping". 120ms is short enough that the
+   dead-zone hysteresis keeps each glide from being overtaken by the next hover
+   change, which is what the 0.2s base chase did and what caused the flicker.
+   The hidden dragged tab glides too, so its trailing gap slides from the source
+   slot to the target in one conveyor motion. The scoped will-change keeps the
+   compositor on WebKitGTK from repainting at full cost during the drag. */
+.tab-bar.tab-drag-active .tab-item { will-change: transform; transition: transform 120ms var(--ease-apple); }
 /* The source tab becomes an invisible gap after the drag image is snapshotted
    (the ghost follows the cursor), so the strip only shows the drop slot. */
 .tab-item.drag-hidden { visibility: hidden; opacity: 0; }
