@@ -375,10 +375,6 @@ body::after {
 .ov-usage-item { margin: 7px 0; }
 .ov-usage-label { font-family: var(--mono); font-size: var(--fs-xs); color: var(--ink2); margin-bottom: 3px; }
 .ov-usage-stats { display: flex; justify-content: space-between; font-family: var(--mono); font-size: var(--fs-2xs); color: var(--ink2); margin-top: 3px; }
-.ov-esp-status { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
-.ov-esp-dot { width: 8px; height: 8px; background: var(--success); border: 1px solid var(--success); }
-.ov-esp-name { font-family: var(--mono); font-size: var(--fs-xs); color: var(--ink2); }
-.ov-esp-conn { font-family: var(--pixel); font-size: var(--fs-2xs); color: var(--primary); letter-spacing: 1px; text-transform: uppercase; padding: 2px 8px; border: 1px solid var(--primary-dim); background: rgb(var(--brand-rgb) / .06); }
 
 /* ── Composer ─────────────────────────────────────────────────── */
 
@@ -622,10 +618,7 @@ body::after {
    panel mono face at a slightly larger size, lowercase with no tracking. */
 .sb-name { font-family: 'Silkscreen', monospace; font-size: var(--fs-2xs); letter-spacing: 1px; text-transform: uppercase; }
 .sb-val { font-family: 'JetBrainsMono', ui-monospace, monospace; font-size: var(--fs-xs); letter-spacing: 0; text-transform: none; }
-.sb-dot { width: 6px; height: 6px; }
-.sb-dot.bt { background: var(--primary); }
 .sb-sep { width: 1px; height: 12px; background: var(--rule); }
-.sb-battery { color: var(--success); }
 .sb-spacer { flex: 1; }
 .sb-mode { color: var(--ai); }
 /* Remaining-usage readout (codex/opencode quota) — accent like the resource item. */
@@ -1169,33 +1162,6 @@ body::after {
   background: rgb(var(--brand-rgb) / 0.12);
   padding: 0 4px;
   font-family: var(--mono);
-}
-
-.onboarding-esp {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 12px;
-  background: var(--bg);
-  border: 1px solid var(--rule);
-}
-
-.onboarding-esp-ok {
-  font-family: var(--mono);
-  font-size: var(--fs-sm);
-  color: var(--success);
-}
-
-.onboarding-esp-msg {
-  font-family: var(--mono);
-  font-size: var(--fs-xs);
-  color: var(--warn);
-}
-
-.onboarding-esp-addr {
-  font-family: var(--mono);
-  font-size: var(--fs-xs);
-  color: var(--ink2);
 }
 
 .onboarding-btn {

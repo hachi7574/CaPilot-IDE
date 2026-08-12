@@ -1,12 +1,11 @@
 import { useState } from "react";
 import { useStore } from "../../state/store";
-import { connectEsp } from "../../state/esp";
 import { spawnAgent } from "../../state/agentActions";
 import { Icon } from "../Icon";
 
 /**
  * First-run onboarding overlay (shown until the user completes it).
- * Five steps: 欢迎 → 运行环境检测 → ESP 配对 → 创建会话 → 完成.
+ * Four steps: 欢迎 → 运行环境检测 → 创建会话 → 完成.
  *
  * The whole guide can be skipped at any point via the top-right 跳过引导
  * button; skipping just marks onboarding done and drops the overlay. The
@@ -15,25 +14,15 @@ import { Icon } from "../Icon";
  */
 export function Onboarding() {
   const runtimes = useStore((s) => s.runtimes);
-  const espStatus = useStore((s) => s.espStatus);
-  const espConnecting = useStore((s) => s.espConnecting);
   const setOnboarded = useStore((s) => s.setOnboarded);
 
   const [step, setStep] = useState(0);
-  const [espMsg, setEspMsg] = useState<string | null>(null);
   const [creatingAgent, setCreatingAgent] = useState(false);
   const [agentErr, setAgentErr] = useState<string | null>(null);
 
-  const total = 5;
+  const total = 4;
   const isLast = step === total - 1;
   const isFirst = step === 0;
-
-  const handleEspConnect = async () => {
-    setEspMsg(null);
-    const err = await connectEsp();
-    if (err) setEspMsg(`连接失败：${err}`);
-    else setEspMsg("已发起 BLE 连接…");
-  };
 
   /** Create the first agent session, then finish onboarding. */
   const handleCreateAgent = async () => {
@@ -125,45 +114,6 @@ export function Onboarding() {
 
         {step === 2 && (
           <div className="onboarding-step">
-            <div className="onboarding-step-title">ESP 遥控器配对</div>
-            <p className="onboarding-step-desc">
-              通过 BLE 连接 ESP32 遥控器，可远程下发指令与控制。连接状态会显示
-              在底部状态栏。你也可以稍后在「设置」中连接。
-            </p>
-            <div className="onboarding-esp">
-              {espStatus.connected ? (
-                <div className="onboarding-esp-ok">
-                  <Icon name="check" size={14} style={{ marginRight: 4 }} /> 已连接{" "}
-                  {espStatus.name ?? "ESP32-C5"}
-                  {espStatus.battery_pct !== null && (
-                    <span style={{ display: "inline-flex", alignItems: "center" }}>
-                      {" · "}
-                      <Icon name="battery-full" size={12} style={{ marginRight: 3 }} />
-                      {espStatus.battery_pct}%
-                    </span>
-                  )}
-                </div>
-              ) : (
-                <button
-                  className="onboarding-btn onboarding-btn-primary"
-                  onClick={handleEspConnect}
-                  disabled={espConnecting}
-                >
-                  {espConnecting ? "连接中…" : "连接 ESP (BLE)"}
-                </button>
-              )}
-              {espMsg && (
-                <div className="onboarding-esp-msg">{espMsg}</div>
-              )}
-              {espStatus.connected && espStatus.address && (
-                <div className="onboarding-esp-addr">{espStatus.address}</div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {step === 3 && (
-          <div className="onboarding-step">
             <div className="onboarding-step-title">创建第一个 Agent 会话</div>
             <p className="onboarding-step-desc">
               创建一个 Agent 终端，即可在底部输入框或原生终端界面中开始工作。
@@ -193,7 +143,7 @@ export function Onboarding() {
           </div>
         )}
 
-        {step === 4 && (
+        {step === 3 && (
           <div className="onboarding-step">
             <div className="onboarding-step-title">准备就绪</div>
             <p className="onboarding-step-desc">
@@ -219,7 +169,6 @@ export function Onboarding() {
                 className="onboarding-btn"
                 onClick={() => {
                   setStep((s) => s - 1);
-                  setEspMsg(null);
                   setAgentErr(null);
                 }}
               >

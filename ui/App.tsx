@@ -3,11 +3,9 @@ import { MainArea } from "./components/layout/MainArea";
 import { RightSidebar } from "./components/layout/RightSidebar";
 import { StatusBar } from "./components/layout/StatusBar";
 import { Onboarding } from "./components/onboarding/Onboarding";
-import { useEspSync } from "./state/esp";
 import { useResourceSync } from "./state/resource";
 import { useRuntimeSync } from "./state/runtime";
 import { useSessionRestore, useAgentEvents } from "./state/session";
-import { useNotifications } from "./state/notifications";
 import { useCloneEvents } from "./state/clone";
 import { useUsageSync } from "./state/usage";
 import { useContextUsageSync } from "./state/usageContext";
@@ -17,12 +15,10 @@ import { AnnotationTray } from "./components/annotations/AnnotationTray";
 import "./App.css";
 
 function App() {
-  useEspSync();
   useResourceSync();
   useRuntimeSync();
   useSessionRestore();
   useAgentEvents();
-  useNotifications();
   useCloneEvents();
   useUsageSync();
   useContextUsageSync();

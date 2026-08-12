@@ -341,17 +341,6 @@ export interface RestoredSession {
   updated_at: number;
 }
 
-export interface EspStatus {
-  connected: boolean;
-  kind: "ble" | "usb" | "wifi" | null;
-  name: string | null;
-  address: string | null;
-  rssi: number | null;
-  battery_pct: number | null;
-  battery_mv: number | null;
-  last_seen_ms: number | null;
-}
-
 /** One agent's resource snapshot from `resource://sample` (DevPlan §10). */
 export interface AgentResource {
   agent_id: string;
@@ -511,10 +500,6 @@ interface AppState {
   /** Composer height (px). */
   composerH: number | null;
 
-  // ESP
-  espStatus: EspStatus;
-  espConnecting: boolean;
-
   // Resource monitor (DevPlan §10)
   agentResources: Map<string, ResourcePoint>;
   resourceHistory: Map<string, ResourcePoint[]>;
@@ -607,8 +592,6 @@ interface AppState {
   addTermTemplate: (t: TermTemplate) => void;
   updateTermTemplate: (id: string, patch: Partial<Pick<TermTemplate, "name" | "command">>) => void;
   removeTermTemplate: (id: string) => void;
-  setEspStatus: (status: Partial<EspStatus>) => void;
-  setEspConnecting: (connecting: boolean) => void;
   applyResourceSample: (resources: AgentResource[]) => void;
   setResourceHistory: (agentId: string, points: ResourcePoint[]) => void;
   setOnboarded: (onboarded: boolean) => void;
@@ -721,17 +704,6 @@ export const useStore = create<AppState>((set, get) => ({
   composerH: null,
   splitTree: null,
   draggedTabId: null,
-  espStatus: {
-    connected: false,
-    kind: null,
-    name: null,
-    address: null,
-    rssi: null,
-    battery_pct: null,
-    battery_mv: null,
-    last_seen_ms: null,
-  },
-  espConnecting: false,
   agentResources: new Map(),
   resourceHistory: new Map(),
   projects: [],
@@ -1327,11 +1299,6 @@ export const useStore = create<AppState>((set, get) => ({
     set({ projects, projectRoots, focusedProject, agents });
     return newName;
   },
-
-  setEspStatus: (status) =>
-    set((s) => ({ espStatus: { ...s.espStatus, ...status } })),
-
-  setEspConnecting: (connecting) => set({ espConnecting: connecting }),
 
   applyResourceSample: (resources) =>
     set((s) => {

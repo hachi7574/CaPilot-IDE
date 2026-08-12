@@ -164,8 +164,6 @@ function bytesToG(bytes: number | undefined | null): string {
 }
 
 function OverviewDashboard() {
-  const esp = useStore((s) => s.espStatus);
-
   // Live system-wide CPU/MEM for the Computer Status panel (2s tick).
   const [stats, setStats] = useState<SystemStats | null>(null);
   useEffect(() => {
@@ -197,29 +195,6 @@ function OverviewDashboard() {
     stats && stats.mem_total
       ? Math.max(0, Math.min(100, (stats.mem_used / stats.mem_total) * 100))
       : 0;
-
-  const espKind = esp.kind === "ble" ? "bluetooth" : esp.kind === "wifi" ? "wifi" : esp.kind === "usb" ? "plug" : "";
-  const espKindLabel =
-    esp.kind === "ble" ? "BLE" : esp.kind === "wifi" ? "WiFi" : esp.kind === "usb" ? "USB" : "";
-  const espSummary = (
-    <>
-      {esp.connected ? (esp.name ?? "ESP") : "未连接"}
-      {espKind && (
-        <>
-          {" · "}
-          <Icon name={espKind} size={11} />
-          {espKindLabel}
-        </>
-      )}
-      {esp.battery_pct != null && (
-        <>
-          {" · "}
-          <Icon name="battery-full" size={11} />
-          {esp.battery_pct}%
-        </>
-      )}
-    </>
-  );
 
   return (
     <div className="tab-panel" id="tab-overview">
@@ -336,68 +311,6 @@ function OverviewDashboard() {
         </div>
       </CollapsibleSection>
 
-      {/* ESP */}
-      <CollapsibleSection icon="plug" title="ESP 设备状态" summary={espSummary}>
-        <div className="ov-esp-status">
-          <span
-            className="ov-esp-dot"
-            style={
-              esp.connected
-                ? { background: "var(--success)", borderColor: "var(--success)" }
-                : { background: "var(--muted)", borderColor: "var(--muted)" }
-            }
-          />
-          <span className="ov-esp-name">
-            {esp.connected ? (esp.name ?? "ESP32-C5") : "Not connected"}
-          </span>
-        </div>
-        <div className="ov-row">
-          <span className="ov-label">Connection</span>
-          <span className="ov-esp-conn">
-            {esp.connected ? (
-              esp.kind === "wifi" ? (
-                <>
-                  <Icon name="wifi" size={12} style={{ marginRight: 4 }} /> WiFi
-                </>
-              ) : esp.kind === "usb" ? (
-                <>
-                  <Icon name="plug" size={12} style={{ marginRight: 4 }} /> USB
-                </>
-              ) : (
-                <>
-                  <Icon name="bluetooth" size={12} style={{ marginRight: 4 }} /> Bluetooth
-                </>
-              )
-            ) : (
-              "—"
-            )}
-          </span>
-        </div>
-        <div className="ov-bar-row">
-          <div className="ov-bar-label">
-            <Icon name="battery-full" size={12} style={{ marginRight: 4 }} />
-            Battery {esp.battery_pct != null ? `${esp.battery_pct}%` : "—"}
-          </div>
-          <div className="ov-bar">
-            <div
-              className="ov-bar-fill gr"
-              style={{ width: `${esp.battery_pct != null ? Math.max(0, Math.min(100, esp.battery_pct)) : 0}%` }}
-            />
-          </div>
-        </div>
-        <div className="ov-row">
-          <span className="ov-label">Temperature</span>
-          <span className="ov-value">—</span>
-        </div>
-        <div className="ov-row">
-          <span className="ov-label">Signal</span>
-          <span className="ov-value">{esp.rssi != null ? `${esp.rssi}dBm` : "—"}</span>
-        </div>
-        <div className="ov-row">
-          <span className="ov-label">Firmware</span>
-          <span className="ov-value">—</span>
-        </div>
-      </CollapsibleSection>
     </div>
   );
 }
