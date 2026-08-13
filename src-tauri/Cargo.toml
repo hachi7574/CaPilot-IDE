@@ -38,6 +38,12 @@ tauri-plugin-log = "2.9.0"
 tauri-plugin-single-instance = "2.4.3"
 tauri-plugin-process = "2.3.1"
 portable-pty = "0.9.0"
+# VT parser backing the daemon's attach checkpoint (§5 of docs/pty-daemon-brief.md).
+# Pure Rust, Tauri-independent — the daemon feeds every PTY chunk through a
+# `vt100::Parser` and serializes the active screen (main/alt + styles + cursor)
+# into a replayable byte stream on Attach. Version pinned to what the lockfile
+# already resolved.
+vt100 = "0.16.2"
 tokio = { version = "1.53.1", features = ["process", "io-util", "sync", "rt", "macros", "rt-multi-thread", "time", "net"] }
 uuid = { version = "1.24.0", features = ["v4"] }
 thiserror = "2.0.19"
@@ -47,3 +53,9 @@ async-trait = "0.1.91"
 log = "0.4.33"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 sysinfo = "0.39.6"
+# Signal handling for the resident daemon (SIGHUP ignore, §9.4).
+libc = "0.2"
+# Cross-process advisory file locking for `.agent-meta.json` (flock on Unix,
+# LockFileEx on Windows) — the GUI process and the PTY daemon must serialize
+# read-modify-write on the same sidecar without a shared mutex.
+fs2 = "0.4"

@@ -9,6 +9,8 @@
 //! └─ sessions.db            # sqlite
 //! ```
 
+use crate::lifecycle_journal::{LifecycleEventKind, LifecycleJournal};
+use crate::session_store::{NaturalExit, SessionStore};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -177,14 +179,55 @@ pub fn custom_project_root(name: &str) -> Option<PathBuf> {
 
 // ── .agent-meta.json ────────────────────────────────────────────
 
+/// Per-agent cross-process advisory lock for `.agent-meta.json`.
+///
+/// The GUI process and (later) the PTY daemon can both update the same sidecar
+/// (title/status/runtime). A `std::sync::Mutex` would only serialize threads
+/// inside ONE process, so we lock a per-agent file (`agents/<id>/.agent-meta.lock`)
+/// with `flock` (Unix) / `LockFileEx` (Windows). Held for the duration of a
+/// read-modify-write; the lock is released on drop (closing the fd drops the
+/// flock).
+///
+/// Callers must re-read the meta from disk INSIDE the lock and only change the
+/// target fields — a stale value captured before the lock could clobber a
+/// concurrent writer's update.
+pub struct AgentMetaGuard {
+    _file: std::fs::File,
+}
+
+impl AgentMetaGuard {
+    /// Take the exclusive per-agent lock, creating the agent dir if needed.
+    pub fn lock(project: &str, agent_id: &str) -> std::io::Result<Self> {
+        let dir = agent_dir(project, agent_id);
+        std::fs::create_dir_all(&dir)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join(".agent-meta.lock"))?;
+        fs2::FileExt::lock_exclusive(&file)?;
+        Ok(Self { _file: file })
+    }
+}
+
 /// Write `.agent-meta.json` into `dir` (which is created if missing). Shared by
 /// `write_agent_meta` and the custom project-root path (git-cloned / local
 /// folder projects whose agents live under `<root>/agents/<id>`).
+///
+/// Written atomically (same-directory temp file + rename) so a concurrent reader
+/// or a crash mid-write can never observe a truncated/partial sidecar.
 pub fn write_agent_meta_to_dir(dir: &std::path::Path, meta: &AgentMeta) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let path = dir.join(".agent-meta.json");
     let json = serde_json::to_vec_pretty(meta).map_err(std::io::Error::other)?;
-    std::fs::write(path, json)
+    let tmp = dir.join(".agent-meta.json.tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        std::io::Write::write_all(&mut f, &json)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
 }
 
 pub fn write_agent_meta(project: &str, meta: &AgentMeta) -> std::io::Result<()> {
@@ -195,6 +238,46 @@ pub fn read_agent_meta(project: &str, agent_id: &str) -> std::io::Result<AgentMe
     let path = agent_dir(project, agent_id).join(".agent-meta.json");
     let data = std::fs::read(path)?;
     Ok(serde_json::from_slice(&data)?)
+}
+
+/// Default (empty) `AgentMeta` used when a sidecar is missing but a DB row
+/// exists — startup repair recreates the sidecar from the DB source of truth.
+/// Also the seed for `update_agent_meta`'s locked read-modify-write.
+#[allow(dead_code)] // exercised by tests; becomes the shared SessionStore core in Phase 1d
+fn empty_agent_meta(project: &str, agent_id: &str) -> AgentMeta {
+    AgentMeta {
+        id: agent_id.to_string(),
+        workspace_id: None,
+        runtime: String::new(),
+        resume_key: None,
+        status: "idle".to_string(),
+        cwd: agent_dir(project, agent_id),
+        title: String::new(),
+        mode: "ask".to_string(),
+        speed: "auto".to_string(),
+        model: None,
+        updated_at: 0,
+    }
+}
+
+/// Locked read-modify-write of an agent's `.agent-meta.json`.
+///
+/// Takes the per-agent cross-process lock, re-reads the CURRENT meta from disk
+/// (a missing sidecar starts from `empty_agent_meta`), applies `f`, then writes
+/// atomically. Prevents the two-writers-clobbering-each-other race the design
+/// calls out: neither the GUI nor a daemon should re-apply a stale
+/// read-modify-write over the other's title/status/runtime change.
+#[allow(dead_code)] // exercised by tests; becomes the shared SessionStore core in Phase 1d
+pub fn update_agent_meta<F>(project: &str, agent_id: &str, f: F) -> std::io::Result<AgentMeta>
+where
+    F: FnOnce(&mut AgentMeta),
+{
+    let _guard = AgentMetaGuard::lock(project, agent_id)?;
+    let mut meta = read_agent_meta(project, agent_id)
+        .unwrap_or_else(|_| empty_agent_meta(project, agent_id));
+    f(&mut meta);
+    write_agent_meta(project, &meta)?;
+    Ok(meta)
 }
 
 // ── SQLite sessions DB ──────────────────────────────────────────
@@ -218,6 +301,30 @@ fn ensure_column(
     Ok(())
 }
 
+/// True for SQLITE_BUSY / SQLITE_LOCKED — the two errors a cross-process writer
+/// can hit when another connection briefly holds the database lock. Used to
+/// retry operations that SQLite's busy handler does not cover (notably the
+/// `journal_mode=WAL` conversion, which must not fail just because another
+/// process is starting up at the same time).
+fn is_sqlite_busy(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ffi::ErrorCode::DatabaseBusy,
+                ..
+            },
+            _
+        ) | rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ffi::ErrorCode::DatabaseLocked,
+                ..
+            },
+            _
+        )
+    )
+}
+
 pub struct SessionsDb {
     conn: Connection,
 }
@@ -225,6 +332,48 @@ pub struct SessionsDb {
 impl SessionsDb {
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
+        // Cross-process concurrency: the GUI process and (later) the PTY daemon
+        // both open `sessions.db`. WAL lets one writer proceed while other
+        // connections keep reading, and busy_timeout makes concurrent writers
+        // wait instead of failing instantly with SQLITE_BUSY. `query_row`
+        // executes each PRAGMA and reads back its result row, so both are
+        // verified, not just set.
+        //
+        // busy_timeout is set BEFORE journal_mode: converting a fresh DB to WAL
+        // takes an exclusive lock, so under multi-process contention the
+        // conversion would otherwise fail with SQLITE_BUSY the moment another
+        // connection touches the file (the timeout must already be installed for
+        // the conversion to wait its turn).
+        let _timeout: i64 = conn.query_row("PRAGMA busy_timeout=5000", [], |r| r.get(0))?;
+        // SQLite does NOT apply the busy handler to `journal_mode` changes, so a
+        // concurrently-starting process can still fail the conversion instantly
+        // even with busy_timeout set. Retry a bounded number of times: on a
+        // freshly-created DB the winner's conversion is done in microseconds, so
+        // the losers just need to briefly wait their turn. Established WAL DBs
+        // (the normal case — the GUI creates the DB once, the daemon opens it
+        // later) return "wal" immediately without needing the exclusive lock.
+        let mut wal: String = String::new();
+        for attempt in 0..10 {
+            match conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0)) {
+                Ok(m) => {
+                    wal = m;
+                    break;
+                }
+                Err(e) if is_sqlite_busy(&e) && attempt < 9 => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        if !wal.eq_ignore_ascii_case("wal") {
+            // WAL unsupported (exotic filesystem / read-only store). Fail loudly
+            // rather than silently running in DELETE mode under cross-process
+            // contention.
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(1),
+                Some("journal_mode did not become WAL".to_string()),
+            ));
+        }
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS sessions (
                 id         TEXT PRIMARY KEY,
@@ -469,10 +618,14 @@ impl SessionsDb {
 
 // ── Managed state ───────────────────────────────────────────────
 
-/// Shared persistence handle. Holds the single sessions DB.
-/// `rusqlite::Connection` is not Sync, so the DB sits behind a Mutex.
+/// Shared persistence handle for the GUI. Holds a [`SessionStore`] (the
+/// Tauri-independent facade over the sessions DB + sidecars, shared with the
+/// PTY daemon) plus the [`LifecycleJournal`]. The natural-exit path goes through
+/// [`Self::apply_natural_exit`] so the GUI fallback exercises the same code the
+/// daemon will use (§6.1) — only the Tauri `emit` stays in the caller.
 pub struct Persistence {
-    db: Mutex<SessionsDb>,
+    store: SessionStore,
+    journal: LifecycleJournal,
 }
 
 impl Persistence {
@@ -500,12 +653,15 @@ impl Persistence {
         if is_pure_scaffold(&legacy_dir) {
             let _ = std::fs::remove_dir_all(&legacy_dir);
         }
-        let db = SessionsDb::open(&db_path).map_err(std::io::Error::other)?;
-        Ok(Self { db: Mutex::new(db) })
+        let store = SessionStore::from_base(ca_pilot)?;
+        Ok(Self {
+            store,
+            journal: LifecycleJournal::new(),
+        })
     }
 
     pub fn db(&self) -> &Mutex<SessionsDb> {
-        &self.db
+        self.store.db()
     }
 
     /// Lock the sessions DB, tolerating a poisoned mutex (a panic while holding
@@ -513,8 +669,72 @@ impl Persistence {
     /// Returns None only if the lock is currently held by a panicked holder that
     /// never released — practically never. Callers should fall back gracefully.
     pub fn db_tolerant(&self) -> Option<std::sync::MutexGuard<'_, SessionsDb>> {
-        self.db.lock().ok()
+        self.store.db_tolerant()
     }
+
+    /// The Tauri-independent store (for daemon-style direct access).
+    pub fn store(&self) -> &SessionStore {
+        &self.store
+    }
+
+    /// The lifecycle event log (Phase 4 replays it after offline gaps).
+    pub fn journal(&self) -> &LifecycleJournal {
+        &self.journal
+    }
+
+    /// Apply the natural-exit policy (`session_end_mode`) and record the
+    /// lifecycle event. The caller (GUI bridge) uses the returned [`NaturalExit`]
+    /// to emit the matching Tauri event; the daemon calls
+    /// [`SessionStore::apply_natural_exit`] directly.
+    pub fn apply_natural_exit(&self, agent_id: &str, exit_code: i32) -> NaturalExit {
+        let outcome = self.store.apply_natural_exit(agent_id);
+        let (kind, payload) = if outcome.deleted {
+            (LifecycleEventKind::Removed, None)
+        } else {
+            (
+                LifecycleEventKind::Exited,
+                Some(serde_json::json!({ "exit_code": exit_code })),
+            )
+        };
+        self.journal.record(agent_id, kind, payload);
+        outcome
+    }
+}
+
+/// Startup repair: `sessions.db` is the source of truth for session metadata;
+/// each `.agent-meta.json` is a derivable copy. Recreate any missing (or
+/// unparseable) sidecar from its DB row so a hand-deleted / corrupted meta file
+/// can't make a restored session look unowned. Idempotent — only writes when the
+/// file is absent or invalid, and it takes the per-agent cross-process lock so a
+/// concurrently-running daemon isn't clobbered. Returns the number of files
+/// recreated.
+pub fn repair_agent_meta(db: &SessionsDb) -> std::io::Result<usize> {
+    let records = db.list_all().map_err(std::io::Error::other)?;
+    let mut repaired = 0usize;
+    for rec in records {
+        // Lock first, then re-check existence inside the lock: a daemon may have
+        // just written it. Writing over a fresh concurrent write would be a lost
+        // update.
+        let _guard = AgentMetaGuard::lock(&rec.project, &rec.id)?;
+        if read_agent_meta(&rec.project, &rec.id).is_err() {
+            let meta = AgentMeta {
+                id: rec.id.clone(),
+                workspace_id: rec.workspace_id.clone(),
+                runtime: rec.runtime.clone(),
+                resume_key: rec.resume_key.clone(),
+                status: rec.status.clone(),
+                cwd: rec.cwd.clone(),
+                title: rec.title.clone(),
+                mode: rec.mode.clone(),
+                speed: rec.speed.clone(),
+                model: rec.model.clone(),
+                updated_at: rec.updated_at,
+            };
+            write_agent_meta(&rec.project, &meta)?;
+            repaired += 1;
+        }
+    }
+    Ok(repaired)
 }
 
 #[cfg(test)]
@@ -695,5 +915,263 @@ mod tests {
         assert_eq!(got.speed, "fast");
         assert_eq!(got.model.as_deref(), Some("claude-opus-5"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ── Phase 1c: persistence hardening ─────────────────────────────
+
+    /// WAL + busy_timeout are what make `sessions.db` safe to open from two
+    /// processes (GUI + daemon): one writer proceeds while the other waits
+    /// instead of failing with SQLITE_BUSY. Verify both PRAGMAs actually took
+    /// effect (set + read back), not just that they ran without error.
+    #[test]
+    fn db_open_enables_wal_and_busy_timeout() {
+        let path = std::env::temp_dir().join(format!("capilot-wal-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+        {
+            let db = SessionsDb::open(&path).unwrap();
+            let mode: String = db
+                .conn
+                .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(mode.to_ascii_lowercase(), "wal");
+            let timeout: i64 = db
+                .conn
+                .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(timeout, 5000);
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    /// Atomic write = same-directory temp + rename. A crash mid-write can never
+    /// leave a truncated sidecar visible; the temp file must not survive.
+    #[test]
+    fn meta_write_is_atomic_leaves_no_temp() {
+        let dir = std::env::temp_dir().join(format!("capilot-meta-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let meta = AgentMeta {
+            id: "a1".into(),
+            workspace_id: None,
+            runtime: "claude".into(),
+            resume_key: None,
+            status: "running".into(),
+            cwd: dir.clone(),
+            title: "t".into(),
+            mode: "ask".into(),
+            speed: "auto".into(),
+            model: None,
+            updated_at: 7,
+        };
+        write_agent_meta_to_dir(&dir, &meta).unwrap();
+        let target = dir.join(".agent-meta.json");
+        assert!(target.exists());
+        assert!(!dir.join(".agent-meta.json.tmp").exists());
+        let read: AgentMeta = serde_json::from_slice(&std::fs::read(target).unwrap()).unwrap();
+        assert_eq!(read.id, "a1");
+        assert_eq!(read.updated_at, 7);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `update_agent_meta` re-reads inside the lock, so concurrent writers each
+    /// apply on top of the latest value. Two threads appending suffixes must
+    /// produce a title with ALL suffixes — a lost update would drop some.
+    #[test]
+    fn update_agent_meta_serializes_concurrent_writers() {
+        let _guard = crate::agent_runtime::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = std::env::temp_dir().join(format!("capilot-meta-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("HOME", &home);
+        let _ = update_agent_meta("proj", "agent1", |m| m.title = "base".into());
+
+        let handles: Vec<_> = (0..2)
+            .map(|t| {
+                std::thread::spawn(move || {
+                    for i in 0..5 {
+                        update_agent_meta("proj", "agent1", |m| {
+                            m.title = format!("{}-t{t}i{i}", m.title);
+                            m.updated_at += 1;
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let meta = read_agent_meta("proj", "agent1").unwrap();
+        // Every writer's counter increment survived — no clobbered RMW.
+        assert_eq!(meta.updated_at, 10);
+        assert_eq!(meta.title.matches("-t0i").count(), 5);
+        assert_eq!(meta.title.matches("-t1i").count(), 5);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Genuine cross-process stress: 4 child test binaries concurrently
+    /// read-modify-write the same `.agent-meta.json`. The flock-based guard is
+    /// per-open-file-description, so it serializes across processes (this is the
+    /// exact GUI-vs-daemon race the design brief calls out). Without the lock,
+    /// the 40 increments would collapse into a much lower count.
+    #[test]
+    fn two_process_meta_lock_prevents_lost_updates() {
+        const WORKER: &str = "CAPILOT_META_WORKER";
+        if std::env::var(WORKER).is_ok() {
+            // Re-invoked test binary, running only THIS test. Do the locked
+            // writes and return — never spawn grandchildren.
+            for i in 0..10 {
+                update_agent_meta("proj", "agent2", |m| {
+                    m.title = format!("{}-w{i}", m.title);
+                    m.updated_at += 1;
+                })
+                .unwrap();
+            }
+            return;
+        }
+        let _guard = crate::agent_runtime::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = std::env::temp_dir().join(format!("capilot-meta-2proc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("HOME", &home);
+        let _ = update_agent_meta("proj", "agent2", |m| m.title = "base".into());
+
+        let exe = std::env::current_exe().unwrap();
+        // Substring filter (NO `--exact`): libtest registers test names without
+        // the crate prefix (`persistence::tests::…`), while `module_path!()`
+        // includes it (`capilot_ide_lib::persistence::tests::…`), so `--exact`
+        // would match 0 tests and the workers would silently no-op.
+        let filter = "two_process_meta_lock_prevents_lost_updates";
+        let mut children = Vec::new();
+        for _ in 0..4 {
+            children.push(
+                std::process::Command::new(&exe)
+                    .arg(filter)
+                    .env(WORKER, "1")
+                    .env("HOME", &home)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+        }
+        for mut c in children {
+            assert!(c.wait().unwrap().success(), "meta worker exited non-zero");
+        }
+        let meta = read_agent_meta("proj", "agent2").unwrap();
+        assert_eq!(meta.updated_at, 40);
+        assert_eq!(meta.title.matches("-w").count(), 40);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Cross-process stress on `sessions.db` itself: 4 child processes each run
+    /// insert/update/delete transactions against the same SQLite file. With WAL
+    /// + busy_timeout, no worker may panic with SQLITE_BUSY and the DB must stay
+    /// intact. Any `SQLITE_BUSY` inside a worker turns into a non-zero exit.
+    #[test]
+    fn two_process_db_write_stress_no_sqlite_busy() {
+        const DB_WORKER: &str = "CAPILOT_DB_WORKER";
+        if std::env::var(DB_WORKER).is_ok() {
+            let home = PathBuf::from(std::env::var("HOME").unwrap());
+            let db = SessionsDb::open(&home.join("CaPilot").join("stress.db")).unwrap();
+            let wid = std::env::var("CAPILOT_DB_WORKER_ID").unwrap();
+            for i in 0..20 {
+                let mut s = sample();
+                s.id = format!("{wid}-{i}");
+                s.project = "stress".into();
+                db.insert(&s).unwrap();
+                db.update_status(&s.id, "done", 100 + i).unwrap();
+                db.delete(&s.id).unwrap();
+            }
+            return;
+        }
+        let _guard = crate::agent_runtime::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = std::env::temp_dir().join(format!("capilot-db-2proc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("HOME", &home);
+        std::fs::create_dir_all(home.join("CaPilot")).unwrap();
+        // Establish the DB in WAL mode ONCE before the workers start. This
+        // mirrors production (the GUI creates `sessions.db` first; the daemon
+        // opens an existing WAL DB later) and keeps the stress test focused on
+        // the acceptance criterion: concurrent read/write of an established DB,
+        // not the one-time journal-mode conversion.
+        let _pre = SessionsDb::open(&home.join("CaPilot").join("stress.db")).unwrap();
+
+        let exe = std::env::current_exe().unwrap();
+        // Substring filter (NO `--exact`) — see the meta lock test above for why
+        // `--exact` + `module_path!()` silently matches 0 tests in the child.
+        let filter = "two_process_db_write_stress_no_sqlite_busy";
+        let mut children = Vec::new();
+        for w in 0..4 {
+            children.push(
+                std::process::Command::new(&exe)
+                    .arg(filter)
+                    .env(DB_WORKER, "1")
+                    .env("CAPILOT_DB_WORKER_ID", format!("w{w}"))
+                    .env("HOME", &home)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+        }
+        for mut c in children {
+            assert!(c.wait().unwrap().success(), "db worker exited non-zero");
+        }
+        // All worker rows were deleted by their own transactions; re-open and
+        // confirm the DB survived intact and still accepts writes.
+        let db = SessionsDb::open(&home.join("CaPilot").join("stress.db")).unwrap();
+        assert_eq!(db.list_all().unwrap().len(), 0);
+        db.insert(&sample()).unwrap();
+        assert_eq!(db.list_all().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Startup repair recreates a missing/corrupt `.agent-meta.json` from the DB
+    /// row (source of truth) and is idempotent — it must not rewrite a sidecar a
+    /// concurrently-running daemon just wrote.
+    #[test]
+    fn repair_agent_meta_recreates_missing_sidecar() {
+        let _guard = crate::agent_runtime::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = std::env::temp_dir().join(format!("capilot-repair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("HOME", &home);
+
+        let path = home.join("CaPilot").join("sessions.db");
+        std::fs::create_dir_all(home.join("CaPilot")).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let db = SessionsDb::open(&path).unwrap();
+        let mut session = sample();
+        session.project = "rp".into();
+        session.cwd = agent_dir("rp", &session.id);
+        db.insert(&session).unwrap();
+        // Simulate a hand-deleted / truncated sidecar.
+        let sidecar_dir = agent_dir("rp", "abc");
+        std::fs::create_dir_all(&sidecar_dir).unwrap();
+        std::fs::write(sidecar_dir.join(".agent-meta.json"), b"not json").unwrap();
+
+        let repaired = repair_agent_meta(&db).unwrap();
+        assert_eq!(repaired, 1);
+        let meta = read_agent_meta("rp", "abc").unwrap();
+        assert_eq!(meta.id, "abc");
+        assert_eq!(meta.title, session.title);
+        assert_eq!(meta.runtime, session.runtime);
+        assert_eq!(meta.cwd, session.cwd);
+        assert_eq!(meta.updated_at, session.updated_at);
+
+        // Idempotent: a second pass repairs nothing.
+        assert_eq!(repair_agent_meta(&db).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

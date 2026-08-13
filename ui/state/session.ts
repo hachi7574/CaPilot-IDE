@@ -3,6 +3,16 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useStore, RestoredSession } from "./store";
 
+/** One journaled lifecycle event returned by `agent_sync_events` (§6.2). */
+interface JournalEvent {
+  seq: number;
+  ts: number;
+  agent_id: string;
+  kind: "exited" | "removed" | "hook_status" | string;
+  exit_code?: number | null;
+  status?: string | null;
+}
+
 /**
  * On app start, restore persisted sessions from sqlite so they survive a
  * restart (DevPlan §6.3). Restored sessions have no live channel yet — the
@@ -75,37 +85,109 @@ export function useSessionRestore() {
  *   kept (marked done). The tab stays open but grays out under "已结束".
  * - `agent://removed` — the "session ended → delete" setting removed the
  *   record; close the tab and drop the agent.
+ * - `agent://hook-status` — a status-hook transition (working→idle etc.) from
+ *   the daemon's status monitor; drives the same store path as the 1s polling.
+ *
+ * Every live event carries the journal `event_seq`, which advances the replay
+ * watermark. After the listeners are live we call `agent_sync_events` to pull
+ * everything journaled while the GUI was offline (natural exits, delete-mode
+ * removals, hook transitions) and apply it in order — nothing that happened
+ * while we were away is lost (§6.2/§9.4).
  */
 export function useAgentEvents() {
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
+    // High-water mark of journaled lifecycle events already applied to the
+    // store. Starts at 0 (this JS module lives for one GUI launch; the daemon
+    // journal is per-daemon-incarnation and bounded).
+    let appliedSeq = 0;
+
+    const applyReplay = (events: JournalEvent[]) => {
+      const s = useStore.getState();
+      for (const ev of events) {
+        appliedSeq = Math.max(appliedSeq, ev.seq);
+        // Only touch agents we know about — the DB restore already reflects
+        // done/removed state, so replay only fills the offline window and can
+        // never resurrect a long-gone session.
+        if (!s.agents.has(ev.agent_id)) continue;
+        switch (ev.kind) {
+          case "exited":
+            s.updateAgentStatus(ev.agent_id, "done");
+            break;
+          case "removed":
+            s.closeTab(ev.agent_id);
+            s.removeAgent(ev.agent_id);
+            break;
+          case "hook_status":
+            if (ev.status) {
+              s.setHookStatus(ev.agent_id, { status: ev.status, ts: ev.ts });
+            }
+            break;
+        }
+      }
+    };
+
     // listen() resolves asynchronously — cleanup may run before the promise
     // settles, so a late listener must drop itself instead of leaking.
     Promise.all([
-      listen<{ id: string; exit_code: number }>("agent://exited", (e) => {
-        const s = useStore.getState();
-        // Natural exit, record kept (marked done): the open tab stays (grayed),
-        // its dead channel stays attached so the last output remains visible.
-        // Reopening from the sidebar "已结束" group drops the channel and resumes.
-        s.updateAgentStatus(e.payload.id, "done");
-      }),
-      listen<{ id: string }>("agent://removed", (e) => {
+      listen<{ id: string; exit_code: number; event_seq: number }>(
+        "agent://exited",
+        (e) => {
+          appliedSeq = Math.max(appliedSeq, e.payload.event_seq ?? 0);
+          // Natural exit, record kept (marked done): the open tab stays (grayed),
+          // its dead channel stays attached so the last output remains visible.
+          // Reopening from the sidebar "已结束" group drops the channel and resumes.
+          useStore.getState().updateAgentStatus(e.payload.id, "done");
+        }
+      ),
+      listen<{ id: string; event_seq: number }>("agent://removed", (e) => {
+        appliedSeq = Math.max(appliedSeq, e.payload.event_seq ?? 0);
         const s = useStore.getState();
         s.closeTab(e.payload.id);
         s.removeAgent(e.payload.id);
       }),
+      listen<{
+        id: string;
+        status: string;
+        ts: number;
+        event_seq: number;
+      }>("agent://hook-status", (e) => {
+        appliedSeq = Math.max(appliedSeq, e.payload.event_seq ?? 0);
+        const s = useStore.getState();
+        if (s.agents.has(e.payload.id)) {
+          s.setHookStatus(e.payload.id, {
+            status: e.payload.status,
+            ts: e.payload.ts,
+          });
+        }
+      }),
     ])
-      .then(([u1, u2]) => {
+      .then(([u1, u2, u3]) => {
         if (cancelled) {
           u1();
           u2();
-        } else {
-          unlisten = () => {
-            u1();
-            u2();
-          };
+          u3();
+          return;
         }
+        unlisten = () => {
+          u1();
+          u2();
+          u3();
+        };
+        // Replay AFTER the listeners are live: events that race this call are
+        // applied by the listeners (idempotent handlers), and their `event_seq`
+        // bumps the watermark, so the response can't double-deliver.
+        invoke<{ last_seq: number; events: JournalEvent[] }>(
+          "agent_sync_events",
+          { lastSeq: appliedSeq }
+        )
+          .then((r) => {
+            if (!cancelled) applyReplay(r.events ?? []);
+          })
+          .catch(() => {
+            // Backend not ready — ignore.
+          });
       })
       .catch(() => {
         // Backend not ready — ignore.

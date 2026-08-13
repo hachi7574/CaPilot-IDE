@@ -14,7 +14,7 @@
 //! computed correctly between consecutive refreshes (sysinfo needs two
 //! refreshes before `cpu_usage()` is meaningful).
 
-use crate::agent_runtime::pty::PtyManager;
+use crate::bridge::PtyBridge;
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -53,6 +53,11 @@ pub struct ResourceMonitor {
     /// Last-known process tree (root + descendants) per agent, so the expensive
     /// per-process refresh only touches the pids we track.
     trees: Mutex<HashMap<String, Vec<u32>>>,
+    /// Last-seen PTY incarnation generation per agent (Phase 4c). A respawned
+    /// process reuses the agent id but is a NEW incarnation — its history and
+    /// tree must be reset so the old process's samples don't pollute the new
+    /// curve.
+    generations: Mutex<HashMap<String, u64>>,
     /// Global CPU% / used-mem / total-mem cached on every sampling tick.
     snapshot: Mutex<(f32, u64, u64)>,
 }
@@ -63,6 +68,7 @@ impl ResourceMonitor {
             sys: Mutex::new(System::new()),
             history: Mutex::new(HashMap::new()),
             trees: Mutex::new(HashMap::new()),
+            generations: Mutex::new(HashMap::new()),
             snapshot: Mutex::new((0.0, 0, 0)),
         }
     }
@@ -70,7 +76,7 @@ impl ResourceMonitor {
     /// Refresh global CPU/mem (cheap `/proc/stat` + `/proc/meminfo`), cache them
     /// for `system_stats`, then sample each live agent's process tree. Returns
     /// the batch to emit (empty when no agents are running).
-    pub fn tick(&self, pty: &PtyManager) -> Vec<AgentResource> {
+    pub fn tick(&self, bridge: &PtyBridge) -> Vec<AgentResource> {
         let mut sys = self.sys.lock().unwrap();
 
         sys.refresh_cpu_usage();
@@ -81,7 +87,7 @@ impl ResourceMonitor {
             sys.total_memory(),
         );
 
-        let pids = pty.pids();
+        let pids = bridge.pids();
         if pids.is_empty() {
             return Vec::new();
         }
@@ -111,7 +117,16 @@ impl ResourceMonitor {
         let mut agents: Vec<(String, u32, Vec<u32>)> = Vec::with_capacity(pids.len());
         {
             let processes = sys.processes();
-            for (agent_id, pid) in &pids {
+            let mut gens = self.generations.lock().unwrap();
+            for (agent_id, generation, pid) in &pids {
+                // A respawned process (new generation) is a fresh incarnation:
+                // drop the old generation's history + tree so its curve restarts
+                // clean and stale pids can't inflate the new sample.
+                if gens.get(agent_id) != Some(generation) {
+                    gens.insert(agent_id.clone(), *generation);
+                    self.history.lock().unwrap().remove(agent_id);
+                    self.trees.lock().unwrap().remove(agent_id);
+                }
                 let root = Pid::from_u32(*pid);
                 agents.push((
                     agent_id.clone(),
@@ -217,7 +232,7 @@ fn sum_tree(
 
 /// Spawn the background sampler. Samples every 3 s and emits `resource://sample`.
 /// `sysinfo` I/O is synchronous, so the actual sampling runs on a blocking pool.
-pub fn start_sampler(pty: Arc<PtyManager>, monitor: Arc<ResourceMonitor>, app: AppHandle) {
+pub fn start_sampler(bridge: Arc<PtyBridge>, monitor: Arc<ResourceMonitor>, app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut tick = tokio::time::interval(SAMPLE_INTERVAL);
         // Consume the immediate first tick so the first real sample has a full
@@ -225,10 +240,10 @@ pub fn start_sampler(pty: Arc<PtyManager>, monitor: Arc<ResourceMonitor>, app: A
         tick.tick().await;
         loop {
             tick.tick().await;
-            let pty = pty.clone();
+            let bridge = bridge.clone();
             let monitor = monitor.clone();
             let app = app.clone();
-            let samples = tauri::async_runtime::spawn_blocking(move || monitor.tick(&pty)).await;
+            let samples = tauri::async_runtime::spawn_blocking(move || monitor.tick(&bridge)).await;
             if let Ok(batch) = samples {
                 if !batch.is_empty() {
                     let _ = app.emit(RESOURCE_EVENT, &batch);

@@ -727,7 +727,12 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
         const resumeChannel = new Channel<number[]>();
         resumeChannel.onmessage = (data) =>
           useStore.getState().appendAgentOutput(agentId, data);
-        invoke<AgentInfo>("agent_resume", { id: agentId, onData: resumeChannel })
+        invoke<AgentInfo>("agent_resume", {
+          id: agentId,
+          onData: resumeChannel,
+          rows: term.rows || 24,
+          cols: term.cols || 80,
+        })
           .then((info) => {
             resumeInFlight.delete(agentId);
             // addAgent unconditionally (even if this mount is already disposed): the

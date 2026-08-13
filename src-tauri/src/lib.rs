@@ -1,19 +1,25 @@
-mod agent_runtime;
+pub mod agent_runtime;
+pub mod bridge;
+pub mod daemon;
 pub mod esp;
 mod git_gate;
-mod persistence;
+pub mod lifecycle_journal;
+pub mod output_hub;
+pub mod persistence;
 mod resource;
+pub mod session_store;
 mod slash;
 mod usage;
 
-use agent_runtime::adapter::{AgentInfo, AgentRuntimeAdapter, AgentSession, AgentUsage};
-use agent_runtime::pty::{OnExit, PtyManager};
+use agent_runtime::adapter::{AgentError, AgentInfo, AgentRuntimeAdapter, AgentSession, AgentUsage};
+use agent_runtime::pty_core::OnExit;
 use agent_runtime::runtimes::{get_adapter, known_runtimes};
 use esp::manager::EspManager;
 use persistence::{
     agent_dir, ensure_project, read_agent_meta, write_agent_meta, AgentMeta, AgentSessionRecord,
     Persistence, DEFAULT_PROJECT,
 };
+use session_store::SESSION_END_MODE_KEY;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -56,11 +62,6 @@ fn sanitize_project(project: &str) -> Result<(), String> {
 
 // ── Agent commands ──────────────────────────────────────────────
 
-/// Settings KV key: what to do when a session's process exits on its own.
-/// `"keep"` (default) marks it done (recoverable from the sidebar "已结束"
-/// group, never auto-restored as a tab); `"delete"` removes the record entirely.
-const SESSION_END_MODE_KEY: &str = "session_end_mode";
-
 /// Settings KV key: per-runtime launch overrides persisted from
 /// Settings → 已安装 → ⚙. Value is a JSON map of `runtime_id` → RuntimeOverride;
 /// empty `command`/`args` leave the adapter's default launch untouched.
@@ -71,6 +72,11 @@ const RUNTIME_OVERRIDES_KEY: &str = "runtime_overrides";
 /// `{"<runtime>": usage::UsageConfig}`. Both are allow-listed in `setting_set`.
 const USAGE_ENABLED_KEY: &str = usage::USAGE_ENABLED_KEY;
 const USAGE_CONFIG_KEY: &str = usage::USAGE_CONFIG_KEY;
+
+/// Settings KV key for the right sidebar's todo-tag list (概览 panel). Value is
+/// a JSON array of `TodoTag` objects (see `ui/state/store.ts`); written by the
+/// frontend on every tag mutation.
+const TODOS_KEY: &str = "todos";
 
 /// User-configured launch override for one runtime (the adapter's defaults win
 /// unless a field is set to a non-empty string).
@@ -123,70 +129,28 @@ struct AgentRemoved {
     id: String,
 }
 
-/// Wrap the natural-exit bookkeeping into an `OnExit` for `PtyManager.spawn`.
+/// Wrap the natural-exit bookkeeping into an `OnExit` for `PtyBridge.spawn`.
 /// Fired only on natural exit (EOF / read error); intentional kills never reach
-/// it. Reads the session-end setting fresh each time, so a settings change
-/// applies without an app restart.
+/// it.
+///
+/// The persistence half lives in `SessionStore` / `Persistence::apply_natural_exit`
+/// (shared with the daemon, §6.1); this closure only layers the Tauri `emit` on
+/// top, so "persist the event" and "tell the WebView" stay separate.
 fn build_on_exit(persistence: Arc<Persistence>, app: tauri::AppHandle) -> OnExit {
     Arc::new(move |agent_id, exit_code| {
-        // Poisoned lock / read error → default to "keep" so a session is never
-        // silently dropped because of a transient DB failure.
-        let keep = persistence
-            .db()
-            .lock()
-            .map(|db| {
-                db.get_setting(SESSION_END_MODE_KEY)
-                    .ok()
-                    .flatten()
-                    .as_deref()
-                    != Some("delete")
-            })
-            .unwrap_or(true);
-        if keep {
-            if let Ok(db) = persistence.db().lock() {
-                let _ = db.update_status(&agent_id, "done", now_ms());
-            }
-            // Keep the per-agent meta in sync (dual-write convention) so a
-            // stale `.agent-meta.json` never shows a finished session as running.
-            let project = persistence
-                .db()
-                .lock()
-                .ok()
-                .and_then(|db| db.get(&agent_id).ok().flatten())
-                .map(|rec| rec.project);
-            if let Some(project) = project {
-                if let Ok(mut meta) = read_agent_meta(&project, &agent_id) {
-                    meta.status = "done".to_string();
-                    meta.updated_at = now_ms();
-                    let _ = write_agent_meta(&project, &meta);
-                }
-            }
+        // Poisoned lock / read error → defaults to "keep" (see SessionStore), so
+        // a session is never silently dropped because of a transient DB failure.
+        let outcome = persistence.apply_natural_exit(&agent_id, exit_code);
+        if outcome.deleted {
+            let _ = app.emit("agent://removed", AgentRemoved { id: agent_id });
+        } else {
             let _ = app.emit(
                 "agent://exited",
                 AgentExited {
-                    id: agent_id.clone(),
+                    id: agent_id,
                     exit_code,
                 },
             );
-        } else {
-            // Delete mode: read the row's CURRENT project (not a value captured
-            // at spawn — a project rename moves the agent dir, and the stale
-            // name would leave the new dir orphaned).
-            let project = persistence
-                .db()
-                .lock()
-                .ok()
-                .and_then(|db| db.get(&agent_id).ok().flatten())
-                .map(|rec| rec.project)
-                .unwrap_or_default();
-            if let Ok(db) = persistence.db().lock() {
-                let _ = db.delete(&agent_id);
-            }
-            let dir = agent_dir(&project, &agent_id);
-            if dir.starts_with(persistence::workspace_root()) && dir.exists() {
-                let _ = std::fs::remove_dir_all(&dir);
-            }
-            let _ = app.emit("agent://removed", AgentRemoved { id: agent_id });
         }
     })
 }
@@ -194,7 +158,7 @@ fn build_on_exit(persistence: Arc<Persistence>, app: tauri::AppHandle) -> OnExit
 /// Shared spawn path used by `agent_spawn` (new) and `agent_resume` (restored).
 #[allow(clippy::too_many_arguments)]
 fn build_and_spawn(
-    pty: &Arc<PtyManager>,
+    bridge: &Arc<bridge::PtyBridge>,
     persistence: &Arc<Persistence>,
     app: &tauri::AppHandle,
     id: &str,
@@ -288,19 +252,24 @@ fn build_and_spawn(
     }
 
     let launch_env = adapter.launch_env(&session)?;
-    let mut info = pty
+    let mut info = bridge
         .spawn(
-            id.to_string(),
+            id,
             &cmd,
             &args,
             &cwd,
             24,
             80,
+            &launch_env,
             on_data,
             Some(build_on_exit(persistence.clone(), app.clone())),
-            &launch_env,
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| match e {
+            AgentError::CapacityReached { limit } => {
+                format!("会话数已达上限 ({limit})，请先关闭部分终端")
+            }
+            other => other.to_string(),
+        })?;
     info.runtime = runtime.to_string();
     info.workspace_id = Some(workspace_id.clone());
     info.project = Some(project.to_string());
@@ -406,7 +375,7 @@ fn apply_launch_overrides(
 
 #[tauri::command]
 async fn agent_spawn(
-    pty: tauri::State<'_, Arc<PtyManager>>,
+    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
     persistence: tauri::State<'_, Arc<Persistence>>,
     app: tauri::AppHandle,
     runtime: String,
@@ -420,14 +389,9 @@ async fn agent_spawn(
     project_root: Option<String>,
     on_data: Channel<Vec<u8>>,
 ) -> Result<AgentInfo, String> {
-    // Session cap: a compromised frontend (or runaway automation) must not be
-    // able to spawn unbounded PTYs and exhaust the machine.
-    const MAX_LIVE_SESSIONS: usize = 64;
-    if pty.live_count() >= MAX_LIVE_SESSIONS {
-        return Err(format!(
-            "会话数已达上限 ({MAX_LIVE_SESSIONS})，请先关闭部分终端"
-        ));
-    }
+    // Session cap is enforced atomically inside `pty_core` (a live-slot
+    // reservation covering in-flight spawns + live children), fixing the
+    // check-then-act TOCTOU of the old `live_count() >= MAX` pre-check (§3).
     let agent_id = uuid::Uuid::new_v4().to_string();
     let project = if project.is_empty() {
         DEFAULT_PROJECT.to_string()
@@ -475,7 +439,7 @@ async fn agent_spawn(
     let resume = resume_key.is_some();
     let cwd_for_capture = cwd.clone();
     let info = build_and_spawn(
-        pty.inner(),
+        bridge.inner(),
         persistence.inner(),
         &app,
         &agent_id,
@@ -536,11 +500,13 @@ async fn agent_spawn(
 
 #[tauri::command]
 async fn agent_resume(
-    pty: tauri::State<'_, Arc<PtyManager>>,
+    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
     persistence: tauri::State<'_, Arc<Persistence>>,
     app: tauri::AppHandle,
     id: String,
     on_data: Channel<Vec<u8>>,
+    rows: Option<u16>,
+    cols: Option<u16>,
 ) -> Result<AgentInfo, String> {
     let record = {
         let db = persistence.db().lock().unwrap();
@@ -550,25 +516,49 @@ async fn agent_resume(
         return Err(format!("Session not found: {}", id));
     };
 
-    // Kill any leftover PTY before re-spawning.
-    pty.kill(&id).map_err(|e| e.to_string())?;
-    build_and_spawn(
-        pty.inner(),
-        persistence.inner(),
-        &app,
-        &id,
-        &rec.project,
-        rec.workspace_id.clone(),
-        &rec.runtime,
-        true, // resume — continue the stored/detected conversation
-        rec.resume_key.clone(),
-        Some(rec.title.clone()),
-        rec.model.clone(),
-        &rec.speed,
-        &rec.mode,
-        rec.cwd.clone(),
-        on_data,
-    )
+    // Attach-first (§6.3): when the daemon still owns the live session, re-attach
+    // and stream the checkpoint instead of respawning. Only a session the daemon
+    // has actually reaped (AgentNotFound) — or in-process fallback, which has no
+    // attach — falls through to respawn.
+    let (rows, cols) = (rows.unwrap_or(24), cols.unwrap_or(80));
+    match bridge.attach(&id, rows, cols, on_data.clone()) {
+        Ok(mut info) => {
+            // The attach returns the live incarnation; carry the persisted session
+            // metadata so the tab looks identical to a respawn.
+            info.runtime = rec.runtime.clone();
+            info.workspace_id = rec.workspace_id.clone();
+            info.project = Some(rec.project.clone());
+            info.mode = rec.mode.clone();
+            info.speed = rec.speed.clone();
+            info.model = rec.model.clone();
+            info.title = rec.title.clone();
+            info.cwd = rec.cwd.clone();
+            Ok(info)
+        }
+        Err(AgentError::AgentNotFound(_)) => {
+            // Not live — kill any leftover PTY and respawn, continuing the
+            // stored/detected conversation.
+            bridge.kill(&id).map_err(|e| e.to_string())?;
+            build_and_spawn(
+                bridge.inner(),
+                persistence.inner(),
+                &app,
+                &id,
+                &rec.project,
+                rec.workspace_id.clone(),
+                &rec.runtime,
+                true, // resume — continue the stored/detected conversation
+                rec.resume_key.clone(),
+                Some(rec.title.clone()),
+                rec.model.clone(),
+                &rec.speed,
+                &rec.mode,
+                rec.cwd.clone(),
+                on_data,
+            )
+        }
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Payload emitted on `agent://usage` — an agent's context-window usage was
@@ -581,7 +571,8 @@ struct AgentUsageUpdate {
 
 /// Per-agent status sidecar read by the frontend (`~/CaPilot/status/<id>.json`).
 /// Written by the claude adapter's lifecycle hook script; `status` is one of
-/// `idle`/`working`/`waiting_input`/`dormant`, `ts` is epoch seconds.
+/// `idle`/`working`/`waiting_input`/`awaiting_choice`/`dormant`, `ts` is epoch
+/// seconds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HookStatus {
     status: String,
@@ -668,9 +659,24 @@ fn agent_status_read(id: String) -> Option<HookStatus> {
     serde_json::from_str(&raw).ok()
 }
 
+/// Pull journaled lifecycle events that happened while the GUI was offline
+/// (Phase 4b, §6.2). The frontend passes its high-water mark — the highest
+/// `event_seq` it has already applied via live `agent://*` events — and gets
+/// every natural exit / delete-mode removal / hook-status transition recorded
+/// past that point, in journal order, plus the journal's new watermark. Call
+/// this AFTER registering the live listeners so replay and live delivery never
+/// race.
+#[tauri::command]
+fn agent_sync_events(
+    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
+    last_seq: u64,
+) -> bridge::SyncEventsResult {
+    bridge.sync_events(last_seq)
+}
+
 #[tauri::command]
 async fn agent_write(
-    pty: tauri::State<'_, Arc<PtyManager>>,
+    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
     id: String,
     data: String,
     raw: Option<bool>,
@@ -682,17 +688,18 @@ async fn agent_write(
     } else {
         format!("{}\r", data)
     };
-    pty.write(&id, payload.as_bytes())
+    bridge
+        .write(&id, payload.as_bytes())
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn agent_kill(
-    pty: tauri::State<'_, Arc<PtyManager>>,
+    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
     persistence: tauri::State<'_, Arc<Persistence>>,
     id: String,
 ) -> Result<(), String> {
-    pty.kill(&id).map_err(|e| e.to_string())?;
+    bridge.kill(&id).map_err(|e| e.to_string())?;
     // Only flip an active session to `idle` (reopenable). A session that already
     // ended naturally is `done` — flipping it back to `idle` would make a
     // finished conversation resurrect as an active tab after a restart (sleep on
@@ -713,19 +720,19 @@ async fn agent_kill(
 
 #[tauri::command]
 async fn agent_resize(
-    pty: tauri::State<'_, Arc<PtyManager>>,
+    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
     id: String,
     rows: u16,
     cols: u16,
 ) -> Result<(), String> {
-    pty.resize(&id, rows, cols).map_err(|e| e.to_string())
+    bridge.resize(&id, rows, cols).map_err(|e| e.to_string())
 }
 
 /// Switch a tab's runtime: kill old PTY → respawn same context dir with the
 /// new runtime → resume session history (DevPlan §4.8).
 #[tauri::command]
 async fn agent_switch_runtime(
-    pty: tauri::State<'_, Arc<PtyManager>>,
+    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
     persistence: tauri::State<'_, Arc<Persistence>>,
     app: tauri::AppHandle,
     id: String,
@@ -750,7 +757,7 @@ async fn agent_switch_runtime(
         ));
     }
 
-    pty.kill(&id).map_err(|e| e.to_string())?;
+    bridge.kill(&id).map_err(|e| e.to_string())?;
     {
         let db = persistence.db().lock().unwrap();
         db.update_runtime(&id, &runtime, now_ms())
@@ -764,7 +771,7 @@ async fn agent_switch_runtime(
     }
 
     build_and_spawn(
-        pty.inner(),
+        bridge.inner(),
         persistence.inner(),
         &app,
         &id,
@@ -981,7 +988,7 @@ fn delete_project_dir(name: &str) -> Result<(), String> {
 /// folders remain untouched.
 #[tauri::command]
 fn delete_project(
-    pty: tauri::State<'_, Arc<PtyManager>>,
+    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
     persistence: tauri::State<'_, Arc<Persistence>>,
     name: String,
 ) -> Result<(), String> {
@@ -998,7 +1005,7 @@ fn delete_project(
             .collect::<Vec<_>>()
     };
     for id in session_ids {
-        let _ = pty.kill(&id);
+        let _ = bridge.kill(&id);
     }
     {
         let db = persistence
@@ -1081,14 +1088,14 @@ fn rename_project_inner(persistence: &Persistence, old: &str, new: &str) -> Resu
 
 #[tauri::command]
 async fn sessions_delete(
-    pty: tauri::State<'_, Arc<PtyManager>>,
+    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
     persistence: tauri::State<'_, Arc<Persistence>>,
     id: String,
 ) -> Result<(), String> {
     // Best-effort end to end: a failed kill (e.g. the PTY was already reaped by
     // the reader task) must not skip session cleanup, or the DB row survives and
     // the terminal resurrects on the next restart.
-    let _ = pty.kill(&id);
+    let _ = bridge.kill(&id);
     // The agent's own project (from its DB row) — its metadata dir lives under
     // `workspaces/<project>/agents/<id>`, so remove exactly that. The session
     // MUST exist: `id` is caller-supplied, and `agent_dir` joins it into a path
@@ -1161,6 +1168,7 @@ fn setting_set(
         RUNTIME_OVERRIDES_KEY,
         USAGE_ENABLED_KEY,
         USAGE_CONFIG_KEY,
+        TODOS_KEY,
     ];
     if !ALLOWED.contains(&key.as_str()) {
         return Err(format!("unknown setting key: {}", key));
@@ -2592,12 +2600,14 @@ mod tests {
     }
 
     // Tests that point HOME at a temp dir must serialize — `workspace_root()`
-    // reads the process-global HOME, and parallel tests would clobber each other.
-    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // reads the process-global HOME, and parallel tests would clobber each
+    // other. Shares ONE lock with the runtime test modules (claude/codex/
+    // opencode), which also mutate process-global env.
+    use crate::agent_runtime::ENV_LOCK;
 
     #[test]
     fn custom_project_root_survives_without_agents() {
-        let _guard = HOME_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // Isolate from the real ~/CaPilot by pointing HOME at a temp dir. A
         // custom-rooted project's root must persist (project.json) even when the
         // project has zero agents — agent-meta based recovery needs one.
@@ -2635,7 +2645,7 @@ mod tests {
 
     #[test]
     fn delete_project_removes_workspace_dir_only() {
-        let _guard = HOME_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let home = std::env::temp_dir().join(format!(
             "capilot_delete_test_{}_{}",
             std::process::id(),
@@ -2666,7 +2676,7 @@ mod tests {
 
     #[test]
     fn persistence_open_creates_no_default_project() {
-        let _guard = HOME_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let home = std::env::temp_dir().join(format!(
             "capilot_persist_test_{}_{}",
             std::process::id(),
@@ -2753,7 +2763,7 @@ mod tests {
 
     #[test]
     fn rename_project_moves_dir_and_rewrites_state() {
-        let _guard = HOME_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // Isolate from the real ~/CaPilot by pointing HOME at a temp dir.
         let home = std::env::temp_dir().join(format!(
             "capilot_rename_test_{}_{}",
@@ -2831,7 +2841,7 @@ mod tests {
     /// actual override config.
     #[test]
     fn launch_override_reappends_hooks_and_mode_flags() {
-        let _guard = HOME_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         use crate::agent_runtime::adapter::{AgentRuntimeAdapter, AgentSession};
         use crate::agent_runtime::runtimes::claude::ClaudeAdapter;
         use crate::agent_runtime::runtimes::codex::CodexAdapter;
@@ -3044,12 +3054,13 @@ fn repair_session_titles(persistence: &Persistence) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let pty = Arc::new(PtyManager::new());
-    // Clone kept for the exit handler so the app can kill every agent PTY on
-    // quit (no orphaned claude/bash), without touching their session rows.
-    let pty_killer = pty.clone();
     let persistence = Arc::new(Persistence::open().expect("Failed to init persistence"));
     repair_session_titles(&persistence);
+    // Startup repair: recreate any missing/corrupt `.agent-meta.json` from the
+    // DB row (source of truth). Best-effort — a failed repair only logs.
+    if let Err(e) = persistence.store().repair() {
+        log::warn!("agent-meta startup repair failed: {e}");
+    }
     let resource = Arc::new(resource::ResourceMonitor::new());
 
     let _app = tauri::Builder::default()
@@ -3082,7 +3093,6 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {}))
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(pty)
         .manage(persistence)
         .manage(EspManager::new())
         .manage(resource)
@@ -3092,6 +3102,7 @@ pub fn run() {
             agent_resume,
             agent_context_usage,
             agent_status_read,
+            agent_sync_events,
             agent_write,
             agent_kill,
             agent_resize,
@@ -3153,25 +3164,37 @@ pub fn run() {
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
+            // PTY bridge: prefer the user-level daemon, spawn one if needed,
+            // fall back in-process only when no other owner can be proven (§8).
+            let bridge = bridge::PtyBridge::start();
+            bridge.attach_app(handle.clone());
+            bridge.start_event_loop();
+            app.manage(bridge.clone());
+            log::info!("PTY bridge mode: {}", bridge.mode());
             // Resource sampler: every 3 s, sample each agent's process tree and
-            // emit `resource://sample` (DevPlan §10).
-            let pty = app.state::<Arc<PtyManager>>().inner().clone();
+            // emit `resource://sample` (DevPlan §10). Runs against the bridge so
+            // it reads live PIDs whether they live in-process or in the daemon.
             let resource = app
                 .state::<Arc<resource::ResourceMonitor>>()
                 .inner()
                 .clone();
-            resource::start_sampler(pty, resource, handle);
+            resource::start_sampler(bridge, resource, handle);
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(move |_app_handle, event| {
+        .run(move |app_handle, event| {
             match event {
-                // App quit: kill every live PTY so no claude/bash is orphaned.
-                // Intentional teardown → sessions stay `running` in the DB and
-                // resume normally next launch.
+                // App quit (Phase 4 §9.4): DETACH, don't kill. The daemon and its
+                // sessions keep running across GUI restarts; a reconnecting GUI
+                // re-attaches to the same `(daemon_instance_id, agent_id,
+                // generation, pid)`. In-process fallback has no daemon to keep
+                // PTYs alive, so `detach` kills them there (same as the old
+                // teardown — sessions stay `running` in the DB and resume next
+                // launch).
                 tauri::RunEvent::ExitRequested { .. } => {
-                    pty_killer.kill_all();
+                    let bridge = app_handle.state::<Arc<bridge::PtyBridge>>();
+                    bridge.detach();
                 }
                 _ => {}
             }

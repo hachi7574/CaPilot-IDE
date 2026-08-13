@@ -1,6 +1,6 @@
 pub mod adapter;
 pub mod cat_breeds;
-pub mod pty;
+pub mod pty_core;
 pub mod runtimes;
 pub mod status_hooks;
 
