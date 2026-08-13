@@ -63,6 +63,18 @@ export default async () => {
     if (event?.type === "session.idle") return "idle";
     if (event?.type === "permission.asked") return "waiting_input";
     if (event?.type === "permission.replied") return "working";
+    // The `question` tool blocks on the user picking an option (claude's
+    // AskUserQuestion equivalent) — `awaiting_choice`, distinct from a
+    // permission prompt. Answering (replied) or dismissing (rejected) resumes
+    // work.
+    if (event?.type === "question.asked" || event?.type === "question.v2.asked")
+      return "awaiting_choice";
+    if (
+      event?.type === "question.replied" ||
+      event?.type === "question.rejected" ||
+      event?.type === "question.v2.replied"
+    )
+      return "working";
     return null;
   };
   return {
@@ -421,6 +433,48 @@ impl OpenCodeAdapter {
         value.pointer("/tokens/total").and_then(Value::as_u64)
     }
 
+    /// Session-cumulative cache stats for a cwd: total cache-read tokens and
+    /// total prompt tokens summed over ALL `step-finish` parts of the session
+    /// (the cache hit rate numerator and denominator). OpenCode accounting:
+    /// `tokens.input` is the non-cached portion and `tokens.cache.read/write`
+    /// are separate, so total prompt = input + cache.read + cache.write.
+    fn session_cache_stats(conn: &Connection, cwd: &Path) -> Option<(u64, u64)> {
+        let session_id = Self::newest_session_id(conn, cwd)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT data FROM part WHERE session_id = ?1 AND data LIKE '%step-finish%'",
+            )
+            .ok()?;
+        let rows = stmt
+            .query_map(params![session_id], |row| row.get::<_, String>(0))
+            .ok()?;
+        let mut hit = 0u64;
+        let mut total = 0u64;
+        for row in rows.flatten() {
+            let Ok(value) = serde_json::from_str::<Value>(&row) else {
+                continue;
+            };
+            let tokens = value.get("tokens");
+            let input = tokens
+                .and_then(|t| t.get("input"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let read = tokens
+                .and_then(|t| t.pointer("/cache/read"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let write = tokens
+                .and_then(|t| t.pointer("/cache/write"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if input + read + write > 0 {
+                hit += read;
+                total += input + read + write;
+            }
+        }
+        (total > 0).then_some((hit, total))
+    }
+
     /// Observed assistant model as `providerID/modelID` from the newest
     /// assistant message in the cwd's session. Authoritative over the draft
     /// selection (the doc's "observed assistant-model metadata updates the
@@ -669,12 +723,15 @@ impl AgentRuntimeAdapter for OpenCodeAdapter {
         // model attached to the assistant message when available).
         let model_id = Self::observed_model_id(&conn, cwd).or_else(|| model.map(str::to_owned));
         let max = model_id.as_deref().and_then(Self::catalog_limit_context);
-        if used.is_none() && max.is_none() {
+        let (cache_hit, cache_total) = Self::session_cache_stats(&conn, cwd).unwrap_or((0, 0));
+        if used.is_none() && max.is_none() && cache_total == 0 {
             return None;
         }
         Some(AgentUsage {
             context_window_used_tokens: used,
             context_window_max_tokens: max,
+            cache_hit_tokens: (cache_hit > 0).then_some(cache_hit),
+            cache_total_input_tokens: (cache_total > 0).then_some(cache_total),
         })
     }
 
@@ -695,8 +752,9 @@ mod tests {
     use super::*;
 
     /// Serializes tests that repoint `XDG_CACHE_HOME`/`HOME` so parallel runs
-    /// don't observe each other's env (mirrors lib.rs's HOME_LOCK pattern).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// don't observe each other's env (shared with lib.rs / claude / codex via
+    /// agent_runtime).
+    use crate::agent_runtime::ENV_LOCK;
 
     fn session(mode: &str, resume_key: Option<&str>) -> AgentSession {
         AgentSession {
@@ -717,7 +775,7 @@ mod tests {
     /// so status-plugin / TUI-config side effects never touch the developer's
     /// real cache dirs or `~/CaPilot`.
     fn with_isolated_cache(f: impl FnOnce()) {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let prev_home = std::env::var_os("HOME");
         let prev_xdg_cache = std::env::var_os("XDG_CACHE_HOME");
         let base = std::env::temp_dir().join(format!(
@@ -762,6 +820,8 @@ mod tests {
             let source = std::fs::read_to_string(&plugin).expect("plugin written");
             assert!(source.contains("session.status"));
             assert!(source.contains("permission.asked"));
+            assert!(source.contains("question.asked"));
+            assert!(source.contains("awaiting_choice"));
             assert!(source.contains("CAPILOT_AGENT_ID"));
             assert_eq!(get("CAPILOT_AGENT_ID").as_deref(), Some("test"));
             assert!(get("CAPILOT_STATUS_DIR").is_some());
@@ -869,6 +929,14 @@ mod tests {
             params![r#"{"type":"step-finish","reason":"stop","tokens":{"total":161848,"input":252,"output":60,"reasoning":0,"cache":{"write":0,"read":161536}}}"#],
         )
         .unwrap();
+        // A second step-finish part exercises the session-cumulative summing:
+        // cache stats accumulate over ALL parts, the active-context estimate
+        // still comes from the newest one.
+        conn.execute(
+            "INSERT INTO part (id, session_id, time_created, data) VALUES ('prt_2', 'ses_1', 400, ?1)",
+            params![r#"{"type":"step-finish","reason":"stop","tokens":{"total":560,"input":100,"output":40,"reasoning":0,"cache":{"write":20,"read":300}}}"#],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO message (id, session_id, time_created, data) VALUES ('msg_1', 'ses_1', 300, ?1)",
             params![r#"{"role":"assistant","providerID":"opencode","modelID":"deepseek-v4-flash-free","tokens":{"total":161848}}"#],
@@ -879,7 +947,15 @@ mod tests {
         // session columns.
         assert_eq!(
             OpenCodeAdapter::latest_step_finish_tokens(&conn, Path::new("/tmp/project")),
-            Some(161848)
+            Some(560)
+        );
+        // Session cumulative cache stats across both parts. OpenCode accounting:
+        // total prompt = input + cache.read + cache.write, hit = cache.read.
+        // prt_1: 252 + 161536 = 161788 prompt / 161536 hit;
+        // prt_2: 100 + 20 + 300 = 420 / 300.
+        assert_eq!(
+            OpenCodeAdapter::session_cache_stats(&conn, Path::new("/tmp/project")),
+            Some((161536 + 300, 161788 + 420))
         );
         assert_eq!(
             OpenCodeAdapter::observed_model_id(&conn, Path::new("/tmp/project")).as_deref(),
@@ -888,6 +964,10 @@ mod tests {
         // A cwd with no session yields nothing.
         assert_eq!(
             OpenCodeAdapter::latest_step_finish_tokens(&conn, Path::new("/tmp/other")),
+            None
+        );
+        assert_eq!(
+            OpenCodeAdapter::session_cache_stats(&conn, Path::new("/tmp/other")),
             None
         );
     }

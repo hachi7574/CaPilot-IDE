@@ -15,6 +15,20 @@ These fields are not cumulative token spend. Compaction can reduce `contextWindo
 
 Both fields stay optional. A provider that cannot supply a trustworthy current value should omit it instead of estimating it from visible text.
 
+### Cache hit rate
+
+`AgentUsage` also carries two **session-cumulative** prompt-token counts: `cacheHitTokens` (the cached-read portion) and `cacheTotalInputTokens` (the total prompt). The composer renders the ratio `cacheHitTokens / cacheTotalInputTokens` as a small chip next to the meter; both must be present and the denominator must be positive, otherwise nothing renders.
+
+The two counts are NOT comparable across providers, and each adapter normalizes its runtime's accounting before reporting them:
+
+| Runtime | Hit numerator | Total-prompt denominator |
+| --- | --- | --- |
+| Claude | `cache_read_input_tokens` | `input_tokens + cache_creation_input_tokens + cache_read_input_tokens` (input excludes cache reads) |
+| Codex | `cached_input_tokens` (older transcripts: `cache_read_input_tokens`) | `input_tokens` (input **already includes** the cached portion — verified `total_tokens == input_tokens + output_tokens`) |
+| OpenCode | `tokens.cache.read` | `tokens.input + tokens.cache.read + tokens.cache.write` (input excludes cache reads) |
+
+Both are summed across the whole session transcript (Claude: all assistant records skipping `isSidechain`; Codex: all `token_count` events; OpenCode: all `step-finish` parts). The frontend only computes the percentage; it never cross-converts providers.
+
 ## Data flow
 
 1. The provider adapter reads usage from its SDK, RPC runtime, model metadata, or stream events.

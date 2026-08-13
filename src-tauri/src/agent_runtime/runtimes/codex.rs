@@ -55,12 +55,17 @@ impl CodexAdapter {
         let escaped = hook_sh.replace('\\', "\\\\").replace('"', "\\\"");
         let mut toml = String::new();
         for event in status_hooks::CODEX_HOOK_EVENTS {
+            // Codex clamps SessionEnd hook timeouts to 3s and warns on startup
+            // when a larger timeout is declared. Declare 3s for SessionEnd
+            // (still generous — hook.sh is a sub-millisecond sh script) so the
+            // session opens without a clamp warning.
+            let timeout = if event == "SessionEnd" { 3 } else { 5 };
             toml.push_str(&format!(
                 "[[hooks.{event}]]\n\
                  [[hooks.{event}.hooks]]\n\
                  type = \"command\"\n\
                  command = \"/bin/sh {escaped}\"\n\
-                 timeout = 5\n\n"
+                 timeout = {timeout}\n\n"
             ));
         }
         std::fs::write(profile, toml)
@@ -337,9 +342,20 @@ impl CodexAdapter {
     /// total) and the last seen `model_context_window` as max (emitted on both
     /// `token_count` and `task_started`). Both fields stay optional: a session
     /// still on its first turn may have no `token_count` yet.
+    ///
+    /// Also accumulates session-cumulative cache stats across ALL `token_count`
+    /// events. Codex accounting (OpenAI style): `input_tokens` ALREADY includes
+    /// the cached portion (verified: `total_tokens == input_tokens +
+    /// output_tokens`), so the total prompt is `input_tokens` and the hit
+    /// portion is `cached_input_tokens`. Older transcripts may name them
+    /// `cache_read_input_tokens` / `cache_creation_input_tokens`; both are
+    /// accepted.
     fn latest_usage_from_content(content: &str) -> AgentUsage {
         let mut used = None;
         let mut max = None;
+        let mut cache_hit = 0u64;
+        let mut cache_total = 0u64;
+        let mut cache_seen = false;
         for line in content.lines() {
             let Ok(v) = serde_json::from_str::<Value>(line) else {
                 continue;
@@ -360,10 +376,32 @@ impl CodexAdapter {
             {
                 used = Some(n);
             }
+            let lu = v
+                .pointer("/payload/info/last_token_usage")
+                .and_then(Value::as_object);
+            let input = lu
+                .and_then(|o| o.get("input_tokens"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let hit = lu
+                .and_then(|o| o.get("cached_input_tokens"))
+                .and_then(Value::as_u64)
+                .or_else(|| {
+                    lu.and_then(|o| o.get("cache_read_input_tokens"))
+                        .and_then(Value::as_u64)
+                })
+                .unwrap_or(0);
+            if input > 0 {
+                cache_hit += hit;
+                cache_total += input;
+                cache_seen = true;
+            }
         }
         AgentUsage {
             context_window_used_tokens: used,
             context_window_max_tokens: max,
+            cache_hit_tokens: cache_seen.then_some(cache_hit),
+            cache_total_input_tokens: cache_seen.then_some(cache_total),
         }
     }
 
@@ -556,8 +594,9 @@ mod tests {
     use super::*;
 
     /// Serializes tests that repoint `HOME`/`CODEX_HOME` so parallel runs don't
-    /// observe each other's env (mirrors lib.rs's HOME_LOCK pattern).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// observe each other's env (shared with lib.rs / claude / opencode via
+    /// agent_runtime).
+    use crate::agent_runtime::ENV_LOCK;
 
     fn session(resume_key: Option<&str>) -> AgentSession {
         AgentSession {
@@ -578,7 +617,7 @@ mod tests {
     /// status-hook side effects (sidecar dir, codex config profile) never touch
     /// the developer's real `~/CaPilot` / `~/.codex`.
     fn with_isolated_homes(f: impl FnOnce()) {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let prev_home = std::env::var_os("HOME");
         let prev_codex_home = std::env::var_os("CODEX_HOME");
         let base = std::env::temp_dir().join(format!(
@@ -626,6 +665,23 @@ mod tests {
             let toml = std::fs::read_to_string(&profile).unwrap();
             assert!(toml.contains("[[hooks.UserPromptSubmit]]"));
             assert!(toml.contains("[[hooks.PermissionRequest]]"));
+            // Codex clamps SessionEnd hook timeouts to 3s and warns on startup
+            // when a larger value is declared. Trim each hook block (the format
+            // string carries source indentation) and assert the per-event
+            // timeout: SessionEnd declares 3s, every other event 5s.
+            let blocks: Vec<&str> = toml
+                .split("\n\n")
+                .map(str::trim)
+                .filter(|b| !b.is_empty())
+                .collect();
+            let block_for = |event: &str| {
+                blocks
+                    .iter()
+                    .find(|b| b.starts_with(&format!("[[hooks.{event}]]")))
+                    .unwrap_or_else(|| panic!("missing {event} hook block"))
+            };
+            assert!(block_for("SessionEnd").contains("timeout = 3"));
+            assert!(block_for("UserPromptSubmit").contains("timeout = 5"));
             assert_eq!(
                 adapter.resume_args(&session(Some("session-id"))),
                 ["resume", "session-id"]
@@ -686,15 +742,24 @@ mod tests {
 
     #[test]
     fn parses_codex_token_count_for_context_usage() {
+        // Two token_count events: the `last` reading comes from the LAST event,
+        // and the session-cumulative cache stats sum across BOTH. Codex
+        // accounting (OpenAI style): `input_tokens` already includes the cached
+        // portion, so the prompt total is `input_tokens` and the hit portion is
+        // `cached_input_tokens`.
         let content = concat!(
             "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/project\"}}\n",
             "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"model_context_window\":258400}}\n",
             "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"total_tokens\":31114},\"last_token_usage\":{\"input_tokens\":15674,\"cached_input_tokens\":11008,\"cache_write_input_tokens\":0,\"output_tokens\":715,\"reasoning_output_tokens\":373,\"total_tokens\":16389},\"model_context_window\":258400}}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":8000,\"cached_input_tokens\":3000,\"cache_write_input_tokens\":0,\"output_tokens\":200,\"total_tokens\":8200},\"model_context_window\":258400}}}\n",
         );
         let usage = CodexAdapter::latest_usage_from_content(content);
         // `last` usage object, not the session total.
-        assert_eq!(usage.context_window_used_tokens, Some(16389));
+        assert_eq!(usage.context_window_used_tokens, Some(8200));
         assert_eq!(usage.context_window_max_tokens, Some(258400));
+        // Session cumulative: 15674 + 8000 prompt, 11008 + 3000 hit.
+        assert_eq!(usage.cache_hit_tokens, Some(11008 + 3000));
+        assert_eq!(usage.cache_total_input_tokens, Some(15674 + 8000));
     }
 
     #[test]

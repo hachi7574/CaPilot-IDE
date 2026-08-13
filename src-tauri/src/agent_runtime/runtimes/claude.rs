@@ -11,6 +11,16 @@ use std::time::SystemTime;
 
 pub struct ClaudeAdapter;
 
+/// Result of one pass over a Claude transcript: the LAST usable assistant
+/// record's summed usage (the live active-context estimate) plus the
+/// session-cumulative cache-read and total-prompt token counts (the cache hit
+/// rate numerator and denominator).
+struct TranscriptUsage {
+    last_used: Option<u64>,
+    cache_hit: u64,
+    cache_total: u64,
+}
+
 impl ClaudeAdapter {
     pub fn new() -> Self {
         Self
@@ -91,25 +101,34 @@ impl ClaudeAdapter {
     }
 
     /// Current active-context estimate for a cwd: the summed `message.usage` of
-    /// the LAST assistant record in the newest transcript. `None` when there is
-    /// no transcript, no readable file, or no usable usage record. This is a
-    /// single-snapshot read — it never accumulates usage across messages.
-    fn latest_used_tokens(cwd: &Path) -> Option<u64> {
+    /// the LAST assistant record in the newest transcript, plus the session's
+    /// cumulative cache stats. `None` when there is no transcript, no readable
+    /// file, or no usable usage record. This is a single-snapshot read — it
+    /// never accumulates usage across messages.
+    fn read_transcript(cwd: &Path) -> Option<TranscriptUsage> {
         let path = Self::newest_transcript(cwd)?;
         let content = std::fs::read_to_string(path).ok()?;
-        Self::sum_usage_from_lines(&content)
+        Some(Self::parse_transcript_usage(&content))
     }
 
-    /// Sum the LAST assistant record's `message.usage` across JSONL `lines`.
+    /// One pass over JSONL `lines` computing:
+    ///  - `last_used`: the summed `message.usage` of the LAST assistant record
+    ///    (`input_tokens` + `cache_creation_input_tokens` +
+    ///    `cache_read_input_tokens` + `output_tokens`);
+    ///  - session-cumulative cache stats across ALL assistant records.
     ///
-    /// Fields present are summed: `input_tokens` + `cache_creation_input_tokens`
-    /// + `cache_read_input_tokens` + `output_tokens`. Records carrying
-    /// `isSidechain: true` are skipped so main-thread turns win (a sidechain
-    /// record that appears last must not shadow the main conversation). Lines
-    /// that fail to parse or carry no `message.usage` are ignored; `None` when
-    /// no usable record exists.
-    fn sum_usage_from_lines(content: &str) -> Option<u64> {
-        let mut last: Option<u64> = None;
+    /// Records carrying `isSidechain: true` are skipped so main-thread turns
+    /// win (a sidechain record that appears last must not shadow the main
+    /// conversation). Lines that fail to parse or carry no `message.usage` are
+    /// ignored.
+    ///
+    /// Anthropic accounting: `input_tokens` EXCLUDES cache reads, so each
+    /// turn's total prompt is `input + cache_creation + cache_read` and the
+    /// cached portion is `cache_read`.
+    fn parse_transcript_usage(content: &str) -> TranscriptUsage {
+        let mut last_used = None;
+        let mut cache_hit = 0u64;
+        let mut cache_total = 0u64;
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() {
@@ -142,10 +161,30 @@ impl ClaudeAdapter {
                 }
             }
             if any {
-                last = Some(sum);
+                last_used = Some(sum);
+            }
+            let input = usage
+                .get("input_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let created = usage
+                .get("cache_creation_input_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let read = usage
+                .get("cache_read_input_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if input + created + read > 0 {
+                cache_hit += read;
+                cache_total += input + created + read;
             }
         }
-        last
+        TranscriptUsage {
+            last_used,
+            cache_hit,
+            cache_total,
+        }
     }
 
     /// Confirmed model context capacities (Anthropic model catalog). Unknown or
@@ -341,10 +380,13 @@ impl AgentRuntimeAdapter for ClaudeAdapter {
     fn context_usage(&self, cwd: &Path, model: Option<&str>) -> Option<AgentUsage> {
         // Single-snapshot read: the LAST assistant record's summed usage is the
         // provider's current active-context estimate (compaction can lower it).
-        let used = Self::latest_used_tokens(cwd)?;
+        let parsed = Self::read_transcript(cwd)?;
+        let used = parsed.last_used?;
         Some(AgentUsage {
             context_window_used_tokens: Some(used),
             context_window_max_tokens: Self::context_window_max(model),
+            cache_hit_tokens: (parsed.cache_hit > 0).then_some(parsed.cache_hit),
+            cache_total_input_tokens: (parsed.cache_total > 0).then_some(parsed.cache_total),
         })
     }
 
@@ -431,45 +473,55 @@ mod tests {
     #[test]
     fn sums_last_assistant_usage_across_jsonl_lines() {
         // Simple shape on the first assistant record, rich shape (with cache
-        // fields) on the last — the last record wins and sums only fields that
-        // are present.
+        // fields) on the last — the last record wins for the live estimate and
+        // the session-cumulative cache stats sum across BOTH records.
         let content = "\
 {\"type\":\"user\",\"message\":{\"content\":\"hi\"}}\n\
 {\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":100,\"output_tokens\":50}}}\n\
 {\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":200,\"cache_creation_input_tokens\":30,\"cache_read_input_tokens\":40,\"output_tokens\":60}}}\n\
 ";
+        let parsed = ClaudeAdapter::parse_transcript_usage(content);
         assert_eq!(
-            ClaudeAdapter::sum_usage_from_lines(content),
+            parsed.last_used,
             Some(200 + 30 + 40 + 60),
             "last assistant record's present fields are summed"
         );
+        // Anthropic accounting: prompt = input + cache_creation + cache_read,
+        // hit = cache_read. Record 1: 100 prompt / 0 hit; record 2: 270 / 40.
+        assert_eq!(parsed.cache_hit, 40);
+        assert_eq!(parsed.cache_total, 100 + 270);
     }
 
     #[test]
     fn skips_sidechain_records_for_main_thread_usage() {
         // Sidechain records that appear after the main-thread turn must not
-        // shadow it — the LAST main-thread record wins.
+        // shadow it — the LAST main-thread record wins, and sidechain usage is
+        // excluded from the session-cumulative cache stats too.
         let content = "\
 {\"type\":\"assistant\",\"isSidechain\":true,\"message\":{\"usage\":{\"input_tokens\":999,\"output_tokens\":999}}}\n\
 {\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}\n\
 {\"type\":\"assistant\",\"isSidechain\":true,\"message\":{\"usage\":{\"input_tokens\":888,\"output_tokens\":888}}}\n\
 ";
-        assert_eq!(ClaudeAdapter::sum_usage_from_lines(content), Some(10));
+        let parsed = ClaudeAdapter::parse_transcript_usage(content);
+        assert_eq!(parsed.last_used, Some(10));
+        assert_eq!(parsed.cache_hit, 0);
+        assert_eq!(parsed.cache_total, 7);
     }
 
     #[test]
     fn usage_none_when_no_usable_record() {
         // Unparseable lines, records without `message.usage`, and empty content
-        // all degrade to None instead of failing.
-        assert_eq!(ClaudeAdapter::sum_usage_from_lines("not json\n"), None);
-        assert_eq!(ClaudeAdapter::sum_usage_from_lines("{\"type\":\"user\"}\n"), None);
-        assert_eq!(
-            ClaudeAdapter::sum_usage_from_lines(
-                "{\"type\":\"assistant\",\"message\":{\"content\":\"no usage\"}}\n"
-            ),
-            None
-        );
-        assert_eq!(ClaudeAdapter::sum_usage_from_lines(""), None);
+        // all degrade to a no-usage result instead of failing.
+        for content in [
+            "not json\n",
+            "{\"type\":\"user\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":\"no usage\"}}\n",
+            "",
+        ] {
+            let parsed = ClaudeAdapter::parse_transcript_usage(content);
+            assert_eq!(parsed.last_used, None);
+            assert_eq!(parsed.cache_total, 0);
+        }
     }
 
     #[test]
@@ -497,25 +549,29 @@ mod tests {
         let usage = AgentUsage {
             context_window_used_tokens: Some(123_456),
             context_window_max_tokens: Some(1_000_000),
+            cache_hit_tokens: Some(88_000),
+            cache_total_input_tokens: Some(110_000),
         };
         assert_eq!(
             serde_json::to_string(&usage).unwrap(),
-            r#"{"contextWindowUsedTokens":123456,"contextWindowMaxTokens":1000000}"#
+            r#"{"contextWindowUsedTokens":123456,"contextWindowMaxTokens":1000000,"cacheHitTokens":88000,"cacheTotalInputTokens":110000}"#
         );
         // Optional fields serialize as null (still present on the wire).
         let empty = AgentUsage {
             context_window_used_tokens: None,
             context_window_max_tokens: None,
+            cache_hit_tokens: None,
+            cache_total_input_tokens: None,
         };
         assert_eq!(
             serde_json::to_string(&empty).unwrap(),
-            r#"{"contextWindowUsedTokens":null,"contextWindowMaxTokens":null}"#
+            r#"{"contextWindowUsedTokens":null,"contextWindowMaxTokens":null,"cacheHitTokens":null,"cacheTotalInputTokens":null}"#
         );
     }
 
     // Serializes tests that repoint `HOME` so parallel runs don't observe each
-    // other's env (mirrors the codex/lib.rs ENV_LOCK pattern).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // other's env (shared with lib.rs / codex / opencode via agent_runtime).
+    use crate::agent_runtime::ENV_LOCK;
 
     fn session() -> AgentSession {
         AgentSession {
@@ -538,7 +594,7 @@ mod tests {
     /// under the (isolated) status dir, exactly as `spawn_interactive` relied on.
     #[test]
     fn status_hook_args_injects_settings_flag() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let prev_home = std::env::var_os("HOME");
         let base = std::env::temp_dir().join(format!("capilot-claude-test-{}", std::process::id()));
         std::env::set_var("HOME", &base);

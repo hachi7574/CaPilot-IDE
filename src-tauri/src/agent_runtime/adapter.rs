@@ -105,15 +105,30 @@ pub struct AgentInfo {
 
 /// Provider's estimate of the current active-context occupancy for an agent.
 ///
-/// These are NOT cumulative token-spend counters: compaction can reduce
-/// `context_window_used_tokens`, and `context_window_max_tokens` is the selected
-/// model's capacity (never guessed from visible text). Both fields stay optional
-/// — a provider with no trustworthy value omits the field instead of estimating.
+/// One normalized context-usage sample for an agent.
+///
+/// The two `context_window_*` fields are the CURRENT active-context occupancy
+/// and capacity — they are NOT cumulative token-spend counters: compaction can
+/// reduce `context_window_used_tokens`, and `context_window_max_tokens` is the
+/// selected model's capacity (never guessed from visible text). Both stay
+/// optional — a provider with no trustworthy value omits the field instead of
+/// estimating.
+///
+/// The two `cache_*` fields are SESSION-CUMULATIVE prompt-token counts feeding
+/// the cache hit rate (`cache_hit_tokens / cache_total_input_tokens`). Each
+/// adapter normalizes its runtime's accounting into this pair — the definition
+/// of "hit" and "total prompt" differs per provider (Claude's `input_tokens`
+/// excludes cache reads; codex's `input_tokens` already includes them;
+/// opencode's `tokens.input` excludes cache reads and reports
+/// `cache.read/write` separately), so the ratio is only computed at the display
+/// layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentUsage {
     pub context_window_used_tokens: Option<u64>,
     pub context_window_max_tokens: Option<u64>,
+    pub cache_hit_tokens: Option<u64>,
+    pub cache_total_input_tokens: Option<u64>,
 }
 
 /// Summary of an available runtime detected on the system
@@ -219,6 +234,8 @@ pub enum AgentError {
     PtyError(String),
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
+    #[error("session limit reached ({limit})")]
+    CapacityReached { limit: usize },
 }
 
 // Implement Serialize for AgentError so it can be returned from Tauri commands
