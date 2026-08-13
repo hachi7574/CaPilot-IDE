@@ -118,6 +118,87 @@ export async function ensureAgentChannel(agentId: string): Promise<boolean> {
   return true;
 }
 
+/**
+ * Send a prompt to an agent with the Composer's exact send semantics, shared by
+ * the Composer and the todo-tag drop targets:
+ *   1. ensure a live PTY channel (resume restored/dormant sessions);
+ *   2. give a freshly-booted TUI time to attach its input loop before injecting
+ *      the message (see `waitForTui` / the resumed-detection comment in the
+ *      Composer);
+ *   3. stamp the submission (tab bar reads 运行中) and clear the
+ *      unviewed-completion flag;
+ *   4. write the message — codex gets the text+Enter keystroke burst its TUI
+ *      needs to treat the input as a submitted prompt, other runtimes a plain
+ *      write (raw:false appends the Enter).
+ */
+export async function sendPromptToAgent(
+  agentId: string,
+  text: string,
+  opts?: { waitForTui?: boolean }
+): Promise<void> {
+  const s = useStore.getState();
+  const resumed = await ensureAgentChannel(agentId);
+  if ((opts?.waitForTui) || resumed) {
+    await new Promise((r) => setTimeout(r, 800));
+  }
+  s.markAgentSubmitted(agentId);
+  s.setAgentUnread(agentId, false);
+  const runtime = s.agents.get(agentId)?.runtime;
+  if (runtime === "codex") {
+    // Codex's TUI detects a text+Enter burst as pasted input. When both are
+    // delivered in one PTY write, the trailing CR may remain in the editor
+    // instead of submitting the prompt. Send the keystrokes separately,
+    // matching what happens when a user types in the terminal directly.
+    await invoke("agent_write", { id: agentId, data: text, raw: true });
+    await new Promise((r) => setTimeout(r, 30));
+    await invoke("agent_write", { id: agentId, data: "\r", raw: true });
+  } else {
+    await invoke("agent_write", { id: agentId, data: text });
+  }
+}
+
+/**
+ * Assign a todo tag to an agent and send its text as a prompt. The tag leaves
+ * 待分配 (becomes invisible `assigned`), linked to the session so it auto-lands
+ * in 待验收 when the session's turn ends. For an ended/dormant session the
+ * standard reopen flow runs first (drop dead channel + flag resume + open the
+ * terminal), then the prompt is injected once the resumed channel is live.
+ */
+export async function assignTodoAndSend(tagId: string, agentId: string): Promise<void> {
+  const st = useStore.getState();
+  const tag = st.todos.find((t) => t.id === tagId);
+  if (!tag) return;
+  const agent = st.agents.get(agentId);
+  const sessionName = agent?.title ?? null;
+  // The tag keeps its creation-time scope (project) — see `assignTodoToAgent`.
+  st.assignTodoToAgent(tagId, agentId, sessionName);
+
+  // Live session (channel attached, not ended) → straight in.
+  if (!st.agentChannels.has(agentId) || agent?.status === "done") {
+    // Ended/dormant: reopen like the sidebar "已结束" click — force a fresh
+    // terminal mount that resumes — then wait for the resumed channel before
+    // sending, so `sendPromptToAgent`'s ensureAgentChannel can't double-resume.
+    st.dropAgentChannel(agentId);
+    if (st.tabs.some((t) => t.id === agentId)) st.closeTab(agentId);
+    st.requestResume(agentId);
+    if (!st.tabs.find((t) => t.id === agentId)) {
+      st.addTab({
+        id: agentId,
+        type: "agent",
+        agentId,
+        title: sessionName ?? `agent-${agentId.slice(0, 6)}`,
+      });
+    }
+    st.setActiveTab(agentId);
+    for (let i = 0; i < 30; i++) {
+      if (useStore.getState().agentChannels.has(agentId)) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+  await sendPromptToAgent(agentId, tag.text).catch(() => {});
+}
+
+
 /** Rename a terminal: the backend (`agent_rename`) persists the new title to the
  *  DB row + `.agent-meta.json`; then we update the live store (agent record +
  *  tab title) so the tab bar and sidebar labels move together. Throws on

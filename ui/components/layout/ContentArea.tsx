@@ -4,6 +4,7 @@ import { splitLeafTabIds } from "../../state/store";
 import { XTermPanel } from "../terminal/XTermPanel";
 import { EditorPanel } from "../editor/EditorPanel";
 import { DiffPanel } from "../editor/DiffPanel";
+import { spawnAgent } from "../../state/agentActions";
 
 type DropEdge = "left" | "right" | "top" | "bottom" | null;
 
@@ -201,6 +202,26 @@ export function ContentArea() {
     return () => window.removeEventListener("keydown", onKey);
   }, [requestSearch]);
 
+  // Global Ctrl+T → start a new agent session (the empty-state hint advertises
+  // it). CodeMirror and the terminal keep Ctrl+T for their own semantics (the
+  // TUI may use it as a tab / next-buffer key), so focus there never triggers.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === "t")) {
+        return;
+      }
+      const el = document.activeElement as HTMLElement | null;
+      const inCm = !!el?.closest?.(".cm-editor");
+      const inTerm = !!el?.closest?.(".xterm");
+      if (inCm || inTerm) return;
+      e.preventDefault();
+      const st = useStore.getState();
+      spawnAgent(st.focusedProject ?? undefined).catch(console.error);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const openCodeTabs = tabs.filter(
     (tab) => tab.type === "agent" && tab.agentId && agents.get(tab.agentId)?.runtime === "opencode"
@@ -255,7 +276,7 @@ export function ContentArea() {
           <img src="/logo.png" alt="CaPilot" />
           <h3>CaPilot IDE</h3>
           <p style={{ fontFamily: "var(--mono)", fontSize: "var(--fs-sm)", color: "var(--ink2)" }}>
-            Press + to start a new agent session
+            Press 'ctrl+t' to start a new agent session
           </p>
         </div>
       </div>

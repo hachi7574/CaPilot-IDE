@@ -4,7 +4,8 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
-import { useStore, AgentInfo } from "../../state/store";
+import { useStore, AgentInfo, TODO_DRAG_MIME } from "../../state/store";
+import { assignTodoAndSend } from "../../state/agentActions";
 import { pathsFromDataTransfer } from "../../state/dropPaths";
 import { Icon } from "../Icon";
 import "@xterm/xterm/css/xterm.css";
@@ -984,6 +985,18 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
         // physical drop, consume the DOM drop without double-inserting.
         if (dropHandledRef.current) {
           dropHandledRef.current = false;
+          dragDepthRef.current = 0;
+          setDragHover(false);
+          return;
+        }
+        // A todo tag dropped onto the terminal assigns the task to this session
+        // and sends its text as a prompt.
+        if (e.dataTransfer.types.includes(TODO_DRAG_MIME)) {
+          const tagId = e.dataTransfer.getData(TODO_DRAG_MIME);
+          if (tagId) {
+            void assignTodoAndSend(tagId, agentId);
+          }
+          dropHandledRef.current = true;
           dragDepthRef.current = 0;
           setDragHover(false);
           return;

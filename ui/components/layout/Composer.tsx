@@ -3,6 +3,7 @@ import {
   useState,
   useEffect,
   useCallback,
+  useMemo,
   KeyboardEvent,
   DragEvent,
   FormEvent,
@@ -10,16 +11,21 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useStore } from "../../state/store";
+import { useStore, TODO_DRAG_MIME, splitLeafTabIds } from "../../state/store";
 import { pathsFromDataTransfer } from "../../state/dropPaths";
 import type {
   PermissionMode,
   PermissionModeInfo,
   ThinkingOptionInfo,
 } from "../../state/store";
-import { spawnAgent, ensureAgentChannel } from "../../state/agentActions";
+import {
+  spawnAgent,
+  ensureAgentChannel,
+  sendPromptToAgent,
+} from "../../state/agentActions";
 import { PermissionConfirmationDialog } from "./PermissionConfirmationDialog";
 import { ContextWindowMeter } from "./ContextWindowMeter";
+import { CacheHitRate } from "./CacheHitRate";
 import { Icon } from "../Icon";
 
 const DEFAULT_RUNTIME = "claude";
@@ -112,6 +118,13 @@ interface ComposerDraftState {
   selectionEnd: number;
 }
 
+/** Where a Composer send goes. Tab cycles through the open terminals (live
+ *  agent sessions) + the 待分配 todo area; a null cycle target means "follow the
+ *  active tab" (the pre-existing behavior). */
+type ComposerTarget =
+  | { kind: "agent"; agentId: string }
+  | { kind: "todo" };
+
 export function Composer() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const atMenuRef = useRef<HTMLDivElement>(null);
@@ -123,8 +136,10 @@ export function Composer() {
   const selectedModel = useStore((s) => s.selectedModel);
   const activeTabId = useStore((s) => s.activeTabId);
   const tabs = useStore((s) => s.tabs);
+  const splitTree = useStore((s) => s.splitTree);
   const agents = useStore((s) => s.agents);
   const runtimes = useStore((s) => s.runtimes);
+  const addTodo = useStore((s) => s.addTodo);
 
   const toggleComposer = useStore((s) => s.toggleComposer);
   const composerH = useStore((s) => s.composerH);
@@ -134,6 +149,8 @@ export function Composer() {
 
   const [atMenu, setAtMenu] = useState<AtMenuState | null>(null);
   const [slashMenuStack, setSlashMenuStack] = useState<SlashMenuState[]>([]);
+  // Tab-cycled send target: null follows the active tab (pre-existing behavior).
+  const [cycleTarget, setCycleTarget] = useState<ComposerTarget | null>(null);
   const [dragHover, setDragHover] = useState(false);
   const [isBangInput, setIsBangInput] = useState(false);
   // Non-empty input → enables the send button (`.ul-send-btn`).
@@ -218,6 +235,22 @@ export function Composer() {
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const targetAgentId = activeTab?.agentId;
 
+  // Effective send target: a Tab-cycled pin wins; otherwise follow the active
+  // terminal. Falls back to null (spawn a new session on send) when the active
+  // tab carries no agent. A cycled terminal whose session has since ended or
+  // been deleted falls back to following the active tab rather than sending
+  // into a dead session.
+  const effectiveTarget: ComposerTarget | null = useMemo(() => {
+    if (cycleTarget?.kind === "agent") {
+      const alive = agents.get(cycleTarget.agentId);
+      if (!alive || alive.status === "done" || alive.status === "failed") {
+        return targetAgentId ? { kind: "agent", agentId: targetAgentId } : null;
+      }
+    }
+    return cycleTarget ??
+      (targetAgentId ? { kind: "agent", agentId: targetAgentId } : null);
+  }, [cycleTarget, agents, targetAgentId]);
+
   useEffect(() => {
     // Skills are session/runtime/cwd-specific. Never carry a previous agent's
     // catalog into a newly selected tab.
@@ -227,6 +260,8 @@ export function Composer() {
     slashChildrenRef.current.clear();
     setAtMenu(null);
     setSlashMenuStack([]);
+    // A Tab-cycled send target follows the newly-active terminal again.
+    setCycleTarget(null);
   }, [targetAgentId]);
 
   useEffect(() => {
@@ -835,6 +870,17 @@ export function Composer() {
         setDragHover(false);
         return;
       }
+      // A todo tag dropped into the composer inserts its text at the cursor
+      // (non-destructive — the tag stays in 待分配 until assigned to a session).
+      if (e.dataTransfer.types.includes(TODO_DRAG_MIME)) {
+        const tagId = e.dataTransfer.getData(TODO_DRAG_MIME);
+        const tag = useStore.getState().todos.find((t) => t.id === tagId);
+        if (tag) insertText(tag.text + " ");
+        dropHandledRef.current = true;
+        dragDepthRef.current = 0;
+        setDragHover(false);
+        return;
+      }
       // Extract absolute paths straight from the DOM dataTransfer. On Tauri
       // v2 + WebKitGTK the legacy `File.path` is gone and the Tauri drag-drop
       // event can be unreliable, so this is the primary source (the file
@@ -849,7 +895,7 @@ export function Composer() {
       // No path at all → leave dragDepthRef/dropHandledRef untouched so the
       // Tauri drag-drop event (which fires next) can still detect the composer.
     },
-    [appendPaths]
+    [appendPaths, insertText]
   );
 
   useEffect(() => {
@@ -1281,6 +1327,53 @@ export function Composer() {
     [appendPaths]
   );
 
+  // ── Send target (Tab cycle: visible terminals ↔ 待分配) ────────
+  /** Advance the composer's send target through the terminals VISIBLE in the
+   *  content area (the split leaves when in split view, else just the active
+   *  tab) then 待分配, wrapping around. Tabs parked in the bar but not rendered
+   *  in this area — other split panes' sessions, or open tabs not currently
+   *  shown — stay out of the cycle. A bare Tab from "follow the active tab"
+   *  starts at the next terminal after the active one (or the first terminal /
+   *  待分配 when the active tab isn't a live terminal). */
+  const cycleSendTarget = useCallback(() => {
+    // The visible set is the split tree's leaves in split view, otherwise the
+    // active tab alone. Ended/failed sessions (status done/failed) keep a row
+    // in the sidebar but are no longer open terminals, so they stay out of the
+    // cycle. Visible order is the natural 终端1/终端2 ordering the user sees.
+    const visibleIds = splitTree
+      ? splitLeafTabIds(splitTree)
+      : activeTabId
+        ? [activeTabId]
+        : [];
+    const terminalIds = visibleIds
+      .map((id) => tabs.find((t) => t.id === id))
+      .filter((t) => t && t.type === "agent" && !!t.agentId)
+      .map((t) => t!.agentId as string)
+      .filter((id) => {
+        const a = agents.get(id);
+        return a && a.status !== "done" && a.status !== "failed";
+      });
+    const slots: ComposerTarget[] = [
+      ...terminalIds.map((agentId) => ({ kind: "agent" as const, agentId })),
+      { kind: "todo" as const },
+    ];
+    let cur = -1;
+    if (cycleTarget) {
+      cur = slots.findIndex((s) =>
+        s.kind === "todo"
+          ? cycleTarget.kind === "todo"
+          : cycleTarget.kind === "agent" &&
+            s.kind === "agent" &&
+            s.agentId === cycleTarget.agentId
+      );
+    } else if (targetAgentId) {
+      cur = slots.findIndex(
+        (s) => s.kind === "agent" && s.agentId === targetAgentId
+      );
+    }
+    setCycleTarget(slots[(cur + 1) % slots.length]);
+  }, [splitTree, activeTabId, tabs, agents, targetAgentId, cycleTarget]);
+
   // ── Send ──────────────────────────────────────────────────────
   const handleSend = useCallback(async () => {
     if (sendingRef.current) return; // in-flight guard (rapid Enter, Bug 3)
@@ -1306,8 +1399,17 @@ export function Composer() {
     setAtMenu(null);
     setSlashMenuStack([]);
 
+    // 待分配 target: the input becomes a task tag instead of a prompt. The `!`
+    // 终端直发 marker is stripped exactly like an agent send — it is a Composer
+    // directive, not message content.
+    if (effectiveTarget?.kind === "todo") {
+      addTodo(text);
+      return;
+    }
+
     sendingRef.current = true;
-    let agentId = targetAgentId;
+    let agentId =
+      effectiveTarget?.kind === "agent" ? effectiveTarget.agentId : targetAgentId;
     let justSpawned = false;
     try {
       if (!agentId) {
@@ -1315,12 +1417,12 @@ export function Composer() {
         justSpawned = true;
       }
 
-      // Resumed/restored sessions may not have a channel yet.
-      const resumed = await ensureAgentChannel(agentId);
-      // Give a freshly-spawned/resumed CLI TUI time to attach its input loop
-      // before injecting the message. A fixed 800ms can be too short on slow
-      // machines / cold claude starts (first instruction typed before the TUI
-      // is reading stdin → dropped or eaten by the shell prompt).
+      // `sendPromptToAgent` (shared with the todo-tag drop targets) ensures a
+      // live channel (resuming restored sessions), then gives a freshly-spawned
+      // /resumed CLI TUI time to attach its input loop before injecting the
+      // message. A fixed 800ms can be too short on slow machines / cold claude
+      // starts (first instruction typed before the TUI is reading stdin →
+      // dropped or eaten by the shell prompt).
       //
       // Why not "wait until the PTY buffer holds the first output" instead?
       // In exactly the cases this wait applies to (justSpawned || resumed) the
@@ -1331,28 +1433,7 @@ export function Composer() {
       // of latency to every first send) or never fire. Detecting readiness
       // reliably would require wiring into the channel/terminal or a new store
       // flag — both out of scope here. So the fixed heuristic stays.
-      if (justSpawned || resumed) {
-        await new Promise((r) => setTimeout(r, 800));
-      }
-      const runtime = useStore.getState().agents.get(agentId)?.runtime;
-      // A submitted message starts a task — stamp the activity clock so the tab
-      // bar reads 运行中 immediately, before the first output chunk arrives.
-      useStore.getState().markAgentActive(agentId);
-      if (runtime === "codex") {
-        // Codex's TUI detects a text+Enter burst as pasted input. When both are
-        // delivered in one PTY write, the trailing CR may remain in the editor
-        // instead of submitting the prompt. Send the keystrokes separately,
-        // matching what happens when a user types in the terminal directly.
-        await invoke("agent_write", {
-          id: agentId,
-          data: agentInput,
-          raw: true,
-        });
-        await new Promise((r) => setTimeout(r, 30));
-        await invoke("agent_write", { id: agentId, data: "\r", raw: true });
-      } else {
-        await invoke("agent_write", { id: agentId, data: agentInput });
-      }
+      await sendPromptToAgent(agentId, agentInput, { waitForTui: justSpawned });
     } catch (err) {
       console.error("Failed to send to agent:", err);
     } finally {
@@ -1360,9 +1441,11 @@ export function Composer() {
       sendingRef.current = false;
     }
   }, [
+    effectiveTarget,
     targetAgentId,
     resizeTextarea,
     pushDraft,
+    addTodo,
   ]);
 
   // Keep the auto-send bridge fresh whenever `handleSend` is recreated.
@@ -1463,6 +1546,9 @@ export function Composer() {
           } else {
             void applyPermissionMode(next.id);
           }
+        } else {
+          // Tab: 在打开的终端 + 待分配 之间循环发送目标（见 cycleSendTarget）.
+          cycleSendTarget();
         }
       } else if (e.key === "ArrowUp" && !e.currentTarget.value) {
         e.preventDefault();
@@ -1492,6 +1578,7 @@ export function Composer() {
       popSlashLevel,
       insertAtItem,
       handleSend,
+      cycleSendTarget,
       shownMode,
       permissionModes,
       configRuntimeId,
@@ -1624,19 +1711,45 @@ export function Composer() {
       <div className="composer-target">
         <span>
           <Icon name="arrow-right" size={12} style={{ marginRight: 4 }} />
-          agent:{" "}
-          {activeTab?.type === "agent" && activeTab.agentId
-            ? activeTab.title || "agent"
-            : "(无标签)"}
+          {effectiveTarget?.kind === "todo" ? (
+            <span className="composer-target-todo" title="内容将添加到待分配">
+              待分配
+            </span>
+          ) : effectiveTarget?.kind === "agent" ? (
+            <>
+              agent: {agents.get(effectiveTarget.agentId)?.title ?? "agent"}
+            </>
+          ) : (
+            "(无标签)"
+          )}
         </span>
-        <ContextWindowMeter agentId={targetAgentId} />
+        <ContextWindowMeter
+          agentId={
+            effectiveTarget?.kind === "agent"
+              ? effectiveTarget.agentId
+              : undefined
+          }
+        />
+        <CacheHitRate
+          agentId={
+            effectiveTarget?.kind === "agent"
+              ? effectiveTarget.agentId
+              : undefined
+          }
+        />
         <span className="composer-target-right">
-          {isBangInput && (
+          {isBangInput && effectiveTarget?.kind !== "todo" && (
             <span className="composer-bang">
               <Icon name="zap" size={12} style={{ marginRight: 4 }} />
               终端直发
             </span>
           )}
+          <span
+            className="composer-f1-hint"
+            title="Tab 在打开的终端与待分配之间切换发送目标"
+          >
+            <kbd>Tab</kbd> 切换目标
+          </span>
           <span
             className="composer-f1-hint"
             title="F1 在输入框与终端之间切换焦点"
@@ -1659,14 +1772,22 @@ export function Composer() {
           <textarea
             ref={textareaRef}
             className="composer-input"
-            placeholder="发消息…（/ 命令 · @ 文件 · ! 终端 · 拖入文件）"
+            placeholder={
+              effectiveTarget?.kind === "todo"
+                ? "添加待办…（Enter 加入待分配）"
+                : "发消息…（/ 命令 · @ 文件 · ! 终端 · 拖入文件）"
+            }
             rows={4}
             onKeyDown={handleKeyDown}
             onInput={handleInput}
           />
           <button
             className="ul-send-btn"
-            title="发送消息（Enter）"
+            title={
+              effectiveTarget?.kind === "todo"
+                ? "添加到待分配（Enter）"
+                : "发送消息（Enter）"
+            }
             onClick={() => handleSend()}
             disabled={sendingRef.current || !hasInput}
           >

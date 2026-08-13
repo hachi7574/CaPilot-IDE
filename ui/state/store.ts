@@ -7,6 +7,7 @@ export type AgentStatus =
   | "idle"
   | "running"
   | "waiting_input"
+  | "awaiting_choice"
   | "busy"
   | "done"
   | "failed";
@@ -20,14 +21,23 @@ export type FontScale = "s" | "m" | "l" | "xl" | "xxl";
  * Provider's estimate of the CURRENT active-context occupancy for an agent
  * (wire camelCase; backend `AgentUsage`, serialized via serde rename_all).
  *
- * These are NOT cumulative token-spend counters: compaction can reduce
- * `contextWindowUsedTokens`, and `contextWindowMaxTokens` is the selected
- * model's capacity (never guessed from visible text). Both fields stay optional
- * — a provider with no trustworthy value omits instead of estimating.
+ * `contextWindowUsedTokens` / `contextWindowMaxTokens` are NOT cumulative
+ * token-spend counters: compaction can reduce `contextWindowUsedTokens`, and
+ * `contextWindowMaxTokens` is the selected model's capacity (never guessed from
+ * visible text). Both stay optional — a provider with no trustworthy value
+ * omits instead of estimating.
+ *
+ * `cacheHitTokens` / `cacheTotalInputTokens` are SESSION-CUMULATIVE prompt
+ * token counts feeding the cache hit rate (`cacheHitTokens /
+ * cacheTotalInputTokens`). Runtimes normalize their own accounting into this
+ * pair (e.g. codex's `input_tokens` already includes cached reads, Claude's
+ * does not).
  */
 export interface AgentUsage {
   contextWindowUsedTokens: number | null;
   contextWindowMaxTokens: number | null;
+  cacheHitTokens: number | null;
+  cacheTotalInputTokens: number | null;
 }
 
 export interface AgentInfo {
@@ -58,7 +68,10 @@ export interface AgentInfo {
 /** Hook-reported lifecycle status read from the backend sidecar
  *  (`~/CaPilot/status/<agent_id>.json`, written by the claude adapter's
  *  `--settings` hooks). `status`: `idle` | `working` | `waiting_input` |
- *  `dormant`; `ts` is epoch seconds. Absent for non-claude runtimes. */
+ *  `awaiting_choice` | `dormant`; `ts` is epoch seconds. `waiting_input` = a
+ *  permission/approval prompt; `awaiting_choice` = a question prompt (claude
+ *  AskUserQuestion / opencode `question.asked`) — the tab bar renders them as
+ *  待确认 and 待选择 respectively. Absent for non-claude runtimes. */
 export interface HookStatus {
   status: string;
   ts: number;
@@ -83,7 +96,8 @@ export function effectiveAgentStatus(
   agent: AgentInfo | undefined,
   connected: boolean,
   active: boolean,
-  hook?: HookStatus | null
+  hook?: HookStatus | null,
+  submittedAt?: number
 ): AgentStatus | "dormant" {
   if (!agent) return "idle";
   if (agent.status === "done") return "done";
@@ -96,9 +110,20 @@ export function effectiveAgentStatus(
       case "working":
         return "running";
       case "idle":
-        return "idle";
+        // A just-submitted prompt lags the hook by up to a poll tick
+        // (UserPromptSubmit hasn't landed yet) while the TUI echo/output is
+        // already flowing — read that brief window as 运行中. Terminal typing
+        // never sets `submittedAt`, so it stays 空闲.
+        return submittedAt && Date.now() - submittedAt < SUBMIT_FLASH_MS
+          ? "running"
+          : "idle";
       case "waiting_input":
         return active ? "running" : "waiting_input";
+      case "awaiting_choice":
+        // Same recency override as `waiting_input`: the question screen is a
+        // static TUI frame, but the output the agent streams after the user
+        // answers must read as 运行中, not a lingering 待选择.
+        return active ? "running" : "awaiting_choice";
       case "dormant":
         return "dormant";
       default:
@@ -124,6 +149,12 @@ export function effectiveAgentStatus(
  * false 运行中 either.
  */
 export const ACTIVE_WINDOW_MS = 2000;
+
+/** How long a just-submitted prompt is allowed to read as 运行中 while its
+ *  lifecycle hook hasn't caught up yet (UserPromptSubmit lags the send by up to
+ *  a poll tick). Only `markAgentSubmitted` (the Composer send path) sets the
+ *  marker, so typing in the terminal never triggers this. */
+export const SUBMIT_FLASH_MS = 1500;
 
 /** Minimum gap between activity stamps (appendAgentOutput / markAgentActive).
  *  Kept small (0.5s) so a future non-zero window still tracks liveness without
@@ -213,6 +244,35 @@ export interface Tab {
   title: string;
 }
 
+// ── Todo tags (overview task tracker) ─────────────────────────────
+
+/** Drag-payload MIME for todo tags. Distinct from the `text/plain` payloads
+ *  already in use (tab ids / project names / file paths) so every drop target
+ *  can tell a tag drag from a tab drag by checking `types.includes(...)`. */
+export const TODO_DRAG_MIME = "application/x-capilot-todo";
+
+/**
+ * One task tag shown in the right sidebar's 概览 tab. Lifecycle:
+ * `todo` (待分配, visible) → `assigned` (dropped onto a session, in-flight and
+ * invisible) → `done` (待验收, visible with the session name). `done` is reached
+ * automatically when the assigned session's hook goes working → idle, or
+ * manually via the check button on an unassigned tag.
+ */
+export interface TodoTag {
+  id: string;
+  text: string;
+  /** todo=待分配(可见) · assigned=已分配 in-flight(不可见) · done=待验收(可见) */
+  status: "todo" | "assigned" | "done";
+  /** The session the tag was assigned to (assigned/done). */
+  agentId?: string | null;
+  /** Session name shown on the 待验收 tag. */
+  sessionName?: string | null;
+  /** Owning project; null = global. Assigned tags take the session's project. */
+  project?: string | null;
+  createdAt: number;
+  doneAt?: number | null;
+}
+
 // ── Split layout ──────────────────────────────────────────────────
 //
 // The content area is a recursive binary tree of panes. A leaf holds a tab id;
@@ -243,6 +303,18 @@ export function splitLeafTabIds(node: SplitNode): string[] {
   return node.kind === "leaf"
     ? [node.tabId]
     : [...splitLeafTabIds(node.a), ...splitLeafTabIds(node.b)];
+}
+
+/** Is `tabId` currently on screen? With a split the visible set is every leaf;
+ *  without one it's the single active tab. Used to decide whether a completed
+ *  agent run's result is unviewed (see `unreadCompletion`). */
+function tabIsVisible(
+  tabId: string,
+  activeTabId: string | null,
+  splitTree: SplitNode | null
+): boolean {
+  if (splitTree) return splitLeafTabIds(splitTree).includes(tabId);
+  return activeTabId === tabId;
 }
 
 /** The first (leftmost/topmost) leaf's tab id — the pane that `setActiveTab` /
@@ -433,6 +505,16 @@ interface AppState {
    *  activity heuristic so the 运行中/空闲 split follows real claude lifecycle
    *  events (submit → working, stop → idle, permission → waiting). */
   hookStatus: Map<string, HookStatus>;
+  /** Epoch-ms of the last Composer prompt submission per agent. Bridges the
+   *  window where a just-sent prompt's lifecycle hook hasn't caught up yet
+   *  (UserPromptSubmit lags the send) — see `SUBMIT_FLASH_MS`. Never set by
+   *  terminal typing. */
+  agentSubmittedAt: Map<string, number>;
+  /** Agent ids whose last completed turn's result hasn't been viewed yet (the
+   *  tab bar reads 已完成 instead of 空闲). Set when the hook goes working →
+   *  idle while the agent's tab is off-screen; cleared on view (`setActiveTab`)
+   *  or when the user submits a new prompt. In-memory only. */
+  unreadCompletion: Set<string>;
   /** Output buffered before a terminal attached (and between mounts). */
   agentOutputs: Map<string, number[]>;
   /** Whether the initial persisted-session lookup has settled. */
@@ -496,6 +578,12 @@ interface AppState {
   leftWidth: number;
   rightWidth: number;
 
+  // Todo tags (overview task tracker)
+  todos: TodoTag[];
+  /** 概览 scope: `"global"` = tags with `project == null`; `"project"` = tags
+   *  of the focused project. Toggled by the overview tab button itself. */
+  todoScope: "global" | "project";
+
   // Composer height
   /** Composer height (px). */
   composerH: number | null;
@@ -527,8 +615,15 @@ interface AppState {
   /** Stamp an agent as active (user input sent to its PTY). Combined with
    *  output activity in `appendAgentOutput`, drives the 运行中/空闲 split. */
   markAgentActive: (id: string) => void;
+  /** Stamp an agent as having just received a submitted prompt. Sets the
+   *  `agentSubmittedAt` flash marker so the tab reads 运行中 while the
+   *  lifecycle hook catches up; clears the activity-based wakeup marker. */
+  markAgentSubmitted: (id: string) => void;
   /** Update (or clear with `null`) an agent's hook-reported lifecycle status. */
   setHookStatus: (id: string, hook: HookStatus | null) => void;
+  /** Mark/unmark an agent's unviewed-completion flag (已完成). `unread` true
+   *  flags a finished turn the user hasn't opened; false clears it. */
+  setAgentUnread: (id: string, unread: boolean) => void;
   requestResume: (id: string) => void;
   consumeResume: (id: string) => void;
   /** Drop a finished agent's dead channel, keeping its record + output so the
@@ -596,6 +691,16 @@ interface AppState {
   setResourceHistory: (agentId: string, points: ResourcePoint[]) => void;
   setOnboarded: (onboarded: boolean) => void;
   setFontScale: (scale: FontScale) => void;
+  setTodos: (todos: TodoTag[]) => void;
+  addTodo: (text: string) => void;
+  updateTodoText: (id: string, text: string) => void;
+  assignTodoToAgent: (
+    id: string,
+    agentId: string,
+    sessionName: string | null
+  ) => void;
+  deleteTodo: (id: string) => void;
+  toggleTodoScope: () => void;
 }
 
 /** Persisted preference: has the user completed first-run onboarding? */
@@ -674,12 +779,32 @@ function saveTermTemplates(list: TermTemplate[]) {
   }
 }
 
+// ── Todo persistence ─────────────────────────────────────────────
+// The todo list lives in the backend settings KV table (key "todos", a JSON
+// array). Every mutating store action writes it back fire-and-forget, matching
+// the termTemplates/localStorage pattern. Hydration happens in TodoPanel after
+// session restore settles (so orphaned assigned tags can be detected there).
+
+let todoUidSeq = 0;
+function todoUid(): string {
+  todoUidSeq += 1;
+  return `todo-${todoUidSeq.toString(36)}`;
+}
+
+function saveTodos(todos: TodoTag[]) {
+  invoke("setting_set", { key: "todos", value: JSON.stringify(todos) }).catch(
+    () => {}
+  );
+}
+
 export const useStore = create<AppState>((set, get) => ({
   agents: new Map(),
   agentChannels: new Map(),
   agentActiveAt: new Map(),
   agentWakeAt: new Map(),
   hookStatus: new Map(),
+  agentSubmittedAt: new Map(),
+  unreadCompletion: new Set(),
   agentOutputs: new Map(),
   sessionsRestored: false,
   resumeOnOpen: new Set(),
@@ -713,6 +838,8 @@ export const useStore = create<AppState>((set, get) => ({
   onboarded: loadOnboarded(),
   termTemplates: loadTermTemplates(),
   fontScale: loadFontScale(),
+  todos: [],
+  todoScope: "global",
 
   addAgent: (info, channel, createdAtTs) =>
     set((s) => {
@@ -780,6 +907,10 @@ export const useStore = create<AppState>((set, get) => ({
       wakeAt.delete(id);
       const hookStatus = new Map(s.hookStatus);
       hookStatus.delete(id);
+      const submittedAt = new Map(s.agentSubmittedAt);
+      submittedAt.delete(id);
+      const unreadCompletion = new Set(s.unreadCompletion);
+      unreadCompletion.delete(id);
       const outputs = new Map(s.agentOutputs);
       outputs.delete(id);
       const resources = new Map(s.agentResources);
@@ -790,17 +921,29 @@ export const useStore = create<AppState>((set, get) => ({
       resumeOnOpen.delete(id);
       const closedAgentIds = new Set(s.closedAgentIds);
       closedAgentIds.add(id);
+      // Orphan revert: an in-flight (assigned) tag tied to the deleted session
+      // would otherwise stay invisible forever — bring it back to 待分配. Its
+      // scope is untouched (a global tag returns to the global view).
+      const todos = s.todos.map((t) =>
+        t.status === "assigned" && t.agentId === id
+          ? { ...t, status: "todo" as const, agentId: null, sessionName: null, doneAt: null }
+          : t
+      );
+      if (todos !== s.todos) saveTodos(todos);
       return {
         agents,
         agentChannels: channels,
         agentActiveAt: activeAt,
         agentWakeAt: wakeAt,
         hookStatus,
+        agentSubmittedAt: submittedAt,
+        unreadCompletion,
         agentOutputs: outputs,
         agentResources: resources,
         resourceHistory: history,
         resumeOnOpen,
         closedAgentIds,
+        todos,
       };
     }),
 
@@ -887,6 +1030,23 @@ export const useStore = create<AppState>((set, get) => ({
         : { agentActiveAt: activeAt };
     }),
 
+  markAgentSubmitted: (id) =>
+    set((s) => {
+      const now = Date.now();
+      const submittedAt = new Map(s.agentSubmittedAt);
+      submittedAt.set(id, now);
+      // Mirror markAgentActive: user interaction ends the wake window.
+      const wakeAt = s.agentWakeAt.has(id) ? new Map(s.agentWakeAt) : undefined;
+      if (wakeAt) wakeAt.delete(id);
+      // Also stamp the activity clock so the post-submit output stream keeps
+      // the tab 运行中 while the hook is still catching up.
+      const activeAt = new Map(s.agentActiveAt);
+      activeAt.set(id, now);
+      return wakeAt
+        ? { agentSubmittedAt: submittedAt, agentActiveAt: activeAt, agentWakeAt: wakeAt }
+        : { agentSubmittedAt: submittedAt, agentActiveAt: activeAt };
+    }),
+
   setHookStatus: (id, hook) =>
     set((s) => {
       // Value-preserving: `invoke` parses a fresh object each poll, so compare
@@ -905,7 +1065,49 @@ export const useStore = create<AppState>((set, get) => ({
       const hookStatus = new Map(s.hookStatus);
       if (hook) hookStatus.set(id, hook);
       else hookStatus.delete(id);
-      return { hookStatus };
+      // A turn completed: the hook went working → idle (claude Stop, codex Stop,
+      // opencode session idle). If the agent's tab is off-screen the user hasn't
+      // seen the result — flag it so the tab reads 已完成 instead of 空闲.
+      let unreadCompletion = s.unreadCompletion;
+      const tab = s.tabs.find((t) => t.agentId === id);
+      if (
+        hook &&
+        prev &&
+        prev.status === "working" &&
+        hook.status === "idle" &&
+        tab &&
+        !tabIsVisible(tab.id, s.activeTabId, s.splitTree)
+      ) {
+        unreadCompletion = new Set(unreadCompletion);
+        unreadCompletion.add(id);
+      }
+      // Task auto-complete: an in-flight (assigned) tag on this session is done
+      // when the turn ends — move it to 待验收 with the session name. Unlike the
+      // unread flag this does not depend on tab visibility; a finished task is
+      // finished whether or not anyone was watching the terminal.
+      let todos = s.todos;
+      if (hook && prev && prev.status === "working" && hook.status === "idle") {
+        const sessionName = s.agents.get(id)?.title;
+        if (todos.some((t) => t.status === "assigned" && t.agentId === id)) {
+          todos = todos.map((t) =>
+            t.status === "assigned" && t.agentId === id
+              ? { ...t, status: "done" as const, doneAt: Date.now(), sessionName: sessionName ?? t.sessionName }
+              : t
+          );
+          saveTodos(todos);
+        }
+      }
+      return { hookStatus, unreadCompletion, todos };
+    }),
+
+  setAgentUnread: (id, unread) =>
+    set((s) => {
+      const has = s.unreadCompletion.has(id);
+      if (has === unread) return {};
+      const unreadCompletion = new Set(s.unreadCompletion);
+      if (unread) unreadCompletion.add(id);
+      else unreadCompletion.delete(id);
+      return { unreadCompletion };
     }),
 
   clearAgentOutput: (id) =>
@@ -1020,13 +1222,18 @@ export const useStore = create<AppState>((set, get) => ({
       // With an active split, clicking a tab that isn't already visible focuses
       // it in the first pane.
       const tree = s.splitTree;
+      let splitTree = tree;
       if (tree && !splitLeafTabIds(tree).includes(id)) {
-        return {
-          activeTabId: id,
-          splitTree: splitReplaceLeaf(tree, splitFirstLeaf(tree), id),
-        };
+        splitTree = splitReplaceLeaf(tree, splitFirstLeaf(tree), id);
       }
-      return { activeTabId: id };
+      // Viewing a tab clears its agent's unviewed-completion flag (已完成 → 空闲).
+      let unreadCompletion = s.unreadCompletion;
+      const tab = s.tabs.find((t) => t.id === id);
+      if (tab?.agentId && unreadCompletion.has(tab.agentId)) {
+        unreadCompletion = new Set(unreadCompletion);
+        unreadCompletion.delete(tab.agentId);
+      }
+      return { activeTabId: id, splitTree, unreadCompletion };
     }),
 
   splitPane: (targetTabId, newTabId, direction, newOnFirst) =>
@@ -1339,6 +1546,72 @@ export const useStore = create<AppState>((set, get) => ({
     }
     set({ fontScale: scale });
   },
+
+  // ── Todo tags ─────────────────────────────────────────────────
+  // All mutating actions persist to the settings KV (`saveTodos`). Hydration
+  // (`setTodos`) is the exception — TodoPanel writes it back only when it
+  // repaired orphans, not on every mount.
+
+  setTodos: (todos) => set({ todos }),
+
+  addTodo: (text) =>
+    set((s) => {
+      const t = text.trim();
+      if (!t) return {};
+      // A tag created in project scope belongs to the focused project; global
+      // scope keeps it global.
+      const project = s.todoScope === "project" ? s.focusedProject : null;
+      const tag: TodoTag = {
+        id: todoUid(),
+        text: t,
+        status: "todo",
+        agentId: null,
+        sessionName: null,
+        project,
+        createdAt: Date.now(),
+        doneAt: null,
+      };
+      const todos = [...s.todos, tag];
+      saveTodos(todos);
+      return { todos };
+    }),
+
+  updateTodoText: (id, text) =>
+    set((s) => {
+      const trimmed = text.trim();
+      if (!trimmed) return {};
+      const todos = s.todos.map((t) => (t.id === id ? { ...t, text: trimmed } : t));
+      saveTodos(todos);
+      return { todos };
+    }),
+
+  assignTodoToAgent: (id, agentId, sessionName) =>
+    set((s) => {
+      // The tag keeps its creation-time scope: only the assignment link changes.
+      // A tag born in the global view stays global (project untouched) so it
+      // lands back in the global 待验收 when the session's turn ends — re-homing
+      // it to the session's project here would make it vanish from the view it
+      // was created in.
+      const todos = s.todos.map((t) =>
+        t.id === id && t.status === "todo"
+          ? { ...t, status: "assigned" as const, agentId, sessionName }
+          : t
+      );
+      saveTodos(todos);
+      return { todos };
+    }),
+
+  deleteTodo: (id) =>
+    set((s) => {
+      const todos = s.todos.filter((t) => t.id !== id);
+      saveTodos(todos);
+      return { todos };
+    }),
+
+  toggleTodoScope: () =>
+    set((s) => ({
+      todoScope: s.todoScope === "global" ? "project" : "global",
+    })),
 }));
 
 // ── Buffered-output accessors ───────────────────────────────────

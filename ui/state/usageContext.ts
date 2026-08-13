@@ -29,7 +29,8 @@ export function supportsContextUsage(runtime: string | undefined): boolean {
  * must keep its loading ring and keep being polled. The rest of
  * `effectiveAgentStatus` still applies: `done`/`failed` are terminal, a
  * restored-but-unresumed session (no PTY channel) is `dormant` → idle, and
- * `busy`/`waiting_input` are authoritative regardless of connectivity.
+ * `busy`/`waiting_input`/`awaiting_choice` are authoritative regardless of
+ * connectivity.
  */
 export function isContextMeterActive(
   agent: AgentInfo | undefined,
@@ -46,7 +47,11 @@ export function isContextMeterActive(
     return false;
   }
   const status = effectiveAgentStatus(agent, connected, /* active */ true, hook);
-  return status === "running" || status === "waiting_input";
+  return (
+    status === "running" ||
+    status === "waiting_input" ||
+    status === "awaiting_choice"
+  );
 }
 
 /**

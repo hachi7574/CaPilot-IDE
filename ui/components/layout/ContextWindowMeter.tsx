@@ -2,7 +2,7 @@ import { useStore } from "../../state/store";
 import { supportsContextUsage } from "../../state/usageContext";
 
 /** Compact token count: 412000 → "412K", 1_500_000 → "1.5M", 950 → "950". */
-function formatTokens(n: number): string {
+export function formatTokens(n: number): string {
   const abs = Math.abs(n);
   let v: number;
   let suffix = "";

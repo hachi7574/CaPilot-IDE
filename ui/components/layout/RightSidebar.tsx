@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { EditorState } from "@codemirror/state";
@@ -7,6 +7,7 @@ import { capilotTheme } from "../editor/capilotTheme";
 import { MergeView } from "@codemirror/merge";
 import { useStore } from "../../state/store";
 import { spawnBashAt } from "../../state/agentActions";
+import { TodoPanel } from "./TodoPanel";
 import { CommitGraph, type GitLogEntry } from "./CommitGraph";
 import { Icon } from "../Icon";
 
@@ -18,6 +19,9 @@ export function RightSidebar() {
   const setRightWidth = useStore((s) => s.setRightWidth);
   const rightSidebarOpen = useStore((s) => s.rightSidebarOpen);
   const toggleRightSidebar = useStore((s) => s.toggleRightSidebar);
+  // 概览 scope (global ↔ focused project), toggled by the overview tab button.
+  const todoScope = useStore((s) => s.todoScope);
+  const toggleTodoScope = useStore((s) => s.toggleTodoScope);
   // Resize-handle mousedown position: distinguishes a click (toggle) from a
   // drag (resize) on the divider.
   const resizeStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -82,9 +86,14 @@ export function RightSidebar() {
         {/* Tabs */}
         <div className="right-tabs">
           <div
-            className={`right-tab${activeTab === "overview" ? " active" : ""}`}
-            onClick={() => setActiveTab("overview")}
-            title="概览"
+            className={`right-tab${activeTab === "overview" ? " active" : ""}${todoScope === "project" ? " overview-project" : ""}`}
+            onClick={() => {
+              // Already on 概览? Clicking the tab again toggles the view scope
+              // (global ↔ current project); otherwise open 概览 first.
+              if (activeTab === "overview") toggleTodoScope();
+              else setActiveTab("overview");
+            }}
+            title={`概览 · ${todoScope === "global" ? "全局" : "当前项目"}`}
           >
             <Icon name="activity" size={15} />
           </div>
@@ -106,7 +115,7 @@ export function RightSidebar() {
 
         {/* Tab Content */}
         <div className="right-panel">
-          {activeTab === "overview" && <OverviewDashboard />}
+          {activeTab === "overview" && <TodoPanel />}
           {activeTab === "files" && <FilesPanel />}
           {activeTab === "git" && <GitPanel />}
         </div>
@@ -142,224 +151,20 @@ function useProjectRoot(): string {
   return cwd || fallback;
 }
 
-/* ── Overview Dashboard ───────────────────────────────────────── */
-
-/** System-wide CPU/MEM snapshot from the backend `system_stats` command. */
-interface SystemStats {
-  cpu_pct: number;
-  mem_used: number;
-  mem_total: number;
-}
-
-/** CPU% to 2 decimals, e.g. "23.12%". */
-function fmtCpu(cpu: number | undefined | null): string {
-  if (cpu === undefined || cpu === null || Number.isNaN(cpu)) return "—";
-  return `${cpu.toFixed(2)}%`;
-}
-
-/** Bytes → GB with 2 decimals, e.g. "8.32G". */
-function bytesToG(bytes: number | undefined | null): string {
-  if (bytes === undefined || bytes === null || Number.isNaN(bytes)) return "—";
-  return `${(bytes / 1024 ** 3).toFixed(2)}G`;
-}
-
-function OverviewDashboard() {
-  // Live system-wide CPU/MEM for the Computer Status panel (2s tick).
-  const [stats, setStats] = useState<SystemStats | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    const tick = () => {
-      invoke<SystemStats>("system_stats")
-        .then((s) => {
-          if (!cancelled) setStats(s);
-        })
-        .catch(() => {
-          if (!cancelled) setStats(null);
-        });
-    };
-    tick();
-    const timer = setInterval(tick, 2000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, []);
-
-  const cpuPct = stats?.cpu_pct;
-  const memText =
-    stats && stats.mem_used != null && stats.mem_total
-      ? `${bytesToG(stats.mem_used)} / ${bytesToG(stats.mem_total)}`
-      : "—";
-  const cpuWidth = cpuPct != null ? Math.max(0, Math.min(100, cpuPct)) : 0;
-  const memWidth =
-    stats && stats.mem_total
-      ? Math.max(0, Math.min(100, (stats.mem_used / stats.mem_total) * 100))
-      : 0;
-
-  return (
-    <div className="tab-panel" id="tab-overview">
-      {/* Runtime */}
-      <CollapsibleSection icon="chart-column" title="运行时" summary="0/1M · 缓存—">
-        <div className="ov-row">
-          <span className="ov-label">上下文窗口</span>
-          <span className="ov-value gr"><Icon name="circle-dot" size={12} style={{ marginRight: 4 }} /> 充足</span>
-        </div>
-        <div className="ov-row">
-          <span className="ov-label">已用 / 上限</span>
-          <span className="ov-value">0 / 1,000,000</span>
-        </div>
-        <div className="ov-bar-row">
-          <div className="ov-bar">
-            <div className="ov-bar-fill pu" style={{ width: "0%" }} />
-          </div>
-          <div className="ov-bar-stats">
-            <span>已用 0</span>
-            <span>距压缩 1M</span>
-          </div>
-        </div>
-        <div className="ov-divider" />
-        <div className="ov-row">
-          <span className="ov-label">缓存命中率</span>
-          <span className="ov-value pu">—</span>
-        </div>
-        <div className="ov-row">
-          <span className="ov-label">运行时间</span>
-          <span className="ov-value">—</span>
-        </div>
-        <div className="ov-row">
-          <span className="ov-label">请求次数</span>
-          <span className="ov-value">0</span>
-        </div>
-        <div className="ov-row">
-          <span className="ov-label">累计 Tokens</span>
-          <span className="ov-value">0</span>
-        </div>
-      </CollapsibleSection>
-
-      {/* Usage */}
-      <CollapsibleSection icon="chart-line" title="用量分析" summary="当前会话—">
-        <div className="ov-usage-item">
-          <div className="ov-usage-label">当前会话</div>
-          <div className="ov-bar">
-            <div className="ov-bar-fill pu" style={{ width: "0%" }} />
-          </div>
-          <div className="ov-usage-stats">
-            <span>0 Tokens</span>
-            <span>0%</span>
-            <span>Cache —</span>
-          </div>
-        </div>
-      </CollapsibleSection>
-
-      {/* Remaining quota */}
-      <CollapsibleSection icon="timer" title="剩余用量" summary="5h — · 周— · 月—">
-        <div className="ov-bar-row">
-          <div className="ov-bar-label"><Icon name="timer" size={12} style={{ marginRight: 4 }} /> 5小时窗口</div>
-          <div className="ov-bar">
-            <div className="ov-bar-fill gr" style={{ width: "0%" }} />
-          </div>
-          <div className="ov-bar-stats">
-            <span></span>
-            <span>剩余 —</span>
-          </div>
-        </div>
-        <div className="ov-bar-row">
-          <div className="ov-bar-label"><Icon name="calendar" size={12} style={{ marginRight: 4 }} /> 周额度</div>
-          <div className="ov-bar">
-            <div className="ov-bar-fill ye" style={{ width: "0%" }} />
-          </div>
-          <div className="ov-bar-stats">
-            <span></span>
-            <span>剩余 —</span>
-          </div>
-        </div>
-        <div className="ov-bar-row">
-          <div className="ov-bar-label"><Icon name="calendar-days" size={12} style={{ marginRight: 4 }} /> 月额度</div>
-          <div className="ov-bar">
-            <div className="ov-bar-fill gr" style={{ width: "0%" }} />
-          </div>
-          <div className="ov-bar-stats">
-            <span></span>
-            <span>剩余 —</span>
-          </div>
-        </div>
-      </CollapsibleSection>
-
-      {/* Computer */}
-      <CollapsibleSection
-        icon="laptop"
-        title="电脑状态"
-        summary={`CPU ${fmtCpu(cpuPct)} · 内存 ${memText}`}
-      >
-        <div className="ov-bar-row">
-          <div className="ov-row">
-            <span className="ov-label">CPU</span>
-            <span className="ov-value">{fmtCpu(cpuPct)}</span>
-          </div>
-          <div className="ov-bar">
-            <div className="ov-bar-fill pu" style={{ width: `${cpuWidth}%` }} />
-          </div>
-        </div>
-        <div className="ov-bar-row">
-          <div className="ov-row">
-            <span className="ov-label">内存</span>
-            <span className="ov-value">{memText}</span>
-          </div>
-          <div className="ov-bar">
-            <div className="ov-bar-fill gr" style={{ width: `${memWidth}%` }} />
-          </div>
-        </div>
-      </CollapsibleSection>
-
-    </div>
-  );
-}
-
-/* ── Collapsible Section ──────────────────────────────────────── */
-
-function CollapsibleSection({
-  icon,
-  title,
-  summary,
-  children,
-}: {
-  icon?: string;
-  title: React.ReactNode;
-  summary?: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  const [collapsed, setCollapsed] = useState(false);
-
-  return (
-    <div className={`ov-section uk-section${collapsed ? " collapsed" : ""}`}>
-      <div
-        className="ov-section-header"
-        onClick={() => setCollapsed(!collapsed)}
-      >
-        {icon && <Icon name={icon} size={12} style={{ marginRight: 6 }} />}
-        {title}
-        {collapsed && summary && (
-          <span className="ov-summary-inline">{summary}</span>
-        )}
-        <span className="ov-toggle">
-          {collapsed ? (
-            <Icon name="chevron-up" size={12} />
-          ) : (
-            <Icon name="chevron-down" size={12} />
-          )}
-        </span>
-      </div>
-      {!collapsed && <div className="ov-section-body">{children}</div>}
-    </div>
-  );
-}
-
 /* ── Files Panel ──────────────────────────────────────────────── */
 
 interface FsEntry {
   name: string;
   is_dir: boolean;
   executable?: boolean;
+}
+
+/** A file's git state in the tree: new (untracked) vs modified (tracked change),
+ *  plus its staged+unstaged ±N line counts. Absent = clean file. */
+interface GitFileState {
+  status: "new" | "mod";
+  add: number;
+  del: number;
 }
 
 const SKIP_DIRS = new Set([".git", "node_modules", "target", ".claude", "dist", "build"]);
@@ -459,11 +264,14 @@ function FilesPanel() {
   // Single-click select target in the tree; second click / double-click opens.
   // `isDir` lets keyboard actions (paste-into, delete, rename) target folders.
   const [selected, setSelected] = useState<{ path: string; isDir: boolean } | null>(null);
+  // Per-file git state (new/modified + ±N) for the tree, keyed by absolute path.
+  const [gitState, setGitState] = useState<Record<string, GitFileState>>({});
   const addTab = useStore((s) => s.addTab);
   const closeTab = useStore((s) => s.closeTab);
   const setActiveTab = useStore((s) => s.setActiveTab);
   const tabs = useStore((s) => s.tabs);
   const agents = useStore((s) => s.agents);
+  const rightSidebarOpen = useStore((s) => s.rightSidebarOpen);
   // Exactly one open bash terminal (agent sessions excluded) → the
   // "open in current terminal" folder action becomes available.
   const bashIds = tabs
@@ -558,6 +366,75 @@ function FilesPanel() {
     }, 2000);
     return () => clearInterval(t);
   }, []);
+
+  // Git status for the tree: poll git_status for the project root and cache
+  // per-path status + line counts. New (untracked) files get the green class,
+  // modified files the yellow class, and both show their ±N badge — the diff
+  // feedback that used to live on the editor tab. Same cost discipline as the
+  // Git panel: skip while hidden / collapsed, don't overlap ticks, and only
+  // re-set state when the map actually changed (a status with no entry for a
+  // path drops its entry, e.g. after a commit). Follows GitPanel's convention:
+  // `root` is treated as the repo root.
+  const gitStateRef = useRef(gitState);
+  gitStateRef.current = gitState;
+  const rightSidebarOpenRef = useRef(rightSidebarOpen);
+  rightSidebarOpenRef.current = rightSidebarOpen;
+  useEffect(() => {
+    let running = false;
+    const tick = async () => {
+      if (running) return;
+      if (document.visibilityState === "hidden") return;
+      if (!rightSidebarOpenRef.current) return;
+      running = true;
+      try {
+        const entries: GitEntry[] =
+          (await invoke<GitEntry[]>("git_status", { dir: root })) ?? [];
+        const base = root.endsWith("/") ? root : `${root}/`;
+        const next: Record<string, GitFileState> = {};
+        for (const e of entries) {
+          next[base + e.path] = {
+            status: e.index === "?" && e.worktree === "?" ? "new" : "mod",
+            add: e.add,
+            del: e.del,
+          };
+        }
+        if (JSON.stringify(gitStateRef.current) !== JSON.stringify(next)) {
+          gitStateRef.current = next;
+          setGitState(next);
+        }
+      } catch {
+        // Not a git repo (or unreadable) — the tree renders plain colors.
+        if (Object.keys(gitStateRef.current).length > 0) {
+          gitStateRef.current = {};
+          setGitState({});
+        }
+      } finally {
+        running = false;
+      }
+    };
+    const t = setInterval(() => void tick(), 2000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [root]);
+
+  // Aggregate file git state up to ancestor directories so a folder reads as
+  // "new" (green) when it only holds untracked files, or "modified" (yellow)
+  // when it holds any tracked change. Modified wins over new. The root itself
+  // is never marked.
+  const dirGit = useMemo(() => {
+    const hasMod = new Set<string>();
+    const hasNew = new Set<string>();
+    const base = root.endsWith("/") ? root : `${root}/`;
+    for (const [p, st] of Object.entries(gitState)) {
+      let dir = p.slice(0, p.lastIndexOf("/"));
+      while (dir.startsWith(base)) {
+        if (st.status === "mod") hasMod.add(dir);
+        else hasNew.add(dir);
+        dir = dir.slice(0, dir.lastIndexOf("/"));
+      }
+    }
+    return { hasMod, hasNew };
+  }, [gitState, root]);
 
   // Close the context menu on any click / new right-click / Escape. The
   // timestamp guard ignores events fired within 150 ms of opening — some
@@ -977,10 +854,15 @@ function FilesPanel() {
           }
           if (e.is_dir) {
             const open = isFiltering || expanded.has(path);
+            const gCls = dirGit.hasMod.has(path)
+              ? " dir-mod"
+              : dirGit.hasNew.has(path)
+                ? " dir-new"
+                : "";
             return (
               <div key={path}>
                 <div
-                  className={`dir${isCutSource ? " files-ctx-cut" : ""}${selected?.path === path ? " selected" : ""}`}
+                  className={`dir${gCls}${isCutSource ? " files-ctx-cut" : ""}${selected?.path === path ? " selected" : ""}`}
                   style={{ paddingLeft: depth * 14 }}
                   onClick={() => {
                     toggleDir(path);
@@ -1022,10 +904,12 @@ function FilesPanel() {
             );
           }
           const { cls, icon } = fileClass(e.name);
+          const g = gitState[path];
+          const gCls = g ? (g.status === "new" ? " file-new" : " file-mod") : "";
           return (
             <div
               key={path}
-              className={`${cls}${isCutSource ? " files-ctx-cut" : ""}${selected?.path === path ? " selected" : ""}`}
+              className={`${cls}${gCls}${isCutSource ? " files-ctx-cut" : ""}${selected?.path === path ? " selected" : ""}`}
               style={{ paddingLeft: depth * 14 }}
               onClick={() => clickFile(path, e.name)}
               onDoubleClick={() => openFile(path, e.name)}
@@ -1040,7 +924,14 @@ function FilesPanel() {
                 ev.dataTransfer.effectAllowed = "copy";
               }}
             >
-              <Icon name={icon} size={14} /> {e.name}
+              <Icon name={icon} size={14} />
+              <span className="file-label">{e.name}</span>
+              {g && (g.add > 0 || g.del > 0) && (
+                <span className="fs-stats">
+                  {g.add > 0 && <span className="fs-add">+{g.add}</span>}
+                  {g.del > 0 && <span className="fs-del">−{g.del}</span>}
+                </span>
+              )}
             </div>
           );
         })}

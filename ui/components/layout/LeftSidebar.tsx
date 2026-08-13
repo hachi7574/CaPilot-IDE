@@ -2,8 +2,12 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { useStore, AgentInfo, AgentStatus } from "../../state/store";
-import { spawnAgent, closeAgent as closeAgentAction } from "../../state/agentActions";
+import { useStore, AgentInfo, AgentStatus, TODO_DRAG_MIME } from "../../state/store";
+import {
+  spawnAgent,
+  closeAgent as closeAgentAction,
+  assignTodoAndSend,
+} from "../../state/agentActions";
 import { SettingsModal } from "./SettingsModal";
 import { TerminalTemplatePicker } from "./TerminalTemplatePicker";
 import { RenameAgentModal } from "./RenameAgentModal";
@@ -244,6 +248,23 @@ export function LeftSidebar() {
   const openProjectTerminal = (proj: string, id: string) => {
     setFocusedProject(proj);
     openAgentTab(id);
+  };
+
+  // Todo-tag drop target on a terminal row: assign the task + send its text to
+  // that session, then focus it. Shared by the live and ended row renderers.
+  const onTodoDragOver = (e: React.DragEvent) => {
+    if (e.dataTransfer.types.includes(TODO_DRAG_MIME)) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  };
+  const onTodoDrop = (e: React.DragEvent, agentId: string, proj: string) => {
+    if (!e.dataTransfer.types.includes(TODO_DRAG_MIME)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const tagId = e.dataTransfer.getData(TODO_DRAG_MIME);
+    if (tagId) void assignTodoAndSend(tagId, agentId);
+    openProjectTerminal(proj, agentId);
   };
 
   // Draggable left sidebar resize.
@@ -574,6 +595,8 @@ export function LeftSidebar() {
                           key={a.id}
                           className={`terminal-item${activeTabId === a.id ? " active" : ""}`}
                           onClick={() => openProjectTerminal(name, a.id)}
+                          onDragOver={onTodoDragOver}
+                          onDrop={(e) => onTodoDrop(e, a.id, name)}
                           onContextMenu={(e) => {
                             e.preventDefault();
                             e.stopPropagation();
@@ -593,7 +616,7 @@ export function LeftSidebar() {
                               closeAgentAction(a.id);
                             }}
                           >
-                            ×
+                            <Icon name="trash-2" size={12} />
                           </button>
                         </div>
                       ))}
@@ -642,6 +665,8 @@ export function LeftSidebar() {
                                   requestResume(a.id);
                                   openProjectTerminal(name, a.id);
                                 }}
+                                onDragOver={onTodoDragOver}
+                                onDrop={(e) => onTodoDrop(e, a.id, name)}
                                 onContextMenu={(e) => {
                                   e.preventDefault();
                                   e.stopPropagation();
@@ -661,7 +686,7 @@ export function LeftSidebar() {
                                     closeAgentAction(a.id);
                                   }}
                                 >
-                                  ×
+                                  <Icon name="trash-2" size={12} />
                                 </button>
                               </div>
                             ))}

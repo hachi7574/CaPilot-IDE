@@ -7,8 +7,12 @@ import {
   HookStatus,
   effectiveAgentStatus,
   ACTIVE_WINDOW_MS,
+  TODO_DRAG_MIME,
 } from "../../state/store";
-import { closeAgent as closeAgentAction } from "../../state/agentActions";
+import {
+  closeAgent as closeAgentAction,
+  assignTodoAndSend,
+} from "../../state/agentActions";
 import { TerminalTemplatePicker } from "./TerminalTemplatePicker";
 import { RenameAgentModal } from "./RenameAgentModal";
 import { Icon, runtimeIcon } from "../Icon";
@@ -28,8 +32,9 @@ const STATUS_TEXT = {
   idle: "空闲",
   running: "运行中",
   waiting_input: "待确认",
+  awaiting_choice: "待选择",
   busy: "运行中",
-  done: "待验收",
+  done: "待处理",
   failed: "异常",
   dormant: "休眠中",
 } as const;
@@ -90,6 +95,8 @@ export function TabBar() {
   const agentChannels = useStore((s) => s.agentChannels);
   const agentActiveAt = useStore((s) => s.agentActiveAt);
   const hookStatus = useStore((s) => s.hookStatus);
+  const agentSubmittedAt = useStore((s) => s.agentSubmittedAt);
+  const unreadCompletion = useStore((s) => s.unreadCompletion);
   const projectRoots = useStore((s) => s.projectRoots);
   const focusedProject = useStore((s) => s.focusedProject);
   const draggedTabId = useStore((s) => s.draggedTabId);
@@ -227,7 +234,6 @@ export function TabBar() {
     return () => clearInterval(t);
   }, []);
 
-  // New-terminal template picker (the "+" button), anchored at the button.
   const [termPicker, setTermPicker] = useState<{
     x: number;
     y: number;
@@ -254,6 +260,9 @@ export function TabBar() {
   // is exactly what the CSS shifts later reproduce — no feedback loop).
   const handleTabBarDragOver = (e: React.DragEvent) => {
     e.preventDefault();
+    // A todo-tag drag is not a tab reorder — tag drags never set draggedTabId,
+    // but keep the strip from rendering a reorder preview just in case.
+    if (e.dataTransfer.types.includes(TODO_DRAG_MIME)) return;
     if (!draggedTabId) return;
     // The first move past dragstart hides the source tab (its drag image was
     // already snapshotted), leaving only the ghost + the drop-slot gap.
@@ -434,8 +443,20 @@ export function TabBar() {
           agent,
           connected,
           active,
-          tab.agentId ? hookStatus.get(tab.agentId) : null
+          tab.agentId ? hookStatus.get(tab.agentId) : null,
+          tab.agentId ? agentSubmittedAt.get(tab.agentId) : undefined
         );
+        // An idle agent whose last completed turn hasn't been viewed reads as
+        // 已完成 (user sent content, agent finished, result unread); otherwise
+        // plain 空闲. Only hook-reporting runtimes can detect a turn boundary.
+        const hasUnread = tab.agentId
+          ? unreadCompletion.has(tab.agentId)
+          : false;
+        const completed = status === "idle" && hasUnread;
+        const statusLabel = completed
+          ? "已完成"
+          : (STATUS_TEXT[status as keyof typeof STATUS_TEXT] ?? status);
+        const statusClass = completed ? "st-completed" : `st-${status}`;
         // Agent records are the live source of truth for terminal names. A
         // tab's title is only the snapshot taken when it was opened, so it can
         // become stale after restoring/resuming a session (or any runtime
@@ -466,6 +487,23 @@ export function TabBar() {
               setDraggedTabId(tab.id);
             }}
             onDragEnd={endTabDrag}
+            // Todo-tag drop target (agent tabs only): assign the task + send its
+            // text to the session, then focus the tab.
+            onDragOver={(e) => {
+              if (e.dataTransfer.types.includes(TODO_DRAG_MIME)) {
+                e.preventDefault();
+                e.stopPropagation();
+              }
+            }}
+            onDrop={(e) => {
+              if (!e.dataTransfer.types.includes(TODO_DRAG_MIME)) return;
+              e.preventDefault();
+              e.stopPropagation();
+              if (!tab.agentId) return;
+              const tagId = e.dataTransfer.getData(TODO_DRAG_MIME);
+              if (tagId) void assignTodoAndSend(tagId, tab.agentId);
+              setActiveTab(tab.id);
+            }}
             onClick={() => setActiveTab(tab.id)}
             onContextMenu={(e) => {
               e.preventDefault();
@@ -482,9 +520,7 @@ export function TabBar() {
               {title}
             </span>
             {tab.type === "agent" && (
-              <span className={`tab-status st-${status}`}>
-                {STATUS_TEXT[status as keyof typeof STATUS_TEXT] ?? status}
-              </span>
+              <span className={`tab-status ${statusClass}`}>{statusLabel}</span>
             )}
             <button
               className="tab-close"
