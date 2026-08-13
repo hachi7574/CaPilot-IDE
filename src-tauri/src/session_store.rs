@@ -13,7 +13,7 @@
 use crate::persistence::{
     agent_dir, read_agent_meta, repair_agent_meta, workspace_root, write_agent_meta, SessionsDb,
 };
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 /// Setting key controlling what happens when an agent exits naturally: anything
@@ -45,8 +45,6 @@ pub struct NaturalExit {
 pub struct SessionStore {
     /// Single sessions DB behind a Mutex (`rusqlite::Connection` is not Sync).
     db: Mutex<SessionsDb>,
-    /// `~/CaPilot` — parent of `sessions.db` and of `workspaces/`.
-    base: PathBuf,
 }
 
 impl SessionStore {
@@ -59,7 +57,6 @@ impl SessionStore {
         let db = SessionsDb::open(&db_path).map_err(std::io::Error::other)?;
         Ok(Self {
             db: Mutex::new(db),
-            base,
         })
     }
 
@@ -70,10 +67,6 @@ impl SessionStore {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("CaPilot"));
         Self::from_base(base)
-    }
-
-    pub fn base(&self) -> &Path {
-        &self.base
     }
 
     pub fn db(&self) -> &Mutex<SessionsDb> {

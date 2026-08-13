@@ -590,7 +590,6 @@ interface AppState {
 
   // Resource monitor (DevPlan §10)
   agentResources: Map<string, ResourcePoint>;
-  resourceHistory: Map<string, ResourcePoint[]>;
 
   // Onboarding
   onboarded: boolean;
@@ -649,8 +648,6 @@ interface AppState {
     direction: "row" | "column",
     newOnFirst: boolean
   ) => void;
-  clearSplit: () => void;
-  removeSplitPane: (id: string) => void;
   /** Set the ratio of a specific split node (by id). */
   setSplitRatio: (nodeId: string, ratio: number) => void;
   setDraggedTabId: (id: string | null) => void;
@@ -688,7 +685,6 @@ interface AppState {
   updateTermTemplate: (id: string, patch: Partial<Pick<TermTemplate, "name" | "command">>) => void;
   removeTermTemplate: (id: string) => void;
   applyResourceSample: (resources: AgentResource[]) => void;
-  setResourceHistory: (agentId: string, points: ResourcePoint[]) => void;
   setOnboarded: (onboarded: boolean) => void;
   setFontScale: (scale: FontScale) => void;
   setTodos: (todos: TodoTag[]) => void;
@@ -830,7 +826,6 @@ export const useStore = create<AppState>((set, get) => ({
   splitTree: null,
   draggedTabId: null,
   agentResources: new Map(),
-  resourceHistory: new Map(),
   projects: [],
   projectRoots: {},
   focusedProject: null,
@@ -915,8 +910,6 @@ export const useStore = create<AppState>((set, get) => ({
       outputs.delete(id);
       const resources = new Map(s.agentResources);
       resources.delete(id);
-      const history = new Map(s.resourceHistory);
-      history.delete(id);
       const resumeOnOpen = new Set(s.resumeOnOpen);
       resumeOnOpen.delete(id);
       const closedAgentIds = new Set(s.closedAgentIds);
@@ -940,7 +933,6 @@ export const useStore = create<AppState>((set, get) => ({
         unreadCompletion,
         agentOutputs: outputs,
         agentResources: resources,
-        resourceHistory: history,
         resumeOnOpen,
         closedAgentIds,
         todos,
@@ -1259,29 +1251,6 @@ export const useStore = create<AppState>((set, get) => ({
 
   setSplitTree: (tree) => set({ splitTree: tree }),
 
-  clearSplit: () => set({ splitTree: null }),
-
-  removeSplitPane: (id) =>
-    set((s) => {
-      const tree = s.splitTree;
-      if (!tree || !splitLeafTabIds(tree).includes(id)) return {};
-      const pruned = splitRemoveLeaf(tree, id);
-      if (!pruned) {
-        return {
-          splitTree: null,
-          activeTabId: s.tabs[s.tabs.length - 1]?.id ?? null,
-        };
-      }
-      const visible = splitLeafTabIds(pruned);
-      return {
-        splitTree: splitLeafCount(pruned) === 1 ? null : pruned,
-        activeTabId:
-          s.activeTabId !== null && visible.includes(s.activeTabId)
-            ? s.activeTabId
-            : splitFirstLeaf(pruned),
-      };
-    }),
-
   setSplitRatio: (nodeId, ratio) =>
     set((s) => {
       if (!s.splitTree) return {};
@@ -1512,21 +1481,11 @@ export const useStore = create<AppState>((set, get) => ({
     set((s) => {
       if (resources.length === 0) return {};
       const agentResources = new Map(s.agentResources);
-      const resourceHistory = new Map(s.resourceHistory);
       for (const r of resources) {
         const point: ResourcePoint = { cpu_pct: r.cpu_pct, mem_bytes: r.mem_bytes };
         agentResources.set(r.agent_id, point);
-        const prev = resourceHistory.get(r.agent_id) || [];
-        resourceHistory.set(r.agent_id, [...prev.slice(-59), point]);
       }
-      return { agentResources, resourceHistory };
-    }),
-
-  setResourceHistory: (agentId, points) =>
-    set((s) => {
-      const resourceHistory = new Map(s.resourceHistory);
-      resourceHistory.set(agentId, points.slice(-60));
-      return { resourceHistory };
+      return { agentResources };
     }),
 
   setOnboarded: (onboarded) => {

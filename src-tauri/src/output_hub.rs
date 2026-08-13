@@ -173,14 +173,6 @@ impl AgentOutputHub {
         }
     }
 
-    pub fn detach_all(&self) {
-        self.state
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .subscribers
-            .clear();
-    }
-
     /// Keep the VT parser's size in sync with the PTY, so a checkpoint rendered
     /// after a resize reflects the new geometry (§5 — attach's `initial_size`
     /// is applied before the snapshot is generated).

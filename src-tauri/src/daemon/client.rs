@@ -58,18 +58,6 @@ pub enum ClientError {
     Request { code: String, message: String },
 }
 
-impl ClientError {
-    /// A handshake/protocol-level failure that must NOT fall back to the
-    /// in-process PTY manager (§8): wrong token, protocol mismatch, live-but-
-    /// unreachable daemon.
-    pub fn is_hard(&self) -> bool {
-        matches!(
-            self,
-            ClientError::Handshake(_) | ClientError::Closed | ClientError::Request { .. }
-        )
-    }
-}
-
 /// Transport/protocol failures from the frame layer become `Io` (connection
 /// problem) or `Handshake` (protocol violation). Both are surfaced verbatim —
 /// a malformed frame from a live daemon is a hard error, never a silent
@@ -110,7 +98,6 @@ pub struct DaemonClient {
     conn: Arc<ConnState>,
     events: Mutex<std::sync::mpsc::Receiver<ClientEvent>>,
     instance_id: String,
-    capabilities: Vec<String>,
 }
 
 impl DaemonClient {
@@ -176,20 +163,11 @@ impl DaemonClient {
             conn,
             events: Mutex::new(ev_rx),
             instance_id: ack.daemon_instance_id,
-            capabilities: ack.capabilities,
         })
     }
 
     pub fn instance_id(&self) -> &str {
         &self.instance_id
-    }
-
-    pub fn capabilities(&self) -> &[String] {
-        &self.capabilities
-    }
-
-    pub fn has_capability(&self, cap: &str) -> bool {
-        self.capabilities.iter().any(|c| c == cap)
     }
 
     /// Block for the next daemon event (or a timeout). Returns the event, or
@@ -204,11 +182,6 @@ impl DaemonClient {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .recv_timeout(timeout)
-    }
-
-    /// True when the connection has dropped.
-    pub fn is_closed(&self) -> bool {
-        self.conn.closed.load(Ordering::Acquire)
     }
 
     fn request(&self, cmd: &RequestCmd) -> Result<Response, ClientError> {

@@ -14,7 +14,6 @@ mod usage;
 use agent_runtime::adapter::{AgentError, AgentInfo, AgentRuntimeAdapter, AgentSession, AgentUsage};
 use agent_runtime::pty_core::OnExit;
 use agent_runtime::runtimes::{get_adapter, known_runtimes};
-use esp::manager::EspManager;
 use persistence::{
     agent_dir, ensure_project, read_agent_meta, write_agent_meta, AgentMeta, AgentSessionRecord,
     Persistence, DEFAULT_PROJECT,
@@ -1197,13 +1196,6 @@ async fn runtime_list_available() -> Vec<agent_runtime::adapter::RuntimeInfo> {
     out
 }
 
-/// Models a runtime can offer — powers the composer `[模型↑]` switcher
-/// (DevPlan §3.2).
-#[tauri::command]
-async fn runtime_models(runtime: String) -> Vec<agent_runtime::adapter::ModelInfo> {
-    get_adapter(&runtime).list_models()
-}
-
 // ── Rate-limit usage commands ───────────────────────────────────
 
 /// Fetch the current remaining usage for a runtime. The status bar polls this
@@ -1952,18 +1944,6 @@ async fn git_status(dir: String) -> Result<Vec<GitEntry>, String> {
         }
     }
     Ok(entries)
-}
-
-/// Files changed in the HEAD commit — the Git panel's "已提交的更改" group.
-/// `git diff-tree` lists them with their change char (A/M/D). Fails on a repo
-/// with no commits yet; the frontend treats that as an empty list.
-#[tauri::command]
-async fn git_committed(repo: String) -> Result<Vec<GitEntry>, String> {
-    let text = git_run(
-        &repo,
-        &["diff-tree", "--no-commit-id", "--name-status", "-r", "HEAD"],
-    )?;
-    Ok(parse_name_status(&text))
 }
 
 /// Whether a directory is a git repo / has a remote / current branch. Powers the
@@ -2960,47 +2940,7 @@ fn notify(app: tauri::AppHandle, title: String, body: String) -> Result<(), Stri
         .map_err(|e| e.to_string())
 }
 
-// ── ESP commands ────────────────────────────────────────────────
-
-#[tauri::command]
-async fn esp_connect(
-    state: tauri::State<'_, EspManager>,
-    app: tauri::AppHandle,
-) -> Result<esp::transport::EspStatus, String> {
-    state.connect_ble(app).await.map_err(|e| e.to_string())?;
-    Ok(state.status().await)
-}
-
-#[tauri::command]
-async fn esp_disconnect(state: tauri::State<'_, EspManager>) -> Result<(), String> {
-    state.disconnect().await.map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn esp_status(
-    state: tauri::State<'_, EspManager>,
-) -> Result<esp::transport::EspStatus, String> {
-    Ok(state.status().await)
-}
-
-#[tauri::command]
-async fn esp_send(state: tauri::State<'_, EspManager>, payload: String) -> Result<(), String> {
-    state
-        .send_command(payload.as_bytes())
-        .await
-        .map_err(|e| e.to_string())
-}
-
 // ── Resource monitor commands ──────────────────────────────────
-
-/// Buffered per-agent CPU/MEM history (oldest → newest) for the curve overlay.
-#[tauri::command]
-fn resource_history(
-    monitor: tauri::State<'_, Arc<resource::ResourceMonitor>>,
-    agent_id: String,
-) -> Vec<resource::HistoryPoint> {
-    monitor.history(&agent_id)
-}
 
 /// System-wide CPU + memory for the Computer Status panel.
 #[derive(serde::Serialize)]
@@ -3094,7 +3034,6 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(persistence)
-        .manage(EspManager::new())
         .manage(resource)
         .manage(ContextUsageCache::new())
         .invoke_handler(tauri::generate_handler![
@@ -3119,7 +3058,6 @@ pub fn run() {
             delete_project,
             rename_project,
             runtime_list_available,
-            runtime_models,
             usage_fetch,
             usage_check,
             slash::agent_list_slash_items,
@@ -3133,7 +3071,6 @@ pub fn run() {
             fs_delete,
             fs_rename,
             git_status,
-            git_committed,
             git_init,
             git_repo_info,
             git_stage,
@@ -3155,11 +3092,6 @@ pub fn run() {
             git_push,
             git_clone,
             notify,
-            esp_connect,
-            esp_disconnect,
-            esp_status,
-            esp_send,
-            resource_history,
             system_stats,
         ])
         .setup(move |app| {

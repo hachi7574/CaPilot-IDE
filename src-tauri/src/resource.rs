@@ -1,9 +1,8 @@
 //! Resource monitor (DevPlan §10).
 //!
 //! Samples each live agent's whole process tree (rooted at the agent PTY pid)
-//! every 3 s via `sysinfo`, sums CPU% + memory across the tree, pushes the
-//! sample into a per-agent ring buffer (~3 min), and emits the batch to the
-//! frontend as `resource://sample`.
+//! every 3 s via `sysinfo`, sums CPU% + memory across the tree, and emits the
+//! batch to the frontend as `resource://sample`.
 //!
 //! To keep idle CPU low, the expensive per-process refresh only touches each
 //! agent's known process tree; a cheap metadata-only `/proc` pass discovers new
@@ -16,15 +15,13 @@
 
 use crate::bridge::PtyBridge;
 use serde::Serialize;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tauri::{AppHandle, Emitter};
 
 /// Event name emitted on every sampling tick.
 pub const RESOURCE_EVENT: &str = "resource://sample";
-/// Ring buffer length ≈ 3 min at the 3 s sampling interval.
-const HISTORY_LEN: usize = 60;
 /// Sampling interval — slow enough that the `/proc` passes stay cheap.
 const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -38,25 +35,16 @@ pub struct AgentResource {
     pub mem_bytes: u64,
 }
 
-/// A single buffered history point (for the sparkline curve overlay).
-#[derive(Debug, Clone, Serialize)]
-pub struct HistoryPoint {
-    pub cpu_pct: f32,
-    pub mem_bytes: u64,
-}
-
 /// Tauri-managed resource monitor. Holds the `sysinfo::System` (for CPU delta
-/// math across samples) and a per-agent ring buffer of recent samples.
+/// math across samples).
 pub struct ResourceMonitor {
     sys: Mutex<System>,
-    history: Mutex<HashMap<String, VecDeque<HistoryPoint>>>,
     /// Last-known process tree (root + descendants) per agent, so the expensive
     /// per-process refresh only touches the pids we track.
     trees: Mutex<HashMap<String, Vec<u32>>>,
     /// Last-seen PTY incarnation generation per agent (Phase 4c). A respawned
-    /// process reuses the agent id but is a NEW incarnation — its history and
-    /// tree must be reset so the old process's samples don't pollute the new
-    /// curve.
+    /// process reuses the agent id but is a NEW incarnation — its tree must be
+    /// reset so the old process's samples don't pollute the new curve.
     generations: Mutex<HashMap<String, u64>>,
     /// Global CPU% / used-mem / total-mem cached on every sampling tick.
     snapshot: Mutex<(f32, u64, u64)>,
@@ -66,7 +54,6 @@ impl ResourceMonitor {
     pub fn new() -> Self {
         Self {
             sys: Mutex::new(System::new()),
-            history: Mutex::new(HashMap::new()),
             trees: Mutex::new(HashMap::new()),
             generations: Mutex::new(HashMap::new()),
             snapshot: Mutex::new((0.0, 0, 0)),
@@ -124,7 +111,6 @@ impl ResourceMonitor {
                 // clean and stale pids can't inflate the new sample.
                 if gens.get(agent_id) != Some(generation) {
                     gens.insert(agent_id.clone(), *generation);
-                    self.history.lock().unwrap().remove(agent_id);
                     self.trees.lock().unwrap().remove(agent_id);
                 }
                 let root = Pid::from_u32(*pid);
@@ -153,7 +139,6 @@ impl ResourceMonitor {
         for (agent_id, root, tree_pids) in agents {
             let (cpu_pct, mem_bytes) = sum_tree(Pid::from_u32(root), sys.processes(), &children);
             trees.insert(agent_id.clone(), tree_pids);
-            self.push_history(&agent_id, cpu_pct, mem_bytes);
             out.push(AgentResource {
                 agent_id,
                 cpu_pct,
@@ -166,26 +151,6 @@ impl ResourceMonitor {
     /// Cached global CPU/mem from the last sampling tick.
     pub fn snapshot(&self) -> (f32, u64, u64) {
         *self.snapshot.lock().unwrap()
-    }
-
-    /// Buffered history for one agent (oldest → newest).
-    pub fn history(&self, agent_id: &str) -> Vec<HistoryPoint> {
-        self.history
-            .lock()
-            .unwrap()
-            .get(agent_id)
-            .cloned()
-            .unwrap_or_default()
-            .into()
-    }
-
-    fn push_history(&self, agent_id: &str, cpu_pct: f32, mem_bytes: u64) {
-        let mut hist = self.history.lock().unwrap();
-        let buf = hist.entry(agent_id.to_string()).or_default();
-        buf.push_back(HistoryPoint { cpu_pct, mem_bytes });
-        while buf.len() > HISTORY_LEN {
-            buf.pop_front();
-        }
     }
 }
 

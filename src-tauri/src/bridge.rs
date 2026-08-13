@@ -259,11 +259,6 @@ impl PtyBridge {
         *self.app.lock().unwrap_or_else(|p| p.into_inner()) = Some(app);
     }
 
-    /// True when PTYs are owned by the daemon process.
-    pub fn is_daemon(&self) -> bool {
-        matches!(self.owner, PtyOwner::Daemon(_))
-    }
-
     /// Human-readable ownership mode for diagnostics.
     pub fn mode(&self) -> &'static str {
         match &self.owner {

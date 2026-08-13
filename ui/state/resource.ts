@@ -1,13 +1,11 @@
 import { useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useStore, AgentResource, ResourcePoint } from "./store";
+import { useStore, AgentResource } from "./store";
 
 /**
  * Resource monitor sync (DevPlan §10).
  * Subscribes to `resource://sample` (emitted every second by the Rust sampler)
- * and merges each batch into the store's per-agent CPU/MEM snapshot + rolling
- * history for the sparkline curve.
+ * and merges each batch into the store's per-agent CPU/MEM snapshot.
  */
 export function useResourceSync() {
   useEffect(() => {
@@ -40,16 +38,6 @@ export function useResourceSync() {
       unlisten?.();
     };
   }, []);
-}
-
-/** Fetch the backend-buffered history (oldest → newest) for the curve overlay. */
-export async function fetchResourceHistory(agentId: string): Promise<ResourcePoint[]> {
-  try {
-    const points = await invoke<ResourcePoint[]>("resource_history", { agentId });
-    return Array.isArray(points) ? points : [];
-  } catch {
-    return [];
-  }
 }
 
 /** Format a byte count as a human-readable MEM string (e.g. "3.2GB"). */
