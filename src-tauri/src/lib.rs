@@ -1,7 +1,6 @@
 pub mod agent_runtime;
 pub mod bridge;
 pub mod daemon;
-pub mod esp;
 mod git_gate;
 pub mod lifecycle_journal;
 pub mod output_hub;

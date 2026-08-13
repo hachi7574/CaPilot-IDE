@@ -28,7 +28,7 @@ sudo apt install libwebkit2gtk-4.1-dev librsvg2-dev libgtk-3-dev libsoup-3.0-dev
 
 ## 2. 设计规范（LUCY）与资源
 
-IDE 遵循 CaPilot 主仓库的 **LUCY styleguide**（8-bit Pixel × Apple Smooth，深色科技 + 紫色强调）。完整规范见 `docs/styleguide/ui-style-guide.md`（附 `demo.html` / `logo-preview.html` / `preview.png`）。
+IDE 遵循 CaPilot 主仓库的 **LUCY styleguide**（8-bit Pixel × Apple Smooth，深色科技 + 紫色强调）。完整规范见 `docs/styleguide/ui-style-guide.md`（附 `logo-preview.html` / `preview.png`）。
 
 要点速查：
 
@@ -40,7 +40,7 @@ IDE 遵循 CaPilot 主仓库的 **LUCY styleguide**（8-bit Pixel × Apple Smoot
 **运行时资源位置：**
 
 - 字体内嵌于 `public/fonts/`：`JetBrainsMono-{Regular,Bold}.ttf`、`PixelifySans-Medium.ttf`、`Silkscreen-Regular.ttf`、`Tektur-{Regular,Medium}.ttf`
-- logo 在 `public/*.png`（`logo.png` / `logo-full.png` / `logo-inverted.png` / `logo-rounded.png`）
+- logo 在 `public/logo.png`（源文件见 `docs/Assets/`，UI 经 `public/` 引用）
 - 颜色令牌定义在 `ui/App.css :root`（`@font-face` 引用 `/fonts/*.ttf`，全本地、无 Google Fonts）
 - 应用图标由主仓库 logo 生成于 `src-tauri/icons/`
 
@@ -52,22 +52,19 @@ IDE 遵循 CaPilot 主仓库的 **LUCY styleguide**（8-bit Pixel × Apple Smoot
 
 - `.lock().unwrap()` 毒化处理（多处 std Mutex）
 - `git_status` 未跟踪大文件整读入内存（应流式）
-- ESP `connected` 事件未带 `kind` 字段（前端 fallback 到 BLE）
 - `Persistence::open` 启动 expect（`$HOME` 不可写会 panic）
 
 > 已解决（2026-08-06）：「会话 permissionMode 未持久化」已在会话生命周期改造中一并完成 —— mode/speed/model 持久化进 `sessions` 表，Composer 三设置跟随当前会话。
 
 ### 待开发项
 
-- **ESP**：USB（`UsbSerial`）/ WiFi（`WifiWs`）传输、配对向导、5s 心跳 / 15s 超时、控制帧 ack/重试
-- **语音链路**（最重）：ESP mic → Opus → BLE → Rust 解码 → sherpa-onnx 流式 STT → 实时字幕 → 回复 TTS
 - **编辑器外部改动监视**（notify → 前端刷新）：Git 面板已用 2.5s 前端轮询兜底，编辑器标签页本身仍未监听磁盘改动
 
 ## 4. 安全注意事项
 
 > 完整细节见 `docs/security-review.md`（CSP / capabilities / 路径白名单 / IPC 暴露逐条 + 发布前 checklist）。
 
-- **信任边界**：`agent_write` / `esp_send` 是高权限命令，信任边界是「打包的前端受信任」——单窗口设计下 XSS 即完全控制应用，靠纵深防御缓解（严格 CSP、无远程内容）。
+- **信任边界**：`agent_write` 是高权限命令，信任边界是「打包的前端受信任」——单窗口设计下 XSS 即完全控制应用，靠纵深防御缓解（严格 CSP、无远程内容）。
 - **范围收紧（发布前）**：`fs_*` / `git_*` 范围限制建议发布前收紧（git 命令接受任意 `repo` 路径、`fs_write` 可写 `$HOME` 任意处，含 dotfile）；`fs_write` 存在 symlink 逃逸的 fallback bug（见 security-review §3）。
 - **updater 占位**：updater 配置是占位 endpoint/pubkey；空 `pubkey` 会跳过签名校验，**发布前必须填真实 HTTPS endpoint 与签名公钥**。
 

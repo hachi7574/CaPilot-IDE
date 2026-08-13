@@ -2,7 +2,7 @@
 
 > Local AI coding workspace — Tauri v2 + React + CodeMirror 6
 
-CaPilot IDE is a lightweight desktop workspace for running AI coding CLIs in real PTY terminals, editing files, using Git, and controlling an ESP32 companion device.
+CaPilot IDE is a lightweight desktop workspace for running AI coding CLIs in real PTY terminals, editing files, and using Git.
 
 ## Tech Stack
 

@@ -1,6 +1,6 @@
 # CaPilot IDE Documentation
 
-CaPilot IDE is a local AI coding workspace centered on interactive terminal sessions, file editing, Git, and ESP device control.
+CaPilot IDE is a local AI coding workspace centered on interactive terminal sessions, file editing, and Git.
 
 ## Quick Start
 
@@ -18,6 +18,7 @@ Linux system dependencies: `libwebkit2gtk-4.1-dev librsvg2-dev libgtk-3-dev libs
 - `CaPilot-IDE-RUNBOOK.md` — running, maintenance, known issues, and security notes
 - `security-review.md` — security review and release checklist
 - `ai-runtime-references.md` — official docs + hard-coded integration facts for the claude / codex / opencode runtimes
+- `structured-agent-runtime-architecture.md` — ACP-first structured Agent provider architecture, unified sessions/events, security boundaries, and migration plan
 - `keyboard-shortcuts.md` — 快捷键速查：bash 终端 + claude / codex / opencode 全部 runtime
 - `styleguide/` / `Assets/` — LUCY design guide and assets
 

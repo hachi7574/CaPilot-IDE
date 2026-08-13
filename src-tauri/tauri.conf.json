@@ -30,7 +30,7 @@
     "targets": "all",
     "category": "DeveloperTool",
     "shortDescription": "CaPilot IDE — 本地 AI 编程工作区",
-    "longDescription": "CaPilot IDE 是一个本地 AI 编程工作区，支持交互式终端 PTY、文件编辑、ESP 遥控器与版本控制。\n\nCaPilot IDE is a local AI coding workspace featuring interactive PTY terminals, file editing, an ESP remote, and version control.",
+    "longDescription": "CaPilot IDE 是一个本地 AI 编程工作区，支持交互式终端 PTY、文件编辑与版本控制。\n\nCaPilot IDE is a local AI coding workspace featuring interactive PTY terminals, file editing, and version control.",
     "copyright": "© 2026 hachi7574",
     "publisher": "hachi7574",
     "icon": [

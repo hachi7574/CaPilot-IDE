@@ -1,7 +1,7 @@
 # CaPilot IDE — Security Review
 
 Scope: `src-tauri/tauri.conf.json` (CSP / bundle), `src-tauri/capabilities/default.json`,
-and the app-defined IPC surface in `src-tauri/src/lib.rs` (`fs_*`, `git_*`, `agent_*`, `esp_*`).
+and the app-defined IPC surface in `src-tauri/src/lib.rs` (`fs_*`, `git_*`, `agent_*`).
 Status: review snapshot — recommendations are **not yet applied** unless noted. No app security
 behavior was changed during this pass.
 
@@ -44,7 +44,7 @@ Current grants: `core:default`, `opener:default`, `updater:default`, `notificati
 |---|---|---|
 | `core:default` | Yes | Baseline Tauri core. |
 | `updater:default` | Yes (scaffolding) | Exposes `check`/`download`/`install` to the webview. Endpoint is a placeholder today, so calls fail harmlessly. Keep for scaffolding; must be backed by a real endpoint + pubkey before release. |
-| `notification:default` | Yes | Required by the `notify` command (ESP-drop alerts). |
+| `notification:default` | Yes | Required by the `notify` command. |
 | `store:default` | Yes | Persistent settings KV store. |
 | `log:default` | Yes (dev) | Logger; can be trimmed for release. |
 | `process:default` | Low risk | App `exit`/`restart` only; does **not** include `kill-child` (correctly absent). |
@@ -53,7 +53,7 @@ Current grants: `core:default`, `opener:default`, `updater:default`, `notificati
 
 No high-risk permission (shell, broad `fs`, `process:default-kill`) is granted.
 
-**Important architectural note:** app-defined commands (`agent_*`, `fs_*`, `git_*`, `esp_*`) are
+**Important architectural note:** app-defined commands (`agent_*`, `fs_*`, `git_*`) are
 implicitly available to any window covered by a capability — Tauri does **not** require (or allow)
 per-command ACL entries for application commands. The capability file therefore only governs
 plugin/core permissions. The real trust boundary is "the bundled frontend is trusted"; an XSS in
@@ -98,7 +98,6 @@ scoping:
 | Command | Risk |
 |---|---|
 | `agent_write(id, data, raw)` | **High.** Injects text / keystrokes into any running agent PTY. With a `bash`-runtime session this is arbitrary command execution in that session; `id` is caller-supplied with no session-ownership check. Mitigation: validate `id` against persisted sessions. |
-| `esp_send(payload)` | **High impact, low likelihood.** Sends arbitrary bytes over BLE to the connected ESP32; a compromised frontend could issue hardware commands (motors/actuators). Mitigate with server-side payload length/schema checks. |
 | `fs_write` / `fs_read` / `fs_list` | Arbitrary files under `$HOME` (see §3). |
 | `git_*` (`git_status`, `git_stage`, `git_commit`, `git_pull`, `git_push`, …) | Accept an arbitrary `repo` path, **not** validated to be a known workspace. A compromised frontend can run git in any readable directory (e.g., `git push` from `/etc`). Low–moderate. |
 | `agent_spawn` | Spawns new PTY sessions (including `bash`); a compromised frontend can spawn shells or exhaust resources. By design; consider a session cap. |
@@ -122,6 +121,6 @@ scoping:
 6. **Scope plugin permissions** down (`dialog:default`, `opener:default`) once the UI feature
    set is final.
 7. **Validate command inputs**: session `id` checks in `agent_write`/`agent_kill`/`agent_resize`;
-   length/schema checks for `esp_send` and `agent_spawn`; restrict `git_*` repos to known
+   length/schema checks for `agent_spawn`; restrict `git_*` repos to known
    workspace roots.
 8. Keep `dangerousDisableAssetCspModification` unset (CSP stays enforced on assets).
