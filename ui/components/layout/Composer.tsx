@@ -381,10 +381,13 @@ export function Composer() {
       permissionSwitchingRef.current = true;
       try {
         // A restored session may not have its PTY until its terminal is first
-        // shown. Resume it before applying a live mode change.
-        const resumed = !s.agentChannels.has(id)
-          ? await ensureAgentChannel(id)
-          : false;
+        // shown. Resume it before applying a live mode change. dsh is skipped:
+        // its permission branch below restarts the PTY anyway, so a pre-resume
+        // would only boot the old mode and then be killed.
+        const resumed =
+          agent.runtime !== "dsh" && !s.agentChannels.has(id)
+            ? await ensureAgentChannel(id)
+            : false;
         if (resumed) await new Promise((r) => setTimeout(r, 250));
 
         if (agent.runtime === "codex") {
@@ -453,10 +456,20 @@ export function Composer() {
           await invoke("agent_write", { id, data: command, raw: true });
           await new Promise((r) => setTimeout(r, 80));
           await invoke("agent_write", { id, data: "\r", raw: true });
+        } else if (agent.runtime === "dsh") {
+          // dsh-TUI 没有实时权限切换（/permission 未适配，DSH 无沙箱切换
+          // API）。唯一可靠路径：先持久化新模式，再重启 PTY，让下次启动注入
+          // 新的 DSH_PERMISSION_MODE 环境变量。这是刻意选的重路径。
+          await invoke("agent_set_session_config", { id, mode });
+          await invoke("agent_kill", { id }).catch(() => {});
+          useStore.getState().dropAgentChannel(id);
+          await new Promise((r) => setTimeout(r, 250));
+          await ensureAgentChannel(id).catch(() => {});
         }
 
         // Persist the selected mode so a later resume starts with the same
-        // policy. This does not restart or replace the running PTY.
+        // policy. Live-switch runtimes keep their PTY; dsh already restarted
+        // it above, so this second persist is a harmless idempotent update.
         await invoke("agent_set_session_config", { id, mode });
         const latest = useStore.getState().agents.get(id);
         if (latest) useStore.getState().addAgent({ ...latest, mode }, null);
@@ -483,7 +496,12 @@ export function Composer() {
 
       modelSwitchingRef.current = true;
       try {
-        const resumed = !s.agentChannels.has(id) ? await ensureAgentChannel(id) : false;
+        // dsh 的模型只在 spawn 时钉死，live 切换会 fork 会话——所以恢复会话
+        // 只需持久化配置，无需启动 PTY（见下方 dsh 分支）。
+        const resumed =
+          agent.runtime !== "dsh" && !s.agentChannels.has(id)
+            ? await ensureAgentChannel(id)
+            : false;
         if (resumed) await new Promise((resolve) => setTimeout(resolve, 250));
 
         if (agent.runtime === "codex") {
@@ -553,6 +571,11 @@ export function Composer() {
           await invoke("agent_write", { id, data: modelName, raw: true });
           await new Promise((resolve) => setTimeout(resolve, 120));
           await invoke("agent_write", { id, data: "\r", raw: true });
+        } else if (agent.runtime === "dsh") {
+          // dsh 不支持原位换模型：/model 会做会话 fork 续聊（历史保留、新
+          // 会话路由新模型、旧会话留在 /resume），破坏 "tab id = session id"
+          // 身份。只持久化配置，由下一次 spawn / resume 经 --patch 钉死生效；
+          // 不驱动运行中的 TUI。
         }
 
         await invoke("agent_set_session_config", {
@@ -632,6 +655,27 @@ export function Composer() {
             });
             await new Promise((resolve) => setTimeout(resolve, 35));
             await invoke("agent_write", { id, data: "\r", raw: true });
+          } else if (agent.runtime === "dsh") {
+            // dsh-cc-tui 的 Shift+Tab 循环 effort（deepseek 档位 off→high→max）。
+            // CaPilot speed 映射 fast→off / mid→high / high→max；auto = 省略
+            // （profile 默认 max）。从当前持久化档位按循环算步数驱动 Shift+Tab。
+            const dshEffortCycle = ["fast", "mid", "high"];
+            const currentIndex =
+              previousSpeed === "auto" ? 2 : dshEffortCycle.indexOf(previousSpeed);
+            const targetIndex =
+              nextSpeed === "auto" ? 2 : dshEffortCycle.indexOf(nextSpeed);
+            if (currentIndex < 0 || targetIndex < 0) {
+              throw new Error(`Unsupported dsh reasoning effort: ${nextSpeed}`);
+            }
+            const steps =
+              (targetIndex - currentIndex + dshEffortCycle.length) %
+              dshEffortCycle.length;
+            for (let step = 0; step < steps; step++) {
+              await invoke("agent_write", { id, data: "\u001b[Z", raw: true });
+              if (step + 1 < steps) {
+                await new Promise((resolve) => setTimeout(resolve, 60));
+              }
+            }
           }
         }
 

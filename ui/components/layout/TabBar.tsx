@@ -43,7 +43,10 @@ const STATUS_TEXT = {
  *  `--settings`, codex's per-session config profile, opencode's status
  *  plugin). The tab strip polls the sidecar these hooks write; other runtimes
  *  keep PTY-activity heuristics. */
-const HOOK_STATUS_RUNTIMES = new Set(["claude", "codex", "opencode"]);
+// Runtimes whose live status comes from the backend sidecar poll. dsh has no
+// hook system, but the backend synthesizes an equivalent status for it from the
+// session log (方案 B) — same `agent_status_read` path, same 运行中/空闲 display.
+const HOOK_STATUS_RUNTIMES = new Set(["claude", "codex", "opencode", "dsh"]);
 
 /** Longest-matching project root for an editor file path (or undefined). */
 function projectRootOfPath(

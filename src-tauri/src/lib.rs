@@ -13,7 +13,7 @@ mod worktree;
 
 use agent_runtime::adapter::{AgentError, AgentInfo, AgentRuntimeAdapter, AgentSession, AgentUsage};
 use agent_runtime::pty_core::OnExit;
-use agent_runtime::runtimes::{get_adapter, known_runtimes};
+use agent_runtime::runtimes::{dsh::DshAdapter, get_adapter, known_runtimes};
 use persistence::{
     agent_dir, ensure_project, read_agent_meta, worktree_id, write_agent_meta, AgentMeta,
     AgentSessionRecord, Persistence, WorktreeMeta, DEFAULT_PROJECT,
@@ -106,6 +106,25 @@ pub struct ContextUsageCache {
 const CONTEXT_USAGE_TTL: Duration = Duration::from_millis(800);
 
 impl ContextUsageCache {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+/// Per-agent dsh status-inference cache (agent id → change fingerprint +
+/// last inferred `(status, ts)`). The TabBar polls `agent_status_read` once a
+/// second; decoding an unchanged zstd session log on every tick would be
+/// wasted work. The fingerprint is the log's (mtime, length) — an appended
+/// `turn/end` changes both, so the entry is invalidated the moment a turn
+/// boundary lands (length covers filesystems that round mtime to seconds).
+/// Lives only in daemon memory, like `ContextUsageCache`.
+pub struct StatusInferenceCache {
+    inner: Mutex<HashMap<String, (u64, u64, i64, String)>>, // id → (mtime_ns, len, ts, status)
+}
+
+impl StatusInferenceCache {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
@@ -674,14 +693,76 @@ async fn agent_context_usage(
     Ok(usage)
 }
 
-/// Read a claude agent's hook-reported lifecycle status from its sidecar file
+/// Read an agent's hook-reported lifecycle status from its sidecar file
 /// (`~/CaPilot/status/<id>.json`). Returns `null` when the file is missing or
-/// unparseable — non-claude runtimes and freshly spawned sessions have no
+/// unparseable — non-hook runtimes and freshly spawned sessions have no
 /// sidecar yet, and the frontend falls back to activity-based derivation.
+///
+/// dsh has no hook system (integration doc §4.8 方案 B), so a missing sidecar
+/// for a dsh session falls back to log inference: `idle`/`working` derived from
+/// the newest session log's `turn/start`/`turn/end`/`assistant/chunk` events.
+/// The inference is fingerprinted (log mtime + length) and cached so the 1s
+/// TabBar poll only re-decodes the zstd log when it actually changed; the
+/// decode itself runs on the blocking pool so it never stalls the UI.
 #[tauri::command]
-fn agent_status_read(id: String) -> Option<HookStatus> {
-    let raw = std::fs::read_to_string(persistence::status_file(&id)).ok()?;
-    serde_json::from_str(&raw).ok()
+async fn agent_status_read(
+    persistence: tauri::State<'_, Arc<Persistence>>,
+    cache: tauri::State<'_, StatusInferenceCache>,
+    id: String,
+) -> Result<Option<HookStatus>, String> {
+    // The hook sidecar is authoritative where present (claude/codex/opencode).
+    if let Some(hook) = std::fs::read_to_string(persistence::status_file(&id))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<HookStatus>(&raw).ok())
+    {
+        return Ok(Some(hook));
+    }
+    let (runtime, cwd) = {
+        let db = persistence.db().lock().unwrap();
+        db.get(&id)
+            .ok()
+            .flatten()
+            .map(|r| (r.runtime, r.cwd))
+            .unwrap_or_default()
+    };
+    if runtime != "dsh" {
+        return Ok(None);
+    }
+    // Cheap log lookup (directory scan + header peek, NO full decode) — enough
+    // to fingerprint the log and reuse a fresh cache entry.
+    let Some((log, mtime, len)) = DshAdapter::newest_session_log_meta(&cwd) else {
+        return Ok(None);
+    };
+    let mtime_ns = mtime
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    {
+        let cache = cache.inner.lock().unwrap();
+        if let Some((cm, cl, ts, status)) = cache.get(&id) {
+            if *cm == mtime_ns && *cl == len {
+                return Ok(Some(HookStatus {
+                    status: status.clone(),
+                    ts: *ts,
+                }));
+            }
+        }
+    }
+    // Log changed (or first poll): decode + infer on the blocking pool.
+    let inferred = tauri::async_runtime::spawn_blocking(move || {
+        DshAdapter::infer_status_from_log(&log).map(|(status, ts)| (mtime_ns, len, ts, status))
+    })
+    .await
+    .ok()
+    .flatten();
+    if let Some((m, l, ts, status)) = &inferred {
+        cache
+            .inner
+            .lock()
+            .unwrap()
+            .insert(id.clone(), (*m, *l, *ts, status.clone()));
+    }
+    Ok(inferred.map(|(_, _, ts, status)| HookStatus { status, ts }))
 }
 
 /// Pull journaled lifecycle events that happened while the GUI was offline
@@ -1461,6 +1542,9 @@ async fn sessions_delete(
     // Remove the session's opencode status-plugin config dir (no-op for other
     // runtimes — `$XDG_CACHE_HOME/capilot-ide/opencode-status/<id>` never exists).
     crate::agent_runtime::runtimes::opencode::OpenCodeAdapter::remove_status_plugin(&id);
+    // Remove the session's dsh `--patch` overlay (no-op for other runtimes —
+    // `$XDG_CACHE_HOME/capilot-ide/dsh/<id>.patch.yml` never exists).
+    crate::agent_runtime::runtimes::dsh::DshAdapter::remove_session_patch(&id);
     if let Some(db) = persistence.db_tolerant() {
         let _ = db.delete(&id);
     }
@@ -3530,6 +3614,7 @@ pub fn run() {
         .manage(persistence)
         .manage(resource)
         .manage(ContextUsageCache::new())
+        .manage(StatusInferenceCache::new())
         .invoke_handler(tauri::generate_handler![
             agent_spawn,
             agent_resume,

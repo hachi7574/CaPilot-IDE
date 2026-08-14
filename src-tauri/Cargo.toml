@@ -57,3 +57,4 @@ libc = "0.2"
 # LockFileEx on Windows) — the GUI process and the PTY daemon must serialize
 # read-modify-write on the same sidecar without a shared mutex.
 fs2 = "0.4"
+ruzstd = "0.9.0"

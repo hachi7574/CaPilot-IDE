@@ -658,6 +658,167 @@ const CLAUDE_COMMANDS: &[BuiltinCommand] = &[
     },
 ];
 
+// dsh-TUI（dsh-cc-tui）的本地命令全集，按分组顺序与上游 README 保持一致。
+// `/resume` 等动态选择器命令在 EXCLUDED 中排除；其余命令是叶子项，选中后
+// 把 `/name` 发给 PTY，由 TUI 在终端内自行展开（模型、主题、子代理等选择器）。
+const DSH_COMMANDS: &[BuiltinCommand] = &[
+    // 会话
+    BuiltinCommand {
+        name: "new",
+        description: "开始一个新会话",
+    },
+    BuiltinCommand {
+        name: "resume",
+        description: "恢复一个已保存的会话",
+    },
+    BuiltinCommand {
+        name: "clear",
+        description: "清空屏幕并开始一个新对话",
+    },
+    BuiltinCommand {
+        name: "compact",
+        description: "压缩当前会话以释放上下文空间",
+    },
+    BuiltinCommand {
+        name: "export",
+        description: "将当前会话导出为 Markdown",
+    },
+    // 状态
+    BuiltinCommand {
+        name: "status",
+        description: "查看会话信息和配置",
+    },
+    BuiltinCommand {
+        name: "cost",
+        description: "查看 token 用量",
+    },
+    BuiltinCommand {
+        name: "doctor",
+        description: "运行环境自检",
+    },
+    BuiltinCommand {
+        name: "config",
+        description: "查看配置来源",
+    },
+    BuiltinCommand {
+        name: "init",
+        description: "创建 AGENTS.md 指令文件",
+    },
+    // 模型
+    BuiltinCommand {
+        name: "model",
+        description: "打开模型选择器（会话 fork 续聊）",
+    },
+    BuiltinCommand {
+        name: "thinking",
+        description: "显示或隐藏模型思考内容",
+    },
+    BuiltinCommand {
+        name: "tokens",
+        description: "查看 token 明细",
+    },
+    BuiltinCommand {
+        name: "theme",
+        description: "打开主题选择器",
+    },
+    BuiltinCommand {
+        name: "lang",
+        description: "切换中英界面语言",
+    },
+    // 账号/策略
+    BuiltinCommand {
+        name: "login",
+        description: "查看凭证状态",
+    },
+    BuiltinCommand {
+        name: "logout",
+        description: "查看登出说明",
+    },
+    BuiltinCommand {
+        name: "permissions",
+        description: "查看权限说明",
+    },
+    BuiltinCommand {
+        name: "add-dir",
+        description: "调整文件策略范围",
+    },
+    BuiltinCommand {
+        name: "hooks",
+        description: "查看生命周期钩子",
+    },
+    BuiltinCommand {
+        name: "mcp",
+        description: "查看 MCP 服务器连接状态",
+    },
+    BuiltinCommand {
+        name: "memory",
+        description: "编辑记忆文件",
+    },
+    // 技能
+    BuiltinCommand {
+        name: "audit",
+        description: "执行代码审计",
+    },
+    BuiltinCommand {
+        name: "bug",
+        description: "提交 bug 报告",
+    },
+    BuiltinCommand {
+        name: "review",
+        description: "执行代码评审",
+    },
+    BuiltinCommand {
+        name: "practice",
+        description: "进行编程练习",
+    },
+    BuiltinCommand {
+        name: "pr_comments",
+        description: "查看 PR 评论",
+    },
+    BuiltinCommand {
+        name: "release-notes",
+        description: "查看发布说明",
+    },
+    BuiltinCommand {
+        name: "vuln-check",
+        description: "执行漏洞检查",
+    },
+    // 其它
+    BuiltinCommand {
+        name: "agents",
+        description: "打开子代理列表",
+    },
+    BuiltinCommand {
+        name: "vim",
+        description: "切换 Vim 输入模式",
+    },
+    BuiltinCommand {
+        name: "terminal-setup",
+        description: "打开终端设置向导",
+    },
+    BuiltinCommand {
+        name: "connect",
+        description: "查看模型提供商连接",
+    },
+    BuiltinCommand {
+        name: "help",
+        description: "显示帮助",
+    },
+    BuiltinCommand {
+        name: "exit",
+        description: "退出 dsh TUI",
+    },
+    // 注册表（DSH 命令注册表插件，随插件并入 `/` 菜单）
+    BuiltinCommand {
+        name: "plan",
+        description: "进入计划模式",
+    },
+    BuiltinCommand {
+        name: "goal",
+        description: "管理会话的持久目标",
+    },
+];
+
 const OPENCODE_COMMANDS: &[BuiltinCommand] = &[
     BuiltinCommand {
         name: "connect",
@@ -783,6 +944,9 @@ const EXCLUDED: &[(&str, &[&str])] = &[
         &["resume", "fork", "apps", "plugins", "hooks", "ps"],
     ),
     ("opencode", &["sessions"]),
+    // dsh 的会话恢复走 TUI 内的选择器（`ResumePicker`），Composer 无法枚举
+    // 选项；其余命令是叶子项，选中后发给 PTY 由 TUI 自行展开。
+    ("dsh", &["resume"]),
 ];
 
 fn child_source(runtime: &str, name: &str) -> ChildSource {
@@ -944,6 +1108,7 @@ fn builtin_commands(runtime: &str) -> &'static [BuiltinCommand] {
         "claude" => CLAUDE_COMMANDS,
         "codex" => CODEX_COMMANDS,
         "opencode" => OPENCODE_COMMANDS,
+        "dsh" => DSH_COMMANDS,
         _ => &[],
     }
 }
@@ -1500,6 +1665,68 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn dsh_builtin_catalog_is_complete_and_resume_is_excluded() {
+        let root = fixture_root("dsh");
+        fs::create_dir_all(root.join(".git")).unwrap();
+
+        // 目录全集：会话 + 状态 + 模型 + 策略 + 技能 + 其它 + 注册表。
+        let catalog = builtin_commands("dsh");
+        assert!(catalog.len() >= 30);
+        for command in catalog {
+            assert!(
+                command
+                    .description
+                    .chars()
+                    .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+                "dsh: {}",
+                command.name
+            );
+        }
+        let names = catalog
+            .iter()
+            .map(|command| command.name)
+            .collect::<HashSet<_>>();
+        assert_eq!(names.len(), catalog.len(), "dsh names must be unique");
+        for expected in [
+            "new",
+            "resume",
+            "clear",
+            "compact",
+            "export",
+            "status",
+            "cost",
+            "model",
+            "thinking",
+            "permissions",
+            "mcp",
+            "review",
+            "exit",
+        ] {
+            assert!(
+                names.contains(expected),
+                "dsh catalog should contain /{expected}"
+            );
+        }
+
+        // `/resume` 走 TUI 内选择器，从 Composer 菜单排除；其余是叶子项。
+        let menu = discover("dsh", &root);
+        assert!(!menu.iter().any(|item| item.invocation == "/resume"));
+        assert!(menu.iter().any(|item| item.invocation == "/model"));
+        let model = menu
+            .iter()
+            .find(|item| item.invocation == "/model")
+            .unwrap();
+        assert!(
+            !model.has_children,
+            "dsh /model opens the TUI's own picker and takes no inline arg"
+        );
+        assert!(!menu.iter().any(|item| item.invocation == "/sessions"));
+        assert!(menu.iter().any(|item| item.invocation == "/compact"));
+
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

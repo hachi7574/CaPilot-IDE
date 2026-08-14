@@ -17,15 +17,25 @@ export async function spawnAgent(
   // store's `projectRoots` map). Pass it through so the agent's cwd lives under
   // that root instead of ~/CaPilot/workspaces/<name>.
   const projectRoot = s.projectRoots[proj];
+  // Model pinning: only pass a model id that actually exists in the target
+  // runtime's catalog. claude spawns pin the chosen Claude model; dsh spawns
+  // pin the chosen DeepSeek model via the per-session `--patch` overlay (its
+  // model cannot be changed live — `/model` would fork the session). A stale
+  // selection from another runtime falls back to the target's own default
+  // rather than leaking a provider-specific id across runtimes.
+  const targetRuntime = s.runtimes.find((r) => r.id === runtime);
+  const pinnedModel =
+    runtime === DEFAULT_RUNTIME || runtime === "dsh"
+      ? targetRuntime?.models?.some((m) => m.id === s.selectedModel)
+        ? s.selectedModel
+        : null
+      : null;
   const info = (await invoke("agent_spawn", {
     runtime,
     project: proj,
     projectRoot: projectRoot ?? null,
     resumeKey: null,
-    // The composer currently exposes Claude's model list. Do not leak that
-    // provider-specific selection into another runtime (for example Codex),
-    // which should use its own configured default model.
-    model: runtime === DEFAULT_RUNTIME ? s.selectedModel : null,
+    model: pinnedModel,
     speed: s.speed,
     mode: s.permissionMode,
     onData: channel,

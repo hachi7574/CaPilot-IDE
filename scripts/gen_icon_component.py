@@ -100,6 +100,7 @@ def main() -> None:
         "  switch (runtime) {",
         "    case 'claude': return 'claude';",
         "    case 'codex': return 'openai';",
+        "    case 'dsh': return 'deepseek';",
         "    case 'opencode': return 'opencode';",
         "    default: return 'terminal';",
         "  }",
