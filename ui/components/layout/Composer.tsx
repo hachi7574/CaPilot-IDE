@@ -13,55 +13,10 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useStore, TODO_DRAG_MIME, splitLeafTabIds } from "../../state/store";
 import { pathsFromDataTransfer } from "../../state/dropPaths";
-import type {
-  PermissionMode,
-  PermissionModeInfo,
-  ThinkingOptionInfo,
-} from "../../state/store";
-import {
-  spawnAgent,
-  ensureAgentChannel,
-  sendPromptToAgent,
-} from "../../state/agentActions";
-import { PermissionConfirmationDialog } from "./PermissionConfirmationDialog";
+import { sendPromptToAgent } from "../../state/agentActions";
+import { createDefaultAgent } from "../../state/structuredAgent";
 import { ContextWindowMeter } from "./ContextWindowMeter";
-import { CacheHitRate } from "./CacheHitRate";
 import { Icon } from "../Icon";
-
-const DEFAULT_RUNTIME = "claude";
-type ComposerPermissionMode = PermissionMode;
-
-// Claude Code's Shift+Tab cycle is not the same order as the permission menu:
-// manual → acceptEdits → plan → bypassPermissions → auto. Keep this explicit;
-// using `list_permission_modes()` here makes auto/bypass transitions land on
-// the wrong native mode because the menu intentionally presents safer choices
-// before bypass.
-const CLAUDE_PERMISSION_CYCLE: readonly ComposerPermissionMode[] = [
-  "ask",
-  "accept_edits",
-  "plan",
-  "yolo",
-  "auto",
-];
-
-// CaPilot's persisted speed tiers map to codex's native reasoning efforts (the
-// reasoning popup lists them in catalog order). "auto" has no native id — it
-// means the model's default effort.
-const SPEED_TO_EFFORT: Record<string, string> = {
-  fast: "low",
-  mid: "medium",
-  high: "high",
-  xhigh: "xhigh",
-};
-
-// Reverse map: turn a codex model's native default effort back into a CaPilot
-// speed tier, so the ⚡ label can reflect the model default instead of "auto".
-const EFFORT_TO_SPEED: Record<string, string> = {
-  low: "fast",
-  medium: "mid",
-  high: "high",
-  xhigh: "xhigh",
-};
 
 interface FsEntryBrief {
   name: string;
@@ -131,14 +86,10 @@ export function Composer() {
   const slashMenuRef = useRef<HTMLDivElement>(null);
 
   const composerOpen = useStore((s) => s.composerOpen);
-  const permissionMode = useStore((s) => s.permissionMode);
-  const speed = useStore((s) => s.speed);
-  const selectedModel = useStore((s) => s.selectedModel);
   const activeTabId = useStore((s) => s.activeTabId);
   const tabs = useStore((s) => s.tabs);
   const splitTree = useStore((s) => s.splitTree);
   const agents = useStore((s) => s.agents);
-  const runtimes = useStore((s) => s.runtimes);
   const addTodo = useStore((s) => s.addTodo);
 
   const toggleComposer = useStore((s) => s.toggleComposer);
@@ -162,25 +113,9 @@ export function Composer() {
   // (resize) on the composer divider.
   const resizeStartRef = useRef<{ x: number; y: number } | null>(null);
 
-  // Composer popover menus (向上弹出)：模型选择 + 文件/引用.
-  const [modelMenuOpen, setModelMenuOpen] = useState(false);
-  // Codex drill-down: after picking a model, the picker switches to that
-  // model's reasoning efforts so the effort is also chosen in the GUI.
-  const [pendingEffortModel, setPendingEffortModel] = useState<string | null>(null);
-  const [permissionMenuOpen, setPermissionMenuOpen] = useState(false);
-  const [pendingPermissionMode, setPendingPermissionMode] =
-    useState<PermissionModeInfo | null>(null);
-  const [thinkingMenuOpen, setThinkingMenuOpen] = useState(false);
-  const [openCodeAgentModes, setOpenCodeAgentModes] =
-    useState<Record<string, "Build" | "Plan">>({});
+  // Composer popover menus (向上弹出)：文件/引用 (+).
   const [refMenuOpen, setRefMenuOpen] = useState(false);
   const [recentEntries, setRecentEntries] = useState<RecentEntry[]>([]);
-  const modelAnchorRef = useRef<HTMLSpanElement>(null);
-  const modelMenuRef = useRef<HTMLDivElement>(null);
-  const permissionAnchorRef = useRef<HTMLSpanElement>(null);
-  const permissionMenuRef = useRef<HTMLDivElement>(null);
-  const thinkingAnchorRef = useRef<HTMLSpanElement>(null);
-  const thinkingMenuRef = useRef<HTMLDivElement>(null);
   const refAnchorRef = useRef<HTMLSpanElement>(null);
   const refMenuRef = useRef<HTMLDivElement>(null);
 
@@ -213,11 +148,6 @@ export function Composer() {
   // can auto-send a leaf selection without a stale closure or a TDZ access to
   // the later `handleSend` const.
   const handleSendRef = useRef<() => void>(() => {});
-  // A Claude permission change is a short sequence of PTY key presses. Do not
-  // allow two slider clicks to interleave and land on an unintended mode.
-  const permissionSwitchingRef = useRef(false);
-  const modelSwitchingRef = useRef(false);
-  const thinkingSwitchingRef = useRef(false);
   // Keep the textarea in the right mode when the composer switches between
   // auto-height and a fixed user-selected height.
   const fixedHeight = composerH !== null;
@@ -234,6 +164,18 @@ export function Composer() {
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const targetAgentId = activeTab?.agentId;
+
+  // Phase 5 tab classification: structured agents render their own composer in
+  // AgentPanel; legacy PTY Agent sessions (claude/codex/opencode) are read-only
+  // EOL; only bash terminals (and the no-tab "create on send" case) use this
+  // Composer's input.
+  const activeRuntime = targetAgentId ? agents.get(targetAgentId)?.runtime : undefined;
+  const activeIsStructured = activeTab?.type === "structured";
+  const activeIsLegacyAgent =
+    activeTab?.type === "agent" &&
+    !!activeRuntime &&
+    activeRuntime !== "bash" &&
+    activeRuntime !== "bash-rc";
 
   // Effective send target: a Tab-cycled pin wins; otherwise follow the active
   // terminal. Falls back to null (spawn a new session on send) when the active
@@ -283,418 +225,11 @@ export function Composer() {
     activeItem?.scrollIntoView({ block: "nearest" });
   }, [topSlashLevel?.idx, topSlashLevel?.items]);
 
-  // ── Per-session composer config ────────────────────────────────
-  // The permission/speed/model controls show and edit the CURRENT target
-  // session's own values (falling back to the global "next spawn" defaults when
-  // no session is targeted). Changing one applies to that session (persisted,
-  // takes effect on next resume) and remembers the choice for new sessions.
-  const configAgentId = activeTab?.agentId;
-  const configAgent = configAgentId ? agents.get(configAgentId) : undefined;
-  const configRuntimeId = configAgent?.runtime ?? DEFAULT_RUNTIME;
-  const configRuntime = runtimes.find((runtime) => runtime.id === configRuntimeId);
-  const models = configRuntime?.models ?? [];
-  const permissionModes: PermissionModeInfo[] = configRuntime?.permission_modes ?? [];
-  const thinkingOptions: ThinkingOptionInfo[] = configRuntime?.thinking_options ?? [];
-  const shownMode =
-    (configAgent?.mode as ComposerPermissionMode) ?? permissionMode;
-  const shownSpeed = configAgent?.speed ?? speed;
-  const defaultModel = models.find((model) => model.is_default) ?? null;
-  const preferredModel = configAgent?.model ?? selectedModel;
-  const shownModel = models.some((model) => model.id === preferredModel)
-    ? preferredModel
-    : defaultModel?.id ?? null;
-  const currentModel = models.find((m) => m.id === shownModel) ?? null;
-  // Codex model drill-down: map the model's supported reasoning efforts (from
-  // the backend catalog) onto CaPilot's speed vocabulary, so the picker only
-  // offers tiers the model actually supports. "auto" means "use the model's
-  // default effort", which is not a native Codex tier (the reasoning popup
-  // simply highlights the default), so it is never offered in the drill-down.
-  const effortOptionsFor = (modelId: string) => {
-    const efforts = models.find((model) => model.id === modelId)?.efforts ?? [];
-    return thinkingOptions.filter((option) => {
-      const native = SPEED_TO_EFFORT[option.id];
-      return native ? efforts.some((effort) => effort.id === native) : false;
-    });
-  };
-  const pendingEffortOptions = pendingEffortModel
-    ? effortOptionsFor(pendingEffortModel)
-    : [];
-  // Codex has no native "auto" effort — the reasoning popup only lists real
-  // tiers and highlights the model's default. Hide CaPilot's "auto" (use the
-  // model default) from the ⚡ picker so the GUI only offers tiers the CLI
-  // accepts. The value stays valid in the store/session config: "auto" spawns
-  // without an effort flag and applyThinkingSpeed treats it as "don't move".
-  const menuThinkingOptions =
-    configRuntimeId === "codex"
-      ? thinkingOptions.filter((option) => option.id !== "auto")
-      : thinkingOptions;
-  // Button label: on a codex session still on "auto" (fresh spawn), reflect the
-  // model's default tier instead of the word "Auto".
-  const defaultSpeedForCodex =
-    configRuntimeId === "codex"
-      ? (() => {
-          const defaultEffort = currentModel?.efforts?.find(
-            (effort) => effort.is_default
-          )?.id;
-          return defaultEffort ? EFFORT_TO_SPEED[defaultEffort] : undefined;
-        })()
-      : undefined;
-  const currentSpeedLabel =
-    shownSpeed === "auto" && configRuntimeId === "codex"
-      ? (defaultSpeedForCodex
-          ? (thinkingOptions.find((option) => option.id === defaultSpeedForCodex)
-              ?.label ?? "思考强度")
-          : "思考强度")
-      : (thinkingOptions.find((option) => option.id === shownSpeed)?.label ??
-        "思考强度");
+  // Phase 5: the per-session permission/model/thinking controls (PTY key
+  // injection into claude/codex/opencode TUIs) were retired — structured
+  // agents configure through AgentPanel, and legacy PTY agents are read-only
+  // EOL. This Composer only serves bash terminals (plain input + @ files).
 
-  const applyPermissionMode = useCallback(
-    async (mode: ComposerPermissionMode) => {
-      if (permissionSwitchingRef.current) return;
-      const s = useStore.getState();
-      const id = activeTab?.agentId;
-      const agent = id ? s.agents.get(id) : undefined;
-      if (!id || !agent) {
-        s.setPermissionMode(mode);
-        return;
-      }
-
-      const previousMode =
-        (agent.mode as ComposerPermissionMode | undefined) ?? s.permissionMode;
-      if (mode === previousMode) return;
-
-      permissionSwitchingRef.current = true;
-      try {
-        // A restored session may not have its PTY until its terminal is first
-        // shown. Resume it before applying a live mode change.
-        const resumed = !s.agentChannels.has(id)
-          ? await ensureAgentChannel(id)
-          : false;
-        if (resumed) await new Promise((r) => setTimeout(r, 250));
-
-        if (agent.runtime === "codex") {
-          // Codex supports changing permissions in the current TUI through the
-          // native `/permissions` picker. Drive that picker instead of killing
-          // and resuming the process. Its presets are ordered Read Only,
-          // Default (workspace access), Full Access.
-          const presetIndex = permissionModes.findIndex((item) => item.id === mode);
-          if (presetIndex < 0) throw new Error(`Unsupported Codex permission mode: ${mode}`);
-          await invoke("agent_write", { id, data: "/permissions", raw: true });
-          await new Promise((r) => setTimeout(r, 40));
-          await invoke("agent_write", { id, data: "\r", raw: true });
-          await new Promise((r) => setTimeout(r, 160));
-          await invoke("agent_write", { id, data: "\u001b[H", raw: true });
-          for (let i = 0; i < presetIndex; i++) {
-            await invoke("agent_write", { id, data: "\u001b[B", raw: true });
-          }
-          await invoke("agent_write", { id, data: "\r", raw: true });
-          if (mode === "yolo") {
-            // Codex opens a second "Enable full access?" picker after the
-            // preset is selected. The user has already accepted the IDE-owned
-            // warning dialog, so accept Codex's default "Yes, continue anyway"
-            // choice here as well; terminal focus is never required.
-            await new Promise((r) => setTimeout(r, 160));
-            await invoke("agent_write", { id, data: "\r", raw: true });
-          }
-        } else if (agent.runtime === "claude") {
-          // Claude Code has no direct in-session command that takes a target
-          // permission mode. Its supported live control is Shift+Tab, cycling:
-          // manual → acceptEdits → plan → bypassPermissions → auto. Calculate
-          // the forward route from the persisted current policy. This
-          // changes the running TUI; it does not kill or resume the process.
-          const currentMode =
-            (agent.mode as ComposerPermissionMode | undefined) ?? s.permissionMode;
-          const currentPosition = CLAUDE_PERMISSION_CYCLE.indexOf(currentMode);
-          const targetPosition = CLAUDE_PERMISSION_CYCLE.indexOf(mode);
-          if (currentPosition < 0 || targetPosition < 0) {
-            throw new Error(`Unsupported Claude permission transition: ${currentMode} -> ${mode}`);
-          }
-          const steps =
-            (targetPosition - currentPosition + CLAUDE_PERMISSION_CYCLE.length) %
-            CLAUDE_PERMISSION_CYCLE.length;
-          for (let i = 0; i < steps; i++) {
-            await invoke("agent_write", { id, data: "\u001b[Z", raw: true });
-            // Claude redraws its status line after every transition. Giving it
-            // a brief turn prevents rapid key presses from being coalesced.
-            if (i + 1 < steps) await new Promise((r) => setTimeout(r, 60));
-          }
-        } else if (agent.runtime === "opencode") {
-          // OpenCode only accepts --auto at process startup. For a running TUI,
-          // its supported switch lives in the command palette. CaPilot launches
-          // OpenCode with a session-scoped TUI config that binds that palette to
-          // F12, avoiding dependence on the user's configurable Ctrl+P binding.
-          const command =
-            mode === "auto"
-              ? "Enable auto-approve permissions"
-              : "Disable auto-approve permissions";
-          // Ctrl+P keeps already-running sessions (started before the private
-          // config existed) working. F12 is authoritative for newly launched
-          // sessions. Sending both is harmless: an already-open palette ignores
-          // F12, while a remapped Ctrl+P is ignored before F12 opens it.
-          await invoke("agent_write", { id, data: "\u0010", raw: true });
-          await new Promise((r) => setTimeout(r, 120));
-          await invoke("agent_write", { id, data: "\u001b[24~", raw: true });
-          await new Promise((r) => setTimeout(r, 120));
-          await invoke("agent_write", { id, data: command, raw: true });
-          await new Promise((r) => setTimeout(r, 80));
-          await invoke("agent_write", { id, data: "\r", raw: true });
-        }
-
-        // Persist the selected mode so a later resume starts with the same
-        // policy. This does not restart or replace the running PTY.
-        await invoke("agent_set_session_config", { id, mode });
-        const latest = useStore.getState().agents.get(id);
-        if (latest) useStore.getState().addAgent({ ...latest, mode }, null);
-        useStore.getState().setPermissionMode(mode);
-      } catch (error) {
-        console.error("permission mode switch failed:", error);
-      } finally {
-        permissionSwitchingRef.current = false;
-      }
-    },
-    [activeTab?.agentId, permissionModes]
-  );
-
-  const applyModel = useCallback(
-    async (modelId: string, effortId?: string) => {
-      if (modelSwitchingRef.current) return;
-      const s = useStore.getState();
-      const id = activeTab?.agentId;
-      const agent = id ? s.agents.get(id) : undefined;
-      if (!id || !agent) {
-        s.setSelectedModel(modelId);
-        return;
-      }
-
-      modelSwitchingRef.current = true;
-      try {
-        const resumed = !s.agentChannels.has(id) ? await ensureAgentChannel(id) : false;
-        if (resumed) await new Promise((resolve) => setTimeout(resolve, 250));
-
-        if (agent.runtime === "codex") {
-          const modelIndex = models.findIndex((model) => model.id === modelId);
-          if (modelIndex < 0) throw new Error(`Unsupported Codex model: ${modelId}`);
-          await invoke("agent_write", { id, data: "/model", raw: true });
-          await new Promise((resolve) => setTimeout(resolve, 40));
-          await invoke("agent_write", { id, data: "\r", raw: true });
-          await new Promise((resolve) => setTimeout(resolve, 180));
-          await invoke("agent_write", { id, data: "\u001b[H", raw: true });
-          for (let i = 0; i < modelIndex; i++) {
-            await invoke("agent_write", { id, data: "\u001b[B", raw: true });
-            if (i + 1 < modelIndex) await new Promise((resolve) => setTimeout(resolve, 35));
-          }
-          await invoke("agent_write", { id, data: "\r", raw: true });
-          if (effortId) {
-            // The model selection opens Codex's "Select Reasoning Level" popup
-            // with the model's default effort highlighted. Move to the chosen
-            // tier and confirm, so the whole selection happens in the GUI.
-            await new Promise((resolve) => setTimeout(resolve, 260));
-            const nativeEffort = effortId === "auto" ? null : SPEED_TO_EFFORT[effortId];
-            if (nativeEffort) {
-              const efforts = models.find((m) => m.id === modelId)?.efforts ?? [];
-              const defaultIndex = efforts.findIndex((e) => e.is_default);
-              const targetIndex = efforts.findIndex((e) => e.id === nativeEffort);
-              const base = defaultIndex >= 0 ? defaultIndex : 0;
-              if (targetIndex >= 0 && targetIndex !== base) {
-                const delta = targetIndex - base;
-                const key = delta > 0 ? "\u001b[B" : "\u001b[A";
-                for (let i = 0; i < Math.abs(delta); i++) {
-                  await invoke("agent_write", { id, data: key, raw: true });
-                  if (i + 1 < Math.abs(delta)) {
-                    await new Promise((resolve) => setTimeout(resolve, 35));
-                  }
-                }
-              }
-            }
-            await invoke("agent_write", { id, data: "\r", raw: true });
-          } else {
-            // No effort chosen in the GUI (single-effort model or legacy path):
-            // leave the reasoning popup open and hand focus to the terminal.
-            useStore.getState().requestFocus("terminal");
-          }
-        } else if (agent.runtime === "claude") {
-          await invoke("agent_write", { id, data: `/model ${modelId}`, raw: true });
-          await new Promise((resolve) => setTimeout(resolve, 30));
-          await invoke("agent_write", { id, data: "\r", raw: true });
-        } else if (agent.runtime === "opencode") {
-          const modelPart = modelId.includes("/")
-            ? modelId.slice(modelId.lastIndexOf("/") + 1)
-            : modelId;
-          const modelName =
-            models.find((model) => model.id === modelId)?.name ??
-            modelPart.replace(/-/g, " ");
-          // Ctrl+P opens the command palette; F12 is remapped to command_list
-          // via OPENCODE_TUI_CONFIG. Type "model", Enter to open the dialog.
-          await invoke("agent_write", { id, data: "\u0010", raw: true });
-          await new Promise((resolve) => setTimeout(resolve, 120));
-          await invoke("agent_write", { id, data: "\u001b[24~", raw: true });
-          await new Promise((resolve) => setTimeout(resolve, 120));
-          await invoke("agent_write", { id, data: "model", raw: true });
-          await new Promise((resolve) => setTimeout(resolve, 100));
-          await invoke("agent_write", { id, data: "\r", raw: true });
-          await new Promise((resolve) => setTimeout(resolve, 320));
-          // DialogModel filters by the catalog display name; the top match
-          // is selected, so Enter applies the model.
-          await invoke("agent_write", { id, data: modelName, raw: true });
-          await new Promise((resolve) => setTimeout(resolve, 120));
-          await invoke("agent_write", { id, data: "\r", raw: true });
-        }
-
-        await invoke("agent_set_session_config", {
-          id,
-          model: modelId,
-          speed: effortId ?? undefined,
-        });
-        const latest = useStore.getState().agents.get(id);
-        if (latest) {
-          useStore.getState().addAgent(
-            { ...latest, model: modelId, speed: effortId ?? latest.speed },
-            null
-          );
-        }
-        useStore.getState().setSelectedModel(modelId);
-        if (effortId) useStore.getState().setSpeed(effortId as never);
-      } catch (error) {
-        console.error("model switch failed:", error);
-      } finally {
-        modelSwitchingRef.current = false;
-      }
-    },
-    [activeTab?.agentId, models]
-  );
-
-  const applyThinkingSpeed = useCallback(
-    async (nextSpeed: string) => {
-      if (thinkingSwitchingRef.current) return;
-      const s = useStore.getState();
-      const id = activeTab?.agentId;
-      const agent = id ? s.agents.get(id) : undefined;
-      if (!id || !agent) {
-        s.setSpeed(nextSpeed as never);
-        return;
-      }
-
-      const previousSpeed = agent.speed ?? s.speed;
-      if (nextSpeed === previousSpeed) return;
-
-      thinkingSwitchingRef.current = true;
-      try {
-        // If the restored session has no running PTY, only persist the choice;
-        // selecting an effort must not start/restart a session as a side effect.
-        if (s.agentChannels.has(id)) {
-          if (agent.runtime === "codex") {
-            // Codex exposes live, non-modal effort controls: Shift+Up raises
-            // reasoning and Shift+Down lowers it. Move from the saved/current
-            // tier to the requested tier without opening /model or restarting.
-            // Auto corresponds to the model's balanced/default (medium) tier.
-            const effortOrder = ["fast", "mid", "high", "xhigh"];
-            const currentIndex =
-              previousSpeed === "auto" ? 1 : effortOrder.indexOf(previousSpeed);
-            const targetIndex =
-              nextSpeed === "auto" ? 1 : effortOrder.indexOf(nextSpeed);
-            if (currentIndex < 0 || targetIndex < 0) {
-              throw new Error(`Unsupported Codex reasoning effort: ${nextSpeed}`);
-            }
-            const delta = targetIndex - currentIndex;
-            const key = delta > 0 ? "\u001b[1;2A" : "\u001b[1;2B";
-            for (let index = 0; index < Math.abs(delta); index++) {
-              await invoke("agent_write", { id, data: key, raw: true });
-              if (index + 1 < Math.abs(delta)) {
-                await new Promise((resolve) => setTimeout(resolve, 35));
-              }
-            }
-          } else if (agent.runtime === "claude") {
-            const nativeEffort =
-              nextSpeed === "fast"
-                ? "low"
-                : nextSpeed === "mid"
-                  ? "medium"
-                  : nextSpeed;
-            await invoke("agent_write", {
-              id,
-              data: `/effort ${nativeEffort}`,
-              raw: true,
-            });
-            await new Promise((resolve) => setTimeout(resolve, 35));
-            await invoke("agent_write", { id, data: "\r", raw: true });
-          }
-        }
-
-        await invoke("agent_set_session_config", { id, speed: nextSpeed });
-        const latest = useStore.getState();
-        latest.setSpeed(nextSpeed as never);
-        const current = latest.agents.get(id);
-        if (current) latest.addAgent({ ...current, speed: nextSpeed }, null);
-      } catch (error) {
-        console.error("thinking effort switch failed:", error);
-      } finally {
-        thinkingSwitchingRef.current = false;
-      }
-    },
-    [activeTab?.agentId, thinkingOptions]
-  );
-
-  const cycleOpenCodeAgent = useCallback(async () => {
-    const s = useStore.getState();
-    const id = activeTab?.agentId;
-    const agent = id ? s.agents.get(id) : undefined;
-    if (!id || agent?.runtime !== "opencode") return;
-    try {
-      const resumed = !s.agentChannels.has(id) ? await ensureAgentChannel(id) : false;
-      if (resumed) await new Promise((resolve) => setTimeout(resolve, 250));
-      // OpenCode owns primary-agent switching in its native TUI. One Tab moves
-      // to the next primary agent (Build ⇄ Plan in the default configuration).
-      await invoke("agent_write", { id, data: "\t", raw: true });
-      setOpenCodeAgentModes((current) => ({
-        ...current,
-        [id]: current[id] === "Plan" ? "Build" : "Plan",
-      }));
-    } catch (error) {
-      console.error("OpenCode agent switch failed:", error);
-    }
-  }, [activeTab?.agentId]);
-
-  // ── Esc → abort the target agent's current operation ──────────
-  // Sends a raw ESC byte to the agent's PTY — the same path the terminal uses
-  // (xterm keydown → agent_write raw:true), so the CLI aborts its in-flight
-  // turn exactly like pressing Esc inside the terminal.
-  const abortAgentOperation = useCallback(() => {
-    const id = activeTab?.agentId;
-    if (!id || !agents.has(id)) return;
-    invoke("agent_write", { id, data: "\u001b", raw: true }).catch(() => {});
-  }, [activeTab?.agentId, agents]);
-
-  // ── Popover open/close (click-outside + Escape) ───────────────
-  useEffect(() => {
-    if (!modelMenuOpen && !permissionMenuOpen && !thinkingMenuOpen) return;
-    const onDown = (e: MouseEvent) => {
-      const t = e.target as Node | null;
-      if (modelMenuRef.current?.contains(t)) return;
-      if (modelAnchorRef.current?.contains(t)) return;
-      if (permissionMenuRef.current?.contains(t)) return;
-      if (permissionAnchorRef.current?.contains(t)) return;
-      if (thinkingMenuRef.current?.contains(t)) return;
-      if (thinkingAnchorRef.current?.contains(t)) return;
-      setModelMenuOpen(false);
-      setPermissionMenuOpen(false);
-      setThinkingMenuOpen(false);
-      setPendingEffortModel(null);
-    };
-    const onKey = (e: globalThis.KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setModelMenuOpen(false);
-        setPermissionMenuOpen(false);
-        setThinkingMenuOpen(false);
-        setPendingEffortModel(null);
-      }
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [modelMenuOpen, permissionMenuOpen, thinkingMenuOpen]);
 
   useEffect(() => {
     if (!refMenuOpen) return;
@@ -738,11 +273,7 @@ export function Composer() {
       // Dismiss any open popover first so focus can't straddle the two areas.
       setAtMenu(null);
       setSlashMenuStack([]);
-      setModelMenuOpen(false);
-      setPermissionMenuOpen(false);
-      setThinkingMenuOpen(false);
       setRefMenuOpen(false);
-      setPendingEffortModel(null);
       if (inputFocused) {
         if (hasTerminal) st.requestFocus("terminal");
         // No terminal to move to — leave focus in the input.
@@ -1413,7 +944,8 @@ export function Composer() {
     let justSpawned = false;
     try {
       if (!agentId) {
-        agentId = await spawnAgent();
+        // Phase 5: a new session defaults to the structured backend.
+        agentId = await createDefaultAgent();
         justSpawned = true;
       }
 
@@ -1530,26 +1062,8 @@ export function Composer() {
         handleSend();
       } else if (e.key === "Tab") {
         e.preventDefault();
-        if (e.shiftKey) {
-          // In OpenCode, Shift+Tab in CaPilot's composer mirrors the native
-          // primary-agent switch: Build ⇄ Plan. Permission switching remains
-          // available from its dedicated button/menu.
-          if (configRuntimeId === "opencode") {
-            void cycleOpenCodeAgent();
-            return;
-          }
-          if (permissionModes.length === 0) return;
-          const idx = permissionModes.findIndex((mode) => mode.id === shownMode);
-          const next = permissionModes[(idx + 1 + permissionModes.length) % permissionModes.length];
-          if (next.requires_confirmation && shownMode !== next.id) {
-            setPendingPermissionMode(next);
-          } else {
-            void applyPermissionMode(next.id);
-          }
-        } else {
-          // Tab: 在打开的终端 + 待分配 之间循环发送目标（见 cycleSendTarget）.
-          cycleSendTarget();
-        }
+        // Tab: 在打开的终端 + 待分配 之间循环发送目标（见 cycleSendTarget）.
+        cycleSendTarget();
       } else if (e.key === "ArrowUp" && !e.currentTarget.value) {
         e.preventDefault();
         const draft = navigateDraft(1);
@@ -1563,10 +1077,9 @@ export function Composer() {
           e.currentTarget.value = draft;
         }
       } else if (e.key === "Escape") {
-        // 终端式中断：向目标 agent 的 PTY 发原始 ESC 字节。模型/文件弹出
-        // 菜单打开时，这次 Esc 只负责关菜单（窗口级监听），不中断。
-        e.preventDefault();
-        if (!modelMenuOpen && !permissionMenuOpen && !thinkingMenuOpen && !refMenuOpen) abortAgentOperation();
+        // 关闭文件引用菜单（Phase 5：模型/权限/思考菜单与终端式中断已随
+        // 旧版 PTY Agent 的按键注入一并移除）。
+        if (refMenuOpen) setRefMenuOpen(false);
       }
     },
     [
@@ -1579,17 +1092,8 @@ export function Composer() {
       insertAtItem,
       handleSend,
       cycleSendTarget,
-      shownMode,
-      permissionModes,
-      configRuntimeId,
-      cycleOpenCodeAgent,
-      applyPermissionMode,
       navigateDraft,
-      modelMenuOpen,
-      permissionMenuOpen,
-      thinkingMenuOpen,
       refMenuOpen,
-      abortAgentOperation,
     ]
   );
 
@@ -1599,8 +1103,7 @@ export function Composer() {
       resizeTextarea(el);
       setIsBangInput(el.value.trimStart().startsWith("!"));
       setHasInput(el.value.trim().length > 0);
-      // Typing dismisses the popover menus (模型选择 / 文件引用).
-      setModelMenuOpen(false);
+      // Typing dismisses the file-reference popover.
       setRefMenuOpen(false);
       if (slashMenuStack.length > 0) {
         // At the root level the trigger is live text: deleting the `/` or
@@ -1665,6 +1168,33 @@ export function Composer() {
 
   const effH = composerH;
 
+  // ── Phase 5 gates ──────────────────────────────────────────────
+  // Structured agents have their own composer inside AgentPanel — this global
+  // bar adds nothing for them. Legacy PTY Agent sessions (claude/codex/opencode)
+  // are read-only EOL: the bar shows the retirement notice instead of an input,
+  // and no keystroke / prompt injection is possible (the backend refuses
+  // `agent_write` for them as well).
+  if (activeIsStructured) {
+    return (
+      <div className="composer composer-gated">
+        <div className="composer-gate-note">
+          <Icon name="bot" size={13} style={{ marginRight: 6 }} />
+          结构化 Agent 会话请在面板内直接输入（AgentPanel 自带输入框与配置条）。
+        </div>
+      </div>
+    );
+  }
+  if (activeIsLegacyAgent) {
+    return (
+      <div className="composer composer-gated">
+        <div className="composer-gate-note composer-gate-eol">
+          <Icon name="triangle-alert" size={13} style={{ marginRight: 6 }} />
+          该会话为旧版 PTY Agent，已进入只读兼容模式（EOL）。请通过「新建 Agent」创建结构化 Agent 会话以继续工作。
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       ref={composerRef}
@@ -1724,13 +1254,6 @@ export function Composer() {
           )}
         </span>
         <ContextWindowMeter
-          agentId={
-            effectiveTarget?.kind === "agent"
-              ? effectiveTarget.agentId
-              : undefined
-          }
-        />
-        <CacheHitRate
           agentId={
             effectiveTarget?.kind === "agent"
               ? effectiveTarget.agentId
@@ -1850,10 +1373,10 @@ export function Composer() {
                           </span>
                         ))}
                       </span>{" "}
-                      {configRuntime?.name ?? configRuntimeId}
+                      {activeRuntime ?? "终端"}
                     </>
                   ) : (
-                    configRuntime?.name ?? configRuntimeId
+                    activeRuntime ?? "终端"
                   )}
                 </span>
                 <span>内置命令 / 自定义命令 / 技能</span>
@@ -1908,12 +1431,7 @@ export function Composer() {
           <span
             className="act-btn"
             title="插入文件引用 / 最近文件"
-            onClick={() => {
-              setModelMenuOpen(false);
-              setPermissionMenuOpen(false);
-              setThinkingMenuOpen(false);
-              setRefMenuOpen((o) => !o);
-            }}
+            onClick={() => setRefMenuOpen((o) => !o)}
           >
             +
           </span>
@@ -1951,207 +1469,8 @@ export function Composer() {
           )}
         </span>
 
-        <span className="cmp-pop" ref={modelAnchorRef}>
-          <span
-            className="act-btn"
-            onClick={() => {
-              setRefMenuOpen(false);
-              setPermissionMenuOpen(false);
-              setThinkingMenuOpen(false);
-              setPendingEffortModel(null);
-              setModelMenuOpen((o) => !o);
-            }}
-            title={`选择模型（当前：${currentModel ? currentModel.name : "runtime 默认"}）`}
-          >
-            {currentModel ? currentModel.name : "选择模型"}
-          </span>
-          {modelMenuOpen && (
-            <div className="cmp-menu" ref={modelMenuRef} role="menu">
-              {pendingEffortModel ? (
-                <>
-                  <div
-                    className="cmp-menu-item"
-                    onClick={() => setPendingEffortModel(null)}
-                  >
-                    <span className="cmp-menu-name">
-                      <Icon name="arrow-left" size={13} style={{ marginRight: 6 }} /> 返回
-                    </span>
-                  </div>
-                  <div className="cmp-menu-label">选择推理强度</div>
-                  {pendingEffortOptions.map((option) => (
-                    <div
-                      key={option.id}
-                      className={`cmp-menu-item${option.id === shownSpeed ? " current" : ""}`}
-                      title={option.description}
-                      onClick={() => {
-                        void applyModel(pendingEffortModel, option.id);
-                        setPendingEffortModel(null);
-                        setModelMenuOpen(false);
-                      }}
-                    >
-                      <span className="cmp-menu-name">{option.label}</span>
-                      {option.id === shownSpeed && (
-                        <span className="cmp-menu-check">
-                          <Icon name="check" size={12} />
-                        </span>
-                      )}
-                    </div>
-                  ))}
-                </>
-              ) : (
-                <>
-                  <div className="cmp-menu-label">选择模型</div>
-                  {models.length === 0 && (
-                    <div className="cmp-menu-empty">无可用模型</div>
-                  )}
-                  {models.map((m) => (
-                    <div
-                      key={m.id}
-                      className={`cmp-menu-item${m.id === shownModel ? " current" : ""}`}
-                      onClick={() => {
-                        // Codex models with several reasoning efforts drill
-                        // into an effort picker; other runtimes apply directly.
-                        // Only drill down when the model has more than one tier
-                        // the GUI can actually select (avoids an empty submenu
-                        // for models whose efforts are all advanced tiers).
-                        const drillDown =
-                          configRuntimeId === "codex" &&
-                          effortOptionsFor(m.id).length > 1;
-                        if (drillDown) {
-                          setPendingEffortModel(m.id);
-                        } else {
-                          applyModel(m.id);
-                          setModelMenuOpen(false);
-                        }
-                      }}
-                    >
-                      <span className="cmp-menu-name">{m.name}</span>
-                      {m.id === shownModel && (
-                        <span className="cmp-menu-check">
-                          <Icon name="check" size={12} />
-                        </span>
-                      )}
-                    </div>
-                  ))}
-                </>
-              )}
-            </div>
-          )}
-        </span>
-
-        {configRuntimeId === "opencode" && (
-          <span
-            className="act-btn"
-            title="切换 OpenCode Build / Plan"
-            onClick={() => {
-              setRefMenuOpen(false);
-              setModelMenuOpen(false);
-              setPermissionMenuOpen(false);
-              setThinkingMenuOpen(false);
-              void cycleOpenCodeAgent();
-            }}
-          >
-            {configAgentId ? openCodeAgentModes[configAgentId] ?? "Build" : "Build"}
-          </span>
-        )}
-
-        {menuThinkingOptions.length > 0 && (
-          <span className="cmp-pop" ref={thinkingAnchorRef}>
-            <span
-              className="act-btn"
-              title="选择思考强度"
-              onClick={() => {
-                setRefMenuOpen(false);
-                setModelMenuOpen(false);
-                setPermissionMenuOpen(false);
-                setThinkingMenuOpen((open) => !open);
-              }}
-            >
-              <Icon name="zap" size={13} style={{ marginRight: 4 }} />
-              {currentSpeedLabel}
-            </span>
-            {thinkingMenuOpen && (
-              <div className="cmp-menu" ref={thinkingMenuRef} role="menu">
-                <div className="cmp-menu-label">思考强度</div>
-                {menuThinkingOptions.map((option) => (
-                  <div
-                    key={option.id}
-                    className={`cmp-menu-item${option.id === shownSpeed ? " current" : ""}`}
-                    title={option.description}
-                    onClick={() => {
-                      void applyThinkingSpeed(option.id);
-                      setThinkingMenuOpen(false);
-                    }}
-                  >
-                    <span className="cmp-menu-name">{option.label}</span>
-                    {option.id === shownSpeed && (
-                      <span className="cmp-menu-check">
-                        <Icon name="check" size={12} />
-                      </span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </span>
-        )}
         <span className="act-sep" />
-        {permissionModes.length > 0 && (
-          <span className="cmp-pop" ref={permissionAnchorRef}>
-            <span
-              className="act-btn"
-              title="选择权限模式"
-              onClick={() => {
-                setRefMenuOpen(false);
-                setModelMenuOpen(false);
-                setThinkingMenuOpen(false);
-                setPermissionMenuOpen((open) => !open);
-              }}
-            >
-              <Icon name="shield" size={13} style={{ marginRight: 4 }} />
-              {permissionModes.find((mode) => mode.id === shownMode)?.label ?? "权限"}
-            </span>
-            {permissionMenuOpen && (
-              <div className="cmp-menu" ref={permissionMenuRef} role="menu">
-                <div className="cmp-menu-label">权限模式</div>
-                {permissionModes.map((mode) => (
-                  <div
-                    key={mode.id}
-                    className={`cmp-menu-item${shownMode === mode.id ? " current" : ""}`}
-                    title={mode.description}
-                    onClick={() => {
-                      setPermissionMenuOpen(false);
-                      if (mode.requires_confirmation && shownMode !== mode.id) {
-                        setPendingPermissionMode(mode);
-                      } else {
-                        void applyPermissionMode(mode.id);
-                      }
-                    }}
-                  >
-                    <span className="cmp-menu-name">{mode.label}</span>
-                    {shownMode === mode.id && (
-                      <span className="cmp-menu-check">
-                        <Icon name="check" size={12} />
-                      </span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </span>
-        )}
       </div>
-      {pendingPermissionMode && (
-        <PermissionConfirmationDialog
-          modeLabel={pendingPermissionMode.label}
-          onCancel={() => setPendingPermissionMode(null)}
-          onConfirm={() => {
-            const mode = pendingPermissionMode.id;
-            setPendingPermissionMode(null);
-            void applyPermissionMode(mode);
-          }}
-        />
-      )}
     </div>
   );
 }

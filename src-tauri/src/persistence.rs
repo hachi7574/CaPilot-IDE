@@ -19,6 +19,15 @@ use std::sync::Mutex;
 /// Default project used when none is supplied by the frontend.
 pub const DEFAULT_PROJECT: &str = "default";
 
+/// Backend kind for an agent session (structured-agent-runtime-architecture §10.2).
+/// `legacy_pty` marks a PTY-driven TUI session; the structured backends are
+/// `acp` / `direct`. All pre-migration sessions are `legacy_pty` (Phase 0).
+pub const BACKEND_KIND_LEGACY_PTY: &str = "legacy_pty";
+
+fn default_backend_kind() -> String {
+    BACKEND_KIND_LEGACY_PTY.to_string()
+}
+
 // ── Data model ──────────────────────────────────────────────────
 
 /// A persisted agent session row.
@@ -30,6 +39,10 @@ pub struct AgentSessionRecord {
     pub project: String,
     pub runtime: String,
     pub resume_key: Option<String>,
+    /// Structured backend kind: `acp` | `direct` | `legacy_pty` (Phase 0 marks
+    /// all existing rows `legacy_pty`; new structured sessions set `acp`/`direct`).
+    #[serde(default = "default_backend_kind")]
+    pub backend_kind: String,
     pub cwd: PathBuf,
     pub title: String,
     pub status: String, // idle | running | busy | done | failed
@@ -52,6 +65,9 @@ pub struct AgentMeta {
     pub workspace_id: Option<String>,
     pub runtime: String,
     pub resume_key: Option<String>,
+    /// Structured backend kind (same vocabulary as `AgentSessionRecord`).
+    #[serde(default = "default_backend_kind")]
+    pub backend_kind: String,
     pub status: String,
     pub cwd: PathBuf,
     pub title: String,
@@ -112,20 +128,6 @@ pub fn ensure_project(project: &str) -> std::io::Result<PathBuf> {
 
 pub fn agent_dir(project: &str, agent_id: &str) -> PathBuf {
     project_dir(project).join("agents").join(agent_id)
-}
-
-/// Sidecar dir for hook-reported agent status (`~/CaPilot/status/`). Claude Code
-/// lifecycle hooks (injected per-session via `--settings`, see the claude
-/// adapter) write one JSON file per agent here; the frontend polls it to drive
-/// the accurate 运行中/空闲 split. App-owned, never inside a project workspace.
-pub fn status_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join("CaPilot").join("status")
-}
-
-/// The per-agent status sidecar path (`~/CaPilot/status/<agent_id>.json`).
-pub fn status_file(agent_id: &str) -> PathBuf {
-    status_dir().join(format!("{agent_id}.json"))
 }
 
 /// Persist a custom project root (picked folder / git clone) to
@@ -250,6 +252,7 @@ fn empty_agent_meta(project: &str, agent_id: &str) -> AgentMeta {
         workspace_id: None,
         runtime: String::new(),
         resume_key: None,
+        backend_kind: BACKEND_KIND_LEGACY_PTY.to_string(),
         status: "idle".to_string(),
         cwd: agent_dir(project, agent_id),
         title: String::new(),
@@ -273,8 +276,8 @@ where
     F: FnOnce(&mut AgentMeta),
 {
     let _guard = AgentMetaGuard::lock(project, agent_id)?;
-    let mut meta = read_agent_meta(project, agent_id)
-        .unwrap_or_else(|_| empty_agent_meta(project, agent_id));
+    let mut meta =
+        read_agent_meta(project, agent_id).unwrap_or_else(|_| empty_agent_meta(project, agent_id));
     f(&mut meta);
     write_agent_meta(project, &meta)?;
     Ok(meta)
@@ -381,6 +384,7 @@ impl SessionsDb {
                 project    TEXT NOT NULL,
                 runtime    TEXT NOT NULL,
                 resume_key TEXT,
+                backend_kind TEXT NOT NULL DEFAULT 'legacy_pty',
                 cwd        TEXT NOT NULL,
                 title      TEXT NOT NULL DEFAULT '',
                 status     TEXT NOT NULL DEFAULT 'idle',
@@ -425,6 +429,13 @@ impl SessionsDb {
         )?;
         ensure_column(&conn, "sessions", "model", "model TEXT")?;
         ensure_column(&conn, "sessions", "workspace_id", "workspace_id TEXT")?;
+        // Phase 0: mark every pre-existing session as the PTY-driven backend.
+        ensure_column(
+            &conn,
+            "sessions",
+            "backend_kind",
+            "backend_kind TEXT NOT NULL DEFAULT 'legacy_pty'",
+        )?;
         Ok(Self { conn })
     }
 
@@ -452,12 +463,12 @@ impl SessionsDb {
     pub fn insert(&self, s: &AgentSessionRecord) -> rusqlite::Result<()> {
         self.conn.execute(
             "INSERT INTO sessions
-                (id, workspace_id, project, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                (id, workspace_id, project, runtime, resume_key, backend_kind, cwd, title, status, mode, speed, model, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(id) DO UPDATE SET
                 workspace_id=excluded.workspace_id, project=excluded.project, runtime=excluded.runtime,
-                resume_key=excluded.resume_key, cwd=excluded.cwd, title=excluded.title,
-                status=excluded.status, mode=excluded.mode, speed=excluded.speed,
+                resume_key=excluded.resume_key, backend_kind=excluded.backend_kind, cwd=excluded.cwd,
+                title=excluded.title, status=excluded.status, mode=excluded.mode, speed=excluded.speed,
                 model=excluded.model, updated_at=excluded.updated_at",
             params![
                 s.id,
@@ -465,6 +476,7 @@ impl SessionsDb {
                 s.project,
                 s.runtime,
                 s.resume_key,
+                s.backend_kind,
                 s.cwd.to_string_lossy(),
                 s.title,
                 s.status,
@@ -486,32 +498,10 @@ impl SessionsDb {
         Ok(())
     }
 
-    pub fn update_runtime(&self, id: &str, runtime: &str, updated_at: i64) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "UPDATE sessions SET runtime = ?1, updated_at = ?2 WHERE id = ?3",
-            params![runtime, updated_at, id],
-        )?;
-        Ok(())
-    }
-
     pub fn update_title(&self, id: &str, title: &str, updated_at: i64) -> rusqlite::Result<()> {
         self.conn.execute(
             "UPDATE sessions SET title = ?1, updated_at = ?2 WHERE id = ?3",
             params![title, updated_at, id],
-        )?;
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub fn update_resume_key(
-        &self,
-        id: &str,
-        resume_key: &str,
-        updated_at: i64,
-    ) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "UPDATE sessions SET resume_key = ?1, updated_at = ?2 WHERE id = ?3",
-            params![resume_key, updated_at, id],
         )?;
         Ok(())
     }
@@ -536,7 +526,7 @@ impl SessionsDb {
     pub fn get(&self, id: &str) -> rusqlite::Result<Option<AgentSessionRecord>> {
         self.conn
             .query_row(
-                "SELECT id, workspace_id, project, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at
+                "SELECT id, workspace_id, project, runtime, resume_key, backend_kind, cwd, title, status, mode, speed, model, created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 params![id],
                 Self::row_to_session,
@@ -547,7 +537,7 @@ impl SessionsDb {
     pub fn list_all(&self) -> rusqlite::Result<Vec<AgentSessionRecord>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, workspace_id, project, runtime, resume_key, cwd, title, status, mode, speed, model, created_at, updated_at FROM sessions ORDER BY updated_at DESC")?;
+            .prepare("SELECT id, workspace_id, project, runtime, resume_key, backend_kind, cwd, title, status, mode, speed, model, created_at, updated_at FROM sessions ORDER BY updated_at DESC")?;
         let rows = stmt.query_map([], Self::row_to_session)?;
         rows.collect()
     }
@@ -559,10 +549,8 @@ impl SessionsDb {
     }
 
     pub fn delete_project(&self, project: &str) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "DELETE FROM sessions WHERE project = ?1",
-            params![project],
-        )?;
+        self.conn
+            .execute("DELETE FROM sessions WHERE project = ?1", params![project])?;
         Ok(())
     }
 
@@ -604,14 +592,15 @@ impl SessionsDb {
             project: row.get(2)?,
             runtime: row.get(3)?,
             resume_key: row.get(4)?,
-            cwd: PathBuf::from(row.get::<_, String>(5)?),
-            title: row.get(6)?,
-            status: row.get(7)?,
-            mode: row.get(8)?,
-            speed: row.get(9)?,
-            model: row.get(10)?,
-            created_at: row.get(11)?,
-            updated_at: row.get(12)?,
+            backend_kind: row.get(5)?,
+            cwd: PathBuf::from(row.get::<_, String>(6)?),
+            title: row.get(7)?,
+            status: row.get(8)?,
+            mode: row.get(9)?,
+            speed: row.get(10)?,
+            model: row.get(11)?,
+            created_at: row.get(12)?,
+            updated_at: row.get(13)?,
         })
     }
 }
@@ -722,6 +711,7 @@ pub fn repair_agent_meta(db: &SessionsDb) -> std::io::Result<usize> {
                 workspace_id: rec.workspace_id.clone(),
                 runtime: rec.runtime.clone(),
                 resume_key: rec.resume_key.clone(),
+                backend_kind: rec.backend_kind.clone(),
                 status: rec.status.clone(),
                 cwd: rec.cwd.clone(),
                 title: rec.title.clone(),
@@ -748,6 +738,7 @@ mod tests {
             project: "test".into(),
             runtime: "claude".into(),
             resume_key: Some("k1".into()),
+            backend_kind: BACKEND_KIND_LEGACY_PTY.into(),
             cwd: PathBuf::from("/tmp/w/agents/abc"),
             title: "布偶".into(),
             status: "running".into(),
@@ -787,10 +778,8 @@ mod tests {
 
     #[test]
     fn delete_project_uses_persisted_identity_not_cwd() {
-        let path = std::env::temp_dir().join(format!(
-            "capilot-project-delete-{}.db",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("capilot-project-delete-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let db = SessionsDb::open(&path).unwrap();
         let mut session = sample();
@@ -816,6 +805,7 @@ mod tests {
             workspace_id: Some("wks_meta".into()),
             runtime: "claude".into(),
             resume_key: None,
+            backend_kind: BACKEND_KIND_LEGACY_PTY.into(),
             status: "running".into(),
             cwd: target.clone(),
             title: "t".into(),
@@ -959,6 +949,7 @@ mod tests {
             workspace_id: None,
             runtime: "claude".into(),
             resume_key: None,
+            backend_kind: BACKEND_KIND_LEGACY_PTY.into(),
             status: "running".into(),
             cwd: dir.clone(),
             title: "t".into(),

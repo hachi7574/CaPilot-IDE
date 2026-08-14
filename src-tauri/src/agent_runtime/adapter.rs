@@ -114,21 +114,14 @@ pub struct AgentInfo {
 /// optional — a provider with no trustworthy value omits the field instead of
 /// estimating.
 ///
-/// The two `cache_*` fields are SESSION-CUMULATIVE prompt-token counts feeding
-/// the cache hit rate (`cache_hit_tokens / cache_total_input_tokens`). Each
-/// adapter normalizes its runtime's accounting into this pair — the definition
-/// of "hit" and "total prompt" differs per provider (Claude's `input_tokens`
-/// excludes cache reads; codex's `input_tokens` already includes them;
-/// opencode's `tokens.input` excludes cache reads and reports
-/// `cache.read/write` separately), so the ratio is only computed at the display
-/// layer.
+/// Cache-hit accounting was removed (structured-agent-runtime-architecture §12.1);
+/// account-level quota lives in the independent provider quota service
+/// (`usage.rs`), never in this session sample.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentUsage {
     pub context_window_used_tokens: Option<u64>,
     pub context_window_max_tokens: Option<u64>,
-    pub cache_hit_tokens: Option<u64>,
-    pub cache_total_input_tokens: Option<u64>,
 }
 
 /// Summary of an available runtime detected on the system
@@ -172,16 +165,6 @@ pub trait AgentRuntimeAdapter: Send + Sync {
     /// Returns (command, args) to execute.
     fn spawn_interactive(&self, session: &AgentSession) -> Result<(String, Vec<String>), String>;
 
-    /// Args that are CaPilot infrastructure and must survive a user launch
-    /// override (Settings → 已安装 → ⚙), which replaces the adapter's arg list
-    /// wholesale. The status-hook injection (claude `--settings`, codex `-p`
-    /// profile) is what makes lifecycle status reporting work; without it the
-    /// tab strip silently falls back to PTY-activity heuristics. `lib.rs`
-    /// re-appends this set after applying an override. Default: no args.
-    fn status_hook_args(&self, _session: &AgentSession) -> Vec<String> {
-        vec![]
-    }
-
     /// Provider-specific environment injected into this one PTY process.
     /// Keeping this session-scoped avoids modifying the user's global CLI
     /// configuration just to make an IDE integration reliable.
@@ -191,19 +174,6 @@ pub trait AgentRuntimeAdapter: Send + Sync {
 
     /// Build args to resume an existing session
     fn resume_args(&self, session: &AgentSession) -> Vec<String>;
-
-    /// Does this runtime have a resumable session concept? `false` runtimes
-    /// (e.g. bash) skip resume-key capture after a fresh spawn.
-    fn supports_resume(&self) -> bool {
-        false
-    }
-
-    /// Best-effort: after a fresh interactive spawn, discover the provider
-    /// session the just-started process created, so a later `agent_resume` can
-    /// continue it. `None` when nothing is detectable yet / not applicable.
-    fn capture_resume_key(&self, _cwd: &std::path::Path) -> Option<String> {
-        None
-    }
 
     /// Provider's estimate of the current active-context occupancy for the agent
     /// running in `cwd` with `model`. Default: the runtime reports no context

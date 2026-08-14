@@ -1,3 +1,4 @@
+pub mod agent_provider;
 pub mod agent_runtime;
 pub mod bridge;
 pub mod daemon;
@@ -8,17 +9,21 @@ pub mod persistence;
 mod resource;
 pub mod session_store;
 mod slash;
+pub mod terminal;
 mod usage;
 
-use agent_runtime::adapter::{AgentError, AgentInfo, AgentRuntimeAdapter, AgentSession, AgentUsage};
-use agent_runtime::pty_core::OnExit;
+use agent_provider::manager::{NewAgentRequest, ResumeAgentRequest};
+use agent_provider::types::{AgentPrompt, ConfigValue, TurnId};
+use agent_runtime::adapter::{
+    AgentError, AgentInfo, AgentRuntimeAdapter, AgentSession, AgentUsage,
+};
 use agent_runtime::runtimes::{get_adapter, known_runtimes};
 use persistence::{
     agent_dir, ensure_project, read_agent_meta, write_agent_meta, AgentMeta, AgentSessionRecord,
     Persistence, DEFAULT_PROJECT,
 };
-use session_store::SESSION_END_MODE_KEY;
 use serde::{Deserialize, Serialize};
+use session_store::SESSION_END_MODE_KEY;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -26,6 +31,7 @@ use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
 use tauri::{Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
+use terminal::pty_core::OnExit;
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -303,6 +309,7 @@ fn build_and_spawn(
         workspace_id: Some(workspace_id.clone()),
         runtime: runtime.to_string(),
         resume_key: persisted_key.clone(),
+        backend_kind: persistence::BACKEND_KIND_LEGACY_PTY.to_string(),
         status: "running".to_string(),
         cwd: cwd.clone(),
         title: info.title.clone(),
@@ -324,6 +331,7 @@ fn build_and_spawn(
         project: project.to_string(),
         runtime: runtime.to_string(),
         resume_key: persisted_key,
+        backend_kind: persistence::BACKEND_KIND_LEGACY_PTY.to_string(),
         cwd: cwd.clone(),
         title: info.title.clone(),
         status: "running".to_string(),
@@ -345,12 +353,9 @@ fn build_and_spawn(
 /// Apply user-configured launch overrides (Settings → 已安装 → ⚙) to the
 /// adapter's spawn argv. A non-empty command replaces the adapter's executable;
 /// a non-empty args string replaces the adapter's argument list wholesale.
-/// Because a wholesale replacement would drop the adapter's mandatory
-/// infrastructure — permission/speed flags and the status-hook injection
-/// (claude `--settings`, codex `-p` profile) — those are re-appended on top of
-/// the user's args so lifecycle status keeps reporting. Without them the tab
-/// strip silently falls back to PTY-activity heuristics: a long tool gap reads
-/// as a false 空闲 and input echo reads as a false 运行中.
+/// Permission/speed flags are re-appended on top of the user's args so the
+/// legacy spawn keeps its configured policy (the status-hook injection was
+/// retired in Phase 5).
 fn apply_launch_overrides(
     adapter: &dyn AgentRuntimeAdapter,
     session: &AgentSession,
@@ -358,14 +363,18 @@ fn apply_launch_overrides(
     (mut cmd, mut args): (String, Vec<String>),
 ) -> (String, Vec<String>) {
     if let Some(ov) = overrides.get(session.runtime.as_str()) {
-        if let Some(c) = ov.command.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(c) = ov
+            .command
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             cmd = c.to_string();
         }
         if let Some(a) = ov.args.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             args = a.split_whitespace().map(|t| t.to_string()).collect();
             args.extend(adapter.mode_args(&session.mode));
             args.extend(adapter.speed_args(&session.speed));
-            args.extend(adapter.status_hook_args(&session));
         }
     }
     (cmd, args)
@@ -435,7 +444,6 @@ async fn agent_spawn(
     // otherwise it stays brand-new (no auto-detect) so it can't hijack the
     // newest session in a shared cwd.
     let resume = resume_key.is_some();
-    let cwd_for_capture = cwd.clone();
     let info = build_and_spawn(
         bridge.inner(),
         persistence.inner(),
@@ -454,45 +462,10 @@ async fn agent_spawn(
         on_data,
     )?;
 
-    // Best-effort: capture the provider session id the freshly-started process
-    // creates, so a later restart can resume this exact conversation instead of
-    // re-detecting (which would collide when several agents share one cwd, e.g.
-    // a custom-rooted project). Runs in the background so spawn returns at once.
-    if get_adapter(&runtime).supports_resume() {
-        let persistence = persistence.inner().clone();
-        let project = project.clone();
-        let agent_id = agent_id.clone();
-        let runtime = runtime.clone();
-        tokio::spawn(async move {
-            let adapter = get_adapter(&runtime);
-            for _ in 0..5 {
-                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                // If the session was deleted mid-poll, stop before rewriting
-                // .agent-meta.json (which would recreate the removed dir).
-                let still_exists = persistence
-                    .db()
-                    .lock()
-                    .ok()
-                    .and_then(|db| db.get(&agent_id).ok().flatten())
-                    .is_some();
-                if !still_exists {
-                    break;
-                }
-                if let Some(key) = adapter.capture_resume_key(&cwd_for_capture) {
-                    if let Ok(db) = persistence.db().lock() {
-                        let _ = db.update_resume_key(&agent_id, &key, now_ms());
-                    }
-                    if let Ok(mut meta) = read_agent_meta(&project, &agent_id) {
-                        meta.resume_key = Some(key);
-                        meta.updated_at = now_ms();
-                        let _ = write_agent_meta(&project, &meta);
-                    }
-                    break;
-                }
-            }
-        });
-    }
-
+    // Phase 5: no background resume-key capture. The dynamic "newest provider
+    // session in cwd" scan was retired — legacy PTY sessions resume only with
+    // the key persisted in the DB row (written when the session was created or
+    // resumed with an explicit key).
     Ok(info)
 }
 
@@ -567,16 +540,6 @@ struct AgentUsageUpdate {
     usage: Option<AgentUsage>,
 }
 
-/// Per-agent status sidecar read by the frontend (`~/CaPilot/status/<id>.json`).
-/// Written by the claude adapter's lifecycle hook script; `status` is one of
-/// `idle`/`working`/`waiting_input`/`awaiting_choice`/`dormant`, `ts` is epoch
-/// seconds.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct HookStatus {
-    status: String,
-    ts: i64,
-}
-
 /// Compute + cache an agent's current context-window usage and emit it as
 /// `agent://usage`. Best-effort by design: an unknown agent or a runtime with
 /// no usage value returns `Ok(None)` — the command never fails on a missing
@@ -647,23 +610,12 @@ async fn agent_context_usage(
     Ok(usage)
 }
 
-/// Read a claude agent's hook-reported lifecycle status from its sidecar file
-/// (`~/CaPilot/status/<id>.json`). Returns `null` when the file is missing or
-/// unparseable — non-claude runtimes and freshly spawned sessions have no
-/// sidecar yet, and the frontend falls back to activity-based derivation.
-#[tauri::command]
-fn agent_status_read(id: String) -> Option<HookStatus> {
-    let raw = std::fs::read_to_string(persistence::status_file(&id)).ok()?;
-    serde_json::from_str(&raw).ok()
-}
-
 /// Pull journaled lifecycle events that happened while the GUI was offline
 /// (Phase 4b, §6.2). The frontend passes its high-water mark — the highest
 /// `event_seq` it has already applied via live `agent://*` events — and gets
-/// every natural exit / delete-mode removal / hook-status transition recorded
-/// past that point, in journal order, plus the journal's new watermark. Call
-/// this AFTER registering the live listeners so replay and live delivery never
-/// race.
+/// every natural exit / delete-mode removal recorded past that point, in journal
+/// order, plus the journal's new watermark. Call this AFTER registering the live
+/// listeners so replay and live delivery never race.
 #[tauri::command]
 fn agent_sync_events(
     bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
@@ -675,10 +627,26 @@ fn agent_sync_events(
 #[tauri::command]
 async fn agent_write(
     bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
+    persistence: tauri::State<'_, Arc<Persistence>>,
     id: String,
     data: String,
     raw: Option<bool>,
 ) -> Result<(), String> {
+    // Phase 5: legacy PTY Agent sessions (claude/codex/opencode) are read-only
+    // EOL compat entries — no keystroke / prompt injection into their TUIs.
+    // bash terminals (the TerminalService path) stay fully writable.
+    {
+        let db = persistence.db().lock().unwrap();
+        if let Ok(Some(rec)) = db.get(&id) {
+            let runtime = rec.runtime.as_str();
+            if runtime != "bash" && runtime != "bash-rc" {
+                return Err(
+                    "该会话为旧版 PTY Agent（EOL），已进入只读兼容模式；请新建结构化 Agent 会话"
+                        .to_string(),
+                );
+            }
+        }
+    }
     // DevPlan §4.2: composer send = pty_write(文本 + \r) — Enter submits the TUI
     // input line. `raw: true` is used by the xterm panel for keystroke passthrough.
     let payload = if raw.unwrap_or(false) {
@@ -726,71 +694,11 @@ async fn agent_resize(
     bridge.resize(&id, rows, cols).map_err(|e| e.to_string())
 }
 
-/// Switch a tab's runtime: kill old PTY → respawn same context dir with the
-/// new runtime → resume session history (DevPlan §4.8).
-#[tauri::command]
-async fn agent_switch_runtime(
-    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
-    persistence: tauri::State<'_, Arc<Persistence>>,
-    app: tauri::AppHandle,
-    id: String,
-    runtime: String,
-    on_data: Channel<Vec<u8>>,
-) -> Result<AgentInfo, String> {
-    let record = {
-        let db = persistence.db().lock().unwrap();
-        db.get(&id).map_err(|e| e.to_string())?
-    };
-    let Some(rec) = record else {
-        return Err(format!("Session not found: {}", id));
-    };
-
-    // Validate the target runtime BEFORE killing the old PTY so a failed
-    // switch can't brick the session (DevPlan §4.8).
-    let adapter = get_adapter(&runtime);
-    if !adapter.is_available() {
-        return Err(format!(
-            "Cannot switch to '{}': runtime not available",
-            runtime
-        ));
-    }
-
-    bridge.kill(&id).map_err(|e| e.to_string())?;
-    {
-        let db = persistence.db().lock().unwrap();
-        db.update_runtime(&id, &runtime, now_ms())
-            .map_err(|e| e.to_string())?;
-    }
-    let project = rec.project.clone();
-    if let Ok(mut meta) = read_agent_meta(&project, &id) {
-        meta.runtime = runtime.clone();
-        meta.updated_at = now_ms();
-        let _ = write_agent_meta(&project, &meta);
-    }
-
-    build_and_spawn(
-        bridge.inner(),
-        persistence.inner(),
-        &app,
-        &id,
-        &project,
-        rec.workspace_id.clone(),
-        &runtime,
-        true, // runtime switch resumes session history in the same context dir
-        rec.resume_key.clone(),
-        Some(rec.title.clone()),
-        rec.model.clone(),
-        &rec.speed,
-        &rec.mode,
-        rec.cwd.clone(),
-        on_data,
-    )
-}
-
 /// Update a session's composer config (permission mode / speed / model).
 /// Persists to the DB row + `.agent-meta.json` so the next `agent_resume` uses
 /// the new values; the running PTY is intentionally NOT touched (no restart, no
-/// interruption). Omitted fields keep their current value.
+/// interruption). Omitted fields keep their current value. Legacy-compat
+/// surface: structured agents configure through `agent_set_config` instead.
 #[tauri::command]
 async fn agent_set_session_config(
     persistence: tauri::State<'_, Arc<Persistence>>,
@@ -874,6 +782,150 @@ async fn agent_rename(
     }
     rec.title = title;
     Ok(rec)
+}
+
+// ── Structured agent API (architecture §13) ────────────────────────
+//
+// Thin Tauri proxies to the daemon's `AgentManager` via the bridge. The daemon
+// owns the manager and pushes sequenced `AgentEvent`s (forwarded to the frontend
+// as `agent://agent-event` by the bridge); these commands are the pull surface:
+// create/resume/list/snapshot, drive a turn, resolve permissions, and fetch
+// provider catalogs.
+
+#[tauri::command]
+async fn agent_provider_list(
+    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
+) -> Result<Vec<agent_provider::types::ProviderInfo>, String> {
+    bridge.provider_list()
+}
+
+#[tauri::command]
+async fn agent_provider_diagnostic(
+    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
+    provider_id: String,
+) -> Result<agent_provider::types::ProviderDiagnostic, String> {
+    bridge.provider_diagnostic(&provider_id)
+}
+
+#[tauri::command]
+async fn agent_provider_catalog(
+    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
+    provider_id: String,
+    cwd: String,
+) -> Result<agent_provider::types::ProviderCatalog, String> {
+    bridge.provider_refresh_catalog(&provider_id, &cwd)
+}
+
+#[tauri::command]
+async fn agent_create(
+    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
+    agent_id: String,
+    provider_id: String,
+    backend_kind: String,
+    cwd: String,
+    model: Option<String>,
+    config: Vec<(String, ConfigValue)>,
+) -> Result<agent_provider::manager::AgentSnapshot, String> {
+    bridge.agent_create(NewAgentRequest {
+        agent_id,
+        provider_id,
+        backend_kind,
+        workspace_id: None,
+        cwd: cwd.into(),
+        model,
+        config,
+    })
+}
+
+#[tauri::command]
+async fn agent_resume_structured(
+    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
+    agent_id: String,
+    provider_id: String,
+    runtime_session_id: String,
+    cwd: String,
+    model: Option<String>,
+    config: Vec<(String, ConfigValue)>,
+) -> Result<agent_provider::manager::AgentSnapshot, String> {
+    bridge.agent_resume(ResumeAgentRequest {
+        agent_id,
+        handle: agent_provider::types::PersistenceHandle {
+            provider_id,
+            runtime_session_id,
+            native_handle: None,
+            metadata: None,
+        },
+        cwd: cwd.into(),
+        model,
+        config,
+    })
+}
+
+#[tauri::command]
+async fn agent_snapshot(
+    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
+    agent_id: String,
+) -> Result<agent_provider::manager::AgentSnapshot, String> {
+    bridge.agent_get_snapshot(&agent_id)
+}
+
+#[tauri::command]
+async fn agent_start_turn(
+    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
+    agent_id: String,
+    client_message_id: String,
+    text: String,
+) -> Result<TurnId, String> {
+    bridge.agent_start_turn(
+        &agent_id,
+        AgentPrompt {
+            client_message_id,
+            content: vec![agent_provider::types::PromptContent::Text { text }],
+        },
+    )
+}
+
+#[tauri::command]
+async fn agent_interrupt_turn(
+    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
+    agent_id: String,
+) -> Result<(), String> {
+    bridge.agent_interrupt(&agent_id)
+}
+
+#[tauri::command]
+async fn agent_set_config(
+    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
+    agent_id: String,
+    config_id: String,
+    value: ConfigValue,
+) -> Result<(), String> {
+    bridge.agent_set_config_option(&agent_id, &config_id, value)
+}
+
+#[tauri::command]
+async fn agent_respond_permission(
+    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
+    agent_id: String,
+    request_id: String,
+    action_id: String,
+) -> Result<(), String> {
+    bridge.agent_respond_permission(&agent_id, &request_id, &action_id)
+}
+
+#[tauri::command]
+async fn agent_close_structured(
+    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
+    agent_id: String,
+) -> Result<(), String> {
+    bridge.agent_close(&agent_id)
+}
+
+#[tauri::command]
+async fn agent_list_structured(
+    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
+) -> Result<Vec<agent_provider::manager::AgentRecord>, String> {
+    bridge.agent_list()
 }
 
 #[tauri::command]
@@ -1112,15 +1164,8 @@ async fn sessions_delete(
     if dir.starts_with(persistence::workspace_root()) && dir.exists() {
         let _ = std::fs::remove_dir_all(&dir);
     }
-    // Drop the hook-reported status sidecar so the closed agent can't leave a
-    // stale 运行中 file behind.
-    let _ = std::fs::remove_file(persistence::status_file(&id));
-    // Remove the session's codex status-hook config profile (no-op for other
-    // runtimes — `$CODEX_HOME/capilot-<id>.config.toml` simply never exists).
-    crate::agent_runtime::runtimes::codex::CodexAdapter::remove_status_profile(&id);
-    // Remove the session's opencode status-plugin config dir (no-op for other
-    // runtimes — `$XDG_CACHE_HOME/capilot-ide/opencode-status/<id>` never exists).
-    crate::agent_runtime::runtimes::opencode::OpenCodeAdapter::remove_status_plugin(&id);
+    // Phase 5: no status-hook sidecar / codex profile / opencode plugin to
+    // clean up — the hook machinery was retired with the legacy Agent path.
     if let Some(db) = persistence.db_tolerant() {
         let _ = db.delete(&id);
     }
@@ -1131,9 +1176,7 @@ async fn sessions_delete(
 
 /// Read the persisted per-runtime launch overrides map (empty when unset or
 /// malformed). Callers fall back to each adapter's default command/args.
-fn load_runtime_overrides(
-    persistence: &Arc<Persistence>,
-) -> HashMap<String, RuntimeOverride> {
+fn load_runtime_overrides(persistence: &Arc<Persistence>) -> HashMap<String, RuntimeOverride> {
     let db = persistence.db().lock().unwrap();
     match db.get_setting(RUNTIME_OVERRIDES_KEY) {
         Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or_default(),
@@ -2188,11 +2231,23 @@ async fn git_show_commit(repo: String, hash: String) -> Result<GitCommitDetail, 
 
     let names = parse_name_status(&git_run(
         &repo,
-        &["diff-tree", "--no-commit-id", "--name-status", "-r", hash.as_str()],
+        &[
+            "diff-tree",
+            "--no-commit-id",
+            "--name-status",
+            "-r",
+            hash.as_str(),
+        ],
     )?);
     let stats = parse_numstat(&git_run(
         &repo,
-        &["diff-tree", "--no-commit-id", "--numstat", "-r", hash.as_str()],
+        &[
+            "diff-tree",
+            "--no-commit-id",
+            "--numstat",
+            "-r",
+            hash.as_str(),
+        ],
     )?);
     let files = names
         .into_iter()
@@ -2206,10 +2261,7 @@ async fn git_show_commit(repo: String, hash: String) -> Result<GitCommitDetail, 
             }
         })
         .collect();
-    Ok(GitCommitDetail {
-        files,
-        ..detail
-    })
+    Ok(GitCommitDetail { files, ..detail })
 }
 
 /// Parse `git log -1 --pretty=format:%H%x1f%s%x1f%b%x1f%an%x1f%ae%x1f%ct`
@@ -2516,7 +2568,14 @@ mod tests {
 
     #[test]
     fn branch_name_validation_accepts_common_names() {
-        for ok in ["main", "feature/foo", "fix-issue-42", "a_b", "v1.2.3", "user/very-long-name"] {
+        for ok in [
+            "main",
+            "feature/foo",
+            "fix-issue-42",
+            "a_b",
+            "v1.2.3",
+            "user/very-long-name",
+        ] {
             assert!(validate_branch_name(ok).is_ok(), "should accept {ok}");
         }
     }
@@ -2529,10 +2588,20 @@ mod tests {
             "-flag",
             " has space",
             "has\ttab",
-            "..", "foo..bar",
-            "@{", "foo@{",
-            "a~b", "a^b", "a:b", "a?b", "a*b", "a[b", "a\\b",
-            "ends.lock", ".hidden", "trailing.",
+            "..",
+            "foo..bar",
+            "@{",
+            "foo@{",
+            "a~b",
+            "a^b",
+            "a:b",
+            "a?b",
+            "a*b",
+            "a[b",
+            "a\\b",
+            "ends.lock",
+            ".hidden",
+            "trailing.",
         ] {
             assert!(validate_branch_name(bad).is_err(), "should reject {bad:?}");
         }
@@ -2762,6 +2831,7 @@ mod tests {
             workspace_id: Some("wks_a1".into()),
             runtime: "claude".into(),
             resume_key: None,
+            backend_kind: persistence::BACKEND_KIND_LEGACY_PTY.into(),
             status: "idle".into(),
             cwd: old_dir.clone(),
             title: "w".into(),
@@ -2780,6 +2850,7 @@ mod tests {
             project: "oldproj".into(),
             runtime: "claude".into(),
             resume_key: None,
+            backend_kind: persistence::BACKEND_KIND_LEGACY_PTY.into(),
             cwd: old_dir.clone(),
             title: "w".into(),
             status: "idle".into(),
@@ -2883,17 +2954,15 @@ mod tests {
         assert_eq!(cmd, "claude");
         assert!(args.windows(2).any(|v| v == ["--model", "claude-sonnet-5"]));
         assert!(!args.windows(2).any(|v| v == ["--model", "claude-opus-5"]));
-        // ...but mode + the status-hook injection survive the replacement.
+        // ...but the permission mode survives the replacement.
         assert!(args
             .windows(2)
             .any(|v| v == ["--permission-mode", "manual"]));
-        let hooks_path = crate::persistence::status_dir().join("hooks.json");
-        assert!(args
-            .windows(2)
-            .any(|v| v == ["--settings", hooks_path.to_string_lossy().as_ref()]));
+        // No status-hook injection: the `--settings` override (Phase 5
+        // retirement) must not come back through the override path.
+        assert!(!args.windows(2).any(|v| v[0] == "--settings"));
 
-        // codex: the override drops alt-screen; the `-p` profile + trust bypass
-        // must still reach the process so hook status reports.
+        // codex: the override drops alt-screen; no hook profile is re-appended.
         let codex_session = AgentSession {
             id: "ovr".into(),
             runtime: "codex".into(),
@@ -2908,10 +2977,8 @@ mod tests {
         );
         assert_eq!(cmd, "codex");
         assert!(args.iter().any(|a| a == "--no-alt-screen"));
-        assert!(args.windows(2).any(|v| v == ["-p", "capilot-ovr"]));
-        assert!(args
-            .iter()
-            .any(|a| a == "--dangerously-bypass-hook-trust"));
+        assert!(!args.windows(2).any(|v| v == ["-p", "capilot-ovr"]));
+        assert!(!args.iter().any(|a| a == "--dangerously-bypass-hook-trust"));
 
         match prev_home {
             Some(v) => std::env::set_var("HOME", v),
@@ -3027,7 +3094,7 @@ pub fn run() {
                         || target.starts_with("mio");
                     !noisy_http || metadata.level() <= log::LevelFilter::Info
                 })
-                .build()
+                .build(),
         )
         .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {}))
         .plugin(tauri_plugin_process::init())
@@ -3039,14 +3106,24 @@ pub fn run() {
             agent_spawn,
             agent_resume,
             agent_context_usage,
-            agent_status_read,
             agent_sync_events,
             agent_write,
             agent_kill,
             agent_resize,
-            agent_switch_runtime,
             agent_set_session_config,
             agent_rename,
+            agent_provider_list,
+            agent_provider_diagnostic,
+            agent_provider_catalog,
+            agent_create,
+            agent_resume_structured,
+            agent_snapshot,
+            agent_start_turn,
+            agent_interrupt_turn,
+            agent_set_config,
+            agent_respond_permission,
+            agent_close_structured,
+            agent_list_structured,
             sessions_list,
             sessions_delete,
             setting_get,

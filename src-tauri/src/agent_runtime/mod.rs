@@ -1,8 +1,6 @@
 pub mod adapter;
 pub mod cat_breeds;
-pub mod pty_core;
 pub mod runtimes;
-pub mod status_hooks;
 
 /// Serializes tests that repoint the process-global `HOME` / `CODEX_HOME`
 /// (or any env the runtime reads) so parallel test modules never observe each

@@ -8,10 +8,16 @@
 //! in-process `PtyCore`; handshake/protocol failures are hard errors, never a
 //! silent fallback.
 
+use crate::agent_provider::manager::{
+    AgentRecord, AgentSnapshot, NewAgentRequest, ResumeAgentRequest,
+};
+use crate::agent_provider::types::{
+    AgentPrompt, ConfigValue, ProviderCatalog, ProviderDiagnostic, TurnId,
+};
 use crate::daemon::protocol::{
     decode_event_payload, read_frame, write_frame, ClientEvent, Hello, HelloAck, JournalEvent,
-    LiveSessionSummary, ProtocolErr, RequestCmd, Response, FRAME_EVENT, FRAME_HELLO, FRAME_HELLO_ACK,
-    FRAME_REQUEST, FRAME_RESPONSE, PROTOCOL_VERSION,
+    LiveSessionSummary, ProtocolErr, RequestCmd, Response, FRAME_EVENT, FRAME_HELLO,
+    FRAME_HELLO_ACK, FRAME_REQUEST, FRAME_RESPONSE, PROTOCOL_VERSION,
 };
 use crate::daemon::runtime::{read_token, socket_path};
 use serde::Serialize;
@@ -48,6 +54,12 @@ pub enum ClientError {
     NotRunning,
     #[error("daemon handshake failed: {0}")]
     Handshake(String),
+    /// The daemon answered but speaks a different protocol — a leftover
+    /// resident daemon from a previous build (GUI and daemon share one binary,
+    /// so only a stale resident can disagree). The bridge replaces it instead
+    /// of leaving the GUI broken (§8).
+    #[error("daemon protocol {daemon} != client protocol {client} (stale daemon)")]
+    VersionMismatch { daemon: u32, client: u32 },
     #[error("daemon closed the connection")]
     Closed,
     #[error("response timeout")]
@@ -129,16 +141,18 @@ impl DaemonClient {
         if ack_frame.kind != FRAME_HELLO_ACK {
             let msg = serde_json::from_slice::<ProtocolErr>(&ack_frame.payload)
                 .map(|p| p.message)
-                .unwrap_or_else(|_| format!("expected HelloAck, got frame kind {}", ack_frame.kind));
+                .unwrap_or_else(|_| {
+                    format!("expected HelloAck, got frame kind {}", ack_frame.kind)
+                });
             return Err(ClientError::Handshake(msg));
         }
         let ack: HelloAck = serde_json::from_slice(&ack_frame.payload)
             .map_err(|e| ClientError::Handshake(format!("bad HelloAck: {e}")))?;
         if ack.protocol_version != PROTOCOL_VERSION {
-            return Err(ClientError::Handshake(format!(
-                "daemon protocol {} != client protocol {PROTOCOL_VERSION}",
-                ack.protocol_version
-            )));
+            return Err(ClientError::VersionMismatch {
+                daemon: ack.protocol_version,
+                client: PROTOCOL_VERSION,
+            });
         }
 
         let (ev_tx, ev_rx) = std::sync::mpsc::channel();
@@ -195,8 +209,7 @@ impl DaemonClient {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .insert(rid, tx);
-        let payload =
-            serde_json::to_vec(cmd).map_err(|e| ClientError::Handshake(e.to_string()))?;
+        let payload = serde_json::to_vec(cmd).map_err(|e| ClientError::Handshake(e.to_string()))?;
         if let Err(e) = write_frame(
             &mut *self.conn.writer.lock().unwrap_or_else(|p| p.into_inner()),
             FRAME_REQUEST,
@@ -227,7 +240,9 @@ impl DaemonClient {
         match self.request(cmd)? {
             Response::Ok => Ok(()),
             Response::Error { code, message } => Err(ClientError::Request { code, message }),
-            other => Err(ClientError::Handshake(format!("unexpected response: {other:?}"))),
+            other => Err(ClientError::Handshake(format!(
+                "unexpected response: {other:?}"
+            ))),
         }
     }
 
@@ -257,7 +272,9 @@ impl DaemonClient {
                 generation,
             } => Ok((pid, generation)),
             Response::Error { code, message } => Err(ClientError::Request { code, message }),
-            other => Err(ClientError::Handshake(format!("unexpected response: {other:?}"))),
+            other => Err(ClientError::Handshake(format!(
+                "unexpected response: {other:?}"
+            ))),
         }
     }
 
@@ -269,7 +286,13 @@ impl DaemonClient {
         })
     }
 
-    pub fn resize(&self, agent_id: &str, generation: u64, rows: u16, cols: u16) -> Result<(), ClientError> {
+    pub fn resize(
+        &self,
+        agent_id: &str,
+        generation: u64,
+        rows: u16,
+        cols: u16,
+    ) -> Result<(), ClientError> {
         self.request_ok(&RequestCmd::Resize {
             agent_id: agent_id.to_string(),
             generation,
@@ -309,7 +332,9 @@ impl DaemonClient {
                 replay,
             }),
             Response::Error { code, message } => Err(ClientError::Request { code, message }),
-            other => Err(ClientError::Handshake(format!("unexpected response: {other:?}"))),
+            other => Err(ClientError::Handshake(format!(
+                "unexpected response: {other:?}"
+            ))),
         }
     }
 
@@ -324,7 +349,9 @@ impl DaemonClient {
         match self.request(&RequestCmd::List)? {
             Response::Listed { sessions } => Ok(sessions),
             Response::Error { code, message } => Err(ClientError::Request { code, message }),
-            other => Err(ClientError::Handshake(format!("unexpected response: {other:?}"))),
+            other => Err(ClientError::Handshake(format!(
+                "unexpected response: {other:?}"
+            ))),
         }
     }
 
@@ -352,12 +379,173 @@ impl DaemonClient {
     pub fn sync_events(&self, last_seq: u64) -> Result<SyncEventsResult, ClientError> {
         let resp = self.request(&RequestCmd::SyncEvents { last_seq })?;
         match resp {
-            Response::EventLog { last_seq, events } => Ok(SyncEventsResult {
-                last_seq,
-                events,
-            }),
+            Response::EventLog { last_seq, events } => Ok(SyncEventsResult { last_seq, events }),
             Response::Error { code, message } => Err(ClientError::Request { code, message }),
-            other => Err(ClientError::Handshake(format!("unexpected response: {other:?}"))),
+            other => Err(ClientError::Handshake(format!(
+                "unexpected response: {other:?}"
+            ))),
+        }
+    }
+
+    // ── Structured agent API (architecture §13) ──────────────────
+
+    /// Create a structured agent through the daemon's `AgentManager`.
+    pub fn agent_create(&self, request: NewAgentRequest) -> Result<AgentSnapshot, ClientError> {
+        let resp = self.request(&RequestCmd::AgentCreate { request })?;
+        match resp {
+            Response::AgentSnapshot { snapshot } => Ok(*snapshot),
+            Response::Error { code, message } => Err(ClientError::Request { code, message }),
+            other => Err(ClientError::Handshake(format!(
+                "unexpected response: {other:?}"
+            ))),
+        }
+    }
+
+    /// Resume a structured agent from its persisted handle.
+    pub fn agent_resume(&self, request: ResumeAgentRequest) -> Result<AgentSnapshot, ClientError> {
+        let resp = self.request(&RequestCmd::AgentResume { request })?;
+        match resp {
+            Response::AgentSnapshot { snapshot } => Ok(*snapshot),
+            Response::Error { code, message } => Err(ClientError::Request { code, message }),
+            other => Err(ClientError::Handshake(format!(
+                "unexpected response: {other:?}"
+            ))),
+        }
+    }
+
+    /// Point-in-time snapshot for reconnect.
+    pub fn agent_get_snapshot(&self, agent_id: &str) -> Result<AgentSnapshot, ClientError> {
+        let resp = self.request(&RequestCmd::AgentGetSnapshot {
+            agent_id: agent_id.to_string(),
+        })?;
+        match resp {
+            Response::AgentSnapshot { snapshot } => Ok(*snapshot),
+            Response::Error { code, message } => Err(ClientError::Request { code, message }),
+            other => Err(ClientError::Handshake(format!(
+                "unexpected response: {other:?}"
+            ))),
+        }
+    }
+
+    /// Begin a foreground turn.
+    pub fn agent_start_turn(
+        &self,
+        agent_id: &str,
+        prompt: AgentPrompt,
+    ) -> Result<TurnId, ClientError> {
+        let resp = self.request(&RequestCmd::AgentStartTurn {
+            agent_id: agent_id.to_string(),
+            prompt,
+        })?;
+        match resp {
+            Response::AgentTurnStarted { turn_id } => Ok(turn_id),
+            Response::Error { code, message } => Err(ClientError::Request { code, message }),
+            other => Err(ClientError::Handshake(format!(
+                "unexpected response: {other:?}"
+            ))),
+        }
+    }
+
+    /// Cancel the in-flight turn.
+    pub fn agent_interrupt(&self, agent_id: &str) -> Result<(), ClientError> {
+        self.request_ok(&RequestCmd::AgentInterrupt {
+            agent_id: agent_id.to_string(),
+        })
+    }
+
+    pub fn agent_set_config_option(
+        &self,
+        agent_id: &str,
+        config_id: &str,
+        value: ConfigValue,
+    ) -> Result<(), ClientError> {
+        self.request_ok(&RequestCmd::AgentSetConfigOption {
+            agent_id: agent_id.to_string(),
+            config_id: config_id.to_string(),
+            value,
+        })
+    }
+
+    /// Resolve a pending permission request with a declared action.
+    pub fn agent_respond_permission(
+        &self,
+        agent_id: &str,
+        request_id: &str,
+        action_id: &str,
+    ) -> Result<(), ClientError> {
+        self.request_ok(&RequestCmd::AgentRespondPermission {
+            agent_id: agent_id.to_string(),
+            request_id: request_id.to_string(),
+            action_id: action_id.to_string(),
+        })
+    }
+
+    /// Release live resources (close ≠ archive ≠ delete).
+    pub fn agent_close(&self, agent_id: &str) -> Result<(), ClientError> {
+        self.request_ok(&RequestCmd::AgentClose {
+            agent_id: agent_id.to_string(),
+        })
+    }
+
+    /// List structured agent records.
+    pub fn agent_list(&self) -> Result<Vec<AgentRecord>, ClientError> {
+        let resp = self.request(&RequestCmd::AgentList)?;
+        match resp {
+            Response::AgentsListed { agents } => Ok(agents),
+            Response::Error { code, message } => Err(ClientError::Request { code, message }),
+            other => Err(ClientError::Handshake(format!(
+                "unexpected response: {other:?}"
+            ))),
+        }
+    }
+
+    /// List registered providers with their backend kind (acp | direct).
+    pub fn provider_list(
+        &self,
+    ) -> Result<Vec<crate::agent_provider::types::ProviderInfo>, ClientError> {
+        let resp = self.request(&RequestCmd::ProviderList)?;
+        match resp {
+            Response::ProvidersListed { providers } => Ok(providers),
+            Response::Error { code, message } => Err(ClientError::Request { code, message }),
+            other => Err(ClientError::Handshake(format!(
+                "unexpected response: {other:?}"
+            ))),
+        }
+    }
+
+    /// Availability + auth diagnostic for a provider.
+    pub fn provider_diagnostic(
+        &self,
+        provider_id: &str,
+    ) -> Result<ProviderDiagnostic, ClientError> {
+        let resp = self.request(&RequestCmd::ProviderDiagnostic {
+            provider_id: provider_id.to_string(),
+        })?;
+        match resp {
+            Response::ProviderDiagnostic { diagnostic } => Ok(diagnostic),
+            Response::Error { code, message } => Err(ClientError::Request { code, message }),
+            other => Err(ClientError::Handshake(format!(
+                "unexpected response: {other:?}"
+            ))),
+        }
+    }
+
+    /// Fetch a provider's runtime catalog for a working directory.
+    pub fn provider_catalog(
+        &self,
+        provider_id: &str,
+        cwd: &Path,
+    ) -> Result<ProviderCatalog, ClientError> {
+        let resp = self.request(&RequestCmd::ProviderRefreshCatalog {
+            provider_id: provider_id.to_string(),
+            cwd: cwd.to_string_lossy().into_owned(),
+        })?;
+        match resp {
+            Response::ProviderCatalog { catalog } => Ok(catalog),
+            Response::Error { code, message } => Err(ClientError::Request { code, message }),
+            other => Err(ClientError::Handshake(format!(
+                "unexpected response: {other:?}"
+            ))),
         }
     }
 }
@@ -376,11 +564,10 @@ fn reader_loop(mut reader: UnixStream, state: Arc<ConnState>) {
                     .unwrap_or_else(|p| p.into_inner())
                     .remove(&frame.request_id);
                 if let Some(s) = sender {
-                    let resp = serde_json::from_slice(&frame.payload)
-                        .unwrap_or(Response::Error {
-                            code: "bad_response".into(),
-                            message: "malformed response from daemon".into(),
-                        });
+                    let resp = serde_json::from_slice(&frame.payload).unwrap_or(Response::Error {
+                        code: "bad_response".into(),
+                        message: "malformed response from daemon".into(),
+                    });
                     let _ = s.send(resp);
                 }
             }
@@ -486,9 +673,7 @@ mod tests {
         assert!(got_banner, "did not receive the spawn banner");
 
         client.write("c1", generation, "x").expect("write");
-        client
-            .resize("c1", generation, 30, 100)
-            .expect("resize");
+        client.resize("c1", generation, 30, 100).expect("resize");
 
         let sessions = client.list().expect("list");
         assert_eq!(sessions.len(), 1);
@@ -606,7 +791,10 @@ mod tests {
         let result = client
             .attach("c1", generation, 24, 80, None)
             .expect("attach");
-        assert!(result.checkpoint.is_some(), "fresh attach needs a checkpoint");
+        assert!(
+            result.checkpoint.is_some(),
+            "fresh attach needs a checkpoint"
+        );
         assert!(result.replay.is_empty(), "no gap for a fresh attach");
         assert!(result.snapshot_seq >= 1);
 
@@ -673,7 +861,8 @@ mod tests {
         c1.detach().expect("detach");
         c2.attach("c1", generation, 24, 80, None)
             .expect("c2 attach after detach");
-        c2.write("c1", generation, "ping\n").expect("write after take-over");
+        c2.write("c1", generation, "ping\n")
+            .expect("write after take-over");
 
         let _ = c2.shutdown();
         thread.join().unwrap();
@@ -735,13 +924,22 @@ mod tests {
         // Replay from 0 → the exit event + watermark.
         let r = client.sync_events(0).expect("sync_events");
         assert!(r.last_seq >= exited_seq);
-        assert_eq!(r.events.len(), 1, "replay must include the exit: {:?}", r.events);
+        assert_eq!(
+            r.events.len(),
+            1,
+            "replay must include the exit: {:?}",
+            r.events
+        );
         assert_eq!(r.events[0].kind, "exited");
         assert_eq!(r.events[0].exit_code, Some(4));
 
         // Sync from the delivered watermark → nothing new.
         let r = client.sync_events(exited_seq).expect("sync_events");
-        assert!(r.events.is_empty(), "no replay past the watermark: {:?}", r.events);
+        assert!(
+            r.events.is_empty(),
+            "no replay past the watermark: {:?}",
+            r.events
+        );
 
         let _ = client.shutdown();
         thread.join().unwrap();

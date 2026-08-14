@@ -1,10 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import {
   useStore,
   Tab,
   AgentInfo,
-  HookStatus,
   effectiveAgentStatus,
   ACTIVE_WINDOW_MS,
   TODO_DRAG_MIME,
@@ -16,6 +14,11 @@ import {
 import { TerminalTemplatePicker } from "./TerminalTemplatePicker";
 import { RenameAgentModal } from "./RenameAgentModal";
 import { Icon, runtimeIcon } from "../Icon";
+import {
+  useStructuredStore,
+  closeStructuredAgent,
+  AGENT_STATUS_TEXT,
+} from "../../state/structuredAgent";
 
 function projectOf(cwd: string): string {
   const m = cwd.match(/workspaces\/([^/]+)/);
@@ -39,11 +42,22 @@ const STATUS_TEXT = {
   dormant: "休眠中",
 } as const;
 
-/** Runtimes whose backend adapter installs lifecycle status hooks (claude's
- *  `--settings`, codex's per-session config profile, opencode's status
- *  plugin). The tab strip polls the sidecar these hooks write; other runtimes
- *  keep PTY-activity heuristics. */
-const HOOK_STATUS_RUNTIMES = new Set(["claude", "codex", "opencode"]);
+/** Structured Agent Runtime statuses → the existing tab-strip color palette
+ *  (the canonical `AgentStatus` set has no direct 1:1 for every PTY label). */
+const STRUCTURED_STATUS_CLASS: Record<string, string> = {
+  initializing: "st-running",
+  idle: "st-idle",
+  running: "st-running",
+  waiting_permission: "st-waiting_input",
+  waiting_input: "st-waiting_input",
+  error: "st-failed",
+  closed: "st-dormant",
+};
+
+/** Runtimes whose sessions are legacy PTY Agent sessions (EOL, read-only in
+ *  Phase 5). Their tab strip status falls back to PTY-activity heuristics like
+ *  bash — the lifecycle-hook sidecar was retired. */
+const LEGACY_AGENT_RUNTIMES = new Set(["claude", "codex", "opencode"]);
 
 /** Longest-matching project root for an editor file path (or undefined). */
 function projectRootOfPath(
@@ -79,6 +93,11 @@ function tabProject(
     }
     return undefined;
   }
+  if (tab.type === "structured" && tab.agentId) {
+    const view = useStructuredStore.getState().agents.get(tab.agentId);
+    if (view?.snapshot.agent.cwd) return projectOf(view.snapshot.agent.cwd);
+    return undefined;
+  }
   if ((tab.type === "editor" || tab.type === "diff") && tab.filePath) {
     const byRoot = projectRootOfPath(tab.filePath, projectRoots);
     if (byRoot) return byRoot;
@@ -94,9 +113,6 @@ export function TabBar() {
   const agents = useStore((s) => s.agents);
   const agentChannels = useStore((s) => s.agentChannels);
   const agentActiveAt = useStore((s) => s.agentActiveAt);
-  const hookStatus = useStore((s) => s.hookStatus);
-  const agentSubmittedAt = useStore((s) => s.agentSubmittedAt);
-  const unreadCompletion = useStore((s) => s.unreadCompletion);
   const projectRoots = useStore((s) => s.projectRoots);
   const focusedProject = useStore((s) => s.focusedProject);
   const draggedTabId = useStore((s) => s.draggedTabId);
@@ -145,10 +161,15 @@ export function TabBar() {
   }, [tabMenu]);
 
   // Close a single tab exactly like the × button: active/restored sessions get
-  // terminated via closeAgentAction; ended sessions stay recoverable.
+  // terminated via closeAgentAction; ended sessions stay recoverable. Structured
+  // agent tabs close the backend ACP session and drop the view.
   const closeTabById = (id: string) => {
     const tab = tabs.find((t) => t.id === id);
     if (!tab) return;
+    if (tab.type === "structured" && tab.agentId) {
+      closeStructuredAgent(tab.agentId).catch(() => {});
+      return;
+    }
     const agent = tab.agentId ? agents.get(tab.agentId) : undefined;
     if (tab.type === "agent" && tab.agentId) {
       if (agent?.status === "done") {
@@ -203,36 +224,10 @@ export function TabBar() {
     return () => clearInterval(t);
   }, [hasActive]);
 
-  // hook-status poll: the backend sidecar (`~/CaPilot/status/<id>.json`,
-  // written by lifecycle hooks — claude's `--settings`, codex's per-session
-  // config profile) is the authoritative 运行中/空闲 source. Poll once a second
-  // for connected hook-enabled agents. The store's setter is
-  // reference-preserving, so an unchanged status doesn't re-render the strip —
-  // and a removed agent is skipped (no stale re-add).
-  useEffect(() => {
-    const t = setInterval(() => {
-      const s = useStore.getState();
-      const targets: string[] = [];
-      for (const [id, agent] of s.agents) {
-        if (HOOK_STATUS_RUNTIMES.has(agent.runtime) && s.agentChannels.has(id)) {
-          targets.push(id);
-        }
-      }
-      if (targets.length === 0) return;
-      Promise.allSettled(
-        targets.map((id) => invoke<HookStatus | null>("agent_status_read", { id }))
-      ).then((results) => {
-        const st = useStore.getState();
-        targets.forEach((id, i) => {
-          const r = results[i];
-          if (r.status === "fulfilled" && st.agents.has(id)) {
-            st.setHookStatus(id, r.value);
-          }
-        });
-      });
-    }, 1000);
-    return () => clearInterval(t);
-  }, []);
+  // Phase 5: the hook-status sidecar poll was retired. The tab strip derives
+  // 运行中/空闲 purely from connectivity + recency (`effectiveAgentStatus`);
+  // legacy PTY agent sessions (claude/codex/opencode) are read-only EOL and
+  // structured agents report status through the daemon's AgentManager.
 
   const [termPicker, setTermPicker] = useState<{
     x: number;
@@ -429,6 +424,13 @@ export function TabBar() {
     >
       {visibleTabs.map((tab) => {
         const agent = tab.agentId ? agents.get(tab.agentId) : undefined;
+        // Structured agent tabs derive status from the structured store's
+        // snapshot (the PTY agent maps above are empty for them).
+        const structured =
+          tab.type === "structured" && tab.agentId
+            ? useStructuredStore.getState().agents.get(tab.agentId)
+            : undefined;
+        const structuredStatus = structured?.snapshot.agent.status;
         // A PTY channel is attached on spawn/resume and dropped when a session
         // is killed/removed — it is the "connected" signal. Restored sessions
         // have no channel yet, so they must not display as 运行中.
@@ -439,24 +441,16 @@ export function TabBar() {
         const active = tab.agentId
           ? Date.now() - (agentActiveAt.get(tab.agentId) ?? 0) < ACTIVE_WINDOW_MS
           : false;
-        const status = effectiveAgentStatus(
-          agent,
-          connected,
-          active,
-          tab.agentId ? hookStatus.get(tab.agentId) : null,
-          tab.agentId ? agentSubmittedAt.get(tab.agentId) : undefined
-        );
-        // An idle agent whose last completed turn hasn't been viewed reads as
-        // 已完成 (user sent content, agent finished, result unread); otherwise
-        // plain 空闲. Only hook-reporting runtimes can detect a turn boundary.
-        const hasUnread = tab.agentId
-          ? unreadCompletion.has(tab.agentId)
-          : false;
-        const completed = status === "idle" && hasUnread;
-        const statusLabel = completed
-          ? "已完成"
+        const status = structuredStatus
+          ? structuredStatus
+          : effectiveAgentStatus(agent, connected, active);
+        const statusLabel = structuredStatus
+          ? AGENT_STATUS_TEXT[structuredStatus]
           : (STATUS_TEXT[status as keyof typeof STATUS_TEXT] ?? status);
-        const statusClass = completed ? "st-completed" : `st-${status}`;
+        // Structured statuses map onto the existing tab-strip color palette.
+        const statusClass = structuredStatus
+          ? (STRUCTURED_STATUS_CLASS[structuredStatus] ?? "st-idle")
+          : `st-${status}`;
         // Agent records are the live source of truth for terminal names. A
         // tab's title is only the snapshot taken when it was opened, so it can
         // become stale after restoring/resuming a session (or any runtime
@@ -487,16 +481,25 @@ export function TabBar() {
               setDraggedTabId(tab.id);
             }}
             onDragEnd={endTabDrag}
-            // Todo-tag drop target (agent tabs only): assign the task + send its
-            // text to the session, then focus the tab.
+            // Todo-tag drop target (PTY agent tabs + structured agent tabs):
+            // assign the task, send its text to the session (legacy PTY agent
+            // sessions are read-only EOL — the assign still lands, the prompt
+            // injection is refused), then focus the tab.
             onDragOver={(e) => {
-              if (e.dataTransfer.types.includes(TODO_DRAG_MIME)) {
+              if (
+                (tab.type === "agent" || tab.type === "structured") &&
+                e.dataTransfer.types.includes(TODO_DRAG_MIME)
+              ) {
                 e.preventDefault();
                 e.stopPropagation();
               }
             }}
             onDrop={(e) => {
-              if (!e.dataTransfer.types.includes(TODO_DRAG_MIME)) return;
+              if (
+                (tab.type !== "agent" && tab.type !== "structured") ||
+                !e.dataTransfer.types.includes(TODO_DRAG_MIME)
+              )
+                return;
               e.preventDefault();
               e.stopPropagation();
               if (!tab.agentId) return;
@@ -513,13 +516,19 @@ export function TabBar() {
           >
             <span>
               <Icon
-                name={tab.type === "agent" ? runtimeIcon(agent?.runtime ?? "") : "file-text"}
+                name={
+                  tab.type === "agent"
+                    ? runtimeIcon(agent?.runtime ?? "")
+                    : tab.type === "structured"
+                      ? runtimeIcon(structured?.snapshot.agent.provider_id ?? "")
+                      : "file-text"
+                }
                 size={12}
                 style={{ marginRight: 5 }}
               />
               {title}
             </span>
-            {tab.type === "agent" && (
+            {(tab.type === "agent" || tab.type === "structured") && (
               <span className={`tab-status ${statusClass}`}>{statusLabel}</span>
             )}
             <button
@@ -529,11 +538,15 @@ export function TabBar() {
                 closeTabById(tab.id);
               }}
               title={
-                tab.type === "agent" && tab.agentId
-                  ? agent?.status === "done"
-                    ? "关闭（已结束，可从侧栏找回）"
-                    : "关闭并终止"
-                  : "关闭标签"
+                tab.type === "structured"
+                  ? "关闭 Agent"
+                  : tab.type === "agent" && tab.agentId
+                    ? agent?.status === "done"
+                      ? "关闭（已结束，可从侧栏找回）"
+                      : LEGACY_AGENT_RUNTIMES.has(agent?.runtime ?? "")
+                        ? "关闭（旧版 PTY Agent，EOL 只读）"
+                        : "关闭并终止"
+                    : "关闭标签"
               }
             >
               ×

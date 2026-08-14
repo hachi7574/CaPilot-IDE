@@ -8,9 +8,8 @@ interface JournalEvent {
   seq: number;
   ts: number;
   agent_id: string;
-  kind: "exited" | "removed" | "hook_status" | string;
+  kind: "exited" | "removed" | string;
   exit_code?: number | null;
-  status?: string | null;
 }
 
 /**
@@ -85,14 +84,13 @@ export function useSessionRestore() {
  *   kept (marked done). The tab stays open but grays out under "已结束".
  * - `agent://removed` — the "session ended → delete" setting removed the
  *   record; close the tab and drop the agent.
- * - `agent://hook-status` — a status-hook transition (working→idle etc.) from
- *   the daemon's status monitor; drives the same store path as the 1s polling.
  *
  * Every live event carries the journal `event_seq`, which advances the replay
  * watermark. After the listeners are live we call `agent_sync_events` to pull
  * everything journaled while the GUI was offline (natural exits, delete-mode
- * removals, hook transitions) and apply it in order — nothing that happened
- * while we were away is lost (§6.2/§9.4).
+ * removals) and apply it in order — nothing that happened while we were away is
+ * lost (§6.2/§9.4). The status-hook `agent://hook-status` event was retired in
+ * Phase 5.
  */
 export function useAgentEvents() {
   useEffect(() => {
@@ -119,11 +117,6 @@ export function useAgentEvents() {
             s.closeTab(ev.agent_id);
             s.removeAgent(ev.agent_id);
             break;
-          case "hook_status":
-            if (ev.status) {
-              s.setHookStatus(ev.agent_id, { status: ev.status, ts: ev.ts });
-            }
-            break;
         }
       }
     };
@@ -147,33 +140,16 @@ export function useAgentEvents() {
         s.closeTab(e.payload.id);
         s.removeAgent(e.payload.id);
       }),
-      listen<{
-        id: string;
-        status: string;
-        ts: number;
-        event_seq: number;
-      }>("agent://hook-status", (e) => {
-        appliedSeq = Math.max(appliedSeq, e.payload.event_seq ?? 0);
-        const s = useStore.getState();
-        if (s.agents.has(e.payload.id)) {
-          s.setHookStatus(e.payload.id, {
-            status: e.payload.status,
-            ts: e.payload.ts,
-          });
-        }
-      }),
     ])
-      .then(([u1, u2, u3]) => {
+      .then(([u1, u2]) => {
         if (cancelled) {
           u1();
           u2();
-          u3();
           return;
         }
         unlisten = () => {
           u1();
           u2();
-          u3();
         };
         // Replay AFTER the listeners are live: events that race this call are
         // applied by the listeners (idempotent handlers), and their `event_seq`

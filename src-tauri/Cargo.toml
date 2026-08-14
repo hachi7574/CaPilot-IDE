@@ -15,6 +15,20 @@ default-run = "capilot-ide"
 name = "capilot_ide_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# Deterministic ACP agent used only by the ACP conformance integration test
+# (`tests/acp_conformance.rs` drives it via `CARGO_BIN_EXE_fake-acp-agent`).
+# Never referenced by the app, Tauri bundle config, or any production path.
+[[bin]]
+name = "fake-acp-agent"
+path = "src/bin/fake_acp_agent.rs"
+
+# Deterministic Codex `app-server` used only by the shared contract integration
+# test (`tests/contract_conformance.rs` drives it via
+# `CARGO_BIN_EXE_fake-codex-app-server`). Never referenced by production paths.
+[[bin]]
+name = "fake-codex-app-server"
+path = "src/bin/fake_codex_app_server.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useStore } from "../../state/store";
-import { spawnAgent } from "../../state/agentActions";
+import { useStructuredStore, createDefaultAgent } from "../../state/structuredAgent";
 import { Icon } from "../Icon";
 
 /**
@@ -24,16 +24,20 @@ export function Onboarding() {
   const isLast = step === total - 1;
   const isFirst = step === 0;
 
-  /** Create the first agent session, then finish onboarding. */
+  /** Create the first agent session, then finish onboarding. Phase 5: new
+   *  sessions default to the structured backend (createDefaultAgent). */
   const handleCreateAgent = async () => {
     setCreatingAgent(true);
     setAgentErr(null);
     try {
-      if (useStore.getState().agents.size > 0) {
+      if (
+        useStore.getState().agents.size > 0 ||
+        useStructuredStore.getState().agents.size > 0
+      ) {
         setOnboarded(true);
         return;
       }
-      await spawnAgent();
+      await createDefaultAgent();
       setOnboarded(true);
     } catch (e) {
       setAgentErr(`创建失败：${e}。可稍后在左侧栏或底部输入框重试。`);
@@ -116,7 +120,7 @@ export function Onboarding() {
           <div className="onboarding-step">
             <div className="onboarding-step-title">创建第一个 Agent 会话</div>
             <p className="onboarding-step-desc">
-              创建一个 Agent 终端，即可在底部输入框或原生终端界面中开始工作。
+              创建一个结构化 Agent 会话（统一 Timeline 界面），即可在面板内开始工作。
             </p>
             <div className="onboarding-agent">
               {agentErr && (

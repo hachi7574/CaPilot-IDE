@@ -2,8 +2,6 @@ use crate::agent_runtime::adapter::{
     AgentRuntimeAdapter, AgentSession, AgentUsage, ModelInfo, PermissionModeInfo,
     ThinkingOptionInfo,
 };
-use crate::agent_runtime::status_hooks::{ensure_status_hooks, HOOK_ENV_AGENT, HOOK_ENV_DIR};
-use crate::persistence::status_dir;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -12,13 +10,9 @@ use std::time::SystemTime;
 pub struct ClaudeAdapter;
 
 /// Result of one pass over a Claude transcript: the LAST usable assistant
-/// record's summed usage (the live active-context estimate) plus the
-/// session-cumulative cache-read and total-prompt token counts (the cache hit
-/// rate numerator and denominator).
+/// record's summed usage (the live active-context estimate).
 struct TranscriptUsage {
     last_used: Option<u64>,
-    cache_hit: u64,
-    cache_total: u64,
 }
 
 impl ClaudeAdapter {
@@ -45,38 +39,11 @@ impl ClaudeAdapter {
             .unwrap_or(false)
     }
 
-    /// Detect the most recent Claude Code session id for a cwd.
-    ///
-    /// Claude Code stores sessions under `~/.claude/projects/<project-key>/`
-    /// where `<project-key>` is the cwd with **every** non-`[a-zA-Z0-9]`
-    /// character replaced by `-` (including the leading `/` and any dots/spaces,
-    /// e.g. `/home/x/my.proj` → `-home-x-my-proj`). Return the newest `*.jsonl`
-    /// stem, or None if the cwd has no session yet (fresh agent).
-    fn detect_resume_key(cwd: &Path) -> Option<String> {
-        let home = std::env::var("HOME").ok()?;
-        let dir = PathBuf::from(&home)
-            .join(".claude")
-            .join("projects")
-            .join(Self::claude_project_key(cwd));
-        let mut sessions: Vec<(SystemTime, String)> = Vec::new();
-        let entries = std::fs::read_dir(dir).ok()?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let mtime = path.metadata().ok()?.modified().ok()?;
-            let stem = path.file_stem()?.to_string_lossy().to_string();
-            sessions.push((mtime, stem));
-        }
-        sessions.sort_by(|a, b| b.0.cmp(&a.0));
-        sessions.first().map(|(_, s)| s.clone())
-    }
-
     /// Newest `*.jsonl` transcript under `~/.claude/projects/<project-key>/`, or
-    /// `None` when the cwd has no session yet. Shares the project-key encoding
-    /// and directory with `detect_resume_key`, but returns the full path (the
-    /// context-usage read needs the file, not the resume stem).
+    /// `None` when the cwd has no session yet. The project-key encoding and
+    /// directory mirror Claude Code's own layout; the returned full path feeds
+    /// the context-window usage read (architecture §12.2 — the resume-key scan
+    /// that shared this dir was retired in Phase 5).
     fn newest_transcript(cwd: &Path) -> Option<PathBuf> {
         let home = std::env::var("HOME").ok()?;
         let dir = PathBuf::from(&home)
@@ -101,34 +68,26 @@ impl ClaudeAdapter {
     }
 
     /// Current active-context estimate for a cwd: the summed `message.usage` of
-    /// the LAST assistant record in the newest transcript, plus the session's
-    /// cumulative cache stats. `None` when there is no transcript, no readable
-    /// file, or no usable usage record. This is a single-snapshot read — it
-    /// never accumulates usage across messages.
+    /// the LAST assistant record in the newest transcript. `None` when there is
+    /// no transcript, no readable file, or no usable usage record. This is a
+    /// single-snapshot read — it never accumulates usage across messages.
     fn read_transcript(cwd: &Path) -> Option<TranscriptUsage> {
         let path = Self::newest_transcript(cwd)?;
         let content = std::fs::read_to_string(path).ok()?;
         Some(Self::parse_transcript_usage(&content))
     }
 
-    /// One pass over JSONL `lines` computing:
-    ///  - `last_used`: the summed `message.usage` of the LAST assistant record
-    ///    (`input_tokens` + `cache_creation_input_tokens` +
-    ///    `cache_read_input_tokens` + `output_tokens`);
-    ///  - session-cumulative cache stats across ALL assistant records.
+    /// One pass over JSONL `lines` computing `last_used`: the summed
+    /// `message.usage` of the LAST assistant record (`input_tokens` +
+    /// `cache_creation_input_tokens` + `cache_read_input_tokens` +
+    /// `output_tokens`).
     ///
     /// Records carrying `isSidechain: true` are skipped so main-thread turns
     /// win (a sidechain record that appears last must not shadow the main
     /// conversation). Lines that fail to parse or carry no `message.usage` are
     /// ignored.
-    ///
-    /// Anthropic accounting: `input_tokens` EXCLUDES cache reads, so each
-    /// turn's total prompt is `input + cache_creation + cache_read` and the
-    /// cached portion is `cache_read`.
     fn parse_transcript_usage(content: &str) -> TranscriptUsage {
         let mut last_used = None;
-        let mut cache_hit = 0u64;
-        let mut cache_total = 0u64;
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() {
@@ -138,7 +97,10 @@ impl ClaudeAdapter {
                 continue;
             };
             // Prefer main-thread records when the sidechain marker is present.
-            if v.get("isSidechain").and_then(Value::as_bool).unwrap_or(false) {
+            if v.get("isSidechain")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
                 continue;
             }
             let Some(usage) = v.get("message").and_then(|m| m.get("usage")) else {
@@ -163,28 +125,8 @@ impl ClaudeAdapter {
             if any {
                 last_used = Some(sum);
             }
-            let input = usage
-                .get("input_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let created = usage
-                .get("cache_creation_input_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let read = usage
-                .get("cache_read_input_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            if input + created + read > 0 {
-                cache_hit += read;
-                cache_total += input + created + read;
-            }
         }
-        TranscriptUsage {
-            last_used,
-            cache_hit,
-            cache_total,
-        }
+        TranscriptUsage { last_used }
     }
 
     /// Confirmed model context capacities (Anthropic model catalog). Unknown or
@@ -321,60 +263,25 @@ impl AgentRuntimeAdapter for ClaudeAdapter {
         // Add speed args
         args.extend(self.speed_args(&session.speed));
 
-        // Status-reporting hooks. The hook files are written idempotently before
-        // the arg list is built so the FIRST spawn already carries `--settings`;
-        // claude loads it as an ADDITIONAL settings source, keeping the user's
-        // global config untouched. A failed sidecar write degrades to no hooks —
-        // it must never abort a spawn.
-        args.extend(self.status_hook_args(session));
-
         Ok(("claude".to_string(), args))
     }
 
-    fn status_hook_args(&self, _session: &AgentSession) -> Vec<String> {
-        let _ = ensure_status_hooks();
-        let hooks_settings = status_dir().join("hooks.json");
-        if hooks_settings.exists() {
-            vec![
-                "--settings".to_string(),
-                hooks_settings.to_string_lossy().into_owned(),
-            ]
-        } else {
-            vec![]
-        }
-    }
-
-    fn launch_env(&self, session: &AgentSession) -> Result<Vec<(String, String)>, String> {
-        // Session-scoped env for the status hook script: it must know which
-        // agent this claude process belongs to and where to write the sidecar.
-        // Injected into THIS PTY only — the user's own claude runs stay clean.
-        Ok(vec![
-            (HOOK_ENV_AGENT.to_string(), session.id.clone()),
-            (
-                HOOK_ENV_DIR.to_string(),
-                status_dir().to_string_lossy().into_owned(),
-            ),
-        ])
+    fn launch_env(&self, _session: &AgentSession) -> Result<Vec<(String, String)>, String> {
+        // No per-session env: the status-hook injection (CAPILOT_AGENT_ID /
+        // CAPILOT_STATUS_DIR) was retired in Phase 5 — structured agents report
+        // lifecycle through the daemon's AgentManager, never through a sidecar.
+        Ok(vec![])
     }
 
     fn resume_args(&self, session: &AgentSession) -> Vec<String> {
-        // An explicit stored key wins; otherwise fall back to detecting the most
-        // recent session in this context dir.
-        if let Some(key) = &session.resume_key {
-            return vec!["--resume".to_string(), key.clone()];
-        }
-        match Self::detect_resume_key(&session.cwd) {
-            Some(key) => vec!["--resume".to_string(), key],
-            None => vec![], // no previous session — start fresh
-        }
-    }
-
-    fn supports_resume(&self) -> bool {
-        true
-    }
-
-    fn capture_resume_key(&self, cwd: &Path) -> Option<String> {
-        Self::detect_resume_key(cwd)
+        // Legacy PTY sessions resume only with the persisted key (stored in the
+        // DB row). The dynamic "newest transcript in cwd" scan was retired in
+        // Phase 5 — the Agent main path no longer guesses resume keys.
+        session
+            .resume_key
+            .as_ref()
+            .map(|key| vec!["--resume".to_string(), key.clone()])
+            .unwrap_or_default()
     }
 
     fn context_usage(&self, cwd: &Path, model: Option<&str>) -> Option<AgentUsage> {
@@ -385,8 +292,6 @@ impl AgentRuntimeAdapter for ClaudeAdapter {
         Some(AgentUsage {
             context_window_used_tokens: Some(used),
             context_window_max_tokens: Self::context_window_max(model),
-            cache_hit_tokens: (parsed.cache_hit > 0).then_some(parsed.cache_hit),
-            cache_total_input_tokens: (parsed.cache_total > 0).then_some(parsed.cache_total),
         })
     }
 
@@ -473,8 +378,7 @@ mod tests {
     #[test]
     fn sums_last_assistant_usage_across_jsonl_lines() {
         // Simple shape on the first assistant record, rich shape (with cache
-        // fields) on the last — the last record wins for the live estimate and
-        // the session-cumulative cache stats sum across BOTH records.
+        // fields) on the last — the last record wins for the live estimate.
         let content = "\
 {\"type\":\"user\",\"message\":{\"content\":\"hi\"}}\n\
 {\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":100,\"output_tokens\":50}}}\n\
@@ -486,17 +390,12 @@ mod tests {
             Some(200 + 30 + 40 + 60),
             "last assistant record's present fields are summed"
         );
-        // Anthropic accounting: prompt = input + cache_creation + cache_read,
-        // hit = cache_read. Record 1: 100 prompt / 0 hit; record 2: 270 / 40.
-        assert_eq!(parsed.cache_hit, 40);
-        assert_eq!(parsed.cache_total, 100 + 270);
     }
 
     #[test]
     fn skips_sidechain_records_for_main_thread_usage() {
         // Sidechain records that appear after the main-thread turn must not
-        // shadow it — the LAST main-thread record wins, and sidechain usage is
-        // excluded from the session-cumulative cache stats too.
+        // shadow it — the LAST main-thread record wins.
         let content = "\
 {\"type\":\"assistant\",\"isSidechain\":true,\"message\":{\"usage\":{\"input_tokens\":999,\"output_tokens\":999}}}\n\
 {\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}\n\
@@ -504,8 +403,6 @@ mod tests {
 ";
         let parsed = ClaudeAdapter::parse_transcript_usage(content);
         assert_eq!(parsed.last_used, Some(10));
-        assert_eq!(parsed.cache_hit, 0);
-        assert_eq!(parsed.cache_total, 7);
     }
 
     #[test]
@@ -520,7 +417,6 @@ mod tests {
         ] {
             let parsed = ClaudeAdapter::parse_transcript_usage(content);
             assert_eq!(parsed.last_used, None);
-            assert_eq!(parsed.cache_total, 0);
         }
     }
 
@@ -539,7 +435,10 @@ mod tests {
             Some(200_000)
         );
         // Unknown / gateway models never get a guessed max.
-        assert_eq!(ClaudeAdapter::context_window_max(Some("deepseek-v4-flash")), None);
+        assert_eq!(
+            ClaudeAdapter::context_window_max(Some("deepseek-v4-flash")),
+            None
+        );
         assert_eq!(ClaudeAdapter::context_window_max(None), None);
     }
 
@@ -549,67 +448,19 @@ mod tests {
         let usage = AgentUsage {
             context_window_used_tokens: Some(123_456),
             context_window_max_tokens: Some(1_000_000),
-            cache_hit_tokens: Some(88_000),
-            cache_total_input_tokens: Some(110_000),
         };
         assert_eq!(
             serde_json::to_string(&usage).unwrap(),
-            r#"{"contextWindowUsedTokens":123456,"contextWindowMaxTokens":1000000,"cacheHitTokens":88000,"cacheTotalInputTokens":110000}"#
+            r#"{"contextWindowUsedTokens":123456,"contextWindowMaxTokens":1000000}"#
         );
         // Optional fields serialize as null (still present on the wire).
         let empty = AgentUsage {
             context_window_used_tokens: None,
             context_window_max_tokens: None,
-            cache_hit_tokens: None,
-            cache_total_input_tokens: None,
         };
         assert_eq!(
             serde_json::to_string(&empty).unwrap(),
-            r#"{"contextWindowUsedTokens":null,"contextWindowMaxTokens":null,"cacheHitTokens":null,"cacheTotalInputTokens":null}"#
+            r#"{"contextWindowUsedTokens":null,"contextWindowMaxTokens":null}"#
         );
-    }
-
-    // Serializes tests that repoint `HOME` so parallel runs don't observe each
-    // other's env (shared with lib.rs / codex / opencode via agent_runtime).
-    use crate::agent_runtime::ENV_LOCK;
-
-    fn session() -> AgentSession {
-        AgentSession {
-            id: "test".into(),
-            runtime: "claude".into(),
-            mode: "ask".into(),
-            speed: "mid".into(),
-            model: Some("claude-sonnet-5".into()),
-            cwd: "/tmp/project".into(),
-            context_dir: "/tmp/project".into(),
-            rows: 24,
-            cols: 80,
-            resume_key: None,
-        }
-    }
-
-    /// `status_hook_args` is the hook-injection set that survives a user launch
-    /// override (Settings → 已安装 → ⚙), which replaces the adapter's arg list
-    /// wholesale. Guarding the extraction: it must return the `--settings` path
-    /// under the (isolated) status dir, exactly as `spawn_interactive` relied on.
-    #[test]
-    fn status_hook_args_injects_settings_flag() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let prev_home = std::env::var_os("HOME");
-        let base = std::env::temp_dir().join(format!("capilot-claude-test-{}", std::process::id()));
-        std::env::set_var("HOME", &base);
-        // Re-run ensure_status_hooks so hooks.json exists under the temp HOME.
-        let _ = ensure_status_hooks();
-        let args = ClaudeAdapter::new().status_hook_args(&session());
-        let expected = status_dir().join("hooks.json");
-        assert_eq!(
-            args,
-            vec!["--settings".to_string(), expected.to_string_lossy().into_owned()]
-        );
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        let _ = std::fs::remove_dir_all(base);
     }
 }

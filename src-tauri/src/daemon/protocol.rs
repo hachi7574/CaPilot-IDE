@@ -16,16 +16,23 @@
 //! binary layout so raw PTY bytes are not base64-bloated. Control messages stay
 //! JSON for debuggability (a single protocol version, no versioned encoding).
 
+use crate::agent_provider::manager::{
+    AgentRecord, AgentSnapshot, NewAgentRequest, ResumeAgentRequest,
+};
+use crate::agent_provider::types::{AgentEvent, AgentPrompt, ConfigValue, TurnId};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
 /// Current wire protocol version. Bump on any incompatible change; the daemon
 /// and client must agree (brief §4.1 — an incompatible daemon is an upgrade
 /// error, never a silent second PTY manager). v2 adds `Attach`/`Attached`
-/// (§4.2, Phase 3); v3 adds `Detach`, `SyncEvents`/`EventLog` and the
-/// `HookStatus` event (Phase 4) — an old client can't drive a new daemon's
-/// detach/replay surface.
-pub const PROTOCOL_VERSION: u32 = 3;
+/// (§4.2, Phase 3); v3 adds `Detach`, `SyncEvents`/`EventLog` (Phase 4); v4
+/// adds the structured agent command surface (`AgentCreate`/`AgentStartTurn`/…)
+/// and the `AgentEvent` push (Phase 1) — an old client can't drive a new
+/// daemon's structured agent API. The v3 `HookStatus` event was removed in
+/// Phase 5 (the Agent main path no longer writes or reads hook sidecars), which
+/// is a compatible narrowing for same-version clients.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// App identifier / capability advertised during the handshake.
 pub const CAPABILITY_BASIC_IO: &str = "basic_io";
@@ -39,6 +46,11 @@ pub const CAPABILITY_ATTACH: &str = "attach";
 /// hook-status transitions) and can replay them to a (re)connecting GUI via
 /// `SyncEvents` (§6.2/§9.4). Added at v3.
 pub const CAPABILITY_EVENT_REPLAY: &str = "event_replay";
+
+/// Capability: the daemon owns a structured `AgentManager` and can create /
+/// resume / drive agent sessions and push sequenced `AgentEvent`s (architecture
+/// §13). Added at v4.
+pub const CAPABILITY_STRUCTURED_AGENTS: &str = "structured_agents";
 
 /// Upper bound for a single frame (16 MiB). Guards against an unbounded frame
 /// exhausting daemon or client memory (§4.2). A single PTY read chunk is
@@ -57,7 +69,9 @@ pub const FRAME_ERROR: u8 = 6;
 pub const EVENT_OUTPUT: u8 = 1;
 pub const EVENT_EXITED: u8 = 2;
 pub const EVENT_REMOVED: u8 = 3;
-pub const EVENT_HOOK_STATUS: u8 = 4;
+/// Structured agent event (architecture §13): a sequenced [`AgentEvent`] pushed
+/// by the daemon's `AgentManager`. v4.
+pub const EVENT_AGENT: u8 = 5;
 
 /// Handshake frame sent by the client (GUI) first (§4.1). The token is read
 /// from a user-only runtime file the daemon wrote at startup.
@@ -143,12 +157,51 @@ pub enum RequestCmd {
     /// removals, hook-status transitions that happened while the GUI was
     /// offline, §6.2/§9.4). The client applies the returned events, then tracks
     /// live lifecycle events by their `event_seq` and skips already-seen ones.
-    SyncEvents {
-        last_seq: u64,
-    },
+    SyncEvents { last_seq: u64 },
     /// Graceful daemon shutdown (Phase 2: the GUI explicitly closes the daemon
     /// it spawned on quit — §9.2; Phase 4 only for an explicit stop).
     Shutdown,
+
+    // ── Structured agent API (architecture §13, v4) ─────────────────
+    /// Create a structured agent through a registered provider. The manager
+    /// reserves the record, spawns the provider session, and pushes sequenced
+    /// `AgentEvent`s to all clients.
+    AgentCreate { request: NewAgentRequest },
+    /// Resume a structured agent from its persisted handle (§10.3).
+    AgentResume { request: ResumeAgentRequest },
+    /// Point-in-time snapshot for reconnect: record + timeline + pending
+    /// permissions. The client then applies only `seq > snapshot.last_seq`.
+    AgentGetSnapshot { agent_id: String },
+    /// Begin a foreground turn.
+    AgentStartTurn {
+        agent_id: String,
+        prompt: AgentPrompt,
+    },
+    /// Cancel the in-flight turn.
+    AgentInterrupt { agent_id: String },
+    AgentSetConfigOption {
+        agent_id: String,
+        config_id: String,
+        value: ConfigValue,
+    },
+    /// Resolve a pending permission request with a declared action (§9.2.5).
+    AgentRespondPermission {
+        agent_id: String,
+        request_id: String,
+        action_id: String,
+    },
+    /// Release live resources (close ≠ archive ≠ delete).
+    AgentClose { agent_id: String },
+    /// List structured agent records.
+    AgentList,
+
+    // ── Provider API (architecture §5, §13) ────────────────────────
+    /// List registered provider ids.
+    ProviderList,
+    /// Availability + auth diagnostic for one provider.
+    ProviderDiagnostic { provider_id: String },
+    /// Fetch the provider's runtime catalog (models, config knobs) for a cwd.
+    ProviderRefreshCatalog { provider_id: String, cwd: String },
 }
 
 /// Reply to a [`RequestCmd`].
@@ -183,6 +236,33 @@ pub enum Response {
         last_seq: u64,
         events: Vec<JournalEvent>,
     },
+    /// Reply to `AgentGetSnapshot` / `AgentCreate` / `AgentResume`. Boxed so the
+    /// enum stays small despite the snapshot payload (serde is transparent to
+    /// `Box`, so the wire format is unchanged).
+    AgentSnapshot {
+        snapshot: Box<AgentSnapshot>,
+    },
+    /// Reply to `AgentStartTurn`.
+    AgentTurnStarted {
+        turn_id: TurnId,
+    },
+    /// Reply to `AgentList`.
+    AgentsListed {
+        agents: Vec<AgentRecord>,
+    },
+    /// Reply to `ProviderList`. Carries each provider's backend kind (acp |
+    /// direct) so the frontend creates agents with the real backend kind.
+    ProvidersListed {
+        providers: Vec<crate::agent_provider::types::ProviderInfo>,
+    },
+    /// Reply to `ProviderDiagnostic`.
+    ProviderDiagnostic {
+        diagnostic: crate::agent_provider::types::ProviderDiagnostic,
+    },
+    /// Reply to `ProviderRefreshCatalog`.
+    ProviderCatalog {
+        catalog: crate::agent_provider::types::ProviderCatalog,
+    },
     /// A command-level failure. (Protocol-level failures use the ERROR frame.)
     Error {
         code: String,
@@ -202,8 +282,8 @@ pub struct LiveSessionSummary {
 
 /// One journaled lifecycle event carried by a `SyncEvents` reply (§6.2). A flat,
 /// wire-friendly shape the GUI can re-apply without importing the shared store.
-/// `kind` is `"exited" | "removed" | "hook_status"`; the kind-specific field
-/// (`exit_code` / `status`) is present only for the matching kind.
+/// `kind` is `"exited" | "removed"`; the kind-specific field (`exit_code`) is
+/// present only for the matching kind.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JournalEvent {
     /// 1-based monotonic sequence (global across agents, within a daemon run).
@@ -213,8 +293,6 @@ pub struct JournalEvent {
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
 }
 
 /// Events the daemon pushes to clients.
@@ -241,14 +319,13 @@ pub enum ClientEvent {
         generation: u64,
         event_seq: u64,
     },
-    /// A status-hook sidecar change the daemon observed (`~/CaPilot/status/
-    /// <id>.json`). Recorded in the journal so transitions that happen while the
-    /// GUI is offline are replayable; broadcast live while it is connected.
-    HookStatus {
+    /// A sequenced structured agent event from the daemon's `AgentManager`
+    /// (architecture §13). `seq` is the manager's global monotonic event
+    /// sequence; the client skips events with `seq <= snapshot.last_seq`.
+    AgentEvent {
         agent_id: String,
-        status: String,
-        ts: i64,
-        event_seq: u64,
+        seq: u64,
+        event: AgentEvent,
     },
 }
 
@@ -258,7 +335,7 @@ impl ClientEvent {
             ClientEvent::Output { agent_id, .. }
             | ClientEvent::Exited { agent_id, .. }
             | ClientEvent::Removed { agent_id, .. }
-            | ClientEvent::HookStatus { agent_id, .. } => agent_id,
+            | ClientEvent::AgentEvent { agent_id, .. } => agent_id,
         }
     }
 }
@@ -431,20 +508,14 @@ pub fn encode_removed_payload(agent_id: &str, generation: u64, event_seq: u64) -
     .expect("removed payload serializes")
 }
 
-/// Encode a HOOK_STATUS event payload (JSON).
-pub fn encode_hook_status_payload(
-    agent_id: &str,
-    status: &str,
-    ts: i64,
-    event_seq: u64,
-) -> Vec<u8> {
+/// Encode an AGENT event payload (JSON): a sequenced structured agent event.
+pub fn encode_agent_payload(agent_id: &str, seq: u64, event: &AgentEvent) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "agent_id": agent_id,
-        "status": status,
-        "ts": ts,
-        "event_seq": event_seq,
+        "seq": seq,
+        "event": event,
     }))
-    .expect("hook_status payload serializes")
+    .expect("agent event payload serializes")
 }
 
 /// Encode a full EVENT frame payload: `[u8 event_kind][event_payload]`.
@@ -457,12 +528,7 @@ pub fn encode_event_payload(event: &ClientEvent) -> Result<Vec<u8>, ProtocolErro
             data,
         } => {
             let mut out = vec![EVENT_OUTPUT];
-            out.extend_from_slice(&encode_output_payload(
-                agent_id,
-                *generation,
-                *seq,
-                data,
-            )?);
+            out.extend_from_slice(&encode_output_payload(agent_id, *generation, *seq, data)?);
             Ok(out)
         }
         ClientEvent::Exited {
@@ -486,23 +552,16 @@ pub fn encode_event_payload(event: &ClientEvent) -> Result<Vec<u8>, ProtocolErro
             event_seq,
         } => {
             let mut out = vec![EVENT_REMOVED];
-            out.extend_from_slice(&encode_removed_payload(
-                agent_id,
-                *generation,
-                *event_seq,
-            ));
+            out.extend_from_slice(&encode_removed_payload(agent_id, *generation, *event_seq));
             Ok(out)
         }
-        ClientEvent::HookStatus {
+        ClientEvent::AgentEvent {
             agent_id,
-            status,
-            ts,
-            event_seq,
+            seq,
+            event,
         } => {
-            let mut out = vec![EVENT_HOOK_STATUS];
-            out.extend_from_slice(&encode_hook_status_payload(
-                agent_id, status, *ts, *event_seq,
-            ));
+            let mut out = vec![EVENT_AGENT];
+            out.extend_from_slice(&encode_agent_payload(agent_id, *seq, event));
             Ok(out)
         }
     }
@@ -548,20 +607,20 @@ pub fn decode_event_payload(payload: &[u8]) -> Result<ClientEvent, ProtocolError
                 event_seq: v["event_seq"].as_u64().unwrap_or(0),
             })
         }
-        EVENT_HOOK_STATUS => {
+        EVENT_AGENT => {
             let v: serde_json::Value = serde_json::from_slice(&payload[1..])
-                .map_err(|e| ProtocolError::Malformed(format!("hook_status json: {e}")))?;
-            Ok(ClientEvent::HookStatus {
-                agent_id: v["agent_id"]
-                    .as_str()
-                    .ok_or_else(|| ProtocolError::Malformed("hook_status agent_id".into()))?
-                    .to_string(),
-                status: v["status"]
-                    .as_str()
-                    .ok_or_else(|| ProtocolError::Malformed("hook_status status".into()))?
-                    .to_string(),
-                ts: v["ts"].as_i64().unwrap_or(0),
-                event_seq: v["event_seq"].as_u64().unwrap_or(0),
+                .map_err(|e| ProtocolError::Malformed(format!("agent json: {e}")))?;
+            let agent_id = v["agent_id"]
+                .as_str()
+                .ok_or_else(|| ProtocolError::Malformed("agent agent_id".into()))?
+                .to_string();
+            let seq = v["seq"].as_u64().unwrap_or(0);
+            let event = serde_json::from_value(v["event"].clone())
+                .map_err(|e| ProtocolError::Malformed(format!("agent event: {e}")))?;
+            Ok(ClientEvent::AgentEvent {
+                agent_id,
+                seq,
+                event,
             })
         }
         other => Err(ProtocolError::Malformed(format!(
@@ -573,6 +632,7 @@ pub fn decode_event_payload(payload: &[u8]) -> Result<ClientEvent, ProtocolError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_provider::types::ProviderCapabilities;
 
     #[test]
     fn frame_roundtrip_preserves_kind_request_id_payload() {
@@ -656,8 +716,7 @@ mod tests {
             cols: 100,
             after_seq: Some(41),
         };
-        let back: RequestCmd =
-            serde_json::from_slice(&serde_json::to_vec(&req).unwrap()).unwrap();
+        let back: RequestCmd = serde_json::from_slice(&serde_json::to_vec(&req).unwrap()).unwrap();
         match back {
             RequestCmd::Attach {
                 agent_id,
@@ -727,11 +786,15 @@ mod tests {
                 generation: 2,
                 event_seq: 10,
             },
-            ClientEvent::HookStatus {
-                agent_id: "c".into(),
-                status: "working".into(),
-                ts: 1_700_000_000,
-                event_seq: 11,
+            ClientEvent::AgentEvent {
+                agent_id: "d".into(),
+                seq: 12,
+                event: AgentEvent::SessionReady(crate::agent_provider::types::SessionReady {
+                    provider_id: "fake".into(),
+                    runtime_session_id: Some("rsession-0".into()),
+                    capabilities: ProviderCapabilities::default(),
+                    persistence: None,
+                }),
             },
         ] {
             let payload = encode_event_payload(&ev).unwrap();
@@ -742,7 +805,9 @@ mod tests {
                 }
                 (
                     ClientEvent::Exited {
-                        exit_code, event_seq, ..
+                        exit_code,
+                        event_seq,
+                        ..
                     },
                     ClientEvent::Exited {
                         exit_code: e2,
@@ -755,24 +820,23 @@ mod tests {
                 }
                 (
                     ClientEvent::Removed { event_seq, .. },
-                    ClientEvent::Removed {
-                        event_seq: s2, ..
-                    },
+                    ClientEvent::Removed { event_seq: s2, .. },
                 ) => assert_eq!(event_seq, s2),
                 (
-                    ClientEvent::HookStatus {
-                        status, ts, event_seq, ..
+                    ClientEvent::AgentEvent {
+                        agent_id,
+                        seq,
+                        event,
                     },
-                    ClientEvent::HookStatus {
-                        status: st2,
-                        ts: t2,
-                        event_seq: s2,
-                        ..
+                    ClientEvent::AgentEvent {
+                        agent_id: a2,
+                        seq: s2,
+                        event: e2,
                     },
                 ) => {
-                    assert_eq!(status, st2);
-                    assert_eq!(ts, t2);
-                    assert_eq!(event_seq, s2);
+                    assert_eq!(agent_id, a2);
+                    assert_eq!(seq, s2);
+                    assert!(std::mem::discriminant(event) == std::mem::discriminant(e2));
                 }
                 (a, b) => panic!("kind mismatch: {a:?} vs {b:?}"),
             }
@@ -797,36 +861,289 @@ mod tests {
         // EventLog carries the watermark + journal events (flat, kind-tagged).
         let resp = Response::EventLog {
             last_seq: 5,
-            events: vec![
-                JournalEvent {
-                    seq: 4,
-                    ts: 100,
-                    agent_id: "a".into(),
-                    kind: "exited".into(),
-                    exit_code: Some(3),
-                    status: None,
-                },
-                JournalEvent {
-                    seq: 5,
-                    ts: 101,
-                    agent_id: "b".into(),
-                    kind: "hook_status".into(),
-                    exit_code: None,
-                    status: Some("working".into()),
-                },
-            ],
+            events: vec![JournalEvent {
+                seq: 4,
+                ts: 100,
+                agent_id: "a".into(),
+                kind: "exited".into(),
+                exit_code: Some(3),
+            }],
         };
         let back: Response = serde_json::from_slice(&serde_json::to_vec(&resp).unwrap()).unwrap();
         match back {
             Response::EventLog { last_seq, events } => {
                 assert_eq!(last_seq, 5);
-                assert_eq!(events.len(), 2);
+                assert_eq!(events.len(), 1);
                 assert_eq!(events[0].kind, "exited");
                 assert_eq!(events[0].exit_code, Some(3));
-                assert_eq!(events[1].kind, "hook_status");
-                assert_eq!(events[1].status.as_deref(), Some("working"));
             }
             other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn structured_agent_commands_roundtrip() {
+        // AgentCreate carries the full NewAgentRequest.
+        let req = RequestCmd::AgentCreate {
+            request: NewAgentRequest {
+                agent_id: "a1".into(),
+                provider_id: "fake".into(),
+                backend_kind: "acp".into(),
+                workspace_id: Some("wks-1".into()),
+                cwd: std::path::PathBuf::from("/tmp/w/proj"),
+                model: Some("fake-model".into()),
+                config: vec![("sandbox".into(), ConfigValue::Bool(true))],
+            },
+        };
+        let back: RequestCmd = serde_json::from_slice(&serde_json::to_vec(&req).unwrap()).unwrap();
+        match back {
+            RequestCmd::AgentCreate { request } => {
+                assert_eq!(request.agent_id, "a1");
+                assert_eq!(request.provider_id, "fake");
+                assert_eq!(request.backend_kind, "acp");
+                assert_eq!(request.workspace_id.as_deref(), Some("wks-1"));
+                assert_eq!(request.model.as_deref(), Some("fake-model"));
+                assert_eq!(request.config.len(), 1);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        // AgentStartTurn carries the prompt (client_message_id + content).
+        let req = RequestCmd::AgentStartTurn {
+            agent_id: "a1".into(),
+            prompt: AgentPrompt {
+                client_message_id: "m1".into(),
+                content: vec![crate::agent_provider::types::PromptContent::Text {
+                    text: "build it".into(),
+                }],
+            },
+        };
+        let back: RequestCmd = serde_json::from_slice(&serde_json::to_vec(&req).unwrap()).unwrap();
+        match back {
+            RequestCmd::AgentStartTurn { agent_id, prompt } => {
+                assert_eq!(agent_id, "a1");
+                assert_eq!(prompt.client_message_id, "m1");
+                assert_eq!(prompt.content.len(), 1);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        // AgentSetConfigOption + AgentRespondPermission + AgentList.
+        let req = RequestCmd::AgentSetConfigOption {
+            agent_id: "a1".into(),
+            config_id: "thinking".into(),
+            value: ConfigValue::Bool(false),
+        };
+        let back: RequestCmd = serde_json::from_slice(&serde_json::to_vec(&req).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            RequestCmd::AgentSetConfigOption {
+                ref agent_id,
+                ref config_id,
+                ..
+            } if agent_id == "a1" && config_id == "thinking"
+        ));
+
+        let req = RequestCmd::AgentRespondPermission {
+            agent_id: "a1".into(),
+            request_id: "p1".into(),
+            action_id: "allow".into(),
+        };
+        let back: RequestCmd = serde_json::from_slice(&serde_json::to_vec(&req).unwrap()).unwrap();
+        match back {
+            RequestCmd::AgentRespondPermission {
+                agent_id,
+                request_id,
+                action_id,
+            } => {
+                assert_eq!(agent_id, "a1");
+                assert_eq!(request_id, "p1");
+                assert_eq!(action_id, "allow");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        assert!(matches!(
+            serde_json::from_slice::<RequestCmd>(
+                &serde_json::to_vec(&RequestCmd::AgentList).unwrap()
+            )
+            .unwrap(),
+            RequestCmd::AgentList
+        ));
+
+        // Provider commands roundtrip.
+        assert!(matches!(
+            serde_json::from_slice::<RequestCmd>(
+                &serde_json::to_vec(&RequestCmd::ProviderList).unwrap()
+            )
+            .unwrap(),
+            RequestCmd::ProviderList
+        ));
+        let req = RequestCmd::ProviderDiagnostic {
+            provider_id: "fake".into(),
+        };
+        let back: RequestCmd = serde_json::from_slice(&serde_json::to_vec(&req).unwrap()).unwrap();
+        match back {
+            RequestCmd::ProviderDiagnostic { provider_id } => assert_eq!(provider_id, "fake"),
+            other => panic!("wrong variant: {other:?}"),
+        }
+        let req = RequestCmd::ProviderRefreshCatalog {
+            provider_id: "fake".into(),
+            cwd: "/tmp/w/proj".into(),
+        };
+        let back: RequestCmd = serde_json::from_slice(&serde_json::to_vec(&req).unwrap()).unwrap();
+        match back {
+            RequestCmd::ProviderRefreshCatalog { provider_id, cwd } => {
+                assert_eq!(provider_id, "fake");
+                assert_eq!(cwd, "/tmp/w/proj");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn structured_agent_responses_roundtrip() {
+        let snapshot = AgentSnapshot {
+            agent: AgentRecord {
+                agent_id: "a1".into(),
+                provider_id: "fake".into(),
+                backend_kind: "acp".into(),
+                workspace_id: None,
+                cwd: std::path::PathBuf::from("/tmp/w/proj"),
+                status: crate::agent_provider::types::AgentStatus::Idle,
+                config: vec![],
+                capabilities: crate::agent_provider::types::ProviderCapabilities::default(),
+                persistence: None,
+                last_event_seq: 2,
+                created_at: 100,
+                updated_at: 101,
+            },
+            timeline: vec![crate::agent_provider::types::TimelineItem::UserMessage(
+                crate::agent_provider::types::MessageItem {
+                    item_id: "u1".into(),
+                    role: crate::agent_provider::types::MessageRole::User,
+                    text: "hi".into(),
+                    created_at: 100,
+                    metadata: None,
+                },
+            )],
+            pending_permissions: vec![],
+            last_seq: 2,
+        };
+        let resp = Response::AgentSnapshot {
+            snapshot: Box::new(snapshot.clone()),
+        };
+        let back: Response = serde_json::from_slice(&serde_json::to_vec(&resp).unwrap()).unwrap();
+        match back {
+            Response::AgentSnapshot { snapshot } => {
+                assert_eq!(snapshot.agent.agent_id, "a1");
+                assert_eq!(snapshot.timeline.len(), 1);
+                assert_eq!(snapshot.timeline[0].item_id(), "u1");
+                assert_eq!(snapshot.last_seq, 2);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        let resp = Response::AgentsListed {
+            agents: vec![snapshot.agent],
+        };
+        let back: Response = serde_json::from_slice(&serde_json::to_vec(&resp).unwrap()).unwrap();
+        match back {
+            Response::AgentsListed { agents } => assert_eq!(agents[0].agent_id, "a1"),
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        let resp = Response::ProvidersListed {
+            providers: vec![crate::agent_provider::types::ProviderInfo {
+                provider_id: "fake".into(),
+                backend_kind: "acp".into(),
+            }],
+        };
+        let back: Response = serde_json::from_slice(&serde_json::to_vec(&resp).unwrap()).unwrap();
+        match back {
+            Response::ProvidersListed { providers } => {
+                assert_eq!(providers[0].provider_id, "fake");
+                assert_eq!(providers[0].backend_kind, "acp");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        let resp = Response::ProviderDiagnostic {
+            diagnostic: crate::agent_provider::types::ProviderDiagnostic {
+                available: true,
+                authenticated: true,
+                version: Some("fake-1.0".into()),
+                message: None,
+            },
+        };
+        let back: Response = serde_json::from_slice(&serde_json::to_vec(&resp).unwrap()).unwrap();
+        match back {
+            Response::ProviderDiagnostic { diagnostic } => {
+                assert!(diagnostic.available);
+                assert_eq!(diagnostic.version.as_deref(), Some("fake-1.0"));
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        let resp = Response::ProviderCatalog {
+            catalog: crate::agent_provider::types::ProviderCatalog {
+                models: vec![crate::agent_provider::types::ModelDefinition {
+                    id: "fake-model".into(),
+                    label: "Fake Model".into(),
+                    context_window: Some(200_000),
+                    reasoning_efforts: vec![],
+                    is_default: true,
+                }],
+                config_options: vec![],
+                capabilities: crate::agent_provider::types::ProviderCapabilities::default(),
+            },
+        };
+        let back: Response = serde_json::from_slice(&serde_json::to_vec(&resp).unwrap()).unwrap();
+        match back {
+            Response::ProviderCatalog { catalog } => {
+                assert_eq!(catalog.models[0].id, "fake-model");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_event_envelope_roundtrip() {
+        let ev = ClientEvent::AgentEvent {
+            agent_id: "a1".into(),
+            seq: 4,
+            event: AgentEvent::Timeline(crate::agent_provider::types::TimelineEvent::Started {
+                item: crate::agent_provider::types::TimelineItem::AssistantMessage(
+                    crate::agent_provider::types::MessageItem {
+                        item_id: "m1".into(),
+                        role: crate::agent_provider::types::MessageRole::Assistant,
+                        text: "Let me look".into(),
+                        created_at: 200,
+                        metadata: None,
+                    },
+                ),
+            }),
+        };
+        let payload = encode_event_payload(&ev).unwrap();
+        let back = decode_event_payload(&payload).unwrap();
+        match back {
+            ClientEvent::AgentEvent {
+                agent_id,
+                seq,
+                event,
+            } => {
+                assert_eq!(agent_id, "a1");
+                assert_eq!(seq, 4);
+                match event {
+                    AgentEvent::Timeline(t) => match t {
+                        crate::agent_provider::types::TimelineEvent::Started { item } => {
+                            assert_eq!(item.item_id(), "m1");
+                        }
+                        other => panic!("wrong timeline op: {other:?}"),
+                    },
+                    other => panic!("wrong agent event: {other:?}"),
+                }
+            }
+            other => panic!("kind mismatch: {other:?}"),
         }
     }
 

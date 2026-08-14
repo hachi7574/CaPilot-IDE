@@ -2,9 +2,10 @@ import { useEffect, useState, ReactNode } from "react";
 import { useStore, Tab, SplitNode } from "../../state/store";
 import { splitLeafTabIds } from "../../state/store";
 import { XTermPanel } from "../terminal/XTermPanel";
+import { AgentPanel } from "../agent/AgentPanel";
 import { EditorPanel } from "../editor/EditorPanel";
 import { DiffPanel } from "../editor/DiffPanel";
-import { spawnAgent } from "../../state/agentActions";
+import { createDefaultAgent } from "../../state/structuredAgent";
 
 type DropEdge = "left" | "right" | "top" | "bottom" | null;
 
@@ -24,6 +25,9 @@ function Panel({
       )}
       {tab.type === "agent" && !tab.agentId && (
         <div className="panel-placeholder">会话未启动 — 在输入框发消息自动创建</div>
+      )}
+      {tab.type === "structured" && tab.agentId && (
+        <AgentPanel agentId={tab.agentId} active={active} />
       )}
       {tab.type === "editor" && tab.filePath && (
         <EditorPanel filePath={tab.filePath} active={active} />
@@ -202,9 +206,10 @@ export function ContentArea() {
     return () => window.removeEventListener("keydown", onKey);
   }, [requestSearch]);
 
-  // Global Ctrl+T → start a new agent session (the empty-state hint advertises
-  // it). CodeMirror and the terminal keep Ctrl+T for their own semantics (the
-  // TUI may use it as a tab / next-buffer key), so focus there never triggers.
+  // Global Ctrl+T → start a new agent session (defaults to the structured
+  // backend, Phase 5; the empty-state hint advertises it). CodeMirror and the
+  // terminal keep Ctrl+T for their own semantics (the TUI may use it as a tab /
+  // next-buffer key), so focus there never triggers.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === "t")) {
@@ -216,7 +221,7 @@ export function ContentArea() {
       if (inCm || inTerm) return;
       e.preventDefault();
       const st = useStore.getState();
-      spawnAgent(st.focusedProject ?? undefined).catch(console.error);
+      createDefaultAgent(st.focusedProject ?? undefined).catch(console.error);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);

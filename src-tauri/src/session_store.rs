@@ -55,9 +55,7 @@ impl SessionStore {
         std::fs::create_dir_all(&base)?;
         let db_path = base.join("sessions.db");
         let db = SessionsDb::open(&db_path).map_err(std::io::Error::other)?;
-        Ok(Self {
-            db: Mutex::new(db),
-        })
+        Ok(Self { db: Mutex::new(db) })
     }
 
     /// Open the store at the standard `~/CaPilot` location.
@@ -212,6 +210,7 @@ mod tests {
             project: project.to_string(),
             runtime: "claude".to_string(),
             resume_key: None,
+            backend_kind: crate::persistence::BACKEND_KIND_LEGACY_PTY.into(),
             cwd: agent_dir(project, id),
             title: "t".to_string(),
             status: "running".to_string(),
@@ -221,12 +220,7 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         };
-        store
-            .db()
-            .lock()
-            .unwrap()
-            .insert(&rec)
-            .expect("insert row");
+        store.db().lock().unwrap().insert(&rec).expect("insert row");
     }
 
     fn sidecar(project: &str, id: &str) -> AgentMeta {
@@ -248,6 +242,7 @@ mod tests {
                     workspace_id: None,
                     runtime: "claude".into(),
                     resume_key: None,
+                    backend_kind: crate::persistence::BACKEND_KIND_LEGACY_PTY.into(),
                     status: "running".into(),
                     cwd: dir,
                     title: "t".into(),
@@ -285,6 +280,7 @@ mod tests {
                     workspace_id: None,
                     runtime: "claude".into(),
                     resume_key: None,
+                    backend_kind: crate::persistence::BACKEND_KIND_LEGACY_PTY.into(),
                     status: "running".into(),
                     cwd: dir.clone(),
                     title: "t".into(),

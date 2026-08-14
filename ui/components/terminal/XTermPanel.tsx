@@ -315,6 +315,15 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
   const fontScale = useStore((s) => s.fontScale);
   const focusRequest = useStore((s) => s.focusRequest);
   const searchRequest = useStore((s) => s.searchRequest);
+  const agent = useStore((s) => s.agents.get(agentId));
+
+  // Phase 5: legacy PTY Agent sessions (claude/codex/opencode) are read-only
+  // EOL compat entries — the terminal renders output but forwards no input (the
+  // backend also refuses `agent_write` for them). bash terminals stay fully
+  // interactive.
+  const isLegacyAgent =
+    !!agent && agent.runtime !== "bash" && agent.runtime !== "bash-rc";
+  const readOnly = isLegacyAgent;
 
   // Terminal Ctrl+F search bar state. The SearchAddon instance itself lives in
   // searchAddonRef (created in the terminal init effect); only the UI state and
@@ -356,7 +365,7 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
   /** Insert shell-escaped path(s) into the PTY (raw keystroke passthrough). */
   const insertPathToPty = useCallback(
     (paths: string[]) => {
-      if (!paths.length) return;
+      if (!paths.length || readOnly) return;
       const escaped = paths.map(shellEscape).join(" ");
       // Dropping a path is explicit terminal engagement — end the spawn wake so
       // the command the user runs against it reads as 运行中 in the tab bar.
@@ -368,7 +377,7 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
         () => {}
       );
     },
-    [agentId]
+    [agentId, readOnly]
   );
 
   /** Run the terminal search. Empty query clears decorations; otherwise jumps to
@@ -753,8 +762,10 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     // agent active keeps the tab bar's 运行中/空闲 split honest when a command
     // is submitted from the terminal itself. Mouse MOTION events are dropped
     // before either step — a hover is not input, and neither the PTY nor the
-    // activity clock should see it.
+    // activity clock should see it. Phase 5: legacy PTY Agent sessions are
+    // read-only EOL — no keystrokes are forwarded.
     term.onData((data) => {
+      if (readOnly) return;
       if (isMouseMotion(data)) return;
       invoke("agent_write", { id: agentId, data, raw: true }).catch(() => {});
       useStore.getState().markAgentActive(agentId);
@@ -793,6 +804,7 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     // xterm's native scrollback handling — no synthetic bytes for them.
     const onWheel = (ev: WheelEvent) => {
       if (ev.deltaY === 0) return;
+      if (readOnly) return;
       const runtime = useStore.getState().agents.get(agentId)?.runtime;
       if (!runtime || !MOUSE_TUI_RUNTIMES.has(runtime)) return;
       if (!modeFilter.sgr) return; // CLI didn't ask for SGR encoding — leave it
@@ -814,6 +826,7 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     let mouseDownPos: { x: number; y: number } | null = null;
     const onMouseDown = (ev: MouseEvent) => {
       if (ev.button !== 0) return;
+      if (readOnly) return;
       if (ev.shiftKey || ev.ctrlKey || ev.altKey || ev.metaKey) return;
       const runtime = useStore.getState().agents.get(agentId)?.runtime;
       if (!runtime || !MOUSE_TUI_RUNTIMES.has(runtime)) return;
@@ -1021,6 +1034,12 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
         // Tauri drag-drop event (which fires next) can still detect the terminal.
       }}
     >
+      {readOnly && (
+        <div className="xterm-eol-banner" title="旧版 PTY Agent（EOL）">
+          <Icon name="triangle-alert" size={12} style={{ marginRight: 6 }} />
+          旧版 PTY Agent · 只读兼容模式（EOL）
+        </div>
+      )}
       {searchOpen && (
         <div className="term-search-bar">
           <input

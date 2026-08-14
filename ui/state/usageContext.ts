@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useStore, AgentInfo, AgentUsage, HookStatus, effectiveAgentStatus } from "./store";
+import { useStore, AgentInfo, AgentUsage, effectiveAgentStatus } from "./store";
 
 /** Poll interval for per-agent live context-window occupancy. The `agent://usage`
  *  push event is the primary low-latency source; polling covers runtimes (e.g.
@@ -29,13 +29,11 @@ export function supportsContextUsage(runtime: string | undefined): boolean {
  * must keep its loading ring and keep being polled. The rest of
  * `effectiveAgentStatus` still applies: `done`/`failed` are terminal, a
  * restored-but-unresumed session (no PTY channel) is `dormant` → idle, and
- * `busy`/`waiting_input`/`awaiting_choice` are authoritative regardless of
- * connectivity.
+ * `busy`/`waiting_input` are authoritative regardless of connectivity.
  */
 export function isContextMeterActive(
   agent: AgentInfo | undefined,
-  connected: boolean,
-  hook?: HookStatus | null
+  connected: boolean
 ): boolean {
   if (!agent) return false;
   // Runtimes without a `context_usage` implementation (bash terminals) never
@@ -46,12 +44,8 @@ export function isContextMeterActive(
   if (agent.status === "done" || agent.status === "failed" || agent.status === "idle") {
     return false;
   }
-  const status = effectiveAgentStatus(agent, connected, /* active */ true, hook);
-  return (
-    status === "running" ||
-    status === "waiting_input" ||
-    status === "awaiting_choice"
-  );
+  const status = effectiveAgentStatus(agent, connected, /* active */ true);
+  return status === "running" || status === "waiting_input";
 }
 
 /**
@@ -122,7 +116,7 @@ export function useContextUsageSync() {
       const nextActive = new Map<string, boolean>();
       for (const [id, agent] of s.agents) {
         const connected = s.agentChannels.has(id);
-        const active = isContextMeterActive(agent, connected, s.hookStatus.get(id));
+        const active = isContextMeterActive(agent, connected);
         nextActive.set(id, active);
         if (!agent.cwd || !supportsContextUsage(agent.runtime)) continue;
         if (active) {

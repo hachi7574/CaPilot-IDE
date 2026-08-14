@@ -109,7 +109,11 @@ impl SlotReservation {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => return Ok(SlotGuard { counter: self.counter.clone() }),
+                Ok(_) => {
+                    return Ok(SlotGuard {
+                        counter: self.counter.clone(),
+                    })
+                }
                 Err(actual) => cur = actual,
             }
         }
@@ -393,8 +397,7 @@ impl PtyCore {
                             // respawned child), then report the natural exit so
                             // the session row can be finalized.
                             if is_own_entry(&children_clone, &reader_agent_id, generation) {
-                                let exit_code =
-                                    reap_and_remove(&children_clone, &reader_agent_id);
+                                let exit_code = reap_and_remove(&children_clone, &reader_agent_id);
                                 if !reader_killed.load(Ordering::SeqCst) {
                                     if let Some(cb) = &reader_on_exit {
                                         cb(reader_agent_id.clone(), exit_code);
@@ -422,8 +425,7 @@ impl PtyCore {
                             // only our own entry, then report the natural exit
                             // like EOF.
                             if is_own_entry(&children_clone, &reader_agent_id, generation) {
-                                let exit_code =
-                                    reap_and_remove(&children_clone, &reader_agent_id);
+                                let exit_code = reap_and_remove(&children_clone, &reader_agent_id);
                                 if !reader_killed.load(Ordering::SeqCst) {
                                     if let Some(cb) = &reader_on_exit {
                                         cb(reader_agent_id.clone(), exit_code);

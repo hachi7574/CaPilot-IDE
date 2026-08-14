@@ -6,6 +6,7 @@ import { Onboarding } from "./components/onboarding/Onboarding";
 import { useResourceSync } from "./state/resource";
 import { useRuntimeSync } from "./state/runtime";
 import { useSessionRestore, useAgentEvents } from "./state/session";
+import { useStructuredAgentEvents } from "./state/structuredAgent";
 import { useCloneEvents } from "./state/clone";
 import { useUsageSync } from "./state/usage";
 import { useContextUsageSync } from "./state/usageContext";
@@ -19,6 +20,7 @@ function App() {
   useRuntimeSync();
   useSessionRestore();
   useAgentEvents();
+  useStructuredAgentEvents();
   useCloneEvents();
   useUsageSync();
   useContextUsageSync();

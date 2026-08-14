@@ -73,7 +73,7 @@ WebView 不直接连接 Unix socket 或 Windows named pipe。守护进程与 GUI
 - Windows：当前用户 ACL 限定的 named pipe。
 - 每次守护进程启动生成随机 token；GUI 通过只有当前用户可读的运行时文件取得 token，并在握手中提交。
 - 使用 OS 级独占锁判定唯一实例。PID 文件仅用于诊断，不能单独作为互斥依据，因为会陈旧且存在 PID 复用。
-- 握手必须包含 `protocol_version`、`daemon_instance_id`、应用版本和 capability 列表。协议不兼容时应要求重启/升级守护进程，不能静默启动第二套 PTY 管理器。
+- 握手必须包含 `protocol_version`、`daemon_instance_id`、应用版本和 capability 列表。协议不兼容（残留的上个构建的 resident daemon）由 GUI 桥自动替换：识别 `VersionMismatch` 后核验并终止旧进程、等待 socket 清空，再拉起同二进制的当前构建 daemon；始终不会静默启动第二套 PTY 管理器。
 - 守护进程可执行文件必须作为 Tauri sidecar（`bundle.externalBin`）或同一可执行文件的明确 daemon 模式打包，并纳入 macOS 签名/公证、Windows 签名和 Linux 包验证；“新增 Cargo binary target”本身不会自动进入安装包。
 
 ### 4.2 帧与命令
@@ -214,5 +214,5 @@ GUI 连接后，以 `(daemon_instance_id, agent_id, generation)` 对账：
 - GUI 离线期间的自然退出、delete-mode 和 hook 状态变化在重连后可重放；todo 等依赖状态迁移的逻辑不会漏事件。
 - daemon 模式下资源面板仍约每 3 秒更新；PID generation 切换后旧历史不串到新进程。
 - 64 会话上限在并发 spawn 压测下仍严格成立，失败 spawn 会释放名额。
-- daemon 不可启动且确认没有其他 owner 时自动回退进程内模式；已存在 owner、鉴权失败或协议不兼容时不会静默回退。
+- daemon 不可启动且确认没有其他 owner 时自动回退进程内模式；已存在 owner 或鉴权失败时不会静默回退。协议不兼容不会回退，而是替换：终止残留的旧构建 daemon 后用当前构建拉起新 daemon（§4.1）。
 - Linux、macOS、Windows 的打包产物都包含并能启动已签名/受权限约束的 daemon，socket/pipe 仅当前用户可访问。

@@ -1,13 +1,13 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { invoke, Channel } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { useStore, AgentInfo, AgentStatus, TODO_DRAG_MIME } from "../../state/store";
+import { useStore, AgentStatus, TODO_DRAG_MIME } from "../../state/store";
 import {
-  spawnAgent,
   closeAgent as closeAgentAction,
   assignTodoAndSend,
 } from "../../state/agentActions";
+import { createDefaultAgent } from "../../state/structuredAgent";
 import { SettingsModal } from "./SettingsModal";
 import { TerminalTemplatePicker } from "./TerminalTemplatePicker";
 import { RenameAgentModal } from "./RenameAgentModal";
@@ -216,15 +216,16 @@ export function LeftSidebar() {
     }
   };
 
-  // Spawn a terminal under a project, expanding the project first so the new
-  // terminal is immediately visible (hover "+" button + project context menu).
+  // Spawn an agent session under a project (Phase 5: defaults to the structured
+  // backend), expanding the project first so the new tab is immediately visible
+  // (hover "+" button + project context menu).
   const spawnInProject = (proj: string) => {
     setCollapsedProjs((prev) => {
       const next = new Set(prev);
       next.delete(proj);
       return next;
     });
-    spawnAgent(proj).catch(console.error);
+    createDefaultAgent(proj).catch(console.error);
   };
 
   const openAgentTab = useCallback(
@@ -396,11 +397,11 @@ export function LeftSidebar() {
       });
       setFocusedProject(trimmed);
       setNprojError(null);
-      // New project auto-opens a fresh agent terminal (spawnAgent adds +
-      // activates the tab). Best-effort: a failed spawn must not block the
-      // modal close or undo the created project.
+      // New project auto-opens a fresh agent session (Phase 5: structured
+      // default). Best-effort: a failed spawn must not block the modal close
+      // or undo the created project.
       try {
-        await spawnAgent(trimmed);
+        await createDefaultAgent(trimmed);
       } catch (e) {
         console.error("自动打开终端失败:", e);
         setNprojError(`项目已创建，但自动打开终端失败：${String(e)}`);
@@ -1089,8 +1090,6 @@ function ContextMenu({
   // values up here even though the project branch doesn't use them.
   const agent = useStore((s) => s.agents.get(ctx.agentId ?? ""));
   const allAgents = useStore((s) => s.agents);
-  const runtimes = useStore((s) => s.runtimes);
-  const addAgent = useStore((s) => s.addAgent);
 
   // ── Project context ───────────────────────────────────────────
   if (ctx.project) {
@@ -1105,16 +1104,17 @@ function ContextMenu({
         <div
           className="ctx-item"
           onClick={() => {
-            // Spawn + expand (so a terminal added to an empty/collapsed
-            // project is immediately visible).
+            // Spawn + expand (so a session added to an empty/collapsed project
+            // is immediately visible). Phase 5: new sessions default to the
+            // structured backend.
             if (onSpawnInProject) onSpawnInProject(proj);
             else {
-              spawnAgent(proj).catch(console.error);
+              createDefaultAgent(proj).catch(console.error);
             }
             onClose();
           }}
         >
-          <Icon name="monitor" size={13} /> 新建终端
+          <Icon name="bot" size={13} /> 新建 Agent
         </div>
         {ctx.cwd && (
           <div
@@ -1198,23 +1198,6 @@ function ContextMenu({
     });
   }
 
-  const switchRuntime = async (runtime: string) => {
-    try {
-      const channel = new Channel<number[]>();
-      channel.onmessage = (data) =>
-        useStore.getState().appendAgentOutput(ctx.agentId ?? "", data);
-      const info = (await invoke("agent_switch_runtime", {
-        id: ctx.agentId,
-        runtime,
-        onData: channel,
-      })) as AgentInfo;
-      addAgent(info, channel);
-    } catch (e) {
-      console.error("runtime switch failed:", e);
-    }
-    onClose();
-  };
-
   const closeAgent = async () => {
     if (!ctx.agentId) return;
     // Same path as the sidebar × button: closes the tab + row immediately,
@@ -1242,19 +1225,9 @@ function ContextMenu({
         </div>
       )}
       {ctx.agentId && <div className="ctx-sep" />}
-      <div className="ctx-label">切换 runtime</div>
-      {runtimes.map((rt) => (
-        <div
-          key={rt.id}
-          className={`ctx-item${rt.id === agent?.runtime ? " current" : ""}`}
-          onClick={() => switchRuntime(rt.id)}
-        >
-          {rt.name}
-          {!rt.available && " (未安装)"}
-          {rt.id === agent?.runtime && " · 当前"}
-        </div>
-      ))}
-      <div className="ctx-sep" />
+      {/* Phase 5: `agent_switch_runtime` was removed — switching provider is an
+          explicit handoff (close + create a new structured agent), never an
+          in-place runtime swap of a live PTY. */}
       <div className="ctx-item danger" onClick={closeAgent}>
         <Icon name="x" size={13} /> 终止并关闭
       </div>

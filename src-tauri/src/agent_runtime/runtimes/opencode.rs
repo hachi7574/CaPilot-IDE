@@ -2,8 +2,6 @@ use crate::agent_runtime::adapter::{
     AgentRuntimeAdapter, AgentSession, AgentUsage, ModelInfo, PermissionModeInfo,
     ThinkingOptionInfo,
 };
-use crate::agent_runtime::status_hooks::{HOOK_ENV_AGENT, HOOK_ENV_DIR};
-use crate::persistence::status_dir;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -11,161 +9,15 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 /// Adapter for the OpenCode interactive TUI. The installed CLI is the source
 /// of truth for models and resumable sessions.
 pub struct OpenCodeAdapter;
 
-/// Status-reporting plugin (`plugin/capilot-status.js`) written into a
-/// per-session config dir passed via `OPENCODE_CONFIG_DIR`. OpenCode has no
-/// shell-hook surface like claude's `--settings` or codex's config-profile
-/// hooks; the only hook point is its in-process plugin event bus. A plugin is
-/// a JS module exporting a default async factory that returns a `Hooks` object
-/// — this one listens on the `event` hook for session/permission lifecycle
-/// events and writes the SAME sidecar format as `~/CaPilot/status/hook.sh`
-/// (`{"status","ts"}`), driven by `CAPILOT_AGENT_ID`/`CAPILOT_STATUS_DIR`.
-/// Env-gated: a standalone `opencode` run (no env) is a no-op.
-///
-/// `OPENCODE_CONFIG_DIR` APPENDS a config dir to opencode's search path — the
-/// user's global config still loads (verified on 1.18.16, see the run log
-/// ordering in docs/ai-runtime-references.md §2.3), so injection is per-session
-/// and leaves the user's global opencode config untouched.
-const STATUS_PLUGIN: &str = r#"// CaPilot status plugin — reports opencode session lifecycle to the IDE sidecar.
-// Loaded per-session via OPENCODE_CONFIG_DIR (see opencode.rs). Env-gated: when
-// CAPILOT_AGENT_ID / CAPILOT_STATUS_DIR are absent this is a no-op, so a
-// standalone `opencode` run is never touched. All writes are best-effort and
-// must never break the opencode host.
-export default async () => {
-  const id = process.env.CAPILOT_AGENT_ID;
-  const dir = process.env.CAPILOT_STATUS_DIR;
-  if (!id || !dir) return {};
-  const fs = await import("node:fs");
-  const sidecar = `${dir}/${id}.json`;
-  const write = (status) => {
-    try {
-      fs.mkdirSync(dir, { recursive: true });
-      const tmp = `${sidecar}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify({ status, ts: Math.floor(Date.now() / 1000) }) + "\n");
-      fs.renameSync(tmp, sidecar);
-    } catch {}
-  };
-  // SessionStart has no opencode event; writing idle at load gives the same
-  // baseline the other runtimes get from their SessionStart hook.
-  write("idle");
-  const statusFor = (event) => {
-    if (event?.type === "session.status") {
-      const kind = event?.properties?.status?.type;
-      if (kind === "busy" || kind === "retry") return "working";
-      if (kind === "idle") return "idle";
-      return null;
-    }
-    if (event?.type === "session.idle") return "idle";
-    if (event?.type === "permission.asked") return "waiting_input";
-    if (event?.type === "permission.replied") return "working";
-    // The `question` tool blocks on the user picking an option (claude's
-    // AskUserQuestion equivalent) — `awaiting_choice`, distinct from a
-    // permission prompt. Answering (replied) or dismissing (rejected) resumes
-    // work.
-    if (event?.type === "question.asked" || event?.type === "question.v2.asked")
-      return "awaiting_choice";
-    if (
-      event?.type === "question.replied" ||
-      event?.type === "question.rejected" ||
-      event?.type === "question.v2.replied"
-    )
-      return "working";
-    return null;
-  };
-  return {
-    event: async ({ event }) => {
-      const status = statusFor(event);
-      if (status) write(status);
-    },
-  };
-};
-"#;
-
 impl OpenCodeAdapter {
     pub fn new() -> Self {
         Self
-    }
-
-    const CAPILOT_COMMAND_PALETTE_KEY: &'static str = "f12";
-
-    fn tui_config_path(session: &AgentSession) -> Result<PathBuf, String> {
-        let cache_root = std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
-            .ok_or_else(|| {
-                "Cannot resolve a cache directory for OpenCode TUI config".to_string()
-            })?;
-        let safe_id: String = session
-            .id
-            .chars()
-            .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
-            .collect();
-        if safe_id.is_empty() {
-            return Err("Invalid OpenCode session id".to_string());
-        }
-        Ok(cache_root
-            .join("capilot-ide/opencode-tui")
-            .join(format!("{safe_id}.json")))
-    }
-
-    fn write_tui_config(session: &AgentSession) -> Result<PathBuf, String> {
-        let path = Self::tui_config_path(session)?;
-        let parent = path
-            .parent()
-            .ok_or_else(|| "Invalid OpenCode TUI config path".to_string())?;
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("Failed to create OpenCode TUI config directory: {error}"))?;
-        let config = serde_json::json!({
-            "$schema": "https://opencode.ai/tui.json",
-            "keybinds": {
-                "command_list": Self::CAPILOT_COMMAND_PALETTE_KEY,
-            }
-        });
-        std::fs::write(&path, serde_json::to_vec_pretty(&config).unwrap())
-            .map_err(|error| format!("Failed to write OpenCode TUI config: {error}"))?;
-        Ok(path)
-    }
-
-    /// Per-session config dir for the status plugin
-    /// (`$XDG_CACHE_HOME/capilot-ide/opencode-status/<agent_id>/`), passed to
-    /// the spawned opencode via `OPENCODE_CONFIG_DIR`. `None` when the cache
-    /// root is unresolvable or the id sanitizes to empty.
-    fn status_config_dir(agent_id: &str) -> Option<PathBuf> {
-        let cache_root = std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
-        let safe_id: String = agent_id
-            .chars()
-            .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
-            .collect();
-        if safe_id.is_empty() {
-            return None;
-        }
-        Some(cache_root.join("capilot-ide/opencode-status").join(safe_id))
-    }
-
-    /// Write the status plugin (`plugin/capilot-status.js`) into a per-session
-    /// config dir. Best-effort: `None` (no plugin injected, status falls back
-    /// to the activity heuristic) on any failure — never aborts a spawn.
-    fn write_status_plugin(agent_id: &str) -> Option<PathBuf> {
-        let dir = Self::status_config_dir(agent_id)?;
-        let plugin_dir = dir.join("plugin");
-        std::fs::create_dir_all(&plugin_dir).ok()?;
-        std::fs::write(plugin_dir.join("capilot-status.js"), STATUS_PLUGIN).ok()?;
-        Some(dir)
-    }
-
-    /// Remove a session's status-plugin config dir (session delete / close).
-    /// No-op when already gone or the cache root is unresolvable.
-    pub fn remove_status_plugin(agent_id: &str) {
-        if let Some(dir) = Self::status_config_dir(agent_id) {
-            let _ = std::fs::remove_dir_all(dir);
-        }
     }
 
     fn check_available() -> bool {
@@ -342,39 +194,6 @@ impl OpenCodeAdapter {
         !Self::discover_models().is_empty()
     }
 
-    fn parse_session_list(output: &str, cwd: &Path) -> Option<String> {
-        let sessions: Vec<Value> = serde_json::from_str(output).ok()?;
-        let cwd = cwd.to_string_lossy();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO)
-            .as_millis() as u64;
-        sessions
-            .into_iter()
-            .filter_map(|session| {
-                if session.get("directory")?.as_str()? != cwd {
-                    return None;
-                }
-                let created = session.get("created")?.as_u64()?;
-                if now.saturating_sub(created) > 10_000 {
-                    return None;
-                }
-                Some((created, session.get("id")?.as_str()?.to_string()))
-            })
-            .max_by_key(|(created, _)| *created)
-            .map(|(_, id)| id)
-    }
-
-    fn detect_recent_resume_key(cwd: &Path) -> Option<String> {
-        let output = Command::new("opencode")
-            .args(["session", "list", "--format", "json", "--max-count", "20"])
-            .current_dir(cwd)
-            .output()
-            .ok()?;
-        output.status.success().then_some(())?;
-        Self::parse_session_list(&String::from_utf8_lossy(&output.stdout), cwd)
-    }
-
     // ── Context-window usage (docs/context-window-usage.md) ────────────────
     //
     // OpenCode keeps sessions in a local SQLite store (`opencode.db`, WAL) and
@@ -431,48 +250,6 @@ impl OpenCodeAdapter {
             .ok()?;
         let value: Value = serde_json::from_str(&data?).ok()?;
         value.pointer("/tokens/total").and_then(Value::as_u64)
-    }
-
-    /// Session-cumulative cache stats for a cwd: total cache-read tokens and
-    /// total prompt tokens summed over ALL `step-finish` parts of the session
-    /// (the cache hit rate numerator and denominator). OpenCode accounting:
-    /// `tokens.input` is the non-cached portion and `tokens.cache.read/write`
-    /// are separate, so total prompt = input + cache.read + cache.write.
-    fn session_cache_stats(conn: &Connection, cwd: &Path) -> Option<(u64, u64)> {
-        let session_id = Self::newest_session_id(conn, cwd)?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT data FROM part WHERE session_id = ?1 AND data LIKE '%step-finish%'",
-            )
-            .ok()?;
-        let rows = stmt
-            .query_map(params![session_id], |row| row.get::<_, String>(0))
-            .ok()?;
-        let mut hit = 0u64;
-        let mut total = 0u64;
-        for row in rows.flatten() {
-            let Ok(value) = serde_json::from_str::<Value>(&row) else {
-                continue;
-            };
-            let tokens = value.get("tokens");
-            let input = tokens
-                .and_then(|t| t.get("input"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let read = tokens
-                .and_then(|t| t.pointer("/cache/read"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let write = tokens
-                .and_then(|t| t.pointer("/cache/write"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            if input + read + write > 0 {
-                hit += read;
-                total += input + read + write;
-            }
-        }
-        (total > 0).then_some((hit, total))
     }
 
     /// Observed assistant model as `providerID/modelID` from the newest
@@ -581,7 +358,10 @@ impl OpenCodeAdapter {
 
     fn fetch_model_limits() -> HashMap<String, u64> {
         let mut map = HashMap::new();
-        let Ok(output) = Command::new("opencode").args(["models", "--verbose"]).output() else {
+        let Ok(output) = Command::new("opencode")
+            .args(["models", "--verbose"])
+            .output()
+        else {
             return map;
         };
         if !output.status.success() {
@@ -597,16 +377,18 @@ impl OpenCodeAdapter {
     fn parse_model_limits(output: &str, map: &mut HashMap<String, u64>) {
         let mut header: Option<String> = None;
         let mut block: Vec<&str> = Vec::new();
-        let flush = |header: &mut Option<String>, block: &mut Vec<&str>, map: &mut HashMap<String, u64>| {
-            if let (Some(id), Ok(value)) =
-                (header.take(), serde_json::from_str::<Value>(&block.join("\n")))
-            {
-                if let Some(context) = value.pointer("/limit/context").and_then(Value::as_u64) {
-                    map.insert(id, context);
+        let flush =
+            |header: &mut Option<String>, block: &mut Vec<&str>, map: &mut HashMap<String, u64>| {
+                if let (Some(id), Ok(value)) = (
+                    header.take(),
+                    serde_json::from_str::<Value>(&block.join("\n")),
+                ) {
+                    if let Some(context) = value.pointer("/limit/context").and_then(Value::as_u64) {
+                        map.insert(id, context);
+                    }
                 }
-            }
-            block.clear();
-        };
+                block.clear();
+            };
         for line in output.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -676,44 +458,24 @@ impl AgentRuntimeAdapter for OpenCodeAdapter {
         Ok(("opencode".into(), args))
     }
 
-    fn launch_env(&self, session: &AgentSession) -> Result<Vec<(String, String)>, String> {
-        let config = Self::write_tui_config(session)?;
-        let mut env = vec![(
-            "OPENCODE_TUI_CONFIG".into(),
-            config.to_string_lossy().into_owned(),
-        )];
-        // Status-reporting plugin. OpenCode's only hook surface is the JS
-        // plugin event bus; the plugin is loaded from a per-session config dir
-        // via OPENCODE_CONFIG_DIR, which APPENDS to opencode's search path (the
-        // user's global config keeps loading — verified on 1.18.16). The hook
-        // env is injected into THIS PTY only; a failed plugin write degrades to
-        // no hooks (the env vars alone are inert without the plugin).
-        if let Some(status_config) = Self::write_status_plugin(&session.id) {
-            env.push((
-                "OPENCODE_CONFIG_DIR".into(),
-                status_config.to_string_lossy().into_owned(),
-            ));
-        }
-        env.push((HOOK_ENV_AGENT.to_string(), session.id.clone()));
-        env.push((
-            HOOK_ENV_DIR.to_string(),
-            status_dir().to_string_lossy().into_owned(),
-        ));
-        Ok(env)
+    fn launch_env(&self, _session: &AgentSession) -> Result<Vec<(String, String)>, String> {
+        // No per-session env: the status plugin (`OPENCODE_CONFIG_DIR` +
+        // `CAPILOT_AGENT_ID`/`CAPILOT_STATUS_DIR`) and the TUI keybind override
+        // (`OPENCODE_TUI_CONFIG` F12 command-palette rebind) were retired in
+        // Phase 5 — structured agents report lifecycle through the daemon's
+        // AgentManager, and the Agent main path no longer injects keys into
+        // provider TUIs.
+        Ok(vec![])
     }
 
     fn resume_args(&self, session: &AgentSession) -> Vec<String> {
+        // Legacy PTY sessions resume only with the persisted key (stored in the
+        // DB row); the dynamic `session list` scan was retired in Phase 5.
         session
             .resume_key
             .as_ref()
             .map(|key| vec!["--session".into(), key.clone()])
             .unwrap_or_default()
-    }
-    fn supports_resume(&self) -> bool {
-        true
-    }
-    fn capture_resume_key(&self, cwd: &Path) -> Option<String> {
-        Self::detect_recent_resume_key(cwd)
     }
 
     fn context_usage(&self, cwd: &Path, model: Option<&str>) -> Option<AgentUsage> {
@@ -723,15 +485,12 @@ impl AgentRuntimeAdapter for OpenCodeAdapter {
         // model attached to the assistant message when available).
         let model_id = Self::observed_model_id(&conn, cwd).or_else(|| model.map(str::to_owned));
         let max = model_id.as_deref().and_then(Self::catalog_limit_context);
-        let (cache_hit, cache_total) = Self::session_cache_stats(&conn, cwd).unwrap_or((0, 0));
-        if used.is_none() && max.is_none() && cache_total == 0 {
+        if used.is_none() && max.is_none() {
             return None;
         }
         Some(AgentUsage {
             context_window_used_tokens: used,
             context_window_max_tokens: max,
-            cache_hit_tokens: (cache_hit > 0).then_some(cache_hit),
-            cache_total_input_tokens: (cache_total > 0).then_some(cache_total),
         })
     }
 
@@ -802,32 +561,13 @@ mod tests {
     }
 
     #[test]
-    fn launch_env_injects_status_plugin_config_dir() {
+    fn launch_env_is_empty_after_hook_and_tui_retirement() {
         with_isolated_cache(|| {
             let adapter = OpenCodeAdapter::new();
+            // Phase 5: no per-session env — the status plugin, the hook env and
+            // the OPENCODE_TUI_CONFIG keybind override are all retired.
             let env = adapter.launch_env(&session("ask", None)).unwrap();
-            let get = |name: &str| {
-                env.iter()
-                    .find(|(k, _)| k == name)
-                    .map(|(_, v)| v.clone())
-            };
-            // TUI keybinding config still wired (existing behavior preserved).
-            assert!(get("OPENCODE_TUI_CONFIG").unwrap().ends_with(".json"));
-            // Status plugin: the per-session config dir is injected and the
-            // hook env points at a fresh temp sidecar dir.
-            let config_dir = PathBuf::from(get("OPENCODE_CONFIG_DIR").unwrap());
-            let plugin = config_dir.join("plugin/capilot-status.js");
-            let source = std::fs::read_to_string(&plugin).expect("plugin written");
-            assert!(source.contains("session.status"));
-            assert!(source.contains("permission.asked"));
-            assert!(source.contains("question.asked"));
-            assert!(source.contains("awaiting_choice"));
-            assert!(source.contains("CAPILOT_AGENT_ID"));
-            assert_eq!(get("CAPILOT_AGENT_ID").as_deref(), Some("test"));
-            assert!(get("CAPILOT_STATUS_DIR").is_some());
-            // Cleanup removes the whole per-session config dir.
-            OpenCodeAdapter::remove_status_plugin("test");
-            assert!(!config_dir.exists());
+            assert!(env.is_empty(), "launch env must be empty: {env:?}");
         });
     }
 
@@ -865,10 +605,8 @@ mod tests {
             "  \"name\": \"Big Pickle\"\n",
             "}\n",
         );
-        let models = OpenCodeAdapter::parse_verbose_models(
-            output,
-            Some("opencode/deepseek-v4-flash-free"),
-        );
+        let models =
+            OpenCodeAdapter::parse_verbose_models(output, Some("opencode/deepseek-v4-flash-free"));
         assert_eq!(models.len(), 3);
         assert_eq!(models[0].id, "opencode/deepseek-v4-flash-free");
         assert_eq!(models[0].name, "DeepSeek V4 Flash Free");
@@ -893,24 +631,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_only_recent_session_for_matching_directory() {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-        let json = format!(
-            r#"[
-            {{"id":"other","created":{now},"directory":"/tmp/other"}},
-            {{"id":"mine","created":{now},"directory":"/tmp/project"}}
-        ]"#
-        );
-        assert_eq!(
-            OpenCodeAdapter::parse_session_list(&json, Path::new("/tmp/project")),
-            Some("mine".into())
-        );
-    }
-
-    #[test]
     fn reads_step_finish_tokens_and_observed_model_from_db() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -929,9 +649,8 @@ mod tests {
             params![r#"{"type":"step-finish","reason":"stop","tokens":{"total":161848,"input":252,"output":60,"reasoning":0,"cache":{"write":0,"read":161536}}}"#],
         )
         .unwrap();
-        // A second step-finish part exercises the session-cumulative summing:
-        // cache stats accumulate over ALL parts, the active-context estimate
-        // still comes from the newest one.
+        // A second step-finish part exercises the newest-wins rule: the
+        // active-context estimate comes from the newest part.
         conn.execute(
             "INSERT INTO part (id, session_id, time_created, data) VALUES ('prt_2', 'ses_1', 400, ?1)",
             params![r#"{"type":"step-finish","reason":"stop","tokens":{"total":560,"input":100,"output":40,"reasoning":0,"cache":{"write":20,"read":300}}}"#],
@@ -943,19 +662,10 @@ mod tests {
         )
         .unwrap();
 
-        // Current active context is the step-finish total, NOT the cumulative
-        // session columns.
+        // Current active context is the newest step-finish total.
         assert_eq!(
             OpenCodeAdapter::latest_step_finish_tokens(&conn, Path::new("/tmp/project")),
             Some(560)
-        );
-        // Session cumulative cache stats across both parts. OpenCode accounting:
-        // total prompt = input + cache.read + cache.write, hit = cache.read.
-        // prt_1: 252 + 161536 = 161788 prompt / 161536 hit;
-        // prt_2: 100 + 20 + 300 = 420 / 300.
-        assert_eq!(
-            OpenCodeAdapter::session_cache_stats(&conn, Path::new("/tmp/project")),
-            Some((161536 + 300, 161788 + 420))
         );
         assert_eq!(
             OpenCodeAdapter::observed_model_id(&conn, Path::new("/tmp/project")).as_deref(),
@@ -964,10 +674,6 @@ mod tests {
         // A cwd with no session yields nothing.
         assert_eq!(
             OpenCodeAdapter::latest_step_finish_tokens(&conn, Path::new("/tmp/other")),
-            None
-        );
-        assert_eq!(
-            OpenCodeAdapter::session_cache_stats(&conn, Path::new("/tmp/other")),
             None
         );
     }

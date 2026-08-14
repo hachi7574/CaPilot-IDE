@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useStore } from "./store";
-import { spawnAgent } from "./agentActions";
+import { createDefaultAgent } from "./structuredAgent";
 import { notify } from "./notify";
 
 /**
@@ -39,8 +39,9 @@ export function useCloneEvents() {
             }
             s.finishClone(id);
             s.setProjectRoots({ [name]: root });
-            // Auto-open a fresh agent terminal in the clone (best-effort).
-            spawnAgent(name).catch((e) =>
+            // Auto-open a fresh agent session in the clone (best-effort; Phase 5
+            // default = structured backend).
+            createDefaultAgent(name).catch((e) =>
               console.error("自动打开终端失败:", e)
             );
           }

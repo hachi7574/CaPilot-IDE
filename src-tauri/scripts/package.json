@@ -1,0 +1,10 @@
+{
+  "name": "capilot-claude-sidecar",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Claude Agent SDK sidecar for CaPilot's structured agent runtime (speaks codex app-server wire schema).",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.232"
+  }
+}

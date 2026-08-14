@@ -153,7 +153,11 @@ mod tests {
     #[test]
     fn alt_screen_roundtrip() {
         // Enter alt, draw a TUI-ish frame, move the cursor.
-        let src = parse_at(b"\x1b[?1049h\x1b[2J\x1b[H\x1b[32mTOP\x1b[0m\x1b[2;5H\x1b[7minv\x1b[0m", 24, 80);
+        let src = parse_at(
+            b"\x1b[?1049h\x1b[2J\x1b[H\x1b[32mTOP\x1b[0m\x1b[2;5H\x1b[7minv\x1b[0m",
+            24,
+            80,
+        );
         assert!(src.screen().alternate_screen(), "test input must be in alt");
         assert_reconstructs(&src, 24, 80);
         // The rebuilt screen must also be in alt.

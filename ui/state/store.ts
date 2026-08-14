@@ -27,17 +27,12 @@ export type FontScale = "s" | "m" | "l" | "xl" | "xxl";
  * visible text). Both stay optional — a provider with no trustworthy value
  * omits instead of estimating.
  *
- * `cacheHitTokens` / `cacheTotalInputTokens` are SESSION-CUMULATIVE prompt
- * token counts feeding the cache hit rate (`cacheHitTokens /
- * cacheTotalInputTokens`). Runtimes normalize their own accounting into this
- * pair (e.g. codex's `input_tokens` already includes cached reads, Claude's
- * does not).
+ * Cache-hit accounting was removed (structured-agent-runtime-architecture
+ * §12.1); account-level quota lives in the independent provider quota service.
  */
 export interface AgentUsage {
   contextWindowUsedTokens: number | null;
   contextWindowMaxTokens: number | null;
-  cacheHitTokens: number | null;
-  cacheTotalInputTokens: number | null;
 }
 
 export interface AgentInfo {
@@ -65,18 +60,6 @@ export interface AgentInfo {
   last_usage?: AgentUsage | null;
 }
 
-/** Hook-reported lifecycle status read from the backend sidecar
- *  (`~/CaPilot/status/<agent_id>.json`, written by the claude adapter's
- *  `--settings` hooks). `status`: `idle` | `working` | `waiting_input` |
- *  `awaiting_choice` | `dormant`; `ts` is epoch seconds. `waiting_input` = a
- *  permission/approval prompt; `awaiting_choice` = a question prompt (claude
- *  AskUserQuestion / opencode `question.asked`) — the tab bar renders them as
- *  待确认 and 待选择 respectively. Absent for non-claude runtimes. */
-export interface HookStatus {
-  status: string;
-  ts: number;
-}
-
 /**
  * Live-status derivation (Orca-aligned). The persisted `status` field is a
  * lifecycle record — "running" means the process was alive when the row was
@@ -87,17 +70,15 @@ export interface HookStatus {
  * sessions. Terminal states (`done`/`failed`/`waiting_input`/`busy`) are
  * authoritative regardless of connectivity.
  *
- * `hook` is the claude hook-reported lifecycle status (authoritative where
- * present). `waiting_input` defers to recency: a permission prompt is a static
- * screen, but the tool that runs after the user grants it streams output — that
- * must read as 运行中, not 待确认.
+ * Phase 5: the status-hook sidecar was retired — legacy PTY agents are
+ * read-only EOL sessions and structured agents report lifecycle through the
+ * daemon's `AgentManager` (`AgentStatus`), so the tab strip derives purely
+ * from connectivity + recency.
  */
 export function effectiveAgentStatus(
   agent: AgentInfo | undefined,
   connected: boolean,
-  active: boolean,
-  hook?: HookStatus | null,
-  submittedAt?: number
+  active: boolean
 ): AgentStatus | "dormant" {
   if (!agent) return "idle";
   if (agent.status === "done") return "done";
@@ -105,31 +86,6 @@ export function effectiveAgentStatus(
   // No live PTY → dormant (restored after restart, sleepProject, killed-kept).
   // These sessions are resumable, not dead and not running.
   if (!connected) return "dormant";
-  if (hook) {
-    switch (hook.status) {
-      case "working":
-        return "running";
-      case "idle":
-        // A just-submitted prompt lags the hook by up to a poll tick
-        // (UserPromptSubmit hasn't landed yet) while the TUI echo/output is
-        // already flowing — read that brief window as 运行中. Terminal typing
-        // never sets `submittedAt`, so it stays 空闲.
-        return submittedAt && Date.now() - submittedAt < SUBMIT_FLASH_MS
-          ? "running"
-          : "idle";
-      case "waiting_input":
-        return active ? "running" : "waiting_input";
-      case "awaiting_choice":
-        // Same recency override as `waiting_input`: the question screen is a
-        // static TUI frame, but the output the agent streams after the user
-        // answers must read as 运行中, not a lingering 待选择.
-        return active ? "running" : "awaiting_choice";
-      case "dormant":
-        return "dormant";
-      default:
-        break;
-    }
-  }
   if (agent.status === "waiting_input") return "waiting_input";
   // `busy` is the explicit "working" flag; otherwise a connected session is
   // 运行中 while it has produced/consumed activity recently, else 空闲.
@@ -149,12 +105,6 @@ export function effectiveAgentStatus(
  * false 运行中 either.
  */
 export const ACTIVE_WINDOW_MS = 2000;
-
-/** How long a just-submitted prompt is allowed to read as 运行中 while its
- *  lifecycle hook hasn't caught up yet (UserPromptSubmit lags the send by up to
- *  a poll tick). Only `markAgentSubmitted` (the Composer send path) sets the
- *  marker, so typing in the terminal never triggers this. */
-export const SUBMIT_FLASH_MS = 1500;
 
 /** Minimum gap between activity stamps (appendAgentOutput / markAgentActive).
  *  Kept small (0.5s) so a future non-zero window still tracks liveness without
@@ -233,7 +183,9 @@ export interface UsageConfig {
 
 export interface Tab {
   id: string;
-  type: "agent" | "editor" | "diff";
+  /** `"agent"` = legacy PTY terminal; `"structured"` = structured Agent Runtime
+   *  session (architecture §14) rendered by AgentPanel. */
+  type: "agent" | "structured" | "editor" | "diff";
   agentId?: string;
   /** Editor: absolute file path. Diff: the "new" (worktree/index) side path,
    *  used for project grouping in the tab bar. */
@@ -303,18 +255,6 @@ export function splitLeafTabIds(node: SplitNode): string[] {
   return node.kind === "leaf"
     ? [node.tabId]
     : [...splitLeafTabIds(node.a), ...splitLeafTabIds(node.b)];
-}
-
-/** Is `tabId` currently on screen? With a split the visible set is every leaf;
- *  without one it's the single active tab. Used to decide whether a completed
- *  agent run's result is unviewed (see `unreadCompletion`). */
-function tabIsVisible(
-  tabId: string,
-  activeTabId: string | null,
-  splitTree: SplitNode | null
-): boolean {
-  if (splitTree) return splitLeafTabIds(splitTree).includes(tabId);
-  return activeTabId === tabId;
 }
 
 /** The first (leftmost/topmost) leaf's tab id — the pane that `setActiveTab` /
@@ -500,21 +440,6 @@ interface AppState {
    *  from the activity stamp; the first user engagement (see markAgentActive)
    *  clears it so real task output reads as 运行中. */
   agentWakeAt: Map<string, number>;
-  /** Hook-reported lifecycle status per agent (claude only; see `HookStatus`).
-   *  Polled from the backend sidecar; `effectiveAgentStatus` prefers it over the
-   *  activity heuristic so the 运行中/空闲 split follows real claude lifecycle
-   *  events (submit → working, stop → idle, permission → waiting). */
-  hookStatus: Map<string, HookStatus>;
-  /** Epoch-ms of the last Composer prompt submission per agent. Bridges the
-   *  window where a just-sent prompt's lifecycle hook hasn't caught up yet
-   *  (UserPromptSubmit lags the send) — see `SUBMIT_FLASH_MS`. Never set by
-   *  terminal typing. */
-  agentSubmittedAt: Map<string, number>;
-  /** Agent ids whose last completed turn's result hasn't been viewed yet (the
-   *  tab bar reads 已完成 instead of 空闲). Set when the hook goes working →
-   *  idle while the agent's tab is off-screen; cleared on view (`setActiveTab`)
-   *  or when the user submits a new prompt. In-memory only. */
-  unreadCompletion: Set<string>;
   /** Output buffered before a terminal attached (and between mounts). */
   agentOutputs: Map<string, number[]>;
   /** Whether the initial persisted-session lookup has settled. */
@@ -614,15 +539,10 @@ interface AppState {
   /** Stamp an agent as active (user input sent to its PTY). Combined with
    *  output activity in `appendAgentOutput`, drives the 运行中/空闲 split. */
   markAgentActive: (id: string) => void;
-  /** Stamp an agent as having just received a submitted prompt. Sets the
-   *  `agentSubmittedAt` flash marker so the tab reads 运行中 while the
-   *  lifecycle hook catches up; clears the activity-based wakeup marker. */
-  markAgentSubmitted: (id: string) => void;
-  /** Update (or clear with `null`) an agent's hook-reported lifecycle status. */
-  setHookStatus: (id: string, hook: HookStatus | null) => void;
-  /** Mark/unmark an agent's unviewed-completion flag (已完成). `unread` true
-   *  flags a finished turn the user hasn't opened; false clears it. */
-  setAgentUnread: (id: string, unread: boolean) => void;
+  /** Complete the in-flight (assigned) todo tags of a session: move them to
+   *  待验收 with the session name. Called when a structured turn completes
+   *  (the hook-driven trigger was retired with Phase 5). */
+  completeAssignedTodos: (id: string) => void;
   requestResume: (id: string) => void;
   consumeResume: (id: string) => void;
   /** Drop a finished agent's dead channel, keeping its record + output so the
@@ -798,9 +718,6 @@ export const useStore = create<AppState>((set, get) => ({
   agentChannels: new Map(),
   agentActiveAt: new Map(),
   agentWakeAt: new Map(),
-  hookStatus: new Map(),
-  agentSubmittedAt: new Map(),
-  unreadCompletion: new Set(),
   agentOutputs: new Map(),
   sessionsRestored: false,
   resumeOnOpen: new Set(),
@@ -900,12 +817,6 @@ export const useStore = create<AppState>((set, get) => ({
       activeAt.delete(id);
       const wakeAt = new Map(s.agentWakeAt);
       wakeAt.delete(id);
-      const hookStatus = new Map(s.hookStatus);
-      hookStatus.delete(id);
-      const submittedAt = new Map(s.agentSubmittedAt);
-      submittedAt.delete(id);
-      const unreadCompletion = new Set(s.unreadCompletion);
-      unreadCompletion.delete(id);
       const outputs = new Map(s.agentOutputs);
       outputs.delete(id);
       const resources = new Map(s.agentResources);
@@ -928,9 +839,6 @@ export const useStore = create<AppState>((set, get) => ({
         agentChannels: channels,
         agentActiveAt: activeAt,
         agentWakeAt: wakeAt,
-        hookStatus,
-        agentSubmittedAt: submittedAt,
-        unreadCompletion,
         agentOutputs: outputs,
         agentResources: resources,
         resumeOnOpen,
@@ -1022,84 +930,23 @@ export const useStore = create<AppState>((set, get) => ({
         : { agentActiveAt: activeAt };
     }),
 
-  markAgentSubmitted: (id) =>
+  completeAssignedTodos: (id) =>
     set((s) => {
-      const now = Date.now();
-      const submittedAt = new Map(s.agentSubmittedAt);
-      submittedAt.set(id, now);
-      // Mirror markAgentActive: user interaction ends the wake window.
-      const wakeAt = s.agentWakeAt.has(id) ? new Map(s.agentWakeAt) : undefined;
-      if (wakeAt) wakeAt.delete(id);
-      // Also stamp the activity clock so the post-submit output stream keeps
-      // the tab 运行中 while the hook is still catching up.
-      const activeAt = new Map(s.agentActiveAt);
-      activeAt.set(id, now);
-      return wakeAt
-        ? { agentSubmittedAt: submittedAt, agentActiveAt: activeAt, agentWakeAt: wakeAt }
-        : { agentSubmittedAt: submittedAt, agentActiveAt: activeAt };
-    }),
-
-  setHookStatus: (id, hook) =>
-    set((s) => {
-      // Value-preserving: `invoke` parses a fresh object each poll, so compare
-      // by value — an unchanged status must not re-render the tab strip (an
-      // idle strip doesn't tick).
-      const prev = s.hookStatus.get(id);
-      if (
-        prev &&
-        hook &&
-        prev.status === hook.status &&
-        prev.ts === hook.ts
-      ) {
+      // Task auto-complete: an in-flight (assigned) tag on this session is done
+      // when the turn ends — move it to 待验收 with the session name. Called on
+      // structured `turn_completed`; the hook-driven trigger (working → idle)
+      // was retired with Phase 5.
+      const sessionName = s.agents.get(id)?.title;
+      if (!s.todos.some((t) => t.status === "assigned" && t.agentId === id)) {
         return {};
       }
-      if (!hook && prev === undefined) return {};
-      const hookStatus = new Map(s.hookStatus);
-      if (hook) hookStatus.set(id, hook);
-      else hookStatus.delete(id);
-      // A turn completed: the hook went working → idle (claude Stop, codex Stop,
-      // opencode session idle). If the agent's tab is off-screen the user hasn't
-      // seen the result — flag it so the tab reads 已完成 instead of 空闲.
-      let unreadCompletion = s.unreadCompletion;
-      const tab = s.tabs.find((t) => t.agentId === id);
-      if (
-        hook &&
-        prev &&
-        prev.status === "working" &&
-        hook.status === "idle" &&
-        tab &&
-        !tabIsVisible(tab.id, s.activeTabId, s.splitTree)
-      ) {
-        unreadCompletion = new Set(unreadCompletion);
-        unreadCompletion.add(id);
-      }
-      // Task auto-complete: an in-flight (assigned) tag on this session is done
-      // when the turn ends — move it to 待验收 with the session name. Unlike the
-      // unread flag this does not depend on tab visibility; a finished task is
-      // finished whether or not anyone was watching the terminal.
-      let todos = s.todos;
-      if (hook && prev && prev.status === "working" && hook.status === "idle") {
-        const sessionName = s.agents.get(id)?.title;
-        if (todos.some((t) => t.status === "assigned" && t.agentId === id)) {
-          todos = todos.map((t) =>
-            t.status === "assigned" && t.agentId === id
-              ? { ...t, status: "done" as const, doneAt: Date.now(), sessionName: sessionName ?? t.sessionName }
-              : t
-          );
-          saveTodos(todos);
-        }
-      }
-      return { hookStatus, unreadCompletion, todos };
-    }),
-
-  setAgentUnread: (id, unread) =>
-    set((s) => {
-      const has = s.unreadCompletion.has(id);
-      if (has === unread) return {};
-      const unreadCompletion = new Set(s.unreadCompletion);
-      if (unread) unreadCompletion.add(id);
-      else unreadCompletion.delete(id);
-      return { unreadCompletion };
+      const todos = s.todos.map((t) =>
+        t.status === "assigned" && t.agentId === id
+          ? { ...t, status: "done" as const, doneAt: Date.now(), sessionName: sessionName ?? t.sessionName }
+          : t
+      );
+      saveTodos(todos);
+      return { todos };
     }),
 
   clearAgentOutput: (id) =>
@@ -1218,14 +1065,7 @@ export const useStore = create<AppState>((set, get) => ({
       if (tree && !splitLeafTabIds(tree).includes(id)) {
         splitTree = splitReplaceLeaf(tree, splitFirstLeaf(tree), id);
       }
-      // Viewing a tab clears its agent's unviewed-completion flag (已完成 → 空闲).
-      let unreadCompletion = s.unreadCompletion;
-      const tab = s.tabs.find((t) => t.id === id);
-      if (tab?.agentId && unreadCompletion.has(tab.agentId)) {
-        unreadCompletion = new Set(unreadCompletion);
-        unreadCompletion.delete(tab.agentId);
-      }
-      return { activeTabId: id, splitTree, unreadCompletion };
+      return { activeTabId: id, splitTree };
     }),
 
   splitPane: (targetTabId, newTabId, direction, newOnFirst) =>

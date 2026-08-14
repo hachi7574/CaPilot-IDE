@@ -7,10 +7,13 @@
 //! (`bundle.externalBin` picks up the app binary); a separate Cargo target
 //! would need explicit packaging work (§4.1).
 
+use crate::agent_provider::acp::{opencode_profile, AcpClient};
+use crate::agent_provider::direct::{claude_profile, codex_profile, ClaudeClient, CodexClient};
 use crate::daemon::runtime::socket_path;
 use crate::daemon::server::{DaemonConfig, DaemonError, DaemonServer};
 use std::path::PathBuf;
 use std::process;
+use std::sync::Arc;
 
 /// Application version shared with the GUI for the version handshake. The GUI
 /// uses the same Cargo package version via `env!("CARGO_PKG_VERSION")`.
@@ -64,6 +67,14 @@ pub fn run_daemon_mode() {
         socket_path(&base).display(),
         server.instance_id()
     );
+
+    // Generic ACP providers are lazy factories: registering the OpenCode ACP
+    // profile spawns nothing until a session/catalog is actually requested. The
+    // Codex Direct adapter is the same: `codex app-server` spawns only when a
+    // session or catalog is requested (§8.2).
+    server.register_provider(Arc::new(AcpClient::new(opencode_profile())));
+    server.register_provider(Arc::new(CodexClient::new(codex_profile())));
+    server.register_provider(Arc::new(ClaudeClient::new(claude_profile())));
 
     // Blocks until a Shutdown request, then kills PTYs and returns.
     server.run();

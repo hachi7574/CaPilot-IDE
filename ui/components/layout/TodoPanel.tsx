@@ -145,7 +145,6 @@ export function TodoPanel() {
   const todoScope = useStore((s) => s.todoScope);
   const focusedProject = useStore((s) => s.focusedProject);
   const sessionsRestored = useStore((s) => s.sessionsRestored);
-  const hookStatus = useStore((s) => s.hookStatus);
   const addTodo = useStore((s) => s.addTodo);
   const updateTodoText = useStore((s) => s.updateTodoText);
   const deleteTodo = useStore((s) => s.deleteTodo);
@@ -174,25 +173,11 @@ export function TodoPanel() {
     () => todos.filter((t) => t.status === "done" && inScope(t)),
     [todos, inScope]
   );
-  // 待处理 also surfaces in-flight (assigned) tags whose session is currently
-  // blocked on a user interaction: `awaiting_choice` (待选择 — a question tool
-  // asking for a pick) AND `waiting_input` (待确认 — a permission/approval
-  // prompt). Both are states where the task needs the user before the turn can
-  // advance, so the tag becomes visible again instead of hiding in the
-  // assigned-in-flight state. Derived live from the hook status — nothing is
-  // persisted for it; the tag is still `assigned` until the turn ends.
-  // Matching `waiting_input` too is deliberate: a question prompt may surface as
-  // a PermissionRequest (claude gates AskUserQuestion behind one), so tying the
-  // surfacing to exactly one hook status would miss real blocked-on-user cases.
-  const waitingTags = useMemo(
-    () =>
-      todos.filter((t) => {
-        if (t.status !== "assigned" || !inScope(t) || t.agentId == null) return false;
-        const status = hookStatus.get(t.agentId)?.status;
-        return status === "awaiting_choice" || status === "waiting_input";
-      }),
-    [todos, hookStatus, inScope]
-  );
+  // 待处理 (blocked-on-user) surfacing: previously derived live from the
+  // status-hook sidecar (`awaiting_choice` / `waiting_input`). Phase 5 retired
+  // the hook sidecar with the legacy Agent path — structured agents surface
+  // permissions inline in AgentPanel instead, so no tag is surfaced here.
+  const waitingTags = useMemo(() => [] as TodoTag[], [todos, inScope]);
 
   // Hydrate from the settings KV once session restore has settled, so an
   // assigned tag whose agent no longer exists (deleted while the app was

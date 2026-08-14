@@ -1,12 +1,12 @@
 //! Append-only, sequence-numbered record of agent lifecycle events (§3, §6.1) —
 //! shared by the GUI bridge and the daemon.
 //!
-//! Natural exits, delete-mode cleanups and status-hook changes are recorded
-//! here with a monotonic sequence. While the GUI is connected these are
-//! redundant with live `agent://*` events; the journal matters when the GUI is
-//! offline: Phase 4 replays `seq > last_acked` so todo/tab state catches up on
-//! reconnect. This is an in-memory log for now — the disk layout / retention
-//! policy is a Phase 4 decision.
+//! Natural exits and delete-mode cleanups are recorded here with a monotonic
+//! sequence. While the GUI is connected these are redundant with live
+//! `agent://*` events; the journal matters when the GUI is offline: Phase 4
+//! replays `seq > last_acked` so todo/tab state catches up on reconnect. This is
+//! an in-memory log for now — the disk layout / retention policy is a Phase 4
+//! decision.
 
 use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,8 +20,6 @@ pub enum LifecycleEventKind {
     Exited,
     /// Agent record deleted (`session_end_mode=delete` or explicit delete).
     Removed,
-    /// A status-hook sidecar change (daemon records; Phase 4 replays it).
-    HookStatus,
 }
 
 /// One recorded lifecycle event. `seq` is globally monotonic across agents.
@@ -115,7 +113,11 @@ mod tests {
     #[test]
     fn sequences_are_monotonic_and_since_filters() {
         let j = LifecycleJournal::new();
-        let a = j.record("a", LifecycleEventKind::Exited, Some(serde_json::json!({"exit_code": 0})));
+        let a = j.record(
+            "a",
+            LifecycleEventKind::Exited,
+            Some(serde_json::json!({"exit_code": 0})),
+        );
         let b = j.record("b", LifecycleEventKind::Removed, None);
         assert_eq!(a, 1);
         assert_eq!(b, 2);
@@ -133,23 +135,14 @@ mod tests {
     }
 
     #[test]
-    fn record_preserves_payload_and_kind() {
-        let j = LifecycleJournal::new();
-        j.record(
-            "a",
-            LifecycleEventKind::HookStatus,
-            Some(serde_json::json!({"status": "working", "ts": 1})),
-        );
-        let ev = j.since(0)[0].clone();
-        assert_eq!(ev.kind, LifecycleEventKind::HookStatus);
-        assert_eq!(ev.payload.unwrap()["status"], "working");
-    }
-
-    #[test]
     fn journal_is_bounded_by_max_events() {
         let j = LifecycleJournal::new();
         for i in 0..(MAX_JOURNAL_EVENTS + 100) {
-            j.record("a", LifecycleEventKind::Exited, Some(serde_json::json!({"n": i})));
+            j.record(
+                "a",
+                LifecycleEventKind::Exited,
+                Some(serde_json::json!({"n": i})),
+            );
         }
         let tail = j.since(0);
         assert_eq!(tail.len(), MAX_JOURNAL_EVENTS, "oldest events dropped");

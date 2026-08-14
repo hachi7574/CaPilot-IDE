@@ -2,81 +2,18 @@ use crate::agent_runtime::adapter::{
     AgentRuntimeAdapter, AgentSession, AgentUsage, EffortInfo, ModelInfo, PermissionModeInfo,
     ThinkingOptionInfo,
 };
-use crate::agent_runtime::status_hooks::{self, ensure_status_hooks, HOOK_ENV_AGENT, HOOK_ENV_DIR};
-use crate::persistence::status_dir;
 use serde_json::Value;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 pub struct CodexAdapter;
 
 impl CodexAdapter {
     pub fn new() -> Self {
         Self
-    }
-
-    /// Codex config root: `$CODEX_HOME` when set, else `~/.codex`.
-    fn codex_home() -> Option<PathBuf> {
-        if let Some(home) = std::env::var_os("CODEX_HOME") {
-            return Some(PathBuf::from(home));
-        }
-        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex"))
-    }
-
-    /// Per-session codex config profile (`$CODEX_HOME/capilot-<agent_id>.config.toml`).
-    /// A `-p <name>` launch layers this file ON TOP of the user's real
-    /// `config.toml`, so CaPilot's status hooks are injected per-invocation
-    /// without touching the user's global config or `hooks.json`.
-    fn status_profile(agent_id: &str) -> Option<PathBuf> {
-        Self::codex_home().map(|home| home.join(format!("capilot-{agent_id}.config.toml")))
-    }
-
-    fn profile_name(agent_id: &str) -> String {
-        format!("capilot-{agent_id}")
-    }
-
-    /// Write the status-hook profile for one agent. The profile defines inline
-    /// TOML hooks (codex's `HookEventsToml` in a `[[hooks.<Event>]]` layer) that
-    /// call the shared `~/CaPilot/status/hook.sh` for every lifecycle event
-    /// codex supports. The hook script itself is env-gated (no-op when
-    /// `CAPILOT_AGENT_ID` is absent), so the same command is safe to run under
-    /// any codex invocation. Best-effort: a failed write degrades to no hooks.
-    fn write_status_profile(agent_id: &str) -> std::io::Result<()> {
-        let Some(profile) = Self::status_profile(agent_id) else {
-            return Ok(());
-        };
-        let hook_sh = status_dir().join("hook.sh");
-        let hook_sh = hook_sh.to_string_lossy();
-        // TOML basic-string escape for the script path (home dirs are plain, but
-        // escape backslash and quote so an odd HOME can never break the file).
-        let escaped = hook_sh.replace('\\', "\\\\").replace('"', "\\\"");
-        let mut toml = String::new();
-        for event in status_hooks::CODEX_HOOK_EVENTS {
-            // Codex clamps SessionEnd hook timeouts to 3s and warns on startup
-            // when a larger timeout is declared. Declare 3s for SessionEnd
-            // (still generous — hook.sh is a sub-millisecond sh script) so the
-            // session opens without a clamp warning.
-            let timeout = if event == "SessionEnd" { 3 } else { 5 };
-            toml.push_str(&format!(
-                "[[hooks.{event}]]\n\
-                 [[hooks.{event}.hooks]]\n\
-                 type = \"command\"\n\
-                 command = \"/bin/sh {escaped}\"\n\
-                 timeout = {timeout}\n\n"
-            ));
-        }
-        std::fs::write(profile, toml)
-    }
-
-    /// Remove a session's codex config profile (session delete / close). No-op
-    /// when the file is already gone or `CODEX_HOME` is unresolvable.
-    pub fn remove_status_profile(agent_id: &str) {
-        if let Some(profile) = Self::status_profile(agent_id) {
-            let _ = std::fs::remove_file(profile);
-        }
     }
 
     fn check_available() -> bool {
@@ -193,16 +130,11 @@ impl CodexAdapter {
                         .get("supportedReasoningEfforts")
                         .and_then(Value::as_array)
                         .map(|options| {
-                            let default = row
-                                .get("defaultReasoningEffort")
-                                .and_then(Value::as_str);
+                            let default = row.get("defaultReasoningEffort").and_then(Value::as_str);
                             options
                                 .iter()
                                 .filter_map(|option| {
-                                    let id = option
-                                        .get("reasoningEffort")?
-                                        .as_str()?
-                                        .to_string();
+                                    let id = option.get("reasoningEffort")?.as_str()?.to_string();
                                     let description = option
                                         .get("description")
                                         .and_then(Value::as_str)
@@ -263,40 +195,6 @@ impl CodexAdapter {
         }
     }
 
-    fn resume_key_from_file(path: &Path, cwd: &Path) -> Option<String> {
-        let file = std::fs::File::open(path).ok()?;
-        let mut first_line = String::new();
-        std::io::BufReader::new(file)
-            .read_line(&mut first_line)
-            .ok()?;
-        let value: Value = serde_json::from_str(&first_line).ok()?;
-        let payload = value.get("payload")?;
-        (payload.get("cwd")?.as_str()? == cwd.to_string_lossy())
-            .then(|| payload.get("id").and_then(Value::as_str).map(str::to_owned))?
-    }
-
-    /// Fresh Codex TUIs write a session_meta record below $CODEX_HOME/sessions.
-    /// Limit candidates to the spawn window so another old terminal sharing the
-    /// cwd can never be captured as this terminal's resume key.
-    fn detect_recent_resume_key(cwd: &Path) -> Option<String> {
-        let mut files = Vec::new();
-        Self::visit_jsonl(&Self::sessions_dir()?, &mut files);
-        let now = SystemTime::now();
-        files
-            .into_iter()
-            .filter_map(|path| {
-                let modified = path.metadata().ok()?.modified().ok()?;
-                let age = now.duration_since(modified).unwrap_or(Duration::ZERO);
-                if age > Duration::from_secs(10) {
-                    return None;
-                }
-                let key = Self::resume_key_from_file(&path, cwd)?;
-                Some((modified, key))
-            })
-            .max_by_key(|(modified, _)| *modified)
-            .map(|(_, key)| key)
-    }
-
     /// Whether `path`'s first line (the `session_meta` record) carries
     /// `payload.cwd` == `cwd`.
     fn session_matches_cwd(path: &Path, cwd: &Path) -> bool {
@@ -342,20 +240,9 @@ impl CodexAdapter {
     /// total) and the last seen `model_context_window` as max (emitted on both
     /// `token_count` and `task_started`). Both fields stay optional: a session
     /// still on its first turn may have no `token_count` yet.
-    ///
-    /// Also accumulates session-cumulative cache stats across ALL `token_count`
-    /// events. Codex accounting (OpenAI style): `input_tokens` ALREADY includes
-    /// the cached portion (verified: `total_tokens == input_tokens +
-    /// output_tokens`), so the total prompt is `input_tokens` and the hit
-    /// portion is `cached_input_tokens`. Older transcripts may name them
-    /// `cache_read_input_tokens` / `cache_creation_input_tokens`; both are
-    /// accepted.
     fn latest_usage_from_content(content: &str) -> AgentUsage {
         let mut used = None;
         let mut max = None;
-        let mut cache_hit = 0u64;
-        let mut cache_total = 0u64;
-        let mut cache_seen = false;
         for line in content.lines() {
             let Ok(v) = serde_json::from_str::<Value>(line) else {
                 continue;
@@ -376,32 +263,10 @@ impl CodexAdapter {
             {
                 used = Some(n);
             }
-            let lu = v
-                .pointer("/payload/info/last_token_usage")
-                .and_then(Value::as_object);
-            let input = lu
-                .and_then(|o| o.get("input_tokens"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let hit = lu
-                .and_then(|o| o.get("cached_input_tokens"))
-                .and_then(Value::as_u64)
-                .or_else(|| {
-                    lu.and_then(|o| o.get("cache_read_input_tokens"))
-                        .and_then(Value::as_u64)
-                })
-                .unwrap_or(0);
-            if input > 0 {
-                cache_hit += hit;
-                cache_total += input;
-                cache_seen = true;
-            }
         }
         AgentUsage {
             context_window_used_tokens: used,
             context_window_max_tokens: max,
-            cache_hit_tokens: cache_seen.then_some(cache_hit),
-            cache_total_input_tokens: cache_seen.then_some(cache_total),
         }
     }
 
@@ -495,60 +360,26 @@ impl AgentRuntimeAdapter for CodexAdapter {
         // Inline mode makes the PTY's scrollback behave like the other runtimes.
         args.push("--no-alt-screen".to_string());
 
-        // Status-reporting hooks. Codex has no per-invocation hook flag like
-        // claude's `--settings`, so CaPilot layers a per-session config profile
-        // (`$CODEX_HOME/capilot-<id>.config.toml`) that defines inline TOML
-        // hooks calling the shared `~/CaPilot/status/hook.sh`. The profile is
-        // loaded on top of the user's real config — it never modifies it — and
-        // removed on session delete. `--dangerously-bypass-hook-trust` is
-        // required because the profile hooks are new to codex (not in the
-        // user's persisted trust state); CaPilot writes the script itself, so
-        // the bypass is safe and scoped to this invocation. A failed profile
-        // write degrades to no hooks — it must never abort a spawn.
-        args.extend(self.status_hook_args(session));
-
         Ok(("codex".to_string(), args))
     }
 
-    fn status_hook_args(&self, session: &AgentSession) -> Vec<String> {
-        let _ = ensure_status_hooks();
-        if Self::write_status_profile(&session.id).is_ok() {
-            vec![
-                "-p".to_string(),
-                Self::profile_name(&session.id),
-                "--dangerously-bypass-hook-trust".to_string(),
-            ]
-        } else {
-            vec![]
-        }
-    }
-
-    fn launch_env(&self, session: &AgentSession) -> Result<Vec<(String, String)>, String> {
-        // Session-scoped env for the status hook script: it must know which
-        // agent this codex process belongs to and where to write the sidecar.
-        // Injected into THIS PTY only — the user's own codex runs stay clean.
-        Ok(vec![
-            (HOOK_ENV_AGENT.to_string(), session.id.clone()),
-            (
-                HOOK_ENV_DIR.to_string(),
-                status_dir().to_string_lossy().into_owned(),
-            ),
-        ])
+    fn launch_env(&self, _session: &AgentSession) -> Result<Vec<(String, String)>, String> {
+        // No per-session env: the status-hook config profile (`-p capilot-<id>`
+        // + `--dangerously-bypass-hook-trust`) was retired in Phase 5 —
+        // structured agents report lifecycle through the daemon's AgentManager,
+        // never through a shell-hook sidecar.
+        Ok(vec![])
     }
 
     fn resume_args(&self, session: &AgentSession) -> Vec<String> {
+        // Legacy PTY sessions resume only with the persisted key (stored in the
+        // DB row); the dynamic "newest session in cwd" scan was retired in
+        // Phase 5 (agent main path no longer guesses resume keys).
         session
             .resume_key
             .as_ref()
             .map(|key| vec!["resume".to_string(), key.clone()])
             .unwrap_or_default()
-    }
-
-    fn supports_resume(&self) -> bool {
-        true
-    }
-    fn capture_resume_key(&self, cwd: &Path) -> Option<String> {
-        Self::detect_recent_resume_key(cwd)
     }
 
     fn context_usage(&self, cwd: &Path, _model: Option<&str>) -> Option<AgentUsage> {
@@ -655,60 +486,15 @@ mod tests {
                 .windows(2)
                 .any(|v| v == ["--ask-for-approval", "untrusted"]));
             assert!(args.windows(2).any(|v| v == ["--sandbox", "read-only"]));
-            // Status hooks: the per-session profile is written into $CODEX_HOME
-            // and wired via `-p` + the trust bypass flag.
-            assert!(args.windows(2).any(|v| v == ["-p", "capilot-test"]));
-            assert!(args
-                .iter()
-                .any(|a| a == "--dangerously-bypass-hook-trust"));
-            let profile = CodexAdapter::status_profile("test").unwrap();
-            let toml = std::fs::read_to_string(&profile).unwrap();
-            assert!(toml.contains("[[hooks.UserPromptSubmit]]"));
-            assert!(toml.contains("[[hooks.PermissionRequest]]"));
-            // Codex clamps SessionEnd hook timeouts to 3s and warns on startup
-            // when a larger value is declared. Trim each hook block (the format
-            // string carries source indentation) and assert the per-event
-            // timeout: SessionEnd declares 3s, every other event 5s.
-            let blocks: Vec<&str> = toml
-                .split("\n\n")
-                .map(str::trim)
-                .filter(|b| !b.is_empty())
-                .collect();
-            let block_for = |event: &str| {
-                blocks
-                    .iter()
-                    .find(|b| b.starts_with(&format!("[[hooks.{event}]]")))
-                    .unwrap_or_else(|| panic!("missing {event} hook block"))
-            };
-            assert!(block_for("SessionEnd").contains("timeout = 3"));
-            assert!(block_for("UserPromptSubmit").contains("timeout = 5"));
+            // No status-hook injection: the `-p capilot-<id>` profile +
+            // `--dangerously-bypass-hook-trust` flags were retired in Phase 5.
+            assert!(!args.iter().any(|a| a == "--dangerously-bypass-hook-trust"));
+            assert!(!args.windows(2).any(|v| v == ["-p", "capilot-test"]));
             assert_eq!(
                 adapter.resume_args(&session(Some("session-id"))),
                 ["resume", "session-id"]
             );
         });
-    }
-
-    #[test]
-    fn parses_only_matching_cwd_session_metadata() {
-        let dir = std::env::temp_dir().join(format!("capilot-codex-test-{}", std::process::id()));
-        let file = dir.join("session.jsonl");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            &file,
-            r#"{"type":"session_meta","payload":{"id":"abc","cwd":"/tmp/project"}}
-"#,
-        )
-        .unwrap();
-        assert_eq!(
-            CodexAdapter::resume_key_from_file(&file, Path::new("/tmp/project")),
-            Some("abc".into())
-        );
-        assert_eq!(
-            CodexAdapter::resume_key_from_file(&file, Path::new("/tmp/other")),
-            None
-        );
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -742,11 +528,7 @@ mod tests {
 
     #[test]
     fn parses_codex_token_count_for_context_usage() {
-        // Two token_count events: the `last` reading comes from the LAST event,
-        // and the session-cumulative cache stats sum across BOTH. Codex
-        // accounting (OpenAI style): `input_tokens` already includes the cached
-        // portion, so the prompt total is `input_tokens` and the hit portion is
-        // `cached_input_tokens`.
+        // Two token_count events: the `last` reading comes from the LAST event.
         let content = concat!(
             "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/project\"}}\n",
             "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"model_context_window\":258400}}\n",
@@ -757,9 +539,6 @@ mod tests {
         // `last` usage object, not the session total.
         assert_eq!(usage.context_window_used_tokens, Some(8200));
         assert_eq!(usage.context_window_max_tokens, Some(258400));
-        // Session cumulative: 15674 + 8000 prompt, 11008 + 3000 hit.
-        assert_eq!(usage.cache_hit_tokens, Some(11008 + 3000));
-        assert_eq!(usage.cache_total_input_tokens, Some(15674 + 8000));
     }
 
     #[test]
@@ -786,8 +565,14 @@ mod tests {
 "#,
         )
         .unwrap();
-        assert!(CodexAdapter::session_matches_cwd(&file, Path::new("/tmp/project")));
-        assert!(!CodexAdapter::session_matches_cwd(&file, Path::new("/tmp/other")));
+        assert!(CodexAdapter::session_matches_cwd(
+            &file,
+            Path::new("/tmp/project")
+        ));
+        assert!(!CodexAdapter::session_matches_cwd(
+            &file,
+            Path::new("/tmp/other")
+        ));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

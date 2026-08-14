@@ -762,9 +762,8 @@ enum ChildSource {
 /// Codex's built-ins (`supports_inline_args`) and OpenCode's pickers take no
 /// inline values, so their rows are absent — those commands stay plain leaves
 /// and the CLI opens its own picker in the PTY.
-const STATIC_CHILDREN: &[(&str, &[&str])] = &[
-    ("claude", &["model", "permissions", "effort", "fast", "mcp"]),
-];
+const STATIC_CHILDREN: &[(&str, &[&str])] =
+    &[("claude", &["model", "permissions", "effort", "fast", "mcp"])];
 
 /// Per-runtime commands whose options live only in the CLI's own picker
 /// (sessions, forks, plugins, ...). Selecting them from the Composer would
@@ -774,8 +773,16 @@ const EXCLUDED: &[(&str, &[&str])] = &[
     (
         "claude",
         &[
-            "resume", "fork", "rewind", "memory", "config", "plugins", "add-dir", "cd",
-            "background", "tasks",
+            "resume",
+            "fork",
+            "rewind",
+            "memory",
+            "config",
+            "plugins",
+            "add-dir",
+            "cd",
+            "background",
+            "tasks",
         ],
     ),
     (
@@ -949,29 +956,27 @@ fn builtin_commands(runtime: &str) -> &'static [BuiltinCommand] {
 }
 
 fn append_builtin_commands(runtime: &str, items: &mut Vec<SlashItem>, seen: &mut HashSet<String>) {
-    let append =
-        |command: &BuiltinCommand, items: &mut Vec<SlashItem>, seen: &mut HashSet<String>| {
-            // Dynamic-picker commands are not statically enumerable; keep them
-            // out of the menu so selecting one never dead-ends.
-            if matches!(child_source(runtime, command.name), ChildSource::Excluded) {
-                return;
-            }
-            push_item(
-                items,
-                seen,
-                SlashItem {
-                    name: command.name.to_string(),
-                    description: command.description.to_string(),
-                    invocation: format!("/{}", command.name),
-                    source: BUILTIN_SOURCE.to_string(),
-                    kind: "command".to_string(),
-                    has_children: matches!(
-                        child_source(runtime, command.name),
-                        ChildSource::Static
-                    ),
-                },
-            );
-        };
+    let append = |command: &BuiltinCommand,
+                  items: &mut Vec<SlashItem>,
+                  seen: &mut HashSet<String>| {
+        // Dynamic-picker commands are not statically enumerable; keep them
+        // out of the menu so selecting one never dead-ends.
+        if matches!(child_source(runtime, command.name), ChildSource::Excluded) {
+            return;
+        }
+        push_item(
+            items,
+            seen,
+            SlashItem {
+                name: command.name.to_string(),
+                description: command.description.to_string(),
+                invocation: format!("/{}", command.name),
+                source: BUILTIN_SOURCE.to_string(),
+                kind: "command".to_string(),
+                has_children: matches!(child_source(runtime, command.name), ChildSource::Static),
+            },
+        );
+    };
 
     if runtime == "codex" {
         for name in CODEX_DISPLAY_ORDER {
@@ -1582,21 +1587,27 @@ mod tests {
 
         // OpenCode's `/models` and `/themes` are interactive pickers.
         let opencode = discover("opencode", &root);
-        assert!(!opencode
-            .iter()
-            .find(|item| item.invocation == "/models")
-            .unwrap()
-            .has_children);
-        assert!(!opencode
-            .iter()
-            .find(|item| item.invocation == "/themes")
-            .unwrap()
-            .has_children);
-        assert!(!opencode
-            .iter()
-            .find(|item| item.invocation == "/connect")
-            .unwrap()
-            .has_children);
+        assert!(
+            !opencode
+                .iter()
+                .find(|item| item.invocation == "/models")
+                .unwrap()
+                .has_children
+        );
+        assert!(
+            !opencode
+                .iter()
+                .find(|item| item.invocation == "/themes")
+                .unwrap()
+                .has_children
+        );
+        assert!(
+            !opencode
+                .iter()
+                .find(|item| item.invocation == "/connect")
+                .unwrap()
+                .has_children
+        );
 
         fs::remove_dir_all(&root).unwrap();
     }
@@ -1629,12 +1640,17 @@ mod tests {
         assert_eq!(permissions, ["default", "acceptEdits", "plan", "auto"]);
 
         // `/mcp` offers actions (claude), not server names.
-        assert_eq!(invocations("claude", "mcp"), ["enable", "disable", "reconnect"]);
+        assert_eq!(
+            invocations("claude", "mcp"),
+            ["enable", "disable", "reconnect"]
+        );
 
         let models = discover_children("claude", &root, "model");
         assert_eq!(models.len(), 3);
         assert!(models.iter().all(|item| item.kind == "command"));
-        assert!(models.iter().all(|item| item.invocation.starts_with("claude-")));
+        assert!(models
+            .iter()
+            .all(|item| item.invocation.starts_with("claude-")));
 
         // Removed parents return empty rather than stale internal-id text.
         assert!(discover_children("codex", &root, "model").is_empty());

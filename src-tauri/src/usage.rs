@@ -1,5 +1,14 @@
-//! Rate-limit usage fetching — powers the status-bar "剩余用量" readout and the
-//! Settings → 已安装 → ⚙ availability check.
+//! Provider account quota service (`ProviderQuotaService`), independent of
+//! Agent session context usage.
+//!
+//! Per docs/structured-agent-runtime-architecture.md §12.3, account remaining
+//! quota belongs to the Provider/account layer — it is NOT part of the Agent
+//! session core interface, NOT mixed with context-window usage, and never
+//! carried by `AgentUsage` (which is session context only). Cache-hit
+//! accounting was removed (§12.1).
+//!
+//! Powers the status-bar "剩余用量" readout and the Settings → 已安装 → ⚙
+//! availability check.
 //!
 //! Strategy mirrors `docs/reference/rate-limit-usage-fetching.md`, scoped to the
 //! two runtimes CaPilot surfaces quota for:
@@ -123,7 +132,10 @@ pub async fn fetch(runtime: &str, persistence: &Persistence) -> Result<RuntimeUs
     let (enabled, config) = {
         let db = persistence.db().lock().map_err(|e| e.to_string())?;
         let enabled = load_usage_enabled(&db);
-        let config = load_usage_config(&db).get(runtime).cloned().unwrap_or_default();
+        let config = load_usage_config(&db)
+            .get(runtime)
+            .cloned()
+            .unwrap_or_default();
         (enabled, config)
     };
     if !enabled.get(runtime).copied().unwrap_or(false) {
@@ -143,7 +155,10 @@ pub async fn check(runtime: &str, persistence: &Persistence) -> Result<UsageChec
     }
     let config = {
         let db = persistence.db().lock().map_err(|e| e.to_string())?;
-        load_usage_config(&db).get(runtime).cloned().unwrap_or_default()
+        load_usage_config(&db)
+            .get(runtime)
+            .cloned()
+            .unwrap_or_default()
     };
     let usage = fetch_with_config(runtime, config).await;
     Ok(usage_to_check(usage))
@@ -168,7 +183,10 @@ fn usage_to_check(usage: RuntimeUsage) -> UsageCheck {
         if let Some(plan) = &usage.plan_type {
             message.push_str(&format!("（{plan}）"));
         }
-        UsageCheck { available: true, message }
+        UsageCheck {
+            available: true,
+            message,
+        }
     } else {
         UsageCheck {
             available: false,
@@ -185,7 +203,9 @@ async fn fetch_with_config(runtime: &str, config: UsageConfig) -> RuntimeUsage {
                     .await
                 {
                     Ok(r) => r,
-                    Err(e) => return RuntimeUsage::error("codex", format!("codex 用量任务失败: {e}")),
+                    Err(e) => {
+                        return RuntimeUsage::error("codex", format!("codex 用量任务失败: {e}"))
+                    }
                 };
             match rpc {
                 Ok(v) => parse_codex_usage(v),
@@ -281,10 +301,7 @@ fn codex_rpc(method: &str) -> Result<Value, String> {
 
 fn parse_codex_usage(value: Value) -> RuntimeUsage {
     let mut usage = RuntimeUsage::error("codex", "codex 用量数据为空");
-    let Some(limits) = value
-        .get("result")
-        .and_then(|r| r.get("rateLimits"))
-    else {
+    let Some(limits) = value.get("result").and_then(|r| r.get("rateLimits")) else {
         usage.error = Some("codex 未返回 rateLimits".into());
         return usage;
     };
@@ -294,7 +311,11 @@ fn parse_codex_usage(value: Value) -> RuntimeUsage {
         .map(str::to_string);
 
     for slot in ["primary", "secondary"] {
-        if let Some(w) = limits.get(slot).and_then(Value::as_object).and_then(window_from_codex) {
+        if let Some(w) = limits
+            .get(slot)
+            .and_then(Value::as_object)
+            .and_then(window_from_codex)
+        {
             usage.windows.push(w);
         }
     }
@@ -394,7 +415,9 @@ async fn fetch_opencode(config: &UsageConfig) -> Result<Vec<UsageWindow>, String
     push_window(&mut windows, "weeklyUsage", &body, 10080);
     push_window(&mut windows, "monthlyUsage", &body, 43200);
     if windows.is_empty() {
-        return Err("无法从用量页解析出用量数据（Cookie 可能已过期，或 workspace id 不正确）".into());
+        return Err(
+            "无法从用量页解析出用量数据（Cookie 可能已过期，或 workspace id 不正确）".into(),
+        );
     }
     Ok(windows)
 }
@@ -483,7 +506,11 @@ fn parse_after_colon(rest: &str) -> Option<(Option<f64>, Option<f64>, Option<i64
             .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
             .unwrap_or(rest.len());
         let n: f64 = rest[..end].parse().ok()?;
-        return Some((Some(n.clamp(0.0, 100.0)), Some((100.0 - n).clamp(0.0, 100.0)), None));
+        return Some((
+            Some(n.clamp(0.0, 100.0)),
+            Some((100.0 - n).clamp(0.0, 100.0)),
+            None,
+        ));
     }
     // Object form. Inside a React Flight string the keys/quotes are escaped
     // (`{\"remaining\":...}`); outside they are raw. A `\"` sequence anywhere
@@ -510,7 +537,12 @@ fn parse_after_colon(rest: &str) -> Option<(Option<f64>, Option<f64>, Option<i64
 fn solid_usage_pct(s: &str) -> Option<(Option<f64>, Option<f64>, Option<i64>)> {
     let end = balanced_braces(s)?;
     let fields = solid_fields(&s[..=end]);
-    let field = |name: &str| fields.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+    let field = |name: &str| {
+        fields
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+    };
     let used: f64 = field("usagePercent")?.parse().ok()?;
     let reset_in_sec: Option<i64> = field("resetInSec").and_then(|v| v.parse().ok());
     let remaining = 100.0 - used;
@@ -571,23 +603,39 @@ fn push_solid_field(fields: &mut Vec<(String, String)>, part: &str) {
 fn object_usage_pct(v: &Value) -> Option<(Option<f64>, Option<f64>, Option<i64>)> {
     let obj = v.as_object()?;
     let num = |keys: &[&str]| -> Option<f64> {
-        keys.iter().find_map(|k| obj.get(*k).and_then(Value::as_f64))
+        keys.iter()
+            .find_map(|k| obj.get(*k).and_then(Value::as_f64))
     };
     let remaining = num(&["remaining", "remainingPct", "remaining_pct"]);
     let limit = num(&["limit", "total", "quota"]);
-    let used = num(&["used", "usedPct", "used_pct", "percent", "percentage", "usagePercent"]);
+    let used = num(&[
+        "used",
+        "usedPct",
+        "used_pct",
+        "percent",
+        "percentage",
+        "usagePercent",
+    ]);
     let resets_at = num(&["resetsAt", "resets_at"])
         .map(|s| s as i64)
         .or_else(|| num(&["resetInSec", "reset_in_sec"]).map(|s| now_epoch() + s as i64));
     if let (Some(rem), Some(lim)) = (remaining, limit) {
         if lim > 0.0 {
             let remaining_pct = (rem / lim * 100.0).clamp(0.0, 100.0);
-            return Some((Some((100.0 - remaining_pct).clamp(0.0, 100.0)), Some(remaining_pct), resets_at));
+            return Some((
+                Some((100.0 - remaining_pct).clamp(0.0, 100.0)),
+                Some(remaining_pct),
+                resets_at,
+            ));
         }
     }
     if let Some(used) = used {
         if used <= 100.0 {
-            return Some((Some(used), Some((100.0 - used).clamp(0.0, 100.0)), resets_at));
+            return Some((
+                Some(used),
+                Some((100.0 - used).clamp(0.0, 100.0)),
+                resets_at,
+            ));
         }
     }
     None

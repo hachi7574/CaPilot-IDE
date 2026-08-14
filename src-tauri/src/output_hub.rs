@@ -25,8 +25,8 @@
 //! duplicated across the attach window. The subscriber then receives only chunks
 //! with `seq > snapshot_seq`.
 
-use crate::agent_runtime::pty_core::{OutputSink, SinkResult};
 use crate::daemon::vt_checkpoint::render_checkpoint;
+use crate::terminal::pty_core::{OutputSink, SinkResult};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -193,7 +193,10 @@ impl AgentOutputHub {
     /// Bytes retained in the increment log (diagnostics/tests).
     #[cfg(test)]
     fn log_bytes(&self) -> usize {
-        self.state.lock().unwrap_or_else(|p| p.into_inner()).log_bytes
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .log_bytes
     }
 }
 
@@ -219,7 +222,9 @@ impl OutputSink for AgentOutputHub {
         // A failing subscriber is removed; the hub keeps absorbing output, so a
         // client disconnect can never cascade into pty_core killing the child
         // (§2.2).
-        state.subscribers.retain(|s| s.on_output(chunk.clone()).is_ok());
+        state
+            .subscribers
+            .retain(|s| s.on_output(chunk.clone()).is_ok());
         Ok(())
     }
 }
@@ -254,7 +259,9 @@ mod tests {
     impl HubSubscriber for RecorderSub {
         fn on_output(&self, chunk: OutputChunk) -> SinkResult {
             self.rec.seqs.lock().unwrap().push(chunk.seq);
-            self.rec.total.fetch_add(chunk.data.len(), Ordering::Relaxed);
+            self.rec
+                .total
+                .fetch_add(chunk.data.len(), Ordering::Relaxed);
             Ok(())
         }
     }
@@ -268,7 +275,7 @@ mod tests {
         fn on_output(&self, _chunk: OutputChunk) -> SinkResult {
             let n = self.seen.fetch_add(1, Ordering::Relaxed) + 1;
             if n >= self.fail_on {
-                Err(crate::agent_runtime::pty_core::SinkError::Closed)
+                Err(crate::terminal::pty_core::SinkError::Closed)
             } else {
                 Ok(())
             }
@@ -398,7 +405,10 @@ mod tests {
         let snap = hub.attach(rec.subscriber(), Some(3));
 
         assert_eq!(snap.snapshot_seq, 5);
-        assert!(snap.checkpoint.is_none(), "gap replay must avoid a checkpoint");
+        assert!(
+            snap.checkpoint.is_none(),
+            "gap replay must avoid a checkpoint"
+        );
         assert_eq!(snap.replay, b"ddddeeee".to_vec());
 
         // Live increments continue after the snapshot sequence.
@@ -474,9 +484,7 @@ mod tests {
         // The 10-row geometry is real: the render positions within the 10-row
         // grid (a no-op resize would keep the cursor on a 24-row grid).
         assert!(
-            std::str::from_utf8(&ckpt)
-                .unwrap()
-                .contains("\x1b[10;"),
+            std::str::from_utf8(&ckpt).unwrap().contains("\x1b[10;"),
             "resized checkpoint must position within the 10-row grid: {:?}",
             String::from_utf8_lossy(&ckpt)
         );

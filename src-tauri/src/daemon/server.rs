@@ -18,12 +18,15 @@
 //!   replayable when the GUI reconnects (§6.2/§9.4);
 //! - `Shutdown` → stop accepting, `kill_all`, then return so the process exits.
 
+use crate::agent_provider::manager::{
+    AgentEventObserver, AgentManager, NewAgentRequest, ResumeAgentRequest,
+};
+use crate::agent_provider::types::AgentPrompt;
 use crate::agent_runtime::adapter::AgentError;
-use crate::agent_runtime::pty_core::{OnExit, PtyCore, SinkError, SinkResult};
 use crate::daemon::protocol::{
     encode_event_payload, write_frame, ClientEvent, Hello, HelloAck, JournalEvent,
-    LiveSessionSummary, ProtocolErr, RequestCmd, Response, FRAME_EVENT, FRAME_HELLO,
-    FRAME_HELLO_ACK, FRAME_RESPONSE, FRAME_ERROR, PROTOCOL_VERSION,
+    LiveSessionSummary, ProtocolErr, RequestCmd, Response, FRAME_ERROR, FRAME_EVENT, FRAME_HELLO,
+    FRAME_HELLO_ACK, FRAME_RESPONSE, PROTOCOL_VERSION,
 };
 use crate::daemon::runtime::{
     ensure_run_dir, generate_token, make_instance_info, new_instance_id, socket_path,
@@ -32,6 +35,8 @@ use crate::daemon::runtime::{
 use crate::lifecycle_journal::{LifecycleEvent, LifecycleEventKind, LifecycleJournal};
 use crate::output_hub::{AgentOutputHub, HubSubscriber, OutputChunk};
 use crate::session_store::SessionStore;
+use crate::terminal::pty_core::{OnExit, SinkError, SinkResult};
+use crate::terminal::TerminalService;
 use std::collections::HashMap;
 use std::io;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -105,7 +110,7 @@ pub enum DaemonError {
 }
 
 pub struct DaemonServer {
-    pty: Arc<PtyCore>,
+    terminal: Arc<TerminalService>,
     store: Arc<SessionStore>,
     journal: Arc<LifecycleJournal>,
     agents: Arc<Mutex<HashMap<String, AgentEntry>>>,
@@ -114,10 +119,12 @@ pub struct DaemonServer {
     /// last attached to it. Only the lease holder may `Write` to that agent, so
     /// two clients can't type into the same TUI. Released on conn close / kill.
     leases: Arc<Mutex<HashMap<String, Arc<ConnState>>>>,
-    /// Status-hook sidecar dir (`~/CaPilot/status`). The monitor thread polls it
-    /// and journals+broadcasts `working → idle`-style transitions so they survive
-    /// a GUI offline window (§6.2/§9.4).
-    status_dir: PathBuf,
+    /// Structured agent runtime (architecture §3.4, §13). Owned by the daemon;
+    /// registered providers and live sessions survive GUI restarts. Commands are
+    /// handled synchronously on the connection thread via `block_on`.
+    agent_manager: Arc<AgentManager>,
+    /// Tokio runtime that drives the async `AgentClient`/`AgentSession` calls.
+    rt: tokio::runtime::Runtime,
     instance_id: String,
     token: String,
     listener: UnixListener,
@@ -152,25 +159,48 @@ impl DaemonServer {
         let store = SessionStore::from_base(config.base.clone())
             .map_err(|e| DaemonError::Bind(format!("open store: {e}")))?;
 
-        // Status-hook sidecars live under the CaPilot base dir in production
-        // (`~/CaPilot/status`); in tests this is the temp base, so the monitor
-        // never scans the real user status dir.
-        let status_dir = config.base.join("status");
+        // Structured agent runtime (architecture §13). The daemon owns the
+        // manager; the accept loop drives async provider calls via `block_on`.
+        let agent_manager = Arc::new(AgentManager::new());
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| DaemonError::Bind(format!("build tokio runtime: {e}")))?;
 
-        Ok(Arc::new(Self {
-            pty: Arc::new(PtyCore::new()),
+        let server = Arc::new(Self {
+            terminal: Arc::new(TerminalService::new()),
             store: Arc::new(store),
             journal: Arc::new(LifecycleJournal::new()),
             agents: Arc::new(Mutex::new(HashMap::new())),
             connections: Arc::new(Mutex::new(Vec::new())),
             leases: Arc::new(Mutex::new(HashMap::new())),
-            status_dir,
+            agent_manager: agent_manager.clone(),
+            rt,
             instance_id,
             token,
             listener,
             shutdown: AtomicBool::new(false),
             _lock: lock,
-        }))
+        });
+
+        // Broadcast structured agent events to every open connection as
+        // `AgentEvent` frames (sequenced; the client dedupes by `last_seq`).
+        agent_manager.subscribe(Arc::new(AgentEventBroadcast {
+            connections: server.connections.clone(),
+        }));
+
+        Ok(server)
+    }
+
+    /// Register a provider client with the daemon's `AgentManager` (used by the
+    /// GUI bridge at startup and by server tests; real providers land in Phase 2).
+    pub fn register_provider(&self, client: Arc<dyn crate::agent_provider::traits::AgentClient>) {
+        self.agent_manager.register_provider(client);
+    }
+
+    /// The daemon's structured agent manager (exposed for tests).
+    pub fn agent_manager(&self) -> &AgentManager {
+        &self.agent_manager
     }
 
     pub fn instance_id(&self) -> &str {
@@ -182,10 +212,9 @@ impl DaemonServer {
     }
 
     /// Accept loop. Blocks until shutdown is requested, then kills every live
-    /// PTY (explicit stop only, §9.4) and returns. A detached status-hook
-    /// monitor runs alongside the accept loop for the server's whole lifetime.
+    /// PTY (explicit stop only, §9.4) and returns. The structured-agent event
+    /// broadcast and the terminal service run alongside the accept loop.
     pub fn run(self: &Arc<Self>) {
-        self.spawn_status_monitor();
         self.listener
             .set_nonblocking(true)
             .expect("daemon listener nonblocking");
@@ -203,7 +232,7 @@ impl DaemonServer {
         }
         // Intentional teardown → sessions stay `running` in the DB and resume
         // next launch (same semantic as the GUI's exit handler).
-        self.pty.kill_all();
+        self.terminal.kill_all();
     }
 
     /// Ask the accept loop to stop.
@@ -274,6 +303,7 @@ impl DaemonServer {
                 crate::daemon::protocol::CAPABILITY_BASIC_IO.into(),
                 crate::daemon::protocol::CAPABILITY_ATTACH.into(),
                 crate::daemon::protocol::CAPABILITY_EVENT_REPLAY.into(),
+                crate::daemon::protocol::CAPABILITY_STRUCTURED_AGENTS.into(),
             ],
         };
         let payload = serde_json::to_vec(&ack).expect("ack serializes");
@@ -302,7 +332,8 @@ impl DaemonServer {
             let req: RequestCmd = match serde_json::from_slice(&frame.payload) {
                 Ok(r) => r,
                 Err(e) => {
-                    let _ = send_protocol_error(&conn, "bad_request", &format!("invalid request: {e}"));
+                    let _ =
+                        send_protocol_error(&conn, "bad_request", &format!("invalid request: {e}"));
                     break;
                 }
             };
@@ -379,6 +410,34 @@ impl DaemonServer {
                 self.request_shutdown();
                 Response::Ok
             }
+
+            // ── Structured agent API (architecture §13) ──
+            RequestCmd::AgentCreate { request } => self.cmd_agent_create(request),
+            RequestCmd::AgentResume { request } => self.cmd_agent_resume(request),
+            RequestCmd::AgentGetSnapshot { agent_id } => self.cmd_agent_get_snapshot(&agent_id),
+            RequestCmd::AgentStartTurn { agent_id, prompt } => {
+                self.cmd_agent_start_turn(&agent_id, prompt)
+            }
+            RequestCmd::AgentInterrupt { agent_id } => self.cmd_agent_interrupt(&agent_id),
+            RequestCmd::AgentSetConfigOption {
+                agent_id,
+                config_id,
+                value,
+            } => self.cmd_agent_set_config_option(&agent_id, &config_id, value),
+            RequestCmd::AgentRespondPermission {
+                agent_id,
+                request_id,
+                action_id,
+            } => self.cmd_agent_respond_permission(&agent_id, &request_id, &action_id),
+            RequestCmd::AgentClose { agent_id } => self.cmd_agent_close(&agent_id),
+            RequestCmd::AgentList => self.cmd_agent_list(),
+            RequestCmd::ProviderList => self.cmd_provider_list(),
+            RequestCmd::ProviderDiagnostic { provider_id } => {
+                self.cmd_provider_diagnostic(&provider_id)
+            }
+            RequestCmd::ProviderRefreshCatalog { provider_id, cwd } => {
+                self.cmd_provider_catalog(&provider_id, &cwd)
+            }
         }
     }
 
@@ -397,7 +456,7 @@ impl DaemonServer {
         // right after spawn (before any resize) already matches the PTY.
         let hub = Arc::new(AgentOutputHub::new(&agent_id, rows, cols));
         let on_exit = self.make_on_exit();
-        match self.pty.spawn(
+        match self.terminal.spawn(
             agent_id.clone(),
             &program,
             &args,
@@ -415,7 +474,7 @@ impl DaemonServer {
                 // and a hub entry; a reaped spawn is reported as a zero-generation
                 // `Spawned` so the GUI still sees the (already-sent) `Exited`
                 // event in order — real generations are ≥ 1 (see pty_core).
-                let generation = match self.pty.generation(&agent_id) {
+                let generation = match self.terminal.generation(&agent_id) {
                     Some(g) => g,
                     None => {
                         return Response::Spawned {
@@ -460,9 +519,10 @@ impl DaemonServer {
             Err(e) => {
                 // hub dropped with no subscribers → pre-attach buffer discarded.
                 let (code, message) = match e {
-                    AgentError::CapacityReached { limit } => {
-                        ("capacity".to_string(), format!("session limit reached ({limit})"))
-                    }
+                    AgentError::CapacityReached { limit } => (
+                        "capacity".to_string(),
+                        format!("session limit reached ({limit})"),
+                    ),
                     other => ("spawn".to_string(), other.to_string()),
                 };
                 Response::Error { code, message }
@@ -470,8 +530,14 @@ impl DaemonServer {
         }
     }
 
-    fn cmd_write(&self, conn: &Arc<ConnState>, agent_id: &str, generation: u64, data: String) -> Response {
-        match self.pty.generation(agent_id) {
+    fn cmd_write(
+        &self,
+        conn: &Arc<ConnState>,
+        agent_id: &str,
+        generation: u64,
+        data: String,
+    ) -> Response {
+        match self.terminal.generation(agent_id) {
             Some(g) if g == generation => {
                 // Input control lease (§4.2): a client that didn't spawn or
                 // attach this agent may not write into its TUI. A lease held by
@@ -480,17 +546,16 @@ impl DaemonServer {
                 {
                     let leases = self.leases.lock().unwrap_or_else(|p| p.into_inner());
                     if let Some(holder) = leases.get(agent_id) {
-                        if !Arc::ptr_eq(holder, conn)
-                            && !holder.closed.load(Ordering::Acquire)
-                        {
+                        if !Arc::ptr_eq(holder, conn) && !holder.closed.load(Ordering::Acquire) {
                             return Response::Error {
                                 code: "lease_held".into(),
-                                message: "another client holds the input lease for this agent".into(),
+                                message: "another client holds the input lease for this agent"
+                                    .into(),
                             };
                         }
                     }
                 }
-                match self.pty.write(agent_id, data.as_bytes()) {
+                match self.terminal.write(agent_id, data.as_bytes()) {
                     Ok(()) => Response::Ok,
                     Err(e) => Response::Error {
                         code: "write".into(),
@@ -510,15 +575,19 @@ impl DaemonServer {
     }
 
     fn cmd_resize(&self, agent_id: &str, generation: u64, rows: u16, cols: u16) -> Response {
-        match self.pty.generation(agent_id) {
+        match self.terminal.generation(agent_id) {
             Some(g) if g == generation => {
                 // Keep the hub's VT parser at the PTY's geometry so a later
                 // checkpoint is rendered at the current size (§5).
-                if let Some(e) = self.agents.lock().unwrap_or_else(|p| p.into_inner()).get(agent_id)
+                if let Some(e) = self
+                    .agents
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get(agent_id)
                 {
                     e.hub.resize(rows, cols);
                 }
-                match self.pty.resize(agent_id, rows, cols) {
+                match self.terminal.resize(agent_id, rows, cols) {
                     Ok(()) => Response::Ok,
                     Err(e) => Response::Error {
                         code: "resize".into(),
@@ -539,7 +608,7 @@ impl DaemonServer {
 
     fn cmd_kill(&self, agent_id: &str, generation: Option<u64>) -> Response {
         if let Some(g) = generation {
-            match self.pty.generation(agent_id) {
+            match self.terminal.generation(agent_id) {
                 Some(cur) if cur != g => {
                     return Response::Error {
                         code: "stale_generation".into(),
@@ -555,12 +624,18 @@ impl DaemonServer {
                 _ => {}
             }
         }
-        let _ = self.pty.kill(agent_id);
+        let _ = self.terminal.kill(agent_id);
         // Explicit kill suppresses the natural-exit callback, so the hub entry
         // is removed here (output subscription dies with it). The input lease
         // goes too — a killed agent has no controller.
-        self.agents.lock().unwrap_or_else(|p| p.into_inner()).remove(agent_id);
-        self.leases.lock().unwrap_or_else(|p| p.into_inner()).remove(agent_id);
+        self.agents
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(agent_id);
+        self.leases
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(agent_id);
         Response::Ok
     }
 
@@ -579,7 +654,7 @@ impl DaemonServer {
         after_seq: Option<u64>,
     ) -> Response {
         // Liveness + incarnation check (same shape as cmd_write/cmd_resize).
-        let hub = match self.pty.generation(&agent_id) {
+        let hub = match self.terminal.generation(&agent_id) {
             Some(g) if g == generation => match self
                 .agents
                 .lock()
@@ -610,7 +685,7 @@ impl DaemonServer {
         // §5: apply the client's initial_size BEFORE the snapshot so the
         // checkpoint is rendered at the terminal's real geometry (no TUI
         // residue when the new terminal is larger than the old one).
-        let _ = self.pty.resize(&agent_id, rows, cols);
+        let _ = self.terminal.resize(&agent_id, rows, cols);
         hub.resize(rows, cols);
 
         let sub = Arc::new(ClientOutputSub {
@@ -632,7 +707,7 @@ impl DaemonServer {
     }
 
     fn cmd_list(&self) -> Response {
-        let pid_map: HashMap<String, u32> = self.pty.pids().into_iter().collect();
+        let pid_map: HashMap<String, u32> = self.terminal.pids().into_iter().collect();
         let sessions = self
             .agents
             .lock()
@@ -685,76 +760,119 @@ impl DaemonServer {
         }
     }
 
-    /// Poll the status-hook sidecar dir and journal+broadcast each observed
-    /// transition. Runs for the daemon's whole lifetime. The FIRST scan seeds
-    /// the baseline without recording, so only changes that happen while this
-    /// daemon is running become events — a GUI that was offline across a
-    /// `working → idle` transition gets it on reconnect, while stale files from
-    /// before daemon start are not replayed as if they were new.
-    fn spawn_status_monitor(self: &Arc<Self>) {
-        let server = self.clone();
-        std::thread::Builder::new()
-            .name("capilot-status-monitor".into())
-            .spawn(move || {
-                // agent_id → (status, ts). Presence = baseline seen.
-                let mut seen: HashMap<String, (String, i64)> = HashMap::new();
-                let mut first_scan = true;
-                while !server.shutdown.load(Ordering::Acquire) {
-                    let mut changed: Vec<(String, String, i64)> = Vec::new();
-                    if let Ok(entries) = std::fs::read_dir(&server.status_dir) {
-                        for entry in entries.flatten() {
-                            let path = entry.path();
-                            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                                continue;
-                            };
-                            // Only per-agent sidecars (`<id>.json`); skip hook.sh
-                            // and hooks.json and any non-agent file.
-                            let Some(agent_id) = name.strip_suffix(".json") else {
-                                continue;
-                            };
-                            if agent_id.is_empty()
-                                || agent_id.starts_with("hook")
-                                || agent_id.ends_with(".tmp")
-                            {
-                                continue;
-                            }
-                            let Ok(raw) = std::fs::read_to_string(&path) else {
-                                continue;
-                            };
-                            let Ok(v) = serde_json::from_str::<StatusSidecar>(&raw) else {
-                                continue;
-                            };
-                            let key = (v.status.clone(), v.ts);
-                            if !first_scan && seen.get(agent_id) != Some(&key) {
-                                changed.push((agent_id.to_string(), v.status, v.ts));
-                            }
-                            seen.insert(agent_id.to_string(), key);
-                        }
-                    }
-                    first_scan = false;
-                    for (agent_id, status, ts) in changed {
-                        server.record_hook_status(&agent_id, &status, ts);
-                    }
-                    std::thread::sleep(Duration::from_millis(500));
-                }
-            })
-            .expect("spawn status monitor");
+    // ── Structured agent API (architecture §13) ──────────────────
+
+    fn cmd_agent_create(&self, request: NewAgentRequest) -> Response {
+        match self.rt.block_on(self.agent_manager.create_agent(request)) {
+            Ok(snapshot) => Response::AgentSnapshot {
+                snapshot: Box::new(snapshot),
+            },
+            Err(e) => agent_error_response(&e),
+        }
     }
 
-    /// Journal a hook-status transition and broadcast it to connected clients.
-    fn record_hook_status(&self, agent_id: &str, status: &str, ts: i64) {
-        let event_seq = self.journal.record(
-            agent_id,
-            LifecycleEventKind::HookStatus,
-            Some(serde_json::json!({ "status": status, "ts": ts })),
-        );
-        let ev = ClientEvent::HookStatus {
-            agent_id: agent_id.to_string(),
-            status: status.to_string(),
-            ts,
-            event_seq,
-        };
-        broadcast_client_event(&self.connections, &ev);
+    fn cmd_agent_resume(&self, request: ResumeAgentRequest) -> Response {
+        match self.rt.block_on(self.agent_manager.resume_agent(request)) {
+            Ok(snapshot) => Response::AgentSnapshot {
+                snapshot: Box::new(snapshot),
+            },
+            Err(e) => agent_error_response(&e),
+        }
+    }
+
+    fn cmd_agent_get_snapshot(&self, agent_id: &str) -> Response {
+        match self.agent_manager.snapshot(agent_id) {
+            Ok(snapshot) => Response::AgentSnapshot {
+                snapshot: Box::new(snapshot),
+            },
+            Err(e) => agent_error_response(&e),
+        }
+    }
+
+    fn cmd_agent_start_turn(&self, agent_id: &str, prompt: AgentPrompt) -> Response {
+        match self
+            .rt
+            .block_on(self.agent_manager.start_turn(agent_id, prompt))
+        {
+            Ok(turn_id) => Response::AgentTurnStarted { turn_id },
+            Err(e) => agent_error_response(&e),
+        }
+    }
+
+    fn cmd_agent_interrupt(&self, agent_id: &str) -> Response {
+        match self.rt.block_on(self.agent_manager.interrupt(agent_id)) {
+            Ok(()) => Response::Ok,
+            Err(e) => agent_error_response(&e),
+        }
+    }
+
+    fn cmd_agent_set_config_option(
+        &self,
+        agent_id: &str,
+        config_id: &str,
+        value: crate::agent_provider::types::ConfigValue,
+    ) -> Response {
+        match self.rt.block_on(
+            self.agent_manager
+                .set_config_option(agent_id, config_id, value),
+        ) {
+            Ok(_options) => Response::Ok,
+            Err(e) => agent_error_response(&e),
+        }
+    }
+
+    fn cmd_agent_respond_permission(
+        &self,
+        agent_id: &str,
+        request_id: &str,
+        action_id: &str,
+    ) -> Response {
+        match self.rt.block_on(
+            self.agent_manager
+                .respond_to_permission(agent_id, request_id, action_id),
+        ) {
+            Ok(()) => Response::Ok,
+            Err(e) => agent_error_response(&e),
+        }
+    }
+
+    fn cmd_agent_close(&self, agent_id: &str) -> Response {
+        match self.rt.block_on(self.agent_manager.close_agent(agent_id)) {
+            Ok(()) => Response::Ok,
+            Err(e) => agent_error_response(&e),
+        }
+    }
+
+    fn cmd_agent_list(&self) -> Response {
+        Response::AgentsListed {
+            agents: self.agent_manager.list_agents(),
+        }
+    }
+
+    fn cmd_provider_list(&self) -> Response {
+        Response::ProvidersListed {
+            providers: self.agent_manager.provider_info(),
+        }
+    }
+
+    fn cmd_provider_diagnostic(&self, provider_id: &str) -> Response {
+        match self
+            .rt
+            .block_on(self.agent_manager.provider_diagnostic(provider_id))
+        {
+            Ok(diagnostic) => Response::ProviderDiagnostic { diagnostic },
+            Err(e) => agent_error_response(&e),
+        }
+    }
+
+    fn cmd_provider_catalog(&self, provider_id: &str, cwd: &str) -> Response {
+        match self.rt.block_on(
+            self.agent_manager
+                .provider_catalog(provider_id, &PathBuf::from(cwd)),
+        ) {
+            Ok(catalog) => Response::ProviderCatalog { catalog },
+            Err(e) => agent_error_response(&e),
+        }
     }
 
     /// Daemon-side natural-exit handler: persist via `SessionStore`, record in
@@ -829,29 +947,50 @@ fn broadcast_client_event(connections: &Mutex<Vec<Arc<ConnState>>>, ev: &ClientE
     }
 }
 
-/// Raw shape of a status-hook sidecar (`~/CaPilot/status/<agent_id>.json`).
-#[derive(Debug, serde::Deserialize)]
-struct StatusSidecar {
-    status: String,
-    ts: i64,
+/// Map a structured agent error to a command-level `Response::Error` with the
+/// stable machine code (§10.4). Distinguishes from the PTY adapter's `AgentError`
+/// (a separate type imported above) by fully qualifying the provider error.
+fn agent_error_response(e: &crate::agent_provider::types::AgentError) -> Response {
+    Response::Error {
+        code: e.code().to_string(),
+        message: e.to_string(),
+    }
+}
+
+/// `AgentEventObserver` that turns every sequenced structured agent event into a
+/// wire `AgentEvent` frame pushed to all connected clients (architecture §13).
+struct AgentEventBroadcast {
+    connections: Arc<Mutex<Vec<Arc<ConnState>>>>,
+}
+
+impl AgentEventObserver for AgentEventBroadcast {
+    fn on_agent_event(
+        &self,
+        agent_id: &str,
+        seq: u64,
+        event: &crate::agent_provider::types::AgentEvent,
+    ) {
+        broadcast_client_event(
+            &self.connections,
+            &ClientEvent::AgentEvent {
+                agent_id: agent_id.to_string(),
+                seq,
+                event: event.clone(),
+            },
+        );
+    }
 }
 
 /// Convert a journaled lifecycle event into the wire `JournalEvent` used by
 /// `Response::EventLog`. The `kind` string matches `LifecycleEventKind`'s
-/// snake_case serialization; `exit_code`/`status` are lifted from the payload.
+/// snake_case serialization; `exit_code` is lifted from the payload.
 fn journal_event_to_protocol(ev: LifecycleEvent) -> JournalEvent {
-    let (kind, exit_code, status) = match ev.kind {
+    let (kind, exit_code) = match ev.kind {
         LifecycleEventKind::Exited => (
             "exited".to_string(),
             ev.payload.as_ref().and_then(|p| p.get("exit_code")),
-            None,
         ),
-        LifecycleEventKind::Removed => ("removed".to_string(), None, None),
-        LifecycleEventKind::HookStatus => (
-            "hook_status".to_string(),
-            None,
-            ev.payload.as_ref().and_then(|p| p.get("status")),
-        ),
+        LifecycleEventKind::Removed => ("removed".to_string(), None),
     };
     JournalEvent {
         seq: ev.seq,
@@ -859,7 +998,6 @@ fn journal_event_to_protocol(ev: LifecycleEvent) -> JournalEvent {
         agent_id: ev.agent_id,
         kind,
         exit_code: exit_code.and_then(|v| v.as_i64()).map(|v| v as i32),
-        status: status.and_then(|v| v.as_str()).map(|s| s.to_string()),
     }
 }
 
@@ -997,7 +1135,9 @@ mod tests {
                 cols: 80,
             });
             match resp {
-                Response::Spawned { generation, pid, .. } => {
+                Response::Spawned {
+                    generation, pid, ..
+                } => {
                     assert!(pid > 0);
                     generation
                 }
@@ -1018,7 +1158,9 @@ mod tests {
                 cols: 80,
             });
             match resp {
-                Response::Spawned { generation, pid, .. } => {
+                Response::Spawned {
+                    generation, pid, ..
+                } => {
                     assert!(pid > 0);
                     generation
                 }
@@ -1046,7 +1188,13 @@ mod tests {
             app_version: "test".into(),
             token: "wrong".into(),
         };
-        write_frame(&mut stream, FRAME_HELLO, 0, &serde_json::to_vec(&hello).unwrap()).unwrap();
+        write_frame(
+            &mut stream,
+            FRAME_HELLO,
+            0,
+            &serde_json::to_vec(&hello).unwrap(),
+        )
+        .unwrap();
         // The server sends an ERROR frame, then closes.
         let err = read_frame(&mut stream).unwrap();
         assert_eq!(err.kind, FRAME_ERROR);
@@ -1182,6 +1330,7 @@ mod tests {
                 project: "p".into(),
                 runtime: "claude".into(),
                 resume_key: None,
+                backend_kind: crate::persistence::BACKEND_KIND_LEGACY_PTY.into(),
                 cwd: crate::persistence::agent_dir("p", "fast"),
                 title: "t".into(),
                 status: "running".into(),
@@ -1389,7 +1538,10 @@ mod tests {
         });
         assert!(matches!(resp, Response::Ok), "{resp:?}");
         let (_, gap_seq) = read_until(&mut c2, "got:gap", Duration::from_secs(5));
-        assert!(gap_seq > first_seq, "gap seq {gap_seq} must exceed {first_seq}");
+        assert!(
+            gap_seq > first_seq,
+            "gap seq {gap_seq} must exceed {first_seq}"
+        );
 
         // A NEW client attaching at first_seq gets ONLY the gap bytes.
         let mut c3 = TestClient::connect(&base, server.token());
@@ -1674,74 +1826,121 @@ mod tests {
     /// offline across a `working → idle` move gets exactly that transition on
     /// reconnect, not a stale replay of pre-daemon files.
     #[test]
-    fn status_monitor_seeds_baseline_then_records_transitions() {
-        use std::io::Write;
+    fn structured_agent_protocol_end_to_end() {
+        use crate::agent_provider::fake::default_provider;
+        use crate::agent_provider::types::AgentStatus;
 
         let base = tmp_base();
-        let status_dir = base.join("status");
-        std::fs::create_dir_all(&status_dir).unwrap();
-        // Baseline exists BEFORE the daemon starts: the first scan seeds it.
-        write_status_sidecar(&status_dir, "a1", "working", 1);
-
         let server = DaemonServer::bind(DaemonConfig {
             base: base.clone(),
             app_version: "test".into(),
         })
         .unwrap();
+        server.register_provider(default_provider());
         let thread = {
             let s = server.clone();
             std::thread::spawn(move || s.run())
         };
-        let mut c1 = TestClient::connect(&base, server.token());
+        let mut c = TestClient::connect(&base, server.token());
 
-        // Give the monitor time for its first scan + a full idle poll. Then the
-        // baseline must NOT be in the journal (seeded, not recorded).
-        std::thread::sleep(Duration::from_millis(1200));
-        match c1.request(&RequestCmd::SyncEvents { last_seq: 0 }) {
-            Response::EventLog { events, .. } => {
-                assert!(
-                    events.is_empty(),
-                    "pre-daemon baseline must be seeded, not recorded: {events:?}"
-                );
+        // Provider list reflects the registered fake provider + its backend kind.
+        match c.request(&RequestCmd::ProviderList) {
+            Response::ProvidersListed { providers } => {
+                assert_eq!(providers.len(), 1);
+                assert_eq!(providers[0].provider_id, "fake");
+                assert_eq!(providers[0].backend_kind, "acp");
             }
             other => panic!("unexpected response: {other:?}"),
         }
 
-        // working → idle: journaled + broadcast as HookStatus.
-        write_status_sidecar(&status_dir, "a1", "idle", 2);
-        match c1.next_event(Duration::from_secs(5)) {
-            ClientEvent::HookStatus {
+        // Create: the fake emits SessionReady synchronously, so the daemon both
+        // returns a snapshot AND pushes the sequenced AgentEvent to the client.
+        let request = crate::agent_provider::manager::NewAgentRequest {
+            agent_id: "a1".into(),
+            provider_id: "fake".into(),
+            backend_kind: "acp".into(),
+            workspace_id: Some("wks-1".into()),
+            cwd: PathBuf::from("/tmp/w/proj"),
+            model: Some("fake-model".into()),
+            config: vec![],
+        };
+        match c.request(&RequestCmd::AgentCreate { request }) {
+            Response::AgentSnapshot { snapshot } => {
+                assert_eq!(snapshot.agent.agent_id, "a1");
+                assert_eq!(snapshot.agent.status, AgentStatus::Idle);
+                assert!(snapshot.agent.persistence.is_some());
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+        match c.next_event(Duration::from_secs(5)) {
+            ClientEvent::AgentEvent {
                 agent_id,
-                status,
-                ts,
-                event_seq,
+                seq,
+                event,
             } => {
                 assert_eq!(agent_id, "a1");
-                assert_eq!(status, "idle");
-                assert_eq!(ts, 2);
-                assert!(event_seq >= 1);
+                assert_eq!(seq, 1, "SessionReady is the first sequenced event");
+                assert!(matches!(
+                    event,
+                    crate::agent_provider::types::AgentEvent::SessionReady(_)
+                ));
             }
-            other => panic!("expected HookStatus, got {other:?}"),
+            other => panic!("expected AgentEvent(SessionReady), got {other:?}"),
         }
 
-        // And it's replayable for a reconnecting client.
-        match c1.request(&RequestCmd::SyncEvents { last_seq: 0 }) {
-            Response::EventLog { events, .. } => {
-                let hook: Vec<_> = events.iter().filter(|e| e.kind == "hook_status").collect();
-                assert_eq!(hook.len(), 1, "one transition recorded: {events:?}");
-                assert_eq!(hook[0].agent_id, "a1");
-                assert_eq!(hook[0].status.as_deref(), Some("idle"));
+        // Start a turn: returns a turn id, pushes TurnStarted, status → Running.
+        match c.request(&RequestCmd::AgentStartTurn {
+            agent_id: "a1".into(),
+            prompt: crate::agent_provider::types::AgentPrompt {
+                client_message_id: "m1".into(),
+                content: vec![crate::agent_provider::types::PromptContent::Text {
+                    text: "build it".into(),
+                }],
+            },
+        }) {
+            Response::AgentTurnStarted { turn_id } => assert!(turn_id.starts_with("turn-")),
+            other => panic!("unexpected response: {other:?}"),
+        }
+        match c.next_event(Duration::from_secs(5)) {
+            ClientEvent::AgentEvent { seq, event, .. } => {
+                assert_eq!(seq, 2);
+                assert!(matches!(
+                    event,
+                    crate::agent_provider::types::AgentEvent::TurnStarted(_)
+                ));
+            }
+            other => panic!("expected AgentEvent(TurnStarted), got {other:?}"),
+        }
+        match c.request(&RequestCmd::AgentGetSnapshot {
+            agent_id: "a1".into(),
+        }) {
+            Response::AgentSnapshot { snapshot } => {
+                assert_eq!(snapshot.agent.status, AgentStatus::Running);
+                assert_eq!(snapshot.last_seq, 2);
             }
             other => panic!("unexpected response: {other:?}"),
         }
 
-        c1.request(&RequestCmd::Shutdown);
+        // List reflects the record.
+        match c.request(&RequestCmd::AgentList) {
+            Response::AgentsListed { agents } => {
+                assert_eq!(agents.len(), 1);
+                assert_eq!(agents[0].agent_id, "a1");
+                assert_eq!(agents[0].backend_kind, "acp");
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        // Unknown provider → stable error code.
+        match c.request(&RequestCmd::AgentGetSnapshot {
+            agent_id: "ghost".into(),
+        }) {
+            Response::Error { code, .. } => assert_eq!(code, "agent_not_found"),
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        c.request(&RequestCmd::Shutdown);
         thread.join().unwrap();
         let _ = std::fs::remove_dir_all(&base);
-
-        fn write_status_sidecar(dir: &std::path::Path, agent_id: &str, status: &str, ts: i64) {
-            let mut f = std::fs::File::create(dir.join(format!("{agent_id}.json"))).unwrap();
-            writeln!(f, "{}", serde_json::json!({ "status": status, "ts": ts })).unwrap();
-        }
     }
 }

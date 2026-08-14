@@ -20,6 +20,8 @@
 
 > 适配器入口：`src-tauri/src/agent_runtime/runtimes/<id>.rs`；Composer 的 TUI 驱动逻辑在 `ui/components/layout/Composer.tsx`；运行时感知的 `/` 命令目录在 `src-tauri/src/slash.rs`。
 > 「live」指会话运行中的 TUI 操作（通过 PTY 注入按键/命令）；「launch」指进程启动参数。
+>
+> **Phase 5（结构化 Agent Runtime 迁移）后置状态**：claude/codex/opencode 的 PTY 路径已降级为**只读 EOL 兼容入口**——Agent 主路径不再注入按键（`agent_write` 对这些 runtime 直接拒绝）、不再写/读状态侧车（hook.sh / `--settings` / codex config profile / opencode status plugin / `agent_status_read` / daemon status monitor 全部退役）、不再做 resume-key 扫描（`capture_resume_key`/`supports_resume` 删除，只恢复 DB 中持久化的 key）。新 session 默认走结构化 backend（daemon 的 `AgentManager` + ACP/Direct adapter，见 `docs/structured-agent-phase5-handoff.md`）；bash 终端不受影响。本节仍记录 legacy 实现事实，仅作历史参考。
 
 ### 2.1 Claude Code（runtime `claude`）
 
@@ -125,17 +127,17 @@ opencode [--model <provider/model>] [--auto]
 | 9 | OpenCode `--auto` / 权限 | `--auto` = auto-approve；无其它模式 flag | `opencode.rs:340-346` | [permissions](https://opencode.ai/docs/permissions/) |
 | 10 | Codex 会话 `resume` 子命令 | `codex resume <id>`（非 flag） | `codex.rs:321-327` | [developer-commands](https://learn.chatgpt.com/docs/codex/developer-commands?surface=cli) |
 | 11 | Claude 会话目录 | `~/.claude/projects/<project-key>/*.jsonl` | `claude.rs:52-71` | [sessions](https://code.claude.com/docs/en/sessions) |
-| 12 | Codex 上下文占用 + 缓存命中数据源 | 会话 JSONL 的 `token_count` 事件：`payload.info.last_token_usage.total_tokens`（used）+ `payload.info.model_context_window`（max，`task_started` 也有）。**会话累计**命中率分子/分母 = 所有 `token_count` 的 `cached_input_tokens`（旧版命名 `cache_read_input_tokens`，二者都兼容）与 `input_tokens`——codex 的 `input_tokens` **已含缓存部分**（实测 `total_tokens == input_tokens + output_tokens`），所以分母就是 `input_tokens`，不得再加回缓存 | `codex.rs` `context_usage`/`latest_usage_from_content` | codex 会话 JSONL（实测 0.147.0） |
-| 13 | OpenCode 上下文占用 + 缓存命中数据源 | `opencode.db` 最新 `step-finish` part 的 `tokens.total`（used，非 `session.tokens_*` 累计列）；`opencode models --verbose` catalog 的 `limit.context`（max）。**会话累计**命中率分子/分母 = 所有 `step-finish` part 的 `tokens.cache.read` 与 `tokens.input + cache.read + cache.write`（opencode 的 `tokens.input` 不含缓存） | `opencode.rs` `context_usage`/`session_cache_stats` | opencode 本地 SQLite + `models --verbose`（实测 1.18.16） |
+| 12 | Codex 上下文占用数据源 | 会话 JSONL 的 `token_count` 事件：`payload.info.last_token_usage.total_tokens`（used）+ `payload.info.model_context_window`（max，`task_started` 也有）。缓存命中率已删除（架构 §12.1） | `codex.rs` `context_usage`/`latest_usage_from_content` | codex 会话 JSONL（实测 0.147.0） |
+| 13 | OpenCode 上下文占用数据源 | `opencode.db` 最新 `step-finish` part 的 `tokens.total`（used，非 `session.tokens_*` 累计列）；`opencode models --verbose` catalog 的 `limit.context`（max）。缓存命中率已删除（架构 §12.1） | `opencode.rs` `context_usage` | opencode 本地 SQLite + `models --verbose`（实测 1.18.16） |
 | 14 | OpenCode catalog 缓存 | 进程内 5min TTL + 落盘 `$XDG_CACHE_HOME/capilot-ide/opencode-model-limits.json`（`provider/model → context`）。进程重启后冷路径先读盘（~0ms），避免首载跑 ~0.7s 的 `models --verbose` 子进程；运行中 TTL 过期仍刷新 CLI 并写回盘 | `opencode.rs` `catalog_limit_context` | 实测：子进程 ~0.66s，DB 查询 ~50ms |
 | 15 | Codex hook 注入方式 | **无** claude 式 `--settings`；`-c hooks.file=` 被忽略（`HooksToml` 无该字段）。按会话用 `-p capilot-<id>` config profile（`$CODEX_HOME/capilot-<id>.config.toml` 内联 `[[hooks.<Event>]]`）+ `--dangerously-bypass-hook-trust`。profile 事件集无 `PostToolUseFailure`/`PostToolBatch`/`StopFailure` | `codex.rs` `write_status_profile`/`spawn_interactive` | 实测 0.147.0（payload 与 claude 同构，hook 进程可写宿主机） |
 | 16 | OpenCode hook 注入方式 | **无** shell hook 面；唯一入口是 JS 插件事件总线。按会话用 `OPENCODE_CONFIG_DIR`（**追加**语义，不改全局配置）指向 `$XDG_CACHE_HOME/capilot-ide/opencode-status/<agent_id>/`，内放 `plugin/capilot-status.js`（`Hooks.event` 监听 `session.status`/`session.idle`/`permission.asked`/`permission.replied`/`question.asked`/`question.replied`）。事件无 `SessionStart`/`SessionEnd`，插件加载时写一次 `idle` 打底 | `opencode.rs` `STATUS_PLUGIN`/`write_status_plugin`/`launch_env` | 实测 1.18.16（run log：`~/.opencode/*` 全局配置与 override 目录并存加载） |
 | 17 | **launch override 会丢弃 hook 注入** | Settings → 已安装 → ⚙ 的 args override **整体替换** adapter 参数列表，会把 claude 的 `--settings`、codex 的 `-p` profile 一起丢掉 → hook 永不触发、状态退回 PTY 活动启发式（长工具间隙误报空闲、输入回显误报运行中）。`lib.rs` spawn 在 override 替换 args 后**重追加** `mode_args`+`speed_args`+`status_hook_args` | `lib.rs` spawn（`replaced` 分支）+ adapter `status_hook_args` | 实测 2026-08-13（claude.args=`--model claude-sonnet-5`、codex.args=`--no-alt-screen`） |
-| 18 | Claude 上下文占用 + 缓存命中数据源 | cwd 下最新 `~/.claude/projects/<project-key>/*.jsonl` 的**全部 assistant 记录**（跳过 `isSidechain`）：used = 最后一条存在 `message.usage` 的 `input + cache_creation + cache_read + output`（Anthropic accounting：`input_tokens` **不含**缓存读取）；max = 模型清单 `context_window_max`（`claude.rs:91-116`，未知模型不猜）。**会话累计**命中率分子/分母 = 所有 assistant 记录的 `cache_read_input_tokens` 与 `input + cache_creation + cache_read` | `claude.rs` `context_usage`/`parse_transcript_usage`/`read_transcript` | 实测 transcript JSONL |
+| 18 | Claude 上下文占用数据源 | cwd 下最新 `~/.claude/projects/<project-key>/*.jsonl` 的**全部 assistant 记录**（跳过 `isSidechain`）：used = 最后一条存在 `message.usage` 的 `input + cache_creation + cache_read + output`（Anthropic accounting：`input_tokens` **不含**缓存读取）；max = 模型清单 `context_window_max`（`claude.rs:91-116`，未知模型不猜）。缓存命中率已删除（架构 §12.1） | `claude.rs` `context_usage`/`parse_transcript_usage`/`read_transcript` | 实测 transcript JSONL |
 
 > 编号 1、5、8 都是「顺序/键位」型事实，**最容易随版本漂移**。改它们时，确认当前 TUI 实际行为后再动代码，别只凭旧文档。
 
-**缓存命中率 chip（composer target 行）**：`AgentUsage` 新增 `cache_hit_tokens` / `cache_total_input_tokens` 两个**会话累计**字段（wire camelCase，`adapter.rs` `AgentUsage`）。各 adapter 按自己 runtime 的会计语义归一化后再上报（Claude/opencode：分子 `cache_read`、分母 `input+cache_read(+cache_write/creation)`；codex：分子 `cached_input_tokens`、分母 `input_tokens`），前端只算 `cache_hit/cache_total` 比例、不做跨 runtime 换算。只有两者都在且分母 > 0 才渲染 chip（`ui/components/layout/CacheHitRate.tsx`）；bash 等无 `context_usage` 的 runtime 永不渲染。
+缓存命中率 chip 已删除（架构 §12.1）：`AgentUsage` 不再携带 `cache_hit_tokens` / `cache_total_input_tokens`，`ui/components/layout/CacheHitRate.tsx` 已移除。账户 quota 属于独立 Provider quota service（`usage.rs`），不混入 session context usage。
 
 ---
 

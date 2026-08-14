@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useStore, AgentInfo, RestoredSession, createBufferedChannel } from "./store";
+import { useStructuredStore, startStructuredTurn } from "./structuredAgent";
 
 const DEFAULT_RUNTIME = "claude";
 
@@ -119,17 +120,11 @@ export async function ensureAgentChannel(agentId: string): Promise<boolean> {
 }
 
 /**
- * Send a prompt to an agent with the Composer's exact send semantics, shared by
- * the Composer and the todo-tag drop targets:
- *   1. ensure a live PTY channel (resume restored/dormant sessions);
- *   2. give a freshly-booted TUI time to attach its input loop before injecting
- *      the message (see `waitForTui` / the resumed-detection comment in the
- *      Composer);
- *   3. stamp the submission (tab bar reads 运行中) and clear the
- *      unviewed-completion flag;
- *   4. write the message — codex gets the text+Enter keystroke burst its TUI
- *      needs to treat the input as a submitted prompt, other runtimes a plain
- *      write (raw:false appends the Enter).
+ * Send a prompt to a legacy PTY agent session (bash terminal input, or the
+ * shared todo-drop path). Phase 5: legacy PTY Agent sessions (claude/codex/
+ * opencode) are read-only EOL — the backend refuses `agent_write` for them —
+ * so this only ever targets bash terminals in practice. The structured agent
+ * path uses `startStructuredTurn` instead (see `assignTodoAndSend`).
  */
 export async function sendPromptToAgent(
   agentId: string,
@@ -141,8 +136,6 @@ export async function sendPromptToAgent(
   if ((opts?.waitForTui) || resumed) {
     await new Promise((r) => setTimeout(r, 800));
   }
-  s.markAgentSubmitted(agentId);
-  s.setAgentUnread(agentId, false);
   const runtime = s.agents.get(agentId)?.runtime;
   if (runtime === "codex") {
     // Codex's TUI detects a text+Enter burst as pasted input. When both are
@@ -158,11 +151,10 @@ export async function sendPromptToAgent(
 }
 
 /**
- * Assign a todo tag to an agent and send its text as a prompt. The tag leaves
- * 待分配 (becomes invisible `assigned`), linked to the session so it auto-lands
- * in 待验收 when the session's turn ends. For an ended/dormant session the
- * standard reopen flow runs first (drop dead channel + flag resume + open the
- * terminal), then the prompt is injected once the resumed channel is live.
+ * Assign a todo tag to a session and send its text as a prompt. Structured
+ * agents (`startStructuredTurn`) and bash terminals (`sendPromptToAgent`) both
+ * accept the prompt; legacy PTY Agent sessions are read-only EOL, so the tag is
+ * assigned but no text is injected (the session can still be viewed/closed).
  */
 export async function assignTodoAndSend(tagId: string, agentId: string): Promise<void> {
   const st = useStore.getState();
@@ -172,6 +164,18 @@ export async function assignTodoAndSend(tagId: string, agentId: string): Promise
   const sessionName = agent?.title ?? null;
   // The tag keeps its creation-time scope (project) — see `assignTodoToAgent`.
   st.assignTodoToAgent(tagId, agentId, sessionName);
+
+  // Structured agent: the unified turn path (no PTY injection).
+  if (useStructuredStore.getState().agents.has(agentId)) {
+    await startStructuredTurn(agentId, tag.text).catch(() => {});
+    return;
+  }
+
+  const runtime = agent?.runtime;
+  // Legacy PTY Agent sessions are read-only EOL (Phase 5): assign only.
+  if (runtime && runtime !== "bash" && runtime !== "bash-rc") {
+    return;
+  }
 
   // Live session (channel attached, not ended) → straight in.
   if (!st.agentChannels.has(agentId) || agent?.status === "done") {

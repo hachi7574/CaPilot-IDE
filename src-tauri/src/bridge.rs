@@ -10,16 +10,25 @@
 //! - **InProcess** — the fallback [`PtyCore`], used only when no daemon can be
 //!   started AND the instance lock proves no other owner exists (§8).
 //! - **Unavailable** — a hard condition (§8): a live daemon we cannot talk to
-//!   (stale socket, version mismatch, wedged). Falling back here would create a
-//!   second PTY owner, so every command fails with a clear error instead.
+//!   (stale socket, bad token, wedged). Falling back here would create a
+//!   second PTY owner, so every command fails with a clear error instead. A
+//!   daemon that merely speaks an old protocol is *replaced* (killed and
+//!   respawned on this build), not left as an unavailable owner.
 
+use crate::agent_provider::manager::{
+    AgentRecord, AgentSnapshot, NewAgentRequest, ResumeAgentRequest,
+};
+use crate::agent_provider::types::{
+    AgentPrompt, ConfigValue, ProviderCatalog, ProviderDiagnostic, TurnId,
+};
 use crate::agent_runtime::adapter::{AgentError, AgentInfo, AgentStatus};
-use crate::agent_runtime::pty_core::{OnExit, OutputSink, PtyCore, SinkError, SinkResult};
 use crate::daemon::bin::{daemon_base, APP_VERSION};
-use crate::daemon::client::{ClientError, DaemonClient};
 pub use crate::daemon::client::SyncEventsResult;
+use crate::daemon::client::{ClientError, DaemonClient};
 use crate::daemon::protocol::ClientEvent;
 use crate::daemon::runtime::InstanceLock;
+use crate::daemon::runtime::{read_instance_info, socket_path, token_path};
+use crate::terminal::pty_core::{OnExit, OutputSink, PtyCore, SinkError, SinkResult};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -56,16 +65,14 @@ struct AgentRemoved {
     event_seq: u64,
 }
 
-/// Payload re-emitted on `agent://hook-status` (Phase 4). Mirrors the
-/// daemon's `ClientEvent::HookStatus` so the frontend sees the same shape as
-/// the in-process status-hook polling path. `event_seq` lets the frontend
-/// dedupe replay vs live delivery of the same journaled transition.
+/// Payload re-emitted on `agent://agent-event` (architecture §13): a sequenced
+/// structured agent event from the daemon's `AgentManager`. The frontend applies
+/// only `seq > snapshot.last_seq` and upserts timeline/permissions by id.
 #[derive(Clone, Serialize)]
-struct AgentHookStatus {
+struct AgentEventForward {
     id: String,
-    status: String,
-    ts: i64,
-    event_seq: u64,
+    seq: u64,
+    event: crate::agent_provider::types::AgentEvent,
 }
 
 /// The live PTY owner behind the bridge.
@@ -169,15 +176,29 @@ impl PtyBridge {
 
     /// Try to connect to a daemon. With `retry`, loops while the daemon is
     /// "not running" (socket/token not created yet — a freshly spawned daemon).
-    /// A hard handshake failure (version mismatch, bad token, protocol error)
-    /// aborts immediately: the daemon is alive but incompatible, and retrying
-    /// will not change that (§8 — never fall back under a live owner).
+    /// A protocol version mismatch replaces the stale daemon (kill + wait for
+    /// its socket to clear) and returns `None`, so [`Self::start`] respawns a
+    /// fresh one on this build's protocol. Other hard handshake failures (bad
+    /// token, protocol error) abort immediately: the daemon is alive but
+    /// incompatible, and retrying will not change that (§8 — never fall back
+    /// under a live owner).
     fn try_connect(base: &Path, retry: bool) -> Option<Arc<DaemonClient>> {
         let attempts = if retry { DAEMON_CONNECT_RETRIES } else { 1 };
         for _ in 0..attempts {
             match DaemonClient::connect(base, APP_VERSION) {
                 Ok(client) => return Some(Arc::new(client)),
                 Err(ClientError::NotRunning) => {}
+                Err(ClientError::VersionMismatch { daemon, client }) => {
+                    // A live daemon from a previous build cannot serve this
+                    // GUI. Remove it so the caller respawns a fresh daemon on
+                    // the same binary — the incompatible owner is replaced,
+                    // never bypassed (§8).
+                    log::warn!(
+                        "daemon protocol {daemon} != client protocol {client}; replacing stale daemon"
+                    );
+                    Self::replace_stale_daemon(base);
+                    return None;
+                }
                 Err(e) => {
                     log::warn!("daemon handshake failed (not falling back): {e}");
                     return None;
@@ -186,6 +207,80 @@ impl PtyBridge {
             std::thread::sleep(DAEMON_CONNECT_DELAY);
         }
         None
+    }
+
+    /// Terminate a daemon that answered with an incompatible protocol version
+    /// (a leftover resident from a previous build) and wait for its socket to
+    /// clear, so [`Self::start`] can acquire the instance lock and spawn a
+    /// fresh daemon. The pid comes from `instance.json` (written by every
+    /// daemon at startup); it is verified against `/proc/<pid>/cmdline` before
+    /// signalling so a recycled pid never kills an unrelated process.
+    fn replace_stale_daemon(base: &Path) {
+        let pid = read_instance_info(base).map(|i| i.pid);
+        match pid {
+            Some(pid) if Self::is_daemon_process(pid) => {
+                log::info!(
+                    "replacing stale daemon (pid {pid}) with an incompatible protocol version"
+                );
+                unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+            }
+            Some(pid) => {
+                log::warn!("instance.json pid {pid} is not a caPilot daemon; not killing it")
+            }
+            None => log::warn!(
+                "stale daemon detected but instance.json has no pid; waiting for it to exit"
+            ),
+        }
+
+        // Wait for the socket to clear (the daemon has exited and released the
+        // instance lock), escalating to SIGKILL if SIGTERM is ignored.
+        let mut escalated = false;
+        let mut deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !Self::daemon_socket_gone(base) {
+            if std::time::Instant::now() >= deadline {
+                if !escalated {
+                    escalated = true;
+                    deadline = std::time::Instant::now() + Duration::from_secs(2);
+                    if let Some(pid) = pid.filter(|p| Self::is_daemon_process(*p)) {
+                        log::warn!(
+                            "stale daemon (pid {pid}) ignored SIGTERM; escalating to SIGKILL"
+                        );
+                        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+                    }
+                    continue;
+                }
+                log::warn!(
+                    "stale daemon still present after SIGKILL; bridge will report unavailable"
+                );
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        // The stale daemon's token file is now orphaned; remove it so the
+        // respawn starts fresh (a client reading the old token before the new
+        // daemon writes its own would otherwise fail the token check).
+        let _ = std::fs::remove_file(token_path(base));
+    }
+
+    /// True once no live listener owns the daemon socket (socket file missing
+    /// or connect refused) — i.e. the old daemon has fully exited.
+    fn daemon_socket_gone(base: &Path) -> bool {
+        use std::os::unix::net::UnixStream;
+        match UnixStream::connect(socket_path(base)) {
+            Err(e) => matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ),
+            Ok(_) => false,
+        }
+    }
+
+    /// Confirm a pid still points at a caPilot daemon (`--daemon` in its
+    /// cmdline) before signalling it — protects against pid recycling.
+    fn is_daemon_process(pid: u32) -> bool {
+        let cmdline = std::fs::read_to_string(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+        cmdline.split('\0').any(|arg| arg == "--daemon")
     }
 
     /// Spawn the daemon as a detached child of this process (`current_exe()
@@ -197,7 +292,12 @@ impl PtyBridge {
     /// session.
     fn spawn_daemon_process() -> std::io::Result<()> {
         use std::os::unix::process::CommandExt;
-        let exe = std::env::current_exe()?;
+        // `CAPILOT_DAEMON_EXE` overrides `current_exe()` — a test seam: in a
+        // test harness `current_exe()` is the test binary, so tests point this
+        // at the real app binary to exercise the spawn path.
+        let exe = std::env::var_os("CAPILOT_DAEMON_EXE")
+            .map(PathBuf::from)
+            .unwrap_or(std::env::current_exe()?);
         let log = std::env::temp_dir().join("capilot-daemon.log");
         let log_file = std::fs::OpenOptions::new()
             .create(true)
@@ -391,21 +491,17 @@ impl PtyBridge {
                     },
                 );
             }
-            ClientEvent::HookStatus {
+            ClientEvent::AgentEvent {
                 agent_id,
-                status,
-                ts,
-                event_seq,
+                seq,
+                event,
             } => {
-                self.last_event_seq
-                    .fetch_max(event_seq, Ordering::AcqRel);
                 self.emit(
-                    "agent://hook-status",
-                    AgentHookStatus {
+                    "agent://agent-event",
+                    AgentEventForward {
                         id: agent_id,
-                        status,
-                        ts,
-                        event_seq,
+                        seq,
+                        event,
                     },
                 );
             }
@@ -460,18 +556,18 @@ impl PtyBridge {
                 // the channel exists (§4.2 attach window). A fresh spawn's
                 // terminal wants everything.
                 let _g = self.attach_lock.lock().unwrap_or_else(|p| p.into_inner());
-                let (pid, generation) = match client.spawn(agent_id, program, args, cwd, env, rows, cols)
-                {
-                    Ok(v) => v,
-                    Err(ClientError::Request { code, .. }) if code == "capacity" => {
-                        // Preserve the structured cap so `build_and_spawn` shows
-                        // the same friendly Chinese message as in-process mode.
-                        return Err(AgentError::CapacityReached {
-                            limit: crate::agent_runtime::pty_core::MAX_LIVE_SESSIONS,
-                        });
-                    }
-                    Err(e) => return Err(AgentError::PtyError(e.to_string())),
-                };
+                let (pid, generation) =
+                    match client.spawn(agent_id, program, args, cwd, env, rows, cols) {
+                        Ok(v) => v,
+                        Err(ClientError::Request { code, .. }) if code == "capacity" => {
+                            // Preserve the structured cap so `build_and_spawn` shows
+                            // the same friendly Chinese message as in-process mode.
+                            return Err(AgentError::CapacityReached {
+                                limit: crate::terminal::pty_core::MAX_LIVE_SESSIONS,
+                            });
+                        }
+                        Err(e) => return Err(AgentError::PtyError(e.to_string())),
+                    };
                 self.channels
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
@@ -607,8 +703,9 @@ impl PtyBridge {
                 let generation = self
                     .generation(agent_id)
                     .ok_or_else(|| AgentError::AgentNotFound(agent_id.to_string()))?;
-                let text = std::str::from_utf8(data)
-                    .map_err(|e| AgentError::PtyError(format!("terminal input is not UTF-8: {e}")))?;
+                let text = std::str::from_utf8(data).map_err(|e| {
+                    AgentError::PtyError(format!("terminal input is not UTF-8: {e}"))
+                })?;
                 client
                     .write(agent_id, generation, text)
                     .map_err(|e| AgentError::PtyError(e.to_string()))
@@ -749,6 +846,112 @@ impl PtyBridge {
             .get(agent_id)
             .map(|c| c.generation)
     }
+
+    // ── Structured agent API (architecture §13) ──────────────────
+    //
+    // Thin proxies to the daemon's `AgentManager`. Structured agents live only
+    // in the daemon (the in-process fallback is a PTY-only owner, §8), so a
+    // non-daemon mode is a hard condition, not a silent degradation — the GUI
+    // surfaces the error and keeps the terminal path untouched.
+
+    fn daemon_client(&self) -> Result<&DaemonClient, String> {
+        match &self.owner {
+            PtyOwner::Daemon(client) => Ok(client),
+            PtyOwner::InProcess(..) => Err(
+                "structured agents require the daemon bridge (in-process fallback is PTY-only)"
+                    .into(),
+            ),
+            PtyOwner::Unavailable(reason) => {
+                Err(format!("structured agents unavailable: {reason}"))
+            }
+        }
+    }
+
+    pub fn agent_create(&self, request: NewAgentRequest) -> Result<AgentSnapshot, String> {
+        self.daemon_client()?
+            .agent_create(request)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn agent_resume(&self, request: ResumeAgentRequest) -> Result<AgentSnapshot, String> {
+        self.daemon_client()?
+            .agent_resume(request)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn agent_get_snapshot(&self, agent_id: &str) -> Result<AgentSnapshot, String> {
+        self.daemon_client()?
+            .agent_get_snapshot(agent_id)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn agent_start_turn(&self, agent_id: &str, prompt: AgentPrompt) -> Result<TurnId, String> {
+        self.daemon_client()?
+            .agent_start_turn(agent_id, prompt)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn agent_interrupt(&self, agent_id: &str) -> Result<(), String> {
+        self.daemon_client()?
+            .agent_interrupt(agent_id)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn agent_set_config_option(
+        &self,
+        agent_id: &str,
+        config_id: &str,
+        value: ConfigValue,
+    ) -> Result<(), String> {
+        self.daemon_client()?
+            .agent_set_config_option(agent_id, config_id, value)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn agent_respond_permission(
+        &self,
+        agent_id: &str,
+        request_id: &str,
+        action_id: &str,
+    ) -> Result<(), String> {
+        self.daemon_client()?
+            .agent_respond_permission(agent_id, request_id, action_id)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn agent_close(&self, agent_id: &str) -> Result<(), String> {
+        self.daemon_client()?
+            .agent_close(agent_id)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn agent_list(&self) -> Result<Vec<AgentRecord>, String> {
+        self.daemon_client()?
+            .agent_list()
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn provider_list(&self) -> Result<Vec<crate::agent_provider::types::ProviderInfo>, String> {
+        self.daemon_client()?
+            .provider_list()
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn provider_diagnostic(&self, provider_id: &str) -> Result<ProviderDiagnostic, String> {
+        self.daemon_client()?
+            .provider_diagnostic(provider_id)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn provider_refresh_catalog(
+        &self,
+        provider_id: &str,
+        cwd: &str,
+    ) -> Result<ProviderCatalog, String> {
+        self.daemon_client()?
+            .provider_catalog(provider_id, std::path::Path::new(cwd))
+            .map_err(|e| e.to_string())
+    }
 }
 
 /// In-process fallback sink (§8): forwards PTY bytes to the frontend Tauri
@@ -787,10 +990,7 @@ mod tests {
 
     fn tmp_base() -> PathBuf {
         let n = BRIDGE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "capilot-bridge-test-{}-{n}",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("capilot-bridge-test-{}-{n}", std::process::id()))
     }
 
     /// A Tauri Channel that captures the bytes the bridge forwards, so tests
@@ -820,7 +1020,10 @@ mod tests {
             .spawn(
                 "a1",
                 "/bin/sh",
-                &["-c".into(), "echo __READY__; while read x; do echo \"got:$x\"; done".into()],
+                &[
+                    "-c".into(),
+                    "echo __READY__; while read x; do echo \"got:$x\"; done".into(),
+                ],
                 &std::env::temp_dir(),
                 24,
                 80,
@@ -960,7 +1163,10 @@ mod tests {
             .spawn(
                 "a1",
                 "/bin/sh",
-                &["-c".into(), "echo __OK__; while read x; do echo \"got:$x\"; done".into()],
+                &[
+                    "-c".into(),
+                    "echo __OK__; while read x; do echo \"got:$x\"; done".into(),
+                ],
                 &std::env::temp_dir(),
                 24,
                 80,

@@ -112,7 +112,11 @@ pub fn write_instance_info(base: &Path, info: &InstanceInfo) -> io::Result<()> {
     ensure_run_dir(base)?;
     let path = instance_path(base);
     let mut f = File::create(&path)?;
-    f.write_all(serde_json::to_vec_pretty(info).unwrap_or_default().as_slice())?;
+    f.write_all(
+        serde_json::to_vec_pretty(info)
+            .unwrap_or_default()
+            .as_slice(),
+    )?;
     f.flush()?;
     #[cfg(unix)]
     {
@@ -210,7 +214,11 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
-            assert_eq!(mode & 0o077, 0, "run dir must be 0700 (not group/world accessible)");
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "run dir must be 0700 (not group/world accessible)"
+            );
         }
         let _ = std::fs::remove_dir_all(&base);
     }
