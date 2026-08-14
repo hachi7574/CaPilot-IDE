@@ -82,6 +82,23 @@ export interface HookStatus {
   ts: number;
 }
 
+/** A registered git worktree isolation project (Rust `WorktreeMeta`, serialized
+ *  snake_case — no serde rename_all). `path` is the checked-out worktree dir;
+ *  `branch` its dedicated branch. `repo` is the source repository the worktree
+ *  was created from. The project shell (`~/CaPilot/workspaces/<name>/`) mirrors
+ *  `path` as its root. */
+export interface WorktreeMeta {
+  id: string;
+  repo: string;
+  path: string;
+  branch: string;
+  base_ref: string | null;
+  parent_id: string | null;
+  instance_id: string;
+  created_at: number;
+  updated_at: number;
+}
+
 /**
  * Live-status derivation (Orca-aligned). The persisted `status` field is a
  * lifecycle record — "running" means the process was alive when the row was
@@ -576,6 +593,9 @@ interface AppState {
   /** In-flight git clones keyed by clone id (id → project name). A project
    *  listed here renders "正在克隆中" in the sidebar and is dropped on failure. */
   pendingClones: Record<string, string>;
+  /** Registered git worktree isolation projects (see `WorktreeMeta`). Drives
+   *  the sidebar branch badge + the dedicated 移除工作区 path. */
+  worktrees: WorktreeMeta[];
 
   // Sidebars
   leftSidebarOpen: boolean;
@@ -681,6 +701,18 @@ interface AppState {
   finishClone: (id: string) => void;
   /** Move `name` to `targetName`'s position in the sidebar project list. */
   moveProject: (name: string, targetName: string) => void;
+  /** Replace the whole worktree registry (from `worktree_list_all` on mount). */
+  setWorktrees: (list: WorktreeMeta[]) => void;
+  /** Register a created worktree (backend `worktree://created` / create modal).
+   *  `name` is the CaPilot project shell name (may carry a `-N` dedupe suffix). */
+  addWorktree: (meta: WorktreeMeta, name: string) => void;
+  /** Drop a worktree locally WITHOUT backend calls (backend `worktree://removed`
+   *  already cleaned the shell/DB). Also used by `removeWorktree` after the
+   *  dedicated remove succeeds. */
+  removeWorktreeLocal: (path: string) => void;
+  /** Dedicated 移除工作区: locally drop the project + worktree, then ask the
+   *  backend to kill sessions, delete the shell and `git worktree remove`. */
+  removeWorktree: (path: string) => void;
   /** Sleep a project: kill all its agent processes + close its tabs/panels to
    *  free CPU/memory. Sessions stay in the DB, so reopening a terminal resumes. */
   sleepProject: (name: string) => void;
@@ -798,8 +830,34 @@ function saveTodos(todos: TodoTag[]) {
   );
 }
 
-export const useStore = create<AppState>((set, get) => ({
-  agents: new Map(),
+export const useStore = create<AppState>((set, get) => {
+  // Local-only removal of a project's UI state (list, root map, focus, tabs,
+  // agents) WITHOUT any backend call. `removeProject` and the worktree flows
+  // share this; the backend work (delete_project vs worktree_remove) is always
+  // issued by the caller.
+  const dropProjectLocal = (name: string) => {
+    const s = get();
+    const projectRoots = { ...s.projectRoots };
+    delete projectRoots[name];
+    set({
+      projects: s.projects.filter((p) => p !== name),
+      projectRoots,
+      focusedProject: s.focusedProject === name ? null : s.focusedProject,
+    });
+    const doomed: string[] = [];
+    s.agents.forEach((a, id) => {
+      if (projectOfAgent(a) === name) doomed.push(id);
+    });
+    for (const id of doomed) {
+      invoke("sessions_delete", { id })
+        .catch(() => invoke("agent_kill", { id }).catch(() => {}));
+      s.closeTab(id);
+      s.removeAgent(id);
+    }
+  };
+
+  return {
+    agents: new Map(),
   agentChannels: new Map(),
   agentActiveAt: new Map(),
   agentWakeAt: new Map(),
@@ -835,6 +893,7 @@ export const useStore = create<AppState>((set, get) => ({
   projectRoots: {},
   focusedProject: null,
   pendingClones: {},
+  worktrees: [],
   onboarded: loadOnboarded(),
   termTemplates: loadTermTemplates(),
   fontScale: loadFontScale(),
@@ -1346,37 +1405,36 @@ export const useStore = create<AppState>((set, get) => ({
     }),
 
   removeProject: (name) => {
-    const s = get();
-    // Remove the project from the list and drop its root mapping; clear focus
-    // when the removed project was the focused one (tab bar then shows all tabs).
-    const projectRoots = { ...s.projectRoots };
-    delete projectRoots[name];
-    set({
-      projects: s.projects.filter((p) => p !== name),
-      projectRoots,
-      focusedProject: s.focusedProject === name ? null : s.focusedProject,
-    });
-
-    // Close + kill every agent in the removed project. Persisted project
-    // identity must win over cwd parsing: old sessions can use a differently
-    // cased or custom cwd (for example project "foo" rooted at "/.../Foo").
-    const doomed: string[] = [];
-    s.agents.forEach((a, id) => {
-      if (projectOfAgent(a) === name) doomed.push(id);
-    });
-    for (const id of doomed) {
-      // sessions_delete kills the PTY and drops the DB row so the agent can't
-      // resurrect on restart; fall back to a plain kill if cleanup fails.
-      invoke("sessions_delete", { id })
-        .catch(() => invoke("agent_kill", { id }).catch(() => {}));
-      s.closeTab(id);
-      s.removeAgent(id);
-    }
-
+    dropProjectLocal(name);
     // Delete the project's workspace dir (sessions / agent metadata / context).
     // Custom-rooted projects only lose this metadata dir — the real folder
     // (picked / cloned) is never touched by the backend command.
     invoke("delete_project", { name }).catch(() => {});
+  },
+
+  setWorktrees: (list) => set({ worktrees: list }),
+
+  addWorktree: (meta, name) => {
+    set((s) => ({
+      worktrees: s.worktrees.some((w) => w.path === meta.path)
+        ? s.worktrees
+        : [...s.worktrees, meta],
+    }));
+    get().addProject(name, meta.path);
+  },
+
+  removeWorktreeLocal: (path) => {
+    const s = get();
+    const name = Object.entries(s.projectRoots).find(
+      ([, root]) => root === path
+    )?.[0];
+    if (name) dropProjectLocal(name);
+    set((st) => ({ worktrees: st.worktrees.filter((w) => w.path !== path) }));
+  },
+
+  removeWorktree: (path) => {
+    get().removeWorktreeLocal(path);
+    invoke("worktree_remove", { path }).catch(() => {});
   },
 
   // Move a project to another project's position in the sidebar list
@@ -1576,7 +1634,8 @@ export const useStore = create<AppState>((set, get) => ({
     set((s) => ({
       todoScope: s.todoScope === "global" ? "project" : "global",
     })),
-}));
+  };
+});
 
 // ── Buffered-output accessors ───────────────────────────────────
 // `agentOutputs` lives in the store (kept reactive so a mounting XTermPanel can

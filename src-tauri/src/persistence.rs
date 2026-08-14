@@ -61,6 +61,36 @@ pub struct AgentMeta {
     pub updated_at: i64,
 }
 
+/// A registered git worktree isolation workspace. One row per live worktree
+/// created via `worktree_create` (or adopted by startup reconciliation).
+/// `id` is derived from the pair `(repo, path)`; `instance_id` is minted fresh
+/// per creation so reusing a path never inherits stale state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorktreeMeta {
+    pub id: String,
+    /// Source repo root (absolute path).
+    pub repo: String,
+    /// Worktree folder (absolute path).
+    pub path: PathBuf,
+    /// Checked-out branch name.
+    pub branch: String,
+    /// Fork base (`main` / `origin/main` / …).
+    pub base_ref: Option<String>,
+    /// Optional parent workspace (stored only; no lineage logic in v1).
+    pub parent_id: Option<String>,
+    /// Fresh UUID minted at each creation.
+    pub instance_id: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Derive the stable `worktrees.id` for a `(repo, path)` pair. Using the full
+/// absolute strings keeps ids unique across repos and collisions-safe even if a
+/// path contains the separator.
+pub fn worktree_id(repo: &str, path: &std::path::Path) -> String {
+    format!("{repo}::{}", path.display())
+}
+
 // ── Workspace layout helpers ────────────────────────────────────
 
 pub fn workspace_root() -> PathBuf {
@@ -393,6 +423,17 @@ impl SessionsDb {
             CREATE TABLE IF NOT EXISTS settings (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS worktrees (
+                id          TEXT PRIMARY KEY,
+                repo        TEXT NOT NULL,
+                path        TEXT NOT NULL,
+                branch      TEXT NOT NULL,
+                base_ref    TEXT,
+                parent_id   TEXT,
+                instance_id TEXT NOT NULL,
+                created_at  INTEGER NOT NULL,
+                updated_at  INTEGER NOT NULL
             );",
         )?;
         // Older builds stored hierarchy and handoff state. It is intentionally
@@ -597,6 +638,109 @@ impl SessionsDb {
         Ok(())
     }
 
+    // ── worktrees (isolation workspaces) ─────────────────────────
+
+    /// Insert (or replace) a worktree row.
+    pub fn insert_worktree(&self, w: &WorktreeMeta) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO worktrees
+                (id, repo, path, branch, base_ref, parent_id, instance_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                repo=excluded.repo, path=excluded.path, branch=excluded.branch,
+                base_ref=excluded.base_ref, parent_id=excluded.parent_id,
+                instance_id=excluded.instance_id, created_at=excluded.created_at,
+                updated_at=excluded.updated_at",
+            params![
+                w.id,
+                w.repo,
+                w.path.to_string_lossy(),
+                w.branch,
+                w.base_ref,
+                w.parent_id,
+                w.instance_id,
+                w.created_at,
+                w.updated_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_worktree(&self, id: &str) -> rusqlite::Result<Option<WorktreeMeta>> {
+        self.conn
+            .query_row(
+                "SELECT id, repo, path, branch, base_ref, parent_id, instance_id, created_at, updated_at
+                 FROM worktrees WHERE id = ?1",
+                params![id],
+                Self::row_to_worktree,
+            )
+            .optional()
+    }
+
+    /// Find a worktree by its on-disk path (used by remove-by-path and
+    /// reconciliation, where the id pair is not readily available).
+    pub fn find_worktree_by_path(&self, path: &str) -> rusqlite::Result<Option<WorktreeMeta>> {
+        self.conn
+            .query_row(
+                "SELECT id, repo, path, branch, base_ref, parent_id, instance_id, created_at, updated_at
+                 FROM worktrees WHERE path = ?1",
+                params![path],
+                Self::row_to_worktree,
+            )
+            .optional()
+    }
+
+    /// Every registered worktree (all repos).
+    pub fn list_worktrees(&self) -> rusqlite::Result<Vec<WorktreeMeta>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo, path, branch, base_ref, parent_id, instance_id, created_at, updated_at
+             FROM worktrees ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt.query_map([], Self::row_to_worktree)?;
+        rows.collect()
+    }
+
+    /// Worktrees belonging to one source repo (for startup reconciliation
+    /// against `git worktree list`).
+    pub fn list_worktrees_for_repo(&self, repo: &str) -> rusqlite::Result<Vec<WorktreeMeta>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo, path, branch, base_ref, parent_id, instance_id, created_at, updated_at
+             FROM worktrees WHERE repo = ?1 ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt.query_map(params![repo], Self::row_to_worktree)?;
+        rows.collect()
+    }
+
+    pub fn delete_worktree(&self, id: &str) -> rusqlite::Result<()> {
+        self.conn
+            .execute("DELETE FROM worktrees WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Drop every worktree row for a repo (used when a source project is
+    /// deleted wholesale).
+    pub fn delete_worktrees_for_repo(&self, repo: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "DELETE FROM worktrees WHERE repo = ?1",
+            params![repo],
+        )?;
+        Ok(())
+    }
+
+    fn row_to_worktree(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeMeta> {
+        Ok(WorktreeMeta {
+            id: row.get(0)?,
+            repo: row.get(1)?,
+            path: PathBuf::from(row.get::<_, String>(2)?),
+            branch: row.get(3)?,
+            base_ref: row.get(4)?,
+            parent_id: row.get(5)?,
+            instance_id: row.get(6)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
+        })
+    }
+
     fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentSessionRecord> {
         Ok(AgentSessionRecord {
             id: row.get(0)?,
@@ -759,6 +903,20 @@ mod tests {
         }
     }
 
+    fn sample_worktree(repo: &str, path: &str, branch: &str) -> WorktreeMeta {
+        WorktreeMeta {
+            id: worktree_id(repo, std::path::Path::new(path)),
+            repo: repo.to_string(),
+            path: PathBuf::from(path),
+            branch: branch.to_string(),
+            base_ref: Some("main".to_string()),
+            parent_id: None,
+            instance_id: uuid::Uuid::new_v4().simple().to_string(),
+            created_at: 10,
+            updated_at: 11,
+        }
+    }
+
     #[test]
     fn db_insert_list_update() {
         let path = std::env::temp_dir().join(format!("capilot-test-{}.db", std::process::id()));
@@ -878,6 +1036,51 @@ mod tests {
         assert_eq!(got.mode, "ask");
         assert_eq!(got.speed, "fast");
         assert_eq!(got.model, None);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn worktree_crud_roundtrip() {
+        let path = std::env::temp_dir().join(format!("capilot-wt-crud-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let db = SessionsDb::open(&path).unwrap();
+
+        let w1 = sample_worktree("/repo/a", "/repo/a-ft", "ft");
+        let w2 = sample_worktree("/repo/a", "/repo/a-ft-2", "ft-2");
+        let w3 = sample_worktree("/repo/b", "/repo/b-x", "x");
+
+        db.insert_worktree(&w1).unwrap();
+        db.insert_worktree(&w2).unwrap();
+        db.insert_worktree(&w3).unwrap();
+
+        // get by id
+        let got = db.get_worktree(&w1.id).unwrap().unwrap();
+        assert_eq!(got.branch, "ft");
+        assert_eq!(got.repo, "/repo/a");
+        assert_eq!(got.path, PathBuf::from("/repo/a-ft"));
+
+        // find by path
+        assert_eq!(
+            db.find_worktree_by_path("/repo/a-ft-2").unwrap().unwrap().branch,
+            "ft-2"
+        );
+
+        // list all + per-repo
+        assert_eq!(db.list_worktrees().unwrap().len(), 3);
+        let repo_a = db.list_worktrees_for_repo("/repo/a").unwrap();
+        assert_eq!(repo_a.len(), 2);
+        assert_eq!(db.list_worktrees_for_repo("/repo/b").unwrap().len(), 1);
+
+        // delete one
+        db.delete_worktree(&w2.id).unwrap();
+        assert!(db.get_worktree(&w2.id).unwrap().is_none());
+        assert_eq!(db.list_worktrees().unwrap().len(), 2);
+
+        // delete a whole repo's rows
+        db.delete_worktrees_for_repo("/repo/a").unwrap();
+        assert_eq!(db.list_worktrees_for_repo("/repo/a").unwrap().len(), 0);
+        assert_eq!(db.list_worktrees().unwrap().len(), 1);
 
         let _ = std::fs::remove_file(&path);
     }

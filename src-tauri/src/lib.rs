@@ -9,13 +9,14 @@ mod resource;
 pub mod session_store;
 mod slash;
 mod usage;
+mod worktree;
 
 use agent_runtime::adapter::{AgentError, AgentInfo, AgentRuntimeAdapter, AgentSession, AgentUsage};
 use agent_runtime::pty_core::OnExit;
 use agent_runtime::runtimes::{get_adapter, known_runtimes};
 use persistence::{
-    agent_dir, ensure_project, read_agent_meta, write_agent_meta, AgentMeta, AgentSessionRecord,
-    Persistence, DEFAULT_PROJECT,
+    agent_dir, ensure_project, read_agent_meta, worktree_id, write_agent_meta, AgentMeta,
+    AgentSessionRecord, Persistence, WorktreeMeta, DEFAULT_PROJECT,
 };
 use session_store::SESSION_END_MODE_KEY;
 use serde::{Deserialize, Serialize};
@@ -1017,6 +1018,24 @@ fn delete_project(
     name: String,
 ) -> Result<(), String> {
     sanitize_project(&name)?;
+    // A worktree-rooted project must go through the dedicated `worktree_remove`
+    // path (kill sessions → DB → shell → `git worktree remove`). The generic
+    // delete would leave stale `.git/worktrees/<name>` metadata — refuse it so
+    // the frontend routes worktree projects correctly (plan §6).
+    if let Some(root) = persistence::custom_project_root(&name) {
+        let root_str = root.to_string_lossy();
+        let is_worktree = persistence
+            .db_tolerant()
+            .map(|db| {
+                db.find_worktree_by_path(&root_str)
+                    .map(|m| m.is_some())
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if is_worktree {
+            return Err("该项目是隔离工作区，请使用「移除工作区」".to_string());
+        }
+    }
     let session_ids = {
         let db = persistence
             .db_tolerant()
@@ -1038,6 +1057,301 @@ fn delete_project(
         db.delete_project(&name).map_err(|e| e.to_string())?;
     }
     delete_project_dir(&name)
+}
+
+// ── Git worktree isolation workspaces ───────────────────────────
+
+/// Event payload for `worktree://created` — the frontend turns this into a
+/// sidebar project (`addProject(name, meta.path)`) and optionally opens a
+/// terminal. `name` is the CaPilot project name (may be `branch` or `branch-N`
+/// when the base name collides with an existing project).
+#[derive(Clone, Serialize)]
+struct WorktreeCreatedEvent {
+    meta: WorktreeMeta,
+    name: String,
+}
+
+/// Event payload for `worktree://removed`.
+#[derive(Clone, Serialize)]
+struct WorktreeRemovedEvent {
+    path: String,
+    /// CaPilot project name, empty if the shell was never created.
+    name: String,
+}
+
+/// Pick a project name under `~/CaPilot/workspaces/` that isn't already taken.
+/// Worktree branches dedup among themselves inside one repo, but a worktree
+/// named like an EXISTING project (e.g. the source repo's own project) must not
+/// clobber that project's `project.json` — so the SHELL gets `name-N` while the
+/// git branch keeps its (git-unique) name.
+fn unique_project_name(base: &str) -> String {
+    for i in 1..=100 {
+        let candidate = if i == 1 {
+            base.to_string()
+        } else {
+            format!("{base}-{i}")
+        };
+        if !persistence::project_dir(&candidate).exists() {
+            return candidate;
+        }
+    }
+    format!("{base}-{}", uuid::Uuid::new_v4().simple())
+}
+
+/// Find the CaPilot project whose persisted root equals `root` (the shell whose
+/// `project.json` points at a worktree path). Used to tear down a worktree's
+/// project shell when removing it by path.
+fn project_name_for_root(root: &std::path::Path) -> Option<String> {
+    let workspace = persistence::workspace_root();
+    for entry in std::fs::read_dir(&workspace).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(r) = persistence::custom_project_root(&name) {
+            if r == root {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+/// Create an isolated git worktree from a source repo and register it as a
+/// CaPilot project. Flow (plan §4.3):
+/// 1. validate the source repo root;
+/// 2. sanitize `name` → branch / folder (dedup candidate loop inside);
+/// 3. resolve base (explicit or `origin/HEAD` → current → any local);
+/// 4. `git worktree add` (+ `push.autoSetupRemote`);
+/// 5. mint `instance_id`, persist `worktrees` row;
+/// 6. create the project shell (`project.json` root → worktree path);
+/// 7. emit `worktree://created` and return the meta.
+#[tauri::command]
+async fn worktree_create(
+    app: tauri::AppHandle,
+    persistence: tauri::State<'_, Arc<Persistence>>,
+    repo: String,
+    name: String,
+    base: Option<String>,
+    parent_id: Option<String>,
+) -> Result<WorktreeMeta, String> {
+    let repo_path = git_gate::validate_repo(&repo)?;
+    let created = crate::worktree::create_worktree(&repo_path, &name, base.as_deref())?;
+
+    let instance_id = uuid::Uuid::new_v4().simple().to_string();
+    let now = now_ms();
+    let meta = WorktreeMeta {
+        id: worktree_id(&repo_path.to_string_lossy(), &created.path),
+        repo: repo_path.to_string_lossy().into_owned(),
+        path: created.path.clone(),
+        branch: created.branch.clone(),
+        base_ref: created.base_ref,
+        parent_id,
+        instance_id,
+        created_at: now,
+        updated_at: now,
+    };
+    // Failure fallback (plan §5): any later step failing rolls back what was
+    // already created — the worktree dir (via git) and any partial DB row — so
+    // no half-registered isolation workspace leaks.
+    if let Err(e) = persistence
+        .db_tolerant()
+        .ok_or_else(|| "persistence unavailable".to_string())
+        .and_then(|db| db.insert_worktree(&meta).map_err(|e| e.to_string()))
+    {
+        let _ = crate::worktree::remove_worktree(&created.path, true);
+        return Err(e);
+    }
+
+    // Project shell: reuse `create_project(name, path)` so the root survives
+    // restarts and the Git panel/terminal open in the worktree automatically.
+    let project_name = unique_project_name(&created.branch);
+    if let Err(e) = create_project(
+        project_name.clone(),
+        Some(created.path.to_string_lossy().into_owned()),
+    ) {
+        if let Some(db) = persistence.db_tolerant() {
+            let _ = db.delete_worktree(&meta.id);
+        }
+        let _ = crate::worktree::remove_worktree(&created.path, true);
+        return Err(e);
+    }
+
+    let _ = app.emit(
+        "worktree://created",
+        WorktreeCreatedEvent {
+            meta: meta.clone(),
+            name: project_name,
+        },
+    );
+    Ok(meta)
+}
+
+/// List registered isolation workspaces for a repo.
+#[tauri::command]
+async fn worktree_list(
+    persistence: tauri::State<'_, Arc<Persistence>>,
+    repo: String,
+) -> Result<Vec<WorktreeMeta>, String> {
+    let repo_path = git_gate::validate_repo(&repo)?;
+    let db = persistence
+        .db_tolerant()
+        .ok_or_else(|| "persistence unavailable".to_string())?;
+    db.list_worktrees_for_repo(&repo_path.to_string_lossy())
+        .map_err(|e| e.to_string())
+}
+
+/// List ALL registered isolation workspaces across repos. Used by the frontend
+/// on mount so sidebar branch badges survive a restart (the per-repo
+/// `worktree_list` needs a repo path, which the sidebar doesn't know upfront).
+#[tauri::command]
+async fn worktree_list_all(
+    persistence: tauri::State<'_, Arc<Persistence>>,
+) -> Result<Vec<WorktreeMeta>, String> {
+    let db = persistence
+        .db_tolerant()
+        .ok_or_else(|| "persistence unavailable".to_string())?;
+    db.list_worktrees().map_err(|e| e.to_string())
+}
+
+/// Remove an isolation workspace: kill its agent sessions, drop its DB rows
+/// (sessions + worktrees), remove the project shell, then `git worktree remove`
+/// so git's worktree metadata stays clean (NEVER `rm -rf` the worktree folder —
+/// that would leave stale `.git/worktrees/<name>` entries).
+#[tauri::command]
+async fn worktree_remove(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
+    persistence: tauri::State<'_, Arc<Persistence>>,
+    path: String,
+) -> Result<(), String> {
+    let canonical = std::path::Path::new(&path)
+        .canonicalize()
+        .map_err(|e| format!("无效的工作区路径: {e}"))?;
+    let canonical_str = canonical.to_string_lossy().into_owned();
+    let meta = {
+        let db = persistence
+            .db_tolerant()
+            .ok_or_else(|| "persistence unavailable".to_string())?;
+        db.find_worktree_by_path(&canonical_str)
+            .map_err(|e| e.to_string())?
+    };
+    let Some(meta) = meta else {
+        return Err("该路径不是已登记的隔离工作区".to_string());
+    };
+    let project_name = project_name_for_root(&canonical).unwrap_or_default();
+
+    // 1. Kill every agent session owned by this project (mirrors delete_project).
+    if !project_name.is_empty() {
+        let session_ids = {
+            let db = persistence
+                .db_tolerant()
+                .ok_or_else(|| "persistence unavailable".to_string())?;
+            db.list_all()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .filter(|record| record.project == project_name)
+                .map(|record| record.id)
+                .collect::<Vec<_>>()
+        };
+        for id in session_ids {
+            let _ = bridge.kill(&id);
+        }
+    }
+    // 2. Drop DB rows: sessions for the project + the worktree record.
+    {
+        let db = persistence
+            .db_tolerant()
+            .ok_or_else(|| "persistence unavailable".to_string())?;
+        if !project_name.is_empty() {
+            db.delete_project(&project_name).map_err(|e| e.to_string())?;
+        }
+        db.delete_worktree(&meta.id).map_err(|e| e.to_string())?;
+    }
+    // 3. Remove the project shell (`~/CaPilot/workspaces/<name>`) — the worktree
+    //    folder itself lives OUTSIDE the workspace root and is handled in step 4.
+    if !project_name.is_empty() {
+        let _ = delete_project_dir(&project_name);
+    }
+    // 4. Clean git worktree metadata. `--force` because an AI worktree usually
+    //    has untracked files / uncommitted changes; removal is meant to be
+    //    destructive. A gone directory (user deleted it by hand) is fine — the
+    //    prune below sweeps the stale `.git/worktrees/<name>` entry.
+    if let Err(e) = crate::worktree::remove_worktree(&canonical, true) {
+        log::warn!("worktree_remove({canonical_str}): {e}");
+    }
+    let _ = git_gate::run(&meta.repo, &["worktree", "prune"]);
+
+    let _ = app.emit(
+        "worktree://removed",
+        WorktreeRemovedEvent {
+            path: canonical_str,
+            name: project_name,
+        },
+    );
+    Ok(())
+}
+
+/// Startup reconciliation: the `worktrees` DB table is the source of truth for
+/// CaPilot-created workspaces, but `git worktree list` is the truth for what
+/// actually exists on disk / in git. Runs once at startup:
+/// - DB row whose path is no longer a git worktree (deleted by hand / other
+///   tool) → dropped;
+/// - git worktree not in DB (created by hand) → adopted with a fresh
+///   `instance_id` (main worktree excluded — it is the repo itself, not an
+///   isolation workspace).
+pub fn worktree_reconcile(persistence: &Persistence) {
+    let all = persistence
+        .db_tolerant()
+        .and_then(|db| db.list_worktrees().ok())
+        .unwrap_or_default();
+    let mut by_repo: std::collections::BTreeMap<String, Vec<WorktreeMeta>> =
+        std::collections::BTreeMap::new();
+    for wt in all {
+        by_repo.entry(wt.repo.clone()).or_default().push(wt);
+    }
+    for (repo, rows) in by_repo {
+        let repo_root = std::path::Path::new(&repo);
+        let live = crate::worktree::list_worktrees_in(repo_root).unwrap_or_default();
+        let live_paths: std::collections::HashSet<std::path::PathBuf> = live
+            .iter()
+            .map(|w| w.path.clone())
+            .collect();
+        // Orphans: DB says we own it, git says no (or dir is gone).
+        for wt in &rows {
+            if !live_paths.contains(&wt.path) || !wt.path.exists() {
+                if let Some(db) = persistence.db_tolerant() {
+                    let _ = db.delete_worktree(&wt.id);
+                    log::info!("worktree reconcile: dropped orphan {}", wt.path.display());
+                }
+            }
+        }
+        // Adoptions: git has a worktree we don't track (manually created).
+        let tracked: std::collections::HashSet<&std::path::Path> =
+            rows.iter().map(|w| w.path.as_path()).collect();
+        for gwt in live {
+            if gwt.path == repo_root {
+                continue; // the main worktree is the repo itself, not isolation
+            }
+            if tracked.contains(gwt.path.as_path()) {
+                continue;
+            }
+            let now = now_ms();
+            let meta = WorktreeMeta {
+                id: worktree_id(&repo, &gwt.path),
+                repo: repo.clone(),
+                path: gwt.path.clone(),
+                branch: gwt.branch.unwrap_or_default(),
+                base_ref: None,
+                parent_id: None,
+                instance_id: uuid::Uuid::new_v4().simple().to_string(),
+                created_at: now,
+                updated_at: now,
+            };
+            if let Some(db) = persistence.db_tolerant() {
+                if db.insert_worktree(&meta).is_ok() {
+                    log::info!("worktree reconcile: adopted {}", gwt.path.display());
+                }
+            }
+        }
+    }
 }
 
 /// Rename a workspace project: renames `~/CaPilot/workspaces/<old>` →
@@ -2143,8 +2457,9 @@ async fn git_checkout(repo: String, branch: String) -> Result<(), String> {
 /// Mirrors `git check-ref-format`'s hard rules loosely (enough to stop `-`-prefixed
 /// or whitespace args from being misread as flags — git_gate passes every arg via
 /// `Command::arg`, so there is no shell to break, but a name that starts with `-`
-/// would still be parsed as an option).
-fn validate_branch_name(name: &str) -> Result<(), String> {
+/// would still be parsed as an option). Also used by `worktree.rs` for the
+/// branches it derives from a worktree name.
+pub(crate) fn validate_branch_name(name: &str) -> Result<(), String> {
     if name.trim() != name {
         return Err("分支名不能包含首尾空白".to_string());
     }
@@ -2484,7 +2799,8 @@ mod tests {
     use super::{
         apply_launch_overrides, create_project, delete_project_dir, git_run, parse_branches,
         parse_commit_detail, parse_log, parse_name_status, parse_porcelain, parse_ref_map,
-        persistence, rename_project_inner, validate_branch_name, RuntimeOverride,
+        persistence, project_name_for_root, rename_project_inner, unique_project_name,
+        validate_branch_name, worktree_reconcile, RuntimeOverride,
     };
 
     #[test]
@@ -2847,6 +3163,144 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
+    // ── worktree isolation (M3) ──────────────────────────────────
+
+    fn git(repo_dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_dir)
+            .args(args)
+            .output()
+            .expect("git should run")
+    }
+
+    #[test]
+    fn unique_project_name_avoids_existing_project_dirs() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = std::env::temp_dir().join(format!(
+            "capilot_wt_name_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::env::set_var("HOME", &home);
+        // "branch" already taken by an existing project → suffix.
+        std::fs::create_dir_all(persistence::project_dir("branch")).unwrap();
+        assert_eq!(unique_project_name("branch"), "branch-2");
+        // Free name stays as-is.
+        assert_eq!(unique_project_name("fresh"), "fresh");
+        std::env::remove_var("HOME");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn project_name_for_root_finds_the_matching_shell() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = std::env::temp_dir().join(format!(
+            "capilot_wt_projname_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::env::set_var("HOME", &home);
+        let root = home.join("repos/src-ft");
+        persistence::write_project_root("shellproj", &root).unwrap();
+        assert_eq!(
+            project_name_for_root(&root).as_deref(),
+            Some("shellproj")
+        );
+        assert_eq!(project_name_for_root(&home.join("repos/other")).as_deref(), None);
+        std::env::remove_var("HOME");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn worktree_reconcile_drops_orphan_and_adopts_external() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = std::env::temp_dir().join(format!(
+            "capilot_wt_reconcile_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::env::set_var("HOME", &home);
+
+        // Source repo with one commit on main.
+        let repo_dir = home.join("repos/src");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        git(&repo_dir, &["init", "-q", "-b", "main"]);
+        git(&repo_dir, &["config", "user.email", "t@test"]);
+        git(&repo_dir, &["config", "user.name", "t"]);
+        std::fs::write(repo_dir.join("a.txt"), "a").unwrap();
+        git(&repo_dir, &["add", "."]);
+        git(&repo_dir, &["commit", "-qm", "init"]);
+        let repo_str = repo_dir.canonicalize().unwrap().to_string_lossy().into_owned();
+
+        let pers = persistence::Persistence::open().unwrap();
+
+        // A REAL registered worktree (exists in both git and DB).
+        let real_path = home.join("repos/src-real");
+        git(
+            &repo_dir,
+            &["worktree", "add", "-b", "real", &real_path.to_string_lossy()],
+        );
+        let real_path_c = real_path.canonicalize().unwrap();
+        // An ORPHAN row: DB claims a worktree git has never seen.
+        let orphan_path = home.join("repos/src-orphan");
+        {
+            let db = pers.db_tolerant().unwrap();
+            let now = 1;
+            let mk = |path: &std::path::Path, branch: &str| persistence::WorktreeMeta {
+                id: persistence::worktree_id(&repo_str, path),
+                repo: repo_str.clone(),
+                path: path.to_path_buf(),
+                branch: branch.to_string(),
+                base_ref: None,
+                parent_id: None,
+                instance_id: uuid::Uuid::new_v4().simple().to_string(),
+                created_at: now,
+                updated_at: now,
+            };
+            db.insert_worktree(&mk(&real_path_c, "real")).unwrap();
+            db.insert_worktree(&mk(&orphan_path, "orphan")).unwrap();
+        }
+
+        // An EXTERNAL worktree git has but the DB doesn't.
+        let ext_path = home.join("repos/src-ext");
+        git(
+            &repo_dir,
+            &["worktree", "add", "-b", "ext", &ext_path.to_string_lossy()],
+        );
+
+        worktree_reconcile(&pers);
+
+        let db = pers.db_tolerant().unwrap();
+        let all = db.list_worktrees().unwrap();
+        let paths: Vec<String> = all.iter().map(|w| w.path.to_string_lossy().into_owned()).collect();
+        // real kept; orphan dropped; external adopted.
+        assert!(
+            paths.contains(&real_path_c.to_string_lossy().into_owned()),
+            "real worktree must survive reconcile: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.contains("src-orphan")),
+            "orphan row must be dropped: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p.contains("src-ext")),
+            "external worktree must be adopted: {paths:?}"
+        );
+        drop(db);
+        std::env::remove_var("HOME");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
     /// The Settings → 已安装 → ⚙ launch override replaces the adapter's arg list
     /// wholesale. Regression: the re-append must keep the permission/speed flags
     /// and the status-hook injection (claude `--settings`, codex `-p` profile)
@@ -3097,6 +3551,10 @@ pub fn run() {
             list_projects,
             delete_project,
             rename_project,
+            worktree_create,
+            worktree_list,
+            worktree_list_all,
+            worktree_remove,
             runtime_list_available,
             opencode_current_variant,
             usage_fetch,
@@ -3137,6 +3595,16 @@ pub fn run() {
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
+            // Startup reconciliation of isolation workspaces vs live git state
+            // (plan §5): drop DB orphans, adopt hand-created worktrees. Runs
+            // off the main thread so a slow `git worktree list` can't block the
+            // window. Best-effort — a failure only logs.
+            {
+                let persistence = app.state::<Arc<Persistence>>().inner().clone();
+                tauri::async_runtime::spawn(async move {
+                    worktree_reconcile(&persistence);
+                });
+            }
             // PTY bridge: prefer the user-level daemon, spawn one if needed,
             // fall back in-process only when no other owner can be proven (§8).
             let bridge = bridge::PtyBridge::start();

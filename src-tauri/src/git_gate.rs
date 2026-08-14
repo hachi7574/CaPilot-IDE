@@ -98,6 +98,23 @@ pub fn run(repo: &str, args: &[&str]) -> Result<Output, String> {
         .map_err(|error| format!("git failed: {error}"))
 }
 
+/// Run git in `path` with the same concurrency/rate gates as [`run`] but WITHOUT
+/// the project-root allow-list. Reserved for targets that live outside the
+/// standard roots by design — git worktree paths (siblings of a repo root) are
+/// not in `allowed_roots()`. The caller MUST guarantee `path` was derived from a
+/// validated repo root / registered worktree (see `worktree.rs`); this never
+/// validates user-supplied paths on its own.
+pub fn run_raw(path: &Path, args: &[&str]) -> Result<Output, String> {
+    let _permit = acquire();
+    wait_for_rate_slot();
+    Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .output()
+        .map_err(|error| format!("git failed: {error}"))
+}
+
 pub fn clone_into(url: &str, target: &Path) -> Result<Output, String> {
     let parent = target
         .parent()

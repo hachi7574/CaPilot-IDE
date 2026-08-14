@@ -104,6 +104,7 @@ export function LeftSidebar() {
   const addProject = useStore((s) => s.addProject);
   const beginClone = useStore((s) => s.beginClone);
   const pendingClones = useStore((s) => s.pendingClones);
+  const worktrees = useStore((s) => s.worktrees);
   const setActiveTab = useStore((s) => s.setActiveTab);
   const addTab = useStore((s) => s.addTab);
 
@@ -465,6 +466,34 @@ export function LeftSidebar() {
     }
   };
 
+  // 🌿 Create an isolation worktree. The backend creates the git worktree +
+  // project shell and emits `worktree://created`; state/worktree.ts registers
+  // the shell and auto-opens a terminal. Errors surface through `nprojError`
+  // and keep the modal open.
+  const handleWorktreeCreate = async (
+    repo: string,
+    name: string,
+    base: string
+  ): Promise<string | null> => {
+    if (!repo) {
+      setNprojError("请选择源仓库");
+      return "请选择源仓库";
+    }
+    try {
+      await invoke("worktree_create", {
+        repo,
+        name: name.trim(),
+        base: base.trim() || null,
+        parentId: null,
+      });
+      setNprojError(null);
+      return null;
+    } catch (e) {
+      setNprojError(String(e));
+      return String(e);
+    }
+  };
+
   return (
     <>
       <div
@@ -509,6 +538,11 @@ export function LeftSidebar() {
                   // group; clicking one reopens (resumes) it.
                   const endedAgents = projAgents.filter((a) => a.status === "done");
                   const liveAgents = projAgents.filter((a) => a.status !== "done");
+                  // A registered isolation worktree whose root is this project's
+                  // root renders a branch badge next to the name.
+                  const wt = worktrees.find(
+                    (w) => w.path === (projectRoots[name] ?? projCwd)
+                  );
                   return (
                     <div
                       key={name}
@@ -568,6 +602,14 @@ export function LeftSidebar() {
                           </span>
                         )}
                         <span className="pj-name">{name}</span>
+                        {wt && (
+                          <span
+                            className="wt-badge"
+                            title={`隔离工作区 · 分支 ${wt.branch} · 根 ${wt.path}`}
+                          >
+                            <Icon name="git-branch" size={9} /> {wt.branch}
+                          </span>
+                        )}
                         {cloningNames.has(name) && (
                           <span
                             className="proj-cloning"
@@ -749,6 +791,7 @@ export function LeftSidebar() {
           }}
           onCreate={handleCreateProject}
           onGitClone={handleGitClone}
+          onWorktreeCreate={handleWorktreeCreate}
         />
       )}
       {renameTarget && (
@@ -817,23 +860,66 @@ function NewProjectModal({
   onClose,
   onCreate,
   onGitClone,
+  onWorktreeCreate,
 }: {
   error: string | null;
   onClose: () => void;
   onCreate: (name: string, path?: string) => Promise<string | null>;
   onGitClone: (url: string, name: string, parentDir: string) => Promise<string | null>;
+  onWorktreeCreate: (repo: string, name: string, base: string) => Promise<string | null>;
 }) {
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [gitUrl, setGitUrl] = useState("");
   const [gitName, setGitName] = useState("");
   const [parentDir, setParentDir] = useState("");
+  // 隔离工作区 section: source-repo picker + workspace name + optional base.
+  const projects = useStore((s) => s.projects);
+  const projectRoots = useStore((s) => s.projectRoots);
+  const worktrees = useStore((s) => s.worktrees);
+  const [wtRepos, setWtRepos] = useState<
+    { name: string; root: string; branch?: string | null }[]
+  >([]);
+  const [wtRepo, setWtRepo] = useState("");
+  const [wtName, setWtName] = useState("");
+  const [wtBase, setWtBase] = useState("");
   const prevAutoName = useRef("");
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
+
+  // Scan existing projects for git repos so the worktree picker only offers
+  // valid sources (a plain folder would fail `git worktree add`). Already
+  // registered worktrees are excluded — forking from a worktree would nest a
+  // weirdly-named sibling (`<worktreeDir>-<name>`) on the same shared .git.
+  useEffect(() => {
+    let cancelled = false;
+    const excluded = new Set(worktrees.map((w) => w.path));
+    const scan = async () => {
+      const out: { name: string; root: string; branch?: string | null }[] = [];
+      for (const p of projects) {
+        const root = projectRoots[p];
+        if (!root || excluded.has(root)) continue;
+        try {
+          const info = await invoke<{ is_repo: boolean; branch?: string | null }>(
+            "git_repo_info",
+            { repo: root }
+          );
+          if (cancelled) return;
+          if (info.is_repo) out.push({ name: p, root, branch: info.branch });
+        } catch {
+          // Not a git repo — skip.
+        }
+      }
+      if (!cancelled) setWtRepos(out);
+    };
+    scan();
+    return () => {
+      cancelled = true;
+    };
+  }, [projects, projectRoots, worktrees]);
 
   // Auto-fill the project name from the repo URL's base name (editable): it
   // tracks the last auto-derived value so a hand-typed name isn't clobbered.
@@ -903,6 +989,17 @@ function NewProjectModal({
     if (busy) return;
     setBusy(true);
     const err = await onGitClone(gitUrl, gitName, parentDir);
+    setBusy(false);
+    closeOnSuccess(err);
+  };
+
+  // 🌿 Create an isolation worktree from a registered source repo. The backend
+  // emits `worktree://created` → state/worktree.ts registers the project shell
+  // + auto-opens a terminal; errors surface via the shared `error` display.
+  const wtSubmit = async () => {
+    if (busy || !wtRepo) return;
+    setBusy(true);
+    const err = await onWorktreeCreate(wtRepo, wtName, wtBase);
     setBusy(false);
     closeOnSuccess(err);
   };
@@ -992,6 +1089,53 @@ function NewProjectModal({
           disabled={busy}
         >
           {busy ? "克隆中…" : "克隆并创建"}
+        </button>
+
+        <div className="ug-nproj-sep" />
+
+        <div className="ug-nproj-label">
+          <Icon name="git-branch" size={12} /> 从仓库创建隔离工作区
+        </div>
+        <select
+          className="nproj-input wt-repo-select"
+          value={wtRepo}
+          onChange={(e) => setWtRepo(e.target.value)}
+          disabled={busy}
+        >
+          <option value="">选择源仓库…</option>
+          {wtRepos.map((r) => (
+            <option key={r.root} value={r.root}>
+              {r.name}
+              {r.branch ? `（${r.branch}）` : ""}
+            </option>
+          ))}
+        </select>
+        <input
+          className="nproj-input"
+          placeholder="工作区名称（用作分支名，必填）"
+          value={wtName}
+          onChange={(e) => setWtName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") wtSubmit();
+            if (e.key === "Escape") onClose();
+          }}
+        />
+        <input
+          className="nproj-input"
+          placeholder="基础分支（可空 = 当前分支）"
+          value={wtBase}
+          onChange={(e) => setWtBase(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") wtSubmit();
+            if (e.key === "Escape") onClose();
+          }}
+        />
+        <button
+          className="nproj-btn primary un-git-clone"
+          onClick={wtSubmit}
+          disabled={busy || !wtRepo || !wtName.trim()}
+        >
+          {busy ? "创建中…" : "创建隔离工作区"}
         </button>
       </div>
     </div>
@@ -1091,10 +1235,16 @@ function ContextMenu({
   const allAgents = useStore((s) => s.agents);
   const runtimes = useStore((s) => s.runtimes);
   const addAgent = useStore((s) => s.addAgent);
+  const worktrees = useStore((s) => s.worktrees);
+  const projectRoots = useStore((s) => s.projectRoots);
 
   // ── Project context ───────────────────────────────────────────
   if (ctx.project) {
     const proj = ctx.project;
+    // A registered isolation worktree rooted at this project's root gets the
+    // dedicated 移除工作区 entry (plain 移除项目 is refused by the backend).
+    const projRoot = projectRoots[proj] ?? ctx.cwd;
+    const wt = projRoot ? worktrees.find((w) => w.path === projRoot) : undefined;
     return (
       <div
         className="ctx-menu"
@@ -1164,16 +1314,29 @@ function ContextMenu({
           </>
         )}
         <div className="ctx-sep" />
-        <div
-          className="ctx-item danger"
-          onClick={() => {
-            // Remove from the list only — disk files are kept (DevPlan §3.3).
-            useStore.getState().removeProject(proj);
-            onClose();
-          }}
-        >
-          <Icon name="trash-2" size={13} /> 移除项目
-        </div>
+        {wt ? (
+          <div
+            className="ctx-item danger"
+            title="终止会话、删除项目壳并 git worktree remove（保留源仓库）"
+            onClick={() => {
+              useStore.getState().removeWorktree(wt.path);
+              onClose();
+            }}
+          >
+            <Icon name="git-branch" size={13} /> 移除工作区
+          </div>
+        ) : (
+          <div
+            className="ctx-item danger"
+            onClick={() => {
+              // Remove from the list only — disk files are kept (DevPlan §3.3).
+              useStore.getState().removeProject(proj);
+              onClose();
+            }}
+          >
+            <Icon name="trash-2" size={13} /> 移除项目
+          </div>
+        )}
       </div>
     );
   }
@@ -1197,6 +1360,10 @@ function ContextMenu({
       if (owningProject === project) projCount++;
     });
   }
+  // Closing the LAST terminal of a worktree project must use the dedicated
+  // 移除工作区 path (the backend refuses plain 移除项目 on worktree roots).
+  const projRoot = project ? projectRoots[project] : undefined;
+  const projWt = projRoot ? worktrees.find((w) => w.path === projRoot) : undefined;
 
   const switchRuntime = async (runtime: string) => {
     try {
@@ -1261,14 +1428,17 @@ function ContextMenu({
       {project && projCount === 1 && (
         <div
           className="ctx-item danger"
+          title={projWt ? "终止会话、删除项目壳并 git worktree remove" : undefined}
           onClick={() => {
-            // Last terminal of the project — remove the whole project (kills +
-            // closes its agents via the store action).
-            useStore.getState().removeProject(project);
+            // Last terminal of the project — remove the whole project. Worktree
+            // projects go through the dedicated remove (kills + closes agents +
+            // git worktree remove); plain projects via removeProject.
+            if (projWt) useStore.getState().removeWorktree(projWt.path);
+            else useStore.getState().removeProject(project);
             onClose();
           }}
         >
-          <Icon name="trash-2" size={13} /> 关闭并移除项目
+          <Icon name="trash-2" size={13} /> {projWt ? "关闭并移除工作区" : "关闭并移除项目"}
         </div>
       )}
     </div>

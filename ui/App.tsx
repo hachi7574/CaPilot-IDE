@@ -7,6 +7,7 @@ import { useResourceSync } from "./state/resource";
 import { useRuntimeSync } from "./state/runtime";
 import { useSessionRestore, useAgentEvents } from "./state/session";
 import { useCloneEvents } from "./state/clone";
+import { useWorktreeEvents } from "./state/worktree";
 import { useUsageSync } from "./state/usage";
 import { useContextUsageSync } from "./state/usageContext";
 import { useStore } from "./state/store";
@@ -20,6 +21,7 @@ function App() {
   useSessionRestore();
   useAgentEvents();
   useCloneEvents();
+  useWorktreeEvents();
   useUsageSync();
   useContextUsageSync();
   const onboarded = useStore((s) => s.onboarded);

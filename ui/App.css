@@ -175,6 +175,18 @@ body::after {
   50% { opacity: .5; }
 }
 .proj.collapsed .pj-arrow { transform: rotate(-90deg); }
+
+/* Isolation-worktree branch badge: shown next to a project rooted at a
+   registered git worktree. Static (no pulse) — it names the checked-out
+   branch, not a transient state. */
+.wt-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: .5px;
+  color: var(--ink2); background: var(--bg2);
+  border: 1px solid var(--bg4); border-radius: 3px;
+  padding: 1px 6px; flex-shrink: 0; max-width: 45%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .proj.collapsed .terminal-item, .proj.collapsed .term-ended-head { display: none; }
 .proj.focused .proj-header { background: rgb(var(--brand-rgb) / .1); border-left: 3px solid var(--brand); }
 .proj.focused { background: rgb(var(--brand-rgb) / .04); }
@@ -1972,6 +1984,14 @@ body::after {
 
 .un-git-clone {
   align-self: flex-end;
+}
+
+/* Isolation-worktree create flow: the source-repo `<select>` reuses the modal
+   input chrome (`.nproj-input` already supplies the shared styling); only the
+   native `<option>` list needs explicit theme colors. */
+.wt-repo-select option {
+  color: var(--ink);
+  background: var(--bg2);
 }
 
 /* ── Git panel: not-initialized / no-remote prompts (up-*) ──────
