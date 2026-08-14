@@ -11,7 +11,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 /// Adapter for the OpenCode interactive TUI. The installed CLI is the source
 /// of truth for models and resumable sessions.
@@ -24,7 +24,8 @@ pub struct OpenCodeAdapter;
 /// a JS module exporting a default async factory that returns a `Hooks` object
 /// — this one listens on the `event` hook for session/permission lifecycle
 /// events and writes the SAME sidecar format as `~/CaPilot/status/hook.sh`
-/// (`{"status","ts"}`), driven by `CAPILOT_AGENT_ID`/`CAPILOT_STATUS_DIR`.
+/// (`{"status","ts","session_id"}`), driven by
+/// `CAPILOT_AGENT_ID`/`CAPILOT_STATUS_DIR`.
 /// Env-gated: a standalone `opencode` run (no env) is a no-op.
 ///
 /// `OPENCODE_CONFIG_DIR` APPENDS a config dir to opencode's search path — the
@@ -42,20 +43,25 @@ export default async () => {
   if (!id || !dir) return {};
   const fs = await import("node:fs");
   const sidecar = `${dir}/${id}.json`;
-  const write = (status) => {
+  let currentStatus = "idle";
+  let sessionID;
+  const write = () => {
     try {
       fs.mkdirSync(dir, { recursive: true });
       const tmp = `${sidecar}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify({ status, ts: Math.floor(Date.now() / 1000) }) + "\n");
+      const state = { status: currentStatus, ts: Math.floor(Date.now() / 1000) };
+      if (sessionID) state.session_id = sessionID;
+      fs.writeFileSync(tmp, JSON.stringify(state) + "\n");
       fs.renameSync(tmp, sidecar);
     } catch {}
   };
   // SessionStart has no opencode event; writing idle at load gives the same
   // baseline the other runtimes get from their SessionStart hook.
-  write("idle");
+  write();
   const statusFor = (event) => {
+    const payload = event?.properties ?? event?.data;
     if (event?.type === "session.status") {
-      const kind = event?.properties?.status?.type;
+      const kind = payload?.status?.type;
       if (kind === "busy" || kind === "retry") return "working";
       if (kind === "idle") return "idle";
       return null;
@@ -79,8 +85,22 @@ export default async () => {
   };
   return {
     event: async ({ event }) => {
+      // v1 plugin events expose `properties`; v2 uses `data`. Bind once to the
+      // first root session observed by this per-process plugin, so child-agent
+      // sessions cannot replace the IDE Agent's provider identity later.
+      const payload = event?.properties ?? event?.data;
+      const candidate = payload?.sessionID ?? payload?.info?.id;
+      const info = payload?.info;
+      const isRootInCwd =
+        info && !info.parentID && (!info.directory || info.directory === process.cwd());
+      let learnedSession = false;
+      if (!sessionID && typeof candidate === "string" && candidate.startsWith("ses_") && isRootInCwd) {
+        sessionID = candidate;
+        learnedSession = true;
+      }
       const status = statusFor(event);
-      if (status) write(status);
+      if (status) currentStatus = status;
+      if (status || learnedSession) write();
     },
   };
 };
@@ -195,6 +215,20 @@ impl OpenCodeAdapter {
             recent.get("providerID")?.as_str()?,
             recent.get("modelID")?.as_str()?
         ))
+    }
+
+    /// Current variant for a model (`provider/model`) from OpenCode's own
+    /// `model.json` (`variant[model]`), which the TUI rewrites on every
+    /// `variant_cycle` (Ctrl+T) / `variant_list` selection. `"default"` or an
+    /// absent entry means the model's native default reasoning — return `None`
+    /// so the Composer renders "Default" rather than a stale variant name.
+    pub fn current_variant(model: &str) -> Option<String> {
+        let value: Value =
+            serde_json::from_slice(&std::fs::read(Self::model_state_path()?).ok()?).ok()?;
+        let variant = value.get("variant")?.get(model)?.as_str()?;
+        let trimmed = variant.trim();
+        (!trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("default"))
+            .then(|| trimmed.to_string())
     }
 
     fn display_name(id: &str) -> String {
@@ -342,39 +376,6 @@ impl OpenCodeAdapter {
         !Self::discover_models().is_empty()
     }
 
-    fn parse_session_list(output: &str, cwd: &Path) -> Option<String> {
-        let sessions: Vec<Value> = serde_json::from_str(output).ok()?;
-        let cwd = cwd.to_string_lossy();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO)
-            .as_millis() as u64;
-        sessions
-            .into_iter()
-            .filter_map(|session| {
-                if session.get("directory")?.as_str()? != cwd {
-                    return None;
-                }
-                let created = session.get("created")?.as_u64()?;
-                if now.saturating_sub(created) > 10_000 {
-                    return None;
-                }
-                Some((created, session.get("id")?.as_str()?.to_string()))
-            })
-            .max_by_key(|(created, _)| *created)
-            .map(|(_, id)| id)
-    }
-
-    fn detect_recent_resume_key(cwd: &Path) -> Option<String> {
-        let output = Command::new("opencode")
-            .args(["session", "list", "--format", "json", "--max-count", "20"])
-            .current_dir(cwd)
-            .output()
-            .ok()?;
-        output.status.success().then_some(())?;
-        Self::parse_session_list(&String::from_utf8_lossy(&output.stdout), cwd)
-    }
-
     // ── Context-window usage (docs/context-window-usage.md) ────────────────
     //
     // OpenCode keeps sessions in a local SQLite store (`opencode.db`, WAL) and
@@ -405,21 +406,73 @@ impl OpenCodeAdapter {
         Some(conn)
     }
 
-    /// Newest session id whose `directory` matches `cwd`.
-    fn newest_session_id(conn: &Connection, cwd: &Path) -> Option<String> {
+    /// Verify that a persisted provider session belongs to this cwd. The
+    /// session id is authoritative; cwd is a defense against stale/corrupt
+    /// metadata. Never substitute the newest session in the same directory.
+    fn session_matches(conn: &Connection, cwd: &Path, session_id: &str) -> bool {
         conn.query_row(
-            "SELECT id FROM session WHERE directory = ?1 ORDER BY time_updated DESC LIMIT 1",
-            params![cwd.to_string_lossy().to_string()],
-            |row| row.get(0),
+            "SELECT 1 FROM session WHERE id = ?1 AND directory = ?2 LIMIT 1",
+            params![session_id, cwd.to_string_lossy().to_string()],
+            |_| Ok(()),
         )
-        .ok()
+        .is_ok()
+    }
+
+    fn sidecar_resume_key(agent_id: &str) -> Option<String> {
+        let raw = std::fs::read_to_string(crate::persistence::status_file(agent_id)).ok()?;
+        serde_json::from_str::<Value>(&raw)
+            .ok()?
+            .get("session_id")?
+            .as_str()
+            .filter(|id| id.starts_with("ses_"))
+            .map(str::to_owned)
+    }
+
+    /// Legacy recovery for sessions created before the status plugin recorded
+    /// `session_id`. OpenCode may defer session creation until the first prompt
+    /// (observed 12.7s after the Agent row), so the old 2s/10s newest-by-cwd
+    /// capture missed it. Recover only when exactly one cwd-matching session was
+    /// created from 2s before through 30s after the Agent; ambiguity is safer as
+    /// no data than cross-session data.
+    fn legacy_session_key(
+        conn: &Connection,
+        cwd: &Path,
+        created_at_ms: i64,
+    ) -> Option<String> {
+        let from = created_at_ms.saturating_sub(2_000);
+        let to = created_at_ms.saturating_add(30_000);
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM session \
+                 WHERE directory = ?1 AND time_created BETWEEN ?2 AND ?3 \
+                 ORDER BY ABS(time_created - ?4) LIMIT 2",
+            )
+            .ok()?;
+        let candidates: Vec<String> = stmt
+            .query_map(
+                params![cwd.to_string_lossy().to_string(), from, to, created_at_ms],
+                |row| row.get(0),
+            )
+            .ok()?
+            .flatten()
+            .collect();
+        (candidates.len() == 1).then(|| candidates[0].clone())
+    }
+
+    fn recover_session_key(agent_id: &str, cwd: &Path, created_at_ms: i64) -> Option<String> {
+        let conn = Self::open_db()?;
+        if let Some(key) = Self::sidecar_resume_key(agent_id) {
+            if Self::session_matches(&conn, cwd, &key) {
+                return Some(key);
+            }
+        }
+        Self::legacy_session_key(&conn, cwd, created_at_ms)
     }
 
     /// Current active-context estimate: the latest `step-finish` part's
     /// `tokens.total` (input + output + reasoning + cache read/write — a single
     /// snapshot, never accumulated across parts).
-    fn latest_step_finish_tokens(conn: &Connection, cwd: &Path) -> Option<u64> {
-        let session_id = Self::newest_session_id(conn, cwd)?;
+    fn latest_step_finish_tokens(conn: &Connection, session_id: &str) -> Option<u64> {
         let data: Option<String> = conn
             .query_row(
                 "SELECT data FROM part WHERE session_id = ?1 AND data LIKE '%step-finish%' \
@@ -433,54 +486,31 @@ impl OpenCodeAdapter {
         value.pointer("/tokens/total").and_then(Value::as_u64)
     }
 
-    /// Session-cumulative cache stats for a cwd: total cache-read tokens and
-    /// total prompt tokens summed over ALL `step-finish` parts of the session
-    /// (the cache hit rate numerator and denominator). OpenCode accounting:
-    /// `tokens.input` is the non-cached portion and `tokens.cache.read/write`
-    /// are separate, so total prompt = input + cache.read + cache.write.
-    fn session_cache_stats(conn: &Connection, cwd: &Path) -> Option<(u64, u64)> {
-        let session_id = Self::newest_session_id(conn, cwd)?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT data FROM part WHERE session_id = ?1 AND data LIKE '%step-finish%'",
+    /// Session-cumulative cache stats from OpenCode's own aggregate columns.
+    /// These are the authoritative lifetime counters and avoid reparsing or
+    /// accidentally double-counting repeated `step-finish` parts. They are NOT
+    /// used for current context occupancy, which remains the latest step.
+    fn session_cache_stats(conn: &Connection, cwd: &Path, session_id: &str) -> Option<(u64, u64)> {
+        let (input, read, write): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT tokens_input, tokens_cache_read, tokens_cache_write \
+                 FROM session WHERE id = ?1 AND directory = ?2",
+                params![session_id, cwd.to_string_lossy().to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .ok()?;
-        let rows = stmt
-            .query_map(params![session_id], |row| row.get::<_, String>(0))
-            .ok()?;
-        let mut hit = 0u64;
-        let mut total = 0u64;
-        for row in rows.flatten() {
-            let Ok(value) = serde_json::from_str::<Value>(&row) else {
-                continue;
-            };
-            let tokens = value.get("tokens");
-            let input = tokens
-                .and_then(|t| t.get("input"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let read = tokens
-                .and_then(|t| t.pointer("/cache/read"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let write = tokens
-                .and_then(|t| t.pointer("/cache/write"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            if input + read + write > 0 {
-                hit += read;
-                total += input + read + write;
-            }
-        }
-        (total > 0).then_some((hit, total))
+        let input = u64::try_from(input).ok()?;
+        let read = u64::try_from(read).ok()?;
+        let write = u64::try_from(write).ok()?;
+        let total = input.saturating_add(read).saturating_add(write);
+        (total > 0).then_some((read, total))
     }
 
     /// Observed assistant model as `providerID/modelID` from the newest
-    /// assistant message in the cwd's session. Authoritative over the draft
+    /// assistant message in the exact session. Authoritative over the draft
     /// selection (the doc's "observed assistant-model metadata updates the
     /// maximum").
-    fn observed_model_id(conn: &Connection, cwd: &Path) -> Option<String> {
-        let session_id = Self::newest_session_id(conn, cwd)?;
+    fn observed_model_id(conn: &Connection, session_id: &str) -> Option<String> {
         let data: Option<String> = conn
             .query_row(
                 "SELECT data FROM message WHERE session_id = ?1 AND data LIKE '%\"role\":\"assistant\"%' \
@@ -664,6 +694,8 @@ impl AgentRuntimeAdapter for OpenCodeAdapter {
     fn list_thinking_options(&self) -> Vec<ThinkingOptionInfo> {
         // Variants belong to individual models and differ by model. OpenCode's
         // full TUI has no --variant launch flag, so a global list would be false.
+        // Live adjustment is the TUI's `variant_cycle` keybind (Ctrl+T), which
+        // the Composer drives directly (see `Composer.tsx` `cycleOpenCodeVariant`).
         vec![]
     }
 
@@ -712,26 +744,50 @@ impl AgentRuntimeAdapter for OpenCodeAdapter {
     fn supports_resume(&self) -> bool {
         true
     }
-    fn capture_resume_key(&self, cwd: &Path) -> Option<String> {
-        Self::detect_recent_resume_key(cwd)
+    fn capture_resume_key(&self, _cwd: &Path) -> Option<String> {
+        // OpenCode can defer root-session creation until the first prompt, well
+        // beyond the generic startup polling window. The per-process plugin's
+        // observed session id is the only collision-safe capture source.
+        None
     }
 
-    fn context_usage(&self, cwd: &Path, model: Option<&str>) -> Option<AgentUsage> {
+    fn recover_resume_key(
+        &self,
+        agent_id: &str,
+        cwd: &Path,
+        created_at_ms: i64,
+    ) -> Option<String> {
+        Self::recover_session_key(agent_id, cwd, created_at_ms)
+    }
+
+    fn context_usage(
+        &self,
+        cwd: &Path,
+        model: Option<&str>,
+        resume_key: Option<&str>,
+    ) -> Option<AgentUsage> {
         let conn = Self::open_db()?;
-        let used = Self::latest_step_finish_tokens(&conn, cwd);
+        let session_id = resume_key?;
+        if !Self::session_matches(&conn, cwd, session_id) {
+            return None;
+        }
+        let used = Self::latest_step_finish_tokens(&conn, session_id);
         // Observed assistant model wins over the draft selection (doc: use the
         // model attached to the assistant message when available).
-        let model_id = Self::observed_model_id(&conn, cwd).or_else(|| model.map(str::to_owned));
+        let model_id =
+            Self::observed_model_id(&conn, session_id).or_else(|| model.map(str::to_owned));
         let max = model_id.as_deref().and_then(Self::catalog_limit_context);
-        let (cache_hit, cache_total) = Self::session_cache_stats(&conn, cwd).unwrap_or((0, 0));
+        let (cache_hit, cache_total) =
+            Self::session_cache_stats(&conn, cwd, session_id).unwrap_or((0, 0));
         if used.is_none() && max.is_none() && cache_total == 0 {
             return None;
         }
         Some(AgentUsage {
             context_window_used_tokens: used,
             context_window_max_tokens: max,
-            cache_hit_tokens: (cache_hit > 0).then_some(cache_hit),
+            cache_hit_tokens: (cache_total > 0).then_some(cache_hit),
             cache_total_input_tokens: (cache_total > 0).then_some(cache_total),
+            actual_model: model_id,
         })
     }
 
@@ -822,6 +878,9 @@ mod tests {
             assert!(source.contains("permission.asked"));
             assert!(source.contains("question.asked"));
             assert!(source.contains("awaiting_choice"));
+            assert!(source.contains("payload?.sessionID"));
+            assert!(source.contains("session_id"));
+            assert!(source.contains("learnedSession"));
             assert!(source.contains("CAPILOT_AGENT_ID"));
             assert_eq!(get("CAPILOT_AGENT_ID").as_deref(), Some("test"));
             assert!(get("CAPILOT_STATUS_DIR").is_some());
@@ -841,6 +900,30 @@ mod tests {
         assert_eq!(models[0].provider, "opencode");
         assert_eq!(models[0].name, "Big Pickle");
         assert!(models[1].is_default);
+    }
+
+    #[test]
+    fn reads_current_variant_from_model_state() {
+        with_isolated_cache(|| {
+            let model = "anthropic/claude-sonnet-5";
+            // No model.json yet → no variant (default reasoning).
+            assert_eq!(OpenCodeAdapter::current_variant(model), None);
+            let state = std::path::PathBuf::from(std::env::var("HOME").unwrap())
+                .join(".local/state/opencode");
+            std::fs::create_dir_all(&state).unwrap();
+            std::fs::write(
+                state.join("model.json"),
+                r#"{"recent":[{"providerID":"anthropic","modelID":"claude-sonnet-5"}],"variant":{"anthropic/claude-sonnet-5":"high","openai/gpt-5.4":"default"}}"#,
+            )
+            .unwrap();
+            // A selected variant reads back; "default" / absent models read None.
+            assert_eq!(
+                OpenCodeAdapter::current_variant(model).as_deref(),
+                Some("high")
+            );
+            assert_eq!(OpenCodeAdapter::current_variant("openai/gpt-5.4"), None);
+            assert_eq!(OpenCodeAdapter::current_variant("openai/unknown"), None);
+        });
     }
 
     #[test]
@@ -893,34 +976,35 @@ mod tests {
     }
 
     #[test]
-    fn parses_only_recent_session_for_matching_directory() {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-        let json = format!(
-            r#"[
-            {{"id":"other","created":{now},"directory":"/tmp/other"}},
-            {{"id":"mine","created":{now},"directory":"/tmp/project"}}
-        ]"#
-        );
-        assert_eq!(
-            OpenCodeAdapter::parse_session_list(&json, Path::new("/tmp/project")),
-            Some("mine".into())
-        );
-    }
-
-    #[test]
     fn reads_step_finish_tokens_and_observed_model_from_db() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, time_updated INTEGER);
+            "CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                directory TEXT,
+                time_created INTEGER,
+                time_updated INTEGER,
+                tokens_input INTEGER,
+                tokens_cache_read INTEGER,
+                tokens_cache_write INTEGER
+             );
              CREATE TABLE part (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
              CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);",
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO session (id, directory, time_updated) VALUES ('ses_1', '/tmp/project', 100)",
+            "INSERT INTO session
+             (id, directory, time_created, time_updated, tokens_input, tokens_cache_read, tokens_cache_write)
+             VALUES ('ses_1', '/tmp/project', 100, 500, 352, 161836, 20)",
+            [],
+        )
+        .unwrap();
+        // A newer session in the same cwd reproduces the old cross-session
+        // bug. Exact helpers must keep reading ses_1.
+        conn.execute(
+            "INSERT INTO session
+             (id, directory, time_created, time_updated, tokens_input, tokens_cache_read, tokens_cache_write)
+             VALUES ('ses_other', '/tmp/project', 40000, 999, 999, 0, 0)",
             [],
         )
         .unwrap();
@@ -929,9 +1013,9 @@ mod tests {
             params![r#"{"type":"step-finish","reason":"stop","tokens":{"total":161848,"input":252,"output":60,"reasoning":0,"cache":{"write":0,"read":161536}}}"#],
         )
         .unwrap();
-        // A second step-finish part exercises the session-cumulative summing:
-        // cache stats accumulate over ALL parts, the active-context estimate
-        // still comes from the newest one.
+        // A second step-finish part confirms active context still comes from
+        // the newest exact-session snapshot. Cache lifetime totals come from
+        // the provider-maintained session columns above.
         conn.execute(
             "INSERT INTO part (id, session_id, time_created, data) VALUES ('prt_2', 'ses_1', 400, ?1)",
             params![r#"{"type":"step-finish","reason":"stop","tokens":{"total":560,"input":100,"output":40,"reasoning":0,"cache":{"write":20,"read":300}}}"#],
@@ -946,28 +1030,60 @@ mod tests {
         // Current active context is the step-finish total, NOT the cumulative
         // session columns.
         assert_eq!(
-            OpenCodeAdapter::latest_step_finish_tokens(&conn, Path::new("/tmp/project")),
+            OpenCodeAdapter::latest_step_finish_tokens(&conn, "ses_1"),
             Some(560)
         );
-        // Session cumulative cache stats across both parts. OpenCode accounting:
+        // Session cumulative cache stats represented by the aggregate columns.
+        // OpenCode accounting:
         // total prompt = input + cache.read + cache.write, hit = cache.read.
         // prt_1: 252 + 161536 = 161788 prompt / 161536 hit;
         // prt_2: 100 + 20 + 300 = 420 / 300.
         assert_eq!(
-            OpenCodeAdapter::session_cache_stats(&conn, Path::new("/tmp/project")),
+            OpenCodeAdapter::session_cache_stats(&conn, Path::new("/tmp/project"), "ses_1"),
             Some((161536 + 300, 161788 + 420))
         );
         assert_eq!(
-            OpenCodeAdapter::observed_model_id(&conn, Path::new("/tmp/project")).as_deref(),
+            OpenCodeAdapter::observed_model_id(&conn, "ses_1").as_deref(),
             Some("opencode/deepseek-v4-flash-free")
         );
-        // A cwd with no session yields nothing.
+        assert!(OpenCodeAdapter::session_matches(
+            &conn,
+            Path::new("/tmp/project"),
+            "ses_1"
+        ));
+        assert!(!OpenCodeAdapter::session_matches(
+            &conn,
+            Path::new("/tmp/other"),
+            "ses_1"
+        ));
         assert_eq!(
-            OpenCodeAdapter::latest_step_finish_tokens(&conn, Path::new("/tmp/other")),
+            OpenCodeAdapter::session_cache_stats(&conn, Path::new("/tmp/other"), "ses_1"),
             None
         );
         assert_eq!(
-            OpenCodeAdapter::session_cache_stats(&conn, Path::new("/tmp/other")),
+            OpenCodeAdapter::session_cache_stats(
+                &conn,
+                Path::new("/tmp/project"),
+                "ses_other"
+            ),
+            Some((0, 999)),
+            "a measured zero hit remains displayable data"
+        );
+
+        // Legacy recovery accepts one delayed root session but refuses an
+        // ambiguous same-cwd launch window.
+        assert_eq!(
+            OpenCodeAdapter::legacy_session_key(&conn, Path::new("/tmp/project"), 80)
+                .as_deref(),
+            Some("ses_1")
+        );
+        conn.execute(
+            "UPDATE session SET time_created = 105 WHERE id = 'ses_other'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            OpenCodeAdapter::legacy_session_key(&conn, Path::new("/tmp/project"), 80),
             None
         );
     }

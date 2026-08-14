@@ -24,6 +24,7 @@ dir="${CAPILOT_STATUS_DIR:-}"
 [ -n "$id" ] && [ -n "$dir" ] || exit 0
 payload=$(cat)
 event=$(printf '%s' "$payload" | sed -n 's/.*"hook_event_name":"\([^"]*\)".*/\1/p')
+session_id=$(printf '%s' "$payload" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
 case "$event" in
   SessionStart) st="idle" ;;
   UserPromptSubmit|PostToolUse|PostToolUseFailure|PostToolBatch) st="working" ;;
@@ -58,7 +59,16 @@ case "$event" in
   *) exit 0 ;;
 esac
 tmp="$dir/$id.tmp"
-printf '{"status":"%s","ts":%s}\n' "$st" "$(date +%s)" > "$tmp"
+# Codex includes session_id in every command-hook payload. Preserve it in the
+# existing sidecar when another provider/version omits it on a later event.
+if [ -z "$session_id" ] && [ -f "$dir/$id.json" ]; then
+  session_id=$(sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$dir/$id.json")
+fi
+if [ -n "$session_id" ]; then
+  printf '{"status":"%s","ts":%s,"session_id":"%s"}\n' "$st" "$(date +%s)" "$session_id" > "$tmp"
+else
+  printf '{"status":"%s","ts":%s}\n' "$st" "$(date +%s)" > "$tmp"
+fi
 mv "$tmp" "$dir/$id.json"
 "#;
 
@@ -202,6 +212,48 @@ mod tests {
     fn permission_request_reports_waiting_input() {
         let payload = r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash"}"#;
         assert_eq!(run_hook(payload).as_deref(), Some("waiting_input"));
+    }
+
+    #[test]
+    fn codex_session_id_is_preserved_across_hook_events() {
+        let base = std::env::temp_dir().join(format!(
+            "capilot_status_session_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(base.join("dir")).unwrap();
+        let script = base.join("hook.sh");
+        std::fs::write(&script, STATUS_HOOK_SCRIPT).unwrap();
+        let run = |payload: &str| {
+            let mut child = Command::new("/bin/sh")
+                .arg(&script)
+                .env("CAPILOT_AGENT_ID", "codex-agent")
+                .env("CAPILOT_STATUS_DIR", base.join("dir"))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap();
+            child.stdin.as_mut().unwrap().write_all(payload.as_bytes()).unwrap();
+            drop(child.stdin.take());
+            assert!(child.wait().unwrap().success());
+        };
+        run(
+            r#"{"hook_event_name":"SessionStart","session_id":"01a000de-1cd7-7d13-a9b7-16b93b7376cf"}"#,
+        );
+        // A later legacy-shaped payload without session_id must not erase the
+        // binding established by SessionStart.
+        run(r#"{"hook_event_name":"Stop"}"#);
+        let raw = std::fs::read_to_string(base.join("dir/codex-agent.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value.get("status").and_then(|v| v.as_str()), Some("idle"));
+        assert_eq!(
+            value.get("session_id").and_then(|v| v.as_str()),
+            Some("01a000de-1cd7-7d13-a9b7-16b93b7376cf")
+        );
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

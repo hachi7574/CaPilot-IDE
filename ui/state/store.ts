@@ -32,12 +32,17 @@ export type FontScale = "s" | "m" | "l" | "xl" | "xxl";
  * cacheTotalInputTokens`). Runtimes normalize their own accounting into this
  * pair (e.g. codex's `input_tokens` already includes cached reads, Claude's
  * does not).
+ *
+ * `actualModel` is the last model id observed in provider-owned session data.
+ * It is display-only and never replaces `AgentInfo.model`, which remains the
+ * configured model used by switching and catalog matching.
  */
 export interface AgentUsage {
   contextWindowUsedTokens: number | null;
   contextWindowMaxTokens: number | null;
   cacheHitTokens: number | null;
   cacheTotalInputTokens: number | null;
+  actualModel: string | null;
 }
 
 export interface AgentInfo {

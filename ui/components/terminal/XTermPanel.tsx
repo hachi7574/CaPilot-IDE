@@ -8,6 +8,11 @@ import { useStore, AgentInfo, TODO_DRAG_MIME } from "../../state/store";
 import { assignTodoAndSend } from "../../state/agentActions";
 import { pathsFromDataTransfer } from "../../state/dropPaths";
 import { Icon } from "../Icon";
+import {
+  canForwardSgrMouse,
+  isMouseTuiRuntime,
+  sgrWheelReport,
+} from "./mouseProtocol";
 import "@xterm/xterm/css/xterm.css";
 
 interface XTermPanelProps {
@@ -57,6 +62,48 @@ function detectClaudePermissionMode(text: string): string | null {
 /** Shell-escape a path so spaces / quotes survive (single-quote wrap, `'` → `'\''`). */
 function shellEscape(path: string): string {
   return `'${path.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * xterm.js injects its DOM-renderer `<style>` elements — the per-cell sizing
+ * rule (`.xterm-dom-renderer-owner-N .xterm-rows span { display: inline-block;
+ * height: 100%; … }`) and the theme rule — directly into `.xterm-screen` (see
+ * the renderer's `_injectCss` / `_updateDimensions`). Those rules are
+ * document-global, but living inside the screen their CSS text leaks into
+ * `.xterm-screen.textContent`: DOM-inspecting tools then flag phantom "letters
+ * not displayed", and screen readers read CSS aloud. Relocate them to `<head>`
+ * once they appear; xterm keeps the element references and keeps rewriting
+ * `textContent` there, so rendering is byte-for-byte unchanged.
+ *
+ * A terminal creates exactly two such styles (theme on the first render pass,
+ * dimensions on the same pass), never re-creates them, so a short-lived
+ * observer that detaches once the screen stays clean is enough — it must not
+ * remain a per-frame cost on WebKitGTK.
+ */
+function relocateXtermStyles(container: HTMLElement | null): void {
+  const screen = container?.querySelector<HTMLElement>(".xterm-screen");
+  if (!screen) return;
+  let movedStyles = 0;
+  const moveStyles = () => {
+    for (const st of Array.from(screen.querySelectorAll("style"))) {
+      document.head.appendChild(st);
+      movedStyles += 1;
+    }
+  };
+  moveStyles();
+  // A terminal creates exactly two such styles (theme + dimensions), both in
+  // the first render pass right after open(). If they're already there the
+  // sync pass above is the whole fix; otherwise watch the screen's direct
+  // children (which rarely change after open — rows live in the inner
+  // container) until both are out. A 1s timer bounds the observer so it can
+  // never become a permanent per-frame cost on WebKitGTK.
+  if (movedStyles >= 2) return;
+  const obs = new MutationObserver(() => {
+    moveStyles();
+    if (movedStyles >= 2) obs.disconnect();
+  });
+  obs.observe(screen, { childList: true });
+  window.setTimeout(() => obs.disconnect(), 1000);
 }
 
 /** Copy text to the OS clipboard (navigator API with execCommand fallback —
@@ -139,12 +186,6 @@ function isMouseMotion(data: string): boolean {
  *   · 1015 urxvt encoding
  */
 const STRIP_MOUSE_MODES = new Set([1000, 1002, 1003, 1004, 1005, 1015]);
-
-/** Alt-buffer TUIs that request mouse tracking. Their viewport scrolls via
- *  mouse wheel *reports*, so after the tracking strip the wheel has to be
- *  forwarded to them by hand. Codex/bash scroll through xterm's native
- *  scrollback and must not receive synthetic mouse bytes. */
-const MOUSE_TUI_RUNTIMES = new Set(["claude", "opencode"]);
 
 /** True if `bytes` contains a complete `ESC [ ?` (DECSET/DECRST) marker. */
 function hasDecsetMarker(bytes: Uint8Array): boolean {
@@ -315,6 +356,11 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
   const fontScale = useStore((s) => s.fontScale);
   const focusRequest = useStore((s) => s.focusRequest);
   const searchRequest = useStore((s) => s.searchRequest);
+  // Immutable per agent; a primitive selection re-renders only when THIS agent's
+  // runtime actually changes (never for other agents' updates). Used to give the
+  // container a runtime class so CSS can scope xterm rules (e.g. the viewport
+  // background) to specific runtimes.
+  const runtime = useStore((s) => s.agents.get(agentId)?.runtime);
 
   // Terminal Ctrl+F search bar state. The SearchAddon instance itself lives in
   // searchAddonRef (created in the terminal init effect); only the UI state and
@@ -471,6 +517,10 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     // started before the tracking strip shipped). The DECSET filter below keeps
     // the modes off for everything that streams in afterwards.
     term.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l");
+    // Keep .xterm-screen's textContent pure terminal text: xterm appends its
+    // renderer <style> elements there, whose CSS text shows up as phantom
+    // "missing letters" in DOM text. Relocated to <head> (document-global CSS).
+    relocateXtermStyles(containerRef.current);
 
     // Keyboard copy: xterm.js maps Ctrl+C to a PTY SIGINT (^C), so the browser's
     // default Ctrl+Shift+C — which terminals use for copy — is never produced,
@@ -530,7 +580,11 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     let flushRaf: number | null = null;
     let redrawPulseTimer: ReturnType<typeof setTimeout> | null = null;
     let redrawRestoreTimer: ReturnType<typeof setTimeout> | null = null;
-    let redrawPulseRequested = false;
+    // Dims the last opencode redraw pulse used, so a pulse that ran before the
+    // terminal settled can re-fire once the real size arrives (the one-shot
+    // `redrawPulseRequested` guard left a stale-size frame stuck until a manual
+    // window resize — see pulseOpenCodeRedraw).
+    let pulseDims = { rows: 0, cols: 0 };
     let pendingClaudeMode: string | null = null;
     let modePersistTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -635,31 +689,49 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     /** OpenCode's alternate-screen TUI may stay idle after this xterm component
      *  is recreated. The PTY is still alive, but xterm has no screen snapshot to
      *  paint and an unchanged resize is normally suppressed. A one-column resize
-     *  pulse makes the native TUI redraw without sending it an input command. */
-    const requestOpenCodeRedraw = () => {
-      if (redrawPulseRequested) return;
+     *  pulse makes the native TUI redraw without sending it an input command.
+     *
+     *  The pulse is dimension-aware: it records the size it pulsed at and skips
+     *  a repeat for the same size, so a pulse fired before the terminal settled
+     *  (font still loading, container mid-layout) is retried with the final dims
+     *  instead of leaving a wrong-sized frame on screen until the user resizes
+     *  the window by hand. */
+    const pulseOpenCodeRedraw = () => {
+      if (disposed) return;
       if (useStore.getState().agents.get(agentId)?.runtime !== "opencode") return;
-      redrawPulseRequested = true;
+      const rows = term.rows || 24;
+      const cols = term.cols || 80;
+      if (pulseDims.rows === rows && pulseDims.cols === cols) return;
+      pulseDims = { rows, cols };
+      const pulseCols = cols > 2 ? cols - 1 : cols + 1;
+      // Drop any pending restore so a re-pulse at a new size can't be cancelled
+      // by the previous restore firing after it (out-of-order dims).
+      if (redrawRestoreTimer) clearTimeout(redrawRestoreTimer);
+      invoke("agent_resize", { id: agentId, rows, cols: pulseCols }).catch(() => {});
+      redrawRestoreTimer = setTimeout(() => {
+        redrawRestoreTimer = null;
+        if (disposed) return;
+        invoke("agent_resize", { id: agentId, rows, cols }).catch(() => {});
+        lastResize = { rows, cols };
+      }, 32);
+    };
+    /** Debounced request for an opencode redraw pulse — schedule one, replacing
+     *  any pending one, so rapid fit passes collapse into a single pulse at the
+     *  settled size. */
+    const requestOpenCodeRedraw = () => {
+      if (useStore.getState().agents.get(agentId)?.runtime !== "opencode") return;
+      if (redrawPulseTimer) clearTimeout(redrawPulseTimer);
       redrawPulseTimer = setTimeout(() => {
         redrawPulseTimer = null;
-        if (disposed) return;
-        const rows = term.rows || 24;
-        const cols = term.cols || 80;
-        const pulseCols = cols > 2 ? cols - 1 : cols + 1;
-        invoke("agent_resize", { id: agentId, rows, cols: pulseCols }).catch(() => {});
-        redrawRestoreTimer = setTimeout(() => {
-          redrawRestoreTimer = null;
-          if (disposed) return;
-          invoke("agent_resize", { id: agentId, rows, cols }).catch(() => {});
-          lastResize = { rows, cols };
-        }, 32);
+        pulseOpenCodeRedraw();
       }, 80);
     };
 
     /** Fit the terminal to its container and force a repaint. A terminal opened
      *  during a tab switch can land in a 0×0 / not-yet-laid-out container, which
      *  paints a blank canvas until something resizes it — fit() alone won't redraw
-     *  when the size didn't change, so refresh() forces the paint. */
+     *  when the size didn't change, so refresh() forces the paint. An opencode
+     *  redraw pulse is also (re)scheduled so its TUI redraws at the settled size. */
     const fitAndRefresh = () => {
       if (disposed) return;
       try {
@@ -670,6 +742,7 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
       if (term.rows > 0 && term.cols > 0) {
         sendResize();
         term.refresh(0, term.rows - 1);
+        requestOpenCodeRedraw();
       }
     };
     // Defer the initial fit so the panel has its final size (a tab switch can
@@ -787,25 +860,38 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     };
 
     // The TUIs scroll their own alternate screen via mouse wheel *reports*.
-    // With the tracking modes stripped, xterm no longer emits them, so forward
-    // the wheel to the PTY as an SGR report (the CLI kept SGR encoding 1006
-    // enabled even though the tracking modes were suppressed). Codex/bash keep
-    // xterm's native scrollback handling — no synthetic bytes for them.
+    // With the tracking modes stripped, xterm would otherwise fall back to
+    // emitting ArrowUp/ArrowDown for every wheel event in the alternate buffer.
+    // OpenCode interprets those arrows as prompt-history navigation regardless
+    // of where the pointer is, in addition to receiving our positioned SGR
+    // report below. Disable that xterm fallback for mouse-driven TUIs; codex and
+    // bash retain xterm's native scrollback handling.
+    term.attachCustomWheelEventHandler(() => {
+      const runtime = useStore.getState().agents.get(agentId)?.runtime;
+      return !isMouseTuiRuntime(runtime);
+    });
+
+    // Forward the wheel to the PTY as an SGR report (the CLI kept SGR encoding
+    // 1006 enabled even though the tracking modes were suppressed).
     const onWheel = (ev: WheelEvent) => {
       if (ev.deltaY === 0) return;
       const runtime = useStore.getState().agents.get(agentId)?.runtime;
-      if (!runtime || !MOUSE_TUI_RUNTIMES.has(runtime)) return;
-      if (!modeFilter.sgr) return; // CLI didn't ask for SGR encoding — leave it
+      if (!canForwardSgrMouse(runtime, modeFilter.sgr)) return;
       ev.preventDefault();
       const { col, row } = cellFromEvent(ev.clientX, ev.clientY);
-      const dir = ev.deltaY < 0 ? 64 : 65; // wheel up / down
       invoke("agent_write", {
         id: agentId,
-        data: `\x1b[<${dir};${col};${row}M`,
+        data: sgrWheelReport(ev.deltaY, col, row),
         raw: true,
       }).catch(() => {});
     };
-    containerRef.current.addEventListener("wheel", onWheel, { passive: false });
+    // Capture before xterm's nested viewport consumes the bubbling wheel event.
+    // A listener on the outer container in the default bubbling phase is not
+    // reliable here: xterm's scrollable element can stop propagation first.
+    containerRef.current.addEventListener("wheel", onWheel, {
+      passive: false,
+      capture: true,
+    });
 
     // Preserve the TUIs' click interactions, which tracking used to deliver as
     // mouse reports. Forward a plain left-click as press+release on mouseup —
@@ -816,7 +902,7 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
       if (ev.button !== 0) return;
       if (ev.shiftKey || ev.ctrlKey || ev.altKey || ev.metaKey) return;
       const runtime = useStore.getState().agents.get(agentId)?.runtime;
-      if (!runtime || !MOUSE_TUI_RUNTIMES.has(runtime)) return;
+      if (!isMouseTuiRuntime(runtime)) return;
       mouseDownPos = { x: ev.clientX, y: ev.clientY };
     };
     const onMouseMove = (ev: MouseEvent) => {
@@ -829,7 +915,8 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
       if (!mouseDownPos) return;
       mouseDownPos = null;
       if (ev.button !== 0) return;
-      if (!modeFilter.sgr) return;
+      const runtime = useStore.getState().agents.get(agentId)?.runtime;
+      if (!canForwardSgrMouse(runtime, modeFilter.sgr)) return;
       const { col, row } = cellFromEvent(ev.clientX, ev.clientY);
       // Press + release so the TUI sees a complete click. Deliberately does NOT
       // stamp activity: a click is passive navigation, not the agent working
@@ -864,7 +951,7 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
       cancelAnimationFrame(raf1);
       cancelAnimationFrame(raf2);
       observer.disconnect();
-      containerRef.current?.removeEventListener("wheel", onWheel);
+      containerRef.current?.removeEventListener("wheel", onWheel, true);
       containerRef.current?.removeEventListener("mousedown", onMouseDown);
       window.removeEventListener("mousemove", onMouseMove);
       window.removeEventListener("mouseup", onMouseUp);
@@ -953,7 +1040,12 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
   return (
     <div
       ref={containerRef}
-      className={dragHover ? "ug-xterm-drophint" : undefined}
+      className={
+        [
+          dragHover ? "ug-xterm-drophint" : undefined,
+          runtime === "opencode" ? "xterm-runtime-opencode" : undefined,
+        ].filter(Boolean).join(" ") || undefined
+      }
       style={{
         flex: 1,
         // min-height: 0 + overflow hidden give this flex item a definite height

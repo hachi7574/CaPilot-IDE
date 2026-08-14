@@ -19,6 +19,8 @@ Both fields stay optional. A provider that cannot supply a trustworthy current v
 
 `AgentUsage` also carries two **session-cumulative** prompt-token counts: `cacheHitTokens` (the cached-read portion) and `cacheTotalInputTokens` (the total prompt). The composer renders the ratio `cacheHitTokens / cacheTotalInputTokens` as a small chip next to the meter; both must be present and the denominator must be positive, otherwise nothing renders.
 
+A measured zero cache hit is reported as `cacheHitTokens: 0`, not `null`, so the composer renders 0%. `actualModel` is the last provider-observed model id. It is display-only: the persisted/configured model remains authoritative for spawning, switching, and catalog checkmarks.
+
 The two counts are NOT comparable across providers, and each adapter normalizes its runtime's accounting before reporting them:
 
 | Runtime | Hit numerator | Total-prompt denominator |
@@ -27,7 +29,7 @@ The two counts are NOT comparable across providers, and each adapter normalizes 
 | Codex | `cached_input_tokens` (older transcripts: `cache_read_input_tokens`) | `input_tokens` (input **already includes** the cached portion — verified `total_tokens == input_tokens + output_tokens`) |
 | OpenCode | `tokens.cache.read` | `tokens.input + tokens.cache.read + tokens.cache.write` (input excludes cache reads) |
 
-Both are summed across the whole session transcript (Claude: all assistant records skipping `isSidechain`; Codex: all `token_count` events; OpenCode: all `step-finish` parts). The frontend only computes the percentage; it never cross-converts providers.
+Both are summed across the whole session transcript (Claude: unique assistant `message.id` records skipping `isSidechain`; Codex: all `token_count` events; OpenCode: all `step-finish` parts). The frontend only computes the percentage; it never cross-converts providers.
 
 ## Data flow
 
@@ -72,19 +74,43 @@ Claude needs a stateful fallback chain because its live stream, result message, 
 
 The static model manifest supplies an initial maximum so live usage can render before SDK model usage arrives. Runtime model usage supersedes it because gateways and model variants can report a different effective window.
 
+Resolve Claude's JSONL by the Agent's persisted `resume_key`, never by the newest file under the cwd project directory. Multiple IDE and standalone Claude processes can share the same cwd. The per-agent SessionStart hook sidecar supplies the exact `session_id` when an older record or startup race lacks it; persist that recovered key before reading. Claude can append repeated streaming snapshots with the same assistant `message.id`, so cumulative cache totals keep only the latest non-zero snapshot for each id. The last usable assistant `message.model` populates display-only `actualModel`.
+
 ### Codex
 
 Use the `last` usage object, not the session-total object. Codex's `last.total_tokens` represents the current context reading needed by the meter; cumulative totals answer a different question.
 
+Resolve the transcript by the agent's persisted Codex `resume_key` (the provider session id), then verify its cwd. Never choose the newest transcript by cwd: multiple IDE agents and standalone Codex processes can legitimately share one project directory. Codex hook sidecars carry `session_id` so fresh sessions can be bound directly. For legacy/missed captures, recover by matching the UUIDv7 session timestamp to the persisted Agent creation time within five seconds, require the cwd to match, and persist the recovered key before reading usage.
+
 ### OpenCode
 
 Use the model attached to the assistant message when available. It can differ from the draft selection, so observed assistant-model metadata updates the maximum. `step-finish` is the accounting boundary for used context; session cost is accumulated separately.
+
+Resolve every OpenCode query by the Agent's persisted provider session id and verify the session directory matches the Agent cwd. Do not use `ORDER BY time_updated DESC` by cwd: another IDE Agent, standalone TUI, or subagent can become newer. The per-process status plugin binds once to the first root-session `sessionID` observed on the event bus and writes it to the Agent sidecar. For sessions created before this binding existed, recovery is allowed only when exactly one cwd-matching session was created from 2 seconds before through 30 seconds after the Agent row; ambiguity returns no usage.
+
+Use the latest exact-session `step-finish.tokens.total` for current occupancy. For cumulative cache statistics, use OpenCode's exact-session aggregate columns `tokens_input`, `tokens_cache_read`, and `tokens_cache_write`; the denominator is their sum and the numerator is `tokens_cache_read`. This is faster and avoids double-counting repeated parts.
 
 ### Pi and OMP
 
 Treat runtime session statistics as authoritative. Pi refreshes after completion. OMP polls because its runtime exposes the current context independently of stream events. Publish only changed OMP samples to avoid agent-state churn.
 
 ## Adding or changing a provider
+
+### Mandatory provider invariants
+
+These checks are required for every new provider adapter. They prevent the same class of cache/context/model bugs from recurring:
+
+1. **Exact session identity:** usage reads require the persisted provider session id. A cwd, project path, file mtime, “latest session”, PID guess, or global model state is never a session identity.
+2. **Collision-safe capture:** capture the provider id from a per-Agent hook/event/stream whenever possible and persist it. A legacy time-window recovery must validate cwd and return a value only for one unambiguous candidate.
+3. **Fail closed:** a missing, stale, mismatched, or ambiguous id returns no usage. Never borrow another conversation to keep the UI populated.
+4. **Authoritative accounting boundary:** document whether the provider exposes final messages, step-finish events, request snapshots, or aggregate columns. Deduplicate repeated records by their stable provider id, or prefer authoritative aggregate columns.
+5. **Provider-specific denominator:** verify whether input already includes cache reads. Record the numerator and denominator formula using real provider data; do not reuse another provider's formula.
+6. **Zero is data:** when total prompt is positive, a measured zero hit is `0`, not missing/null. Missing means the provider supplied no trustworthy accounting.
+7. **Actual model is telemetry:** expose the provider-observed model for display, but keep the configured model authoritative for spawning, switching, persistence, and catalog checkmarks.
+8. **Non-blocking reads:** database/filesystem/subprocess work runs off the async command thread and expensive catalog discovery is cached. Performance failure must not be indistinguishable from a valid 0%.
+9. **Required regression fixtures:** test two sessions sharing one cwd, a newer unrelated session, missing/ambiguous identity, repeated usage records, a valid 0% sample, the provider's denominator semantics, and actual-model/configured-model separation.
+
+Code review for a new provider is incomplete until its documentation names the identity source, accounting boundary, cache formula, observed-model source, and the tests covering the invariants above.
 
 Before exposing a context meter:
 

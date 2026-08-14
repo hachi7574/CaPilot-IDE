@@ -41,7 +41,7 @@ export function CacheHitRate({ agentId }: { agentId: string | undefined }) {
       className="cw-cache"
       title={`缓存命中 ${formatTokens(hit)} / ${formatTokens(total)} tokens (${pct}%)`}
     >
-      缓存 {pct}%
+      缓存命中 {pct}%
     </span>
   );
 }

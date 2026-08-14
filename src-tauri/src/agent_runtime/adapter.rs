@@ -122,6 +122,14 @@ pub struct AgentInfo {
 /// opencode's `tokens.input` excludes cache reads and reports
 /// `cache.read/write` separately), so the ratio is only computed at the display
 /// layer.
+///
+/// A measured zero hit MUST be `Some(0)` when the denominator is present;
+/// `None` means unavailable, not zero. Adapters must scope cumulative values to
+/// the exact provider session identified by `resume_key`.
+///
+/// `actual_model` is provider-observed telemetry (for example Claude's
+/// `message.model`). It is display-only: the persisted Agent model remains the
+/// configured model used for spawning, switching, and catalog matching.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentUsage {
@@ -129,6 +137,7 @@ pub struct AgentUsage {
     pub context_window_max_tokens: Option<u64>,
     pub cache_hit_tokens: Option<u64>,
     pub cache_total_input_tokens: Option<u64>,
+    pub actual_model: Option<String>,
 }
 
 /// Summary of an available runtime detected on the system
@@ -205,11 +214,31 @@ pub trait AgentRuntimeAdapter: Send + Sync {
         None
     }
 
+    /// Recover a missing provider session id for an already-persisted agent.
+    /// Runtimes with a reliable per-agent signal can override this; the default
+    /// leaves legacy capture behavior unchanged.
+    fn recover_resume_key(
+        &self,
+        _agent_id: &str,
+        _cwd: &Path,
+        _created_at_ms: i64,
+    ) -> Option<String> {
+        None
+    }
+
     /// Provider's estimate of the current active-context occupancy for the agent
-    /// running in `cwd` with `model`. Default: the runtime reports no context
-    /// usage (so the UI renders no meter). Implementations should return
-    /// `None` when no trustworthy value exists rather than estimating.
-    fn context_usage(&self, _cwd: &Path, _model: Option<&str>) -> Option<AgentUsage> {
+    /// running in `cwd` with `model`. `resume_key` identifies the exact provider
+    /// conversation when the runtime exposes one; adapters must not substitute
+    /// another conversation merely because it shares the same cwd. Default: the
+    /// runtime reports no context usage (so the UI renders no meter).
+    /// Implementations should return `None` when no trustworthy value exists
+    /// rather than estimating.
+    fn context_usage(
+        &self,
+        _cwd: &Path,
+        _model: Option<&str>,
+        _resume_key: Option<&str>,
+    ) -> Option<AgentUsage> {
         None
     }
 

@@ -576,13 +576,6 @@ function FilesPanel() {
     closeMenu();
   };
 
-  const doOpen = () => {
-    if (!menu?.path) return;
-    if (menu.kind === "dir") toggleDir(menu.path);
-    else openFile(menu.path, menu.path.slice(menu.path.lastIndexOf("/") + 1));
-    closeMenu();
-  };
-
   /** cd the single open bash terminal to a folder (req: open in current terminal). */
   const doOpenInCurrentTerminal = () => {
     if (!menu?.path || !singleBashId) return;
@@ -971,7 +964,10 @@ function FilesPanel() {
       id="tab-files"
       style={{ padding: "8px 0" }}
       onContextMenu={(e) => {
-        openCtx(e, "space");
+        // Blank-space right-click acts on the root directory: give the menu the
+        // root path so the folder-consistent actions (open in terminal, copy
+        // path) target the workspace root.
+        openCtx(e, "space", root);
         setSelected(null);
       }}
     >
@@ -1009,12 +1005,7 @@ function FilesPanel() {
           onClick={(e) => e.stopPropagation()}
           onContextMenu={(e) => e.stopPropagation()}
         >
-          {menu.kind !== "space" && (
-            <div className="ctx-item" onClick={doOpen}>
-              打开
-            </div>
-          )}
-          {menu.kind === "dir" && (
+          {(menu.kind === "dir" || menu.kind === "space") && (
             <>
               {singleBashId && (
                 <div className="ctx-item" onClick={doOpenInCurrentTerminal}>
@@ -1069,14 +1060,17 @@ function FilesPanel() {
               </div>
             </>
           ) : (
-            clip && (
-              <>
-                <div className="ctx-sep" />
+            <>
+              <div className="ctx-sep" />
+              <div className="ctx-item" onClick={doCopyPath}>
+                复制路径
+              </div>
+              {clip && (
                 <div className="ctx-item" onClick={doPaste}>
                   粘贴
                 </div>
-              </>
-            )
+              )}
+            </>
           )}
         </div>
       )}
@@ -2062,7 +2056,7 @@ function GitPanel() {
                 {log.length === 0 ? (
                   <div className="gg-log-empty">暂无提交记录</div>
                 ) : (
-                  <CommitGraph log={log} menuOpen={!!commitMenu} onCommitContextMenu={openCommitMenu} />
+                  <CommitGraph log={log} currentBranch={branch} menuOpen={!!commitMenu} onCommitContextMenu={openCommitMenu} />
                 )}
               </div>
             )}

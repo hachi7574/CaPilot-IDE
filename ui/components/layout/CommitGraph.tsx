@@ -8,8 +8,38 @@ const COL_W = 16;
 const ROW_H = 26;
 /** Commit dot radius. */
 const DOT_R = 4;
-/** Approx advance width of one mono 11px character. */
-const CHAR_W = 6.6;
+/** The mono family the pill renders with (CSS `.gg-pill` → `var(--mono)`, which
+ *  the right sidebar rebinds to `--panel-ui-font`). Resolved once from the root
+ *  so the canvas measurement matches the SVG text; falls back to the generic
+ *  stack when custom properties can't be read (non-browser / measurement error). */
+function monoFontStack(): string {
+  try {
+    if (typeof document !== "undefined") {
+      const el = document.documentElement;
+      const family =
+        getComputedStyle(el).getPropertyValue("--panel-ui-font").trim() ||
+        getComputedStyle(el).getPropertyValue("--mono").trim();
+      if (family && !family.includes("var(")) return family;
+    }
+  } catch { /* ignore → fallback */ }
+  return "ui-monospace, monospace";
+}
+
+/** Approx advance width of one mono char at the pill's 9px font, measured once
+ *  so the pill rect hugs its text (the old 11px estimate left empty space and
+ *  pushed the commit subject right). Fallback is the old conservative value. */
+const PILL_CHAR_W = (() => {
+  try {
+    if (typeof document !== "undefined") {
+      const ctx = document.createElement("canvas").getContext("2d");
+      if (ctx) {
+        ctx.font = `9px ${monoFontStack()}`;
+        return ctx.measureText("MMMMMMMMMM").width / 10;
+      }
+    }
+  } catch { /* non-browser / measurement failure → keep fallback */ }
+  return 6.6;
+})();
 /** Dot palette per lane column (dark-bg friendly). Values live in CSS :root. */
 const LANE_COLORS = ["var(--lane-0)", "var(--lane-1)", "var(--lane-2)", "var(--lane-3)", "var(--lane-4)", "var(--lane-5)", "var(--lane-6)"];
 
@@ -45,6 +75,11 @@ interface CommitGraphProps {
   /** True while the commit context menu is open: suppress the hover tooltip so
    *  the two overlays never show at the same time. */
   menuOpen?: boolean;
+  /** Name of the checked-out branch. Its ancestry becomes the graph's main
+   *  line; commits outside it (a divergent branch, or one merely ahead of the
+   *  current branch) keep their own lane so the branch structure stays visible
+   *  even when the history is linear. Omitted/unknown → single-lane layout. */
+  currentBranch?: string;
 }
 
 /**
@@ -67,13 +102,13 @@ interface CommitGraphProps {
  *   source, and the native SVG `<title>` renders a huge black GTK tooltip.
  *   Full hash/subject/author/date show in the custom hover tooltip.
  */
-export function CommitGraph({ log, onCommitContextMenu, menuOpen = false }: CommitGraphProps) {
+export function CommitGraph({ log, onCommitContextMenu, menuOpen = false, currentBranch }: CommitGraphProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerW, setContainerW] = useState(320);
   // Custom hover tooltip (the native SVG <title> renders a huge black GTK box
   // on WebKitGTK). Positioned below the hovered row; cleared on mouseleave.
   const [hover, setHover] = useState<{ left: number; top: number; c: GitLogEntry } | null>(null);
-  const placed = useMemo(() => layout(log), [log]);
+  const placed = useMemo(() => layout(log, currentBranch), [log, currentBranch]);
   const { commits, numCols, maxRow } = placed;
 
   // Track the sidebar width so subject clipping follows the panel, not the
@@ -121,14 +156,15 @@ export function CommitGraph({ log, onCommitContextMenu, menuOpen = false }: Comm
     if (!first) continue;
     const pt = pillFor(first);
     const text = clip(pt.text, 12);
-    const w = text.length * CHAR_W + 14;
+    const w = text.length * PILL_CHAR_W + 14;
     const msgX = treeW + 12 + w;
     if (msgX > maxMsgX) maxMsgX = msgX;
     pills.set(p.c.hash, { text, isTag: pt.isTag, w });
   }
-  // Room for the commit message, then a positive subject budget.
-  const subjectClip = Math.max(8, Math.floor((containerW - maxMsgX - 12) / CHAR_W));
-  const svgW = Math.max(containerW, maxMsgX + subjectClip * CHAR_W + 12);
+  // The tree is as wide as the container (or wider for many lanes); commit
+  // subjects are clipped per-row by the HTML overlay, so the SVG only needs to
+  // reach the right edge of the widest ref pill — no fixed subject budget.
+  const svgW = Math.max(containerW, maxMsgX);
   // Tight to the last row: dangling-stub lines end inside the bottom row's cell,
   // so no extra blank below the oldest commit.
   const svgH = (maxRow + 1) * ROW_H;
@@ -202,7 +238,6 @@ export function CommitGraph({ log, onCommitContextMenu, menuOpen = false }: Comm
           const x = xOf(p.col);
           const y = yOf(p.row);
           const pill = pills.get(p.c.hash);
-          const msgX = pill ? treeW + 12 + pill.w : treeW + 8;
           return (
             <g key={p.c.hash}>
               {pill && (
@@ -211,14 +246,10 @@ export function CommitGraph({ log, onCommitContextMenu, menuOpen = false }: Comm
                     fill="var(--bg3)" stroke={pill.isTag ? "rgb(var(--warn-rgb) / 0.45)" : "var(--rule2)"} />
                   <text x={7} y={1} alignmentBaseline="central"
                     fill={pill.isTag ? "var(--warn)" : "var(--ink2)"}
-                    style={{ font: "9px ui-monospace, monospace" }}>{pill.text}</text>
+                    className="gg-pill">{pill.text}</text>
                 </g>
               )}
               <circle cx={x} cy={y} r={DOT_R} fill={LANE_COLORS[p.col % LANE_COLORS.length]} />
-              <text x={msgX} y={y} alignmentBaseline="central"
-                style={{ font: "11px ui-monospace, monospace" }}>
-                <tspan fill="var(--ink)">{clip(p.c.subject, subjectClip)}</tspan>
-              </text>
             </g>
           );
         })}
@@ -227,27 +258,46 @@ export function CommitGraph({ log, onCommitContextMenu, menuOpen = false }: Comm
           SVG stays purely visual because WebKitGTK paints a solid black box
           when an SVG element is the HTML5 drag source. These <div>s carry the
           hover tooltip and right-click menu instead. */}
-      {commits.map((p) => (
-        <div
-          key={`row-${p.c.hash}`}
-          className="gg-row"
-          style={{ top: p.row * ROW_H, width: svgW, height: ROW_H }}
-          onContextMenu={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            setHover(null);
-            onCommitContextMenu?.(e, p.c);
-          }}
-          onMouseEnter={(e) => {
-            if (menuOpen) return;
-            const r = e.currentTarget.getBoundingClientRect();
-            const left = Math.max(8, Math.min(r.left, window.innerWidth - 220));
-            const top = Math.min(r.bottom + 6, window.innerHeight - 80);
-            setHover({ left, top, c: p.c });
-          }}
-          onMouseLeave={() => setHover(null)}
-        />
-      ))}
+      {commits.map((p) => {
+        // Commit subject is an HTML overlay, not SVG: CSS `text-overflow:
+        // ellipsis` clips it at the row's own right edge, so every row uses its
+        // full available width (limited only by the panel window) instead of a
+        // shared character budget, and it can never overflow the line.
+        const pill = pills.get(p.c.hash);
+        const msgX = pill ? treeW + 12 + pill.w : treeW + 8;
+        return (
+          <div
+            key={`row-${p.c.hash}`}
+            className="gg-row"
+            style={{ top: p.row * ROW_H, width: svgW, height: ROW_H }}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setHover(null);
+              onCommitContextMenu?.(e, p.c);
+            }}
+            onMouseEnter={(e) => {
+              if (menuOpen) return;
+              const r = e.currentTarget.getBoundingClientRect();
+              const left = Math.max(8, Math.min(r.left, window.innerWidth - 220));
+              const top = Math.min(r.bottom + 6, window.innerHeight - 80);
+              setHover({ left, top, c: p.c });
+            }}
+            onMouseLeave={() => setHover(null)}
+          >
+            <span
+              className="gg-subject"
+              style={{
+                left: msgX,
+                width: Math.max(0, containerW - msgX - 12),
+                lineHeight: `${ROW_H}px`,
+              }}
+            >
+              {p.c.subject}
+            </span>
+          </div>
+        );
+      })}
       {hover && (
         <div className="gg-tip" style={{ left: hover.left, top: hover.top }}>
           <span className="gg-tip-hash" style={{ color: hoverColor }}>{hover.c.hash.slice(0, 7)}</span>

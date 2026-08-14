@@ -297,43 +297,58 @@ impl CodexAdapter {
             .map(|(_, key)| key)
     }
 
-    /// Whether `path`'s first line (the `session_meta` record) carries
-    /// `payload.cwd` == `cwd`.
-    fn session_matches_cwd(path: &Path, cwd: &Path) -> bool {
-        let file = std::fs::File::open(path).ok();
-        let Some(mut reader) = file.map(std::io::BufReader::new) else {
-            return false;
-        };
-        let mut first_line = String::new();
-        if reader.read_line(&mut first_line).is_err() {
-            return false;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(&first_line) else {
-            return false;
-        };
-        value
-            .get("payload")
-            .and_then(|p| p.get("cwd"))
-            .and_then(Value::as_str)
-            == Some(cwd.to_string_lossy().as_ref())
-    }
-
-    /// Newest session JSONL under `$CODEX_HOME/sessions` whose `session_meta`
-    /// cwd matches `cwd`, or `None`. Mirrors the resume-key scan but returns
-    /// the full path and has no 10s freshness window — context usage wants the
-    /// current session for the cwd regardless of age.
-    fn newest_session_for_cwd(cwd: &Path) -> Option<PathBuf> {
+    /// Exact session JSONL under `$CODEX_HOME/sessions` whose `session_meta`
+    /// id matches the persisted provider `resume_key` and whose cwd still
+    /// matches the agent record. The id is the authority: choosing the newest
+    /// file by cwd makes two agents in one project silently share usage data.
+    fn session_for_resume_key(cwd: &Path, resume_key: &str) -> Option<PathBuf> {
         let mut files = Vec::new();
         Self::visit_jsonl(&Self::sessions_dir()?, &mut files);
         files
             .into_iter()
-            .filter(|path| Self::session_matches_cwd(path, cwd))
+            .find(|path| Self::resume_key_from_file(path, cwd).as_deref() == Some(resume_key))
+    }
+
+    /// Codex session ids are UUIDv7; their first 48 bits are the Unix epoch in
+    /// milliseconds. This gives a stable spawn-time signal even when the JSONL
+    /// file itself is created later or its mtime keeps changing during a turn.
+    fn session_started_at_ms(resume_key: &str) -> Option<u64> {
+        let id = uuid::Uuid::parse_str(resume_key).ok()?;
+        (id.get_version_num() == 7).then_some((id.as_u128() >> 80) as u64)
+    }
+
+    fn sidecar_resume_key(agent_id: &str) -> Option<String> {
+        let raw = std::fs::read_to_string(crate::persistence::status_file(agent_id)).ok()?;
+        serde_json::from_str::<Value>(&raw)
+            .ok()?
+            .get("session_id")?
+            .as_str()
+            .map(str::to_owned)
+    }
+
+    /// Recover the exact Codex session for agents whose older metadata has no
+    /// resume_key. Prefer the per-agent hook sidecar. As a legacy fallback,
+    /// match the UUIDv7 session timestamp to the persisted Agent creation time
+    /// within a narrow window, while still requiring the cwd to match.
+    fn recover_session_key(agent_id: &str, cwd: &Path, created_at_ms: i64) -> Option<String> {
+        if let Some(key) = Self::sidecar_resume_key(agent_id) {
+            if Self::session_for_resume_key(cwd, &key).is_some() {
+                return Some(key);
+            }
+        }
+
+        let created_at_ms = u64::try_from(created_at_ms).ok()?;
+        let mut files = Vec::new();
+        Self::visit_jsonl(&Self::sessions_dir()?, &mut files);
+        files
+            .into_iter()
             .filter_map(|path| {
-                let modified = path.metadata().ok()?.modified().ok()?;
-                Some((modified, path))
+                let key = Self::resume_key_from_file(&path, cwd)?;
+                let delta = Self::session_started_at_ms(&key)?.abs_diff(created_at_ms);
+                (delta <= 5_000).then_some((delta, key))
             })
-            .max_by_key(|(modified, _)| *modified)
-            .map(|(_, path)| path)
+            .min_by_key(|(delta, _)| *delta)
+            .map(|(_, key)| key)
     }
 
     /// Context-window reading from one session transcript: the LAST
@@ -356,10 +371,19 @@ impl CodexAdapter {
         let mut cache_hit = 0u64;
         let mut cache_total = 0u64;
         let mut cache_seen = false;
+        let mut actual_model = None;
         for line in content.lines() {
             let Ok(v) = serde_json::from_str::<Value>(line) else {
                 continue;
             };
+            if let Some(model) = v
+                .pointer("/payload/model")
+                .or_else(|| v.pointer("/payload/thread_settings/model"))
+                .and_then(Value::as_str)
+                .filter(|model| !model.is_empty())
+            {
+                actual_model = Some(model.to_owned());
+            }
             if let Some(n) = v
                 .pointer("/payload/info/model_context_window")
                 .or_else(|| v.pointer("/payload/model_context_window"))
@@ -402,11 +426,15 @@ impl CodexAdapter {
             context_window_max_tokens: max,
             cache_hit_tokens: cache_seen.then_some(cache_hit),
             cache_total_input_tokens: cache_seen.then_some(cache_total),
+            actual_model,
         }
     }
 
-    fn latest_usage(cwd: &Path) -> Option<AgentUsage> {
-        let path = Self::newest_session_for_cwd(cwd)?;
+    fn latest_usage(cwd: &Path, resume_key: Option<&str>) -> Option<AgentUsage> {
+        // A fresh process needs a brief moment before background capture stores
+        // its provider session id. Showing no sample during that window is safer
+        // than borrowing another Codex conversation from the same directory.
+        let path = Self::session_for_resume_key(cwd, resume_key?)?;
         let content = std::fs::read_to_string(path).ok()?;
         let usage = Self::latest_usage_from_content(&content);
         (usage.context_window_used_tokens.is_some() || usage.context_window_max_tokens.is_some())
@@ -551,11 +579,25 @@ impl AgentRuntimeAdapter for CodexAdapter {
         Self::detect_recent_resume_key(cwd)
     }
 
-    fn context_usage(&self, cwd: &Path, _model: Option<&str>) -> Option<AgentUsage> {
+    fn recover_resume_key(
+        &self,
+        agent_id: &str,
+        cwd: &Path,
+        created_at_ms: i64,
+    ) -> Option<String> {
+        Self::recover_session_key(agent_id, cwd, created_at_ms)
+    }
+
+    fn context_usage(
+        &self,
+        cwd: &Path,
+        _model: Option<&str>,
+        resume_key: Option<&str>,
+    ) -> Option<AgentUsage> {
         // Session snapshot: the last token_count's `last_token_usage` is the
         // current active-context reading, and `model_context_window` supplies
         // the capacity from the session itself — no model manifest needed.
-        Self::latest_usage(cwd)
+        Self::latest_usage(cwd, resume_key)
     }
 
     fn speed_args(&self, speed: &str) -> Vec<String> {
@@ -749,6 +791,7 @@ mod tests {
         // `cached_input_tokens`.
         let content = concat!(
             "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/project\"}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.6-sol\"}}\n",
             "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"model_context_window\":258400}}\n",
             "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"total_tokens\":31114},\"last_token_usage\":{\"input_tokens\":15674,\"cached_input_tokens\":11008,\"cache_write_input_tokens\":0,\"output_tokens\":715,\"reasoning_output_tokens\":373,\"total_tokens\":16389},\"model_context_window\":258400}}}\n",
             "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":8000,\"cached_input_tokens\":3000,\"cache_write_input_tokens\":0,\"output_tokens\":200,\"total_tokens\":8200},\"model_context_window\":258400}}}\n",
@@ -760,6 +803,7 @@ mod tests {
         // Session cumulative: 15674 + 8000 prompt, 11008 + 3000 hit.
         assert_eq!(usage.cache_hit_tokens, Some(11008 + 3000));
         assert_eq!(usage.cache_total_input_tokens, Some(15674 + 8000));
+        assert_eq!(usage.actual_model.as_deref(), Some("gpt-5.6-sol"));
     }
 
     #[test]
@@ -776,18 +820,125 @@ mod tests {
     }
 
     #[test]
-    fn codex_session_cwd_matching_reads_first_line() {
-        let dir = std::env::temp_dir().join(format!("capilot-codex-cw-{}", std::process::id()));
-        let file = dir.join("session.jsonl");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            &file,
-            r#"{"type":"session_meta","payload":{"cwd":"/tmp/project","id":"abc"}}
-"#,
-        )
-        .unwrap();
-        assert!(CodexAdapter::session_matches_cwd(&file, Path::new("/tmp/project")));
-        assert!(!CodexAdapter::session_matches_cwd(&file, Path::new("/tmp/other")));
-        let _ = std::fs::remove_dir_all(dir);
+    fn codex_usage_uses_exact_resume_key_when_sessions_share_cwd() {
+        with_isolated_homes(|| {
+            let dir = CodexAdapter::sessions_dir().unwrap().join("2026/08/14");
+            std::fs::create_dir_all(&dir).unwrap();
+            let write_session = |name: &str, id: &str, input: u64, cached: u64| {
+                let content = [
+                    serde_json::json!({
+                        "type": "session_meta",
+                        "payload": { "cwd": "/tmp/project", "id": id }
+                    })
+                    .to_string(),
+                    serde_json::json!({
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "info": {
+                                "last_token_usage": {
+                                    "input_tokens": input,
+                                    "cached_input_tokens": cached,
+                                    "output_tokens": 10,
+                                    "total_tokens": input + 10
+                                },
+                                "model_context_window": 258400
+                            }
+                        }
+                    })
+                    .to_string(),
+                ]
+                .join("\n");
+                std::fs::write(dir.join(name), format!("{content}\n")).unwrap();
+            };
+
+            // The second transcript is written last, reproducing the old bug:
+            // a cwd-only lookup returned it for both agents.
+            write_session("first.jsonl", "session-a", 10_000, 2_000);
+            write_session("second.jsonl", "session-b", 20_000, 18_000);
+
+            let usage_a = CodexAdapter::latest_usage(
+                Path::new("/tmp/project"),
+                Some("session-a"),
+            )
+            .unwrap();
+            let usage_b = CodexAdapter::latest_usage(
+                Path::new("/tmp/project"),
+                Some("session-b"),
+            )
+            .unwrap();
+            assert_eq!(usage_a.cache_hit_tokens, Some(2_000));
+            assert_eq!(usage_a.cache_total_input_tokens, Some(10_000));
+            assert_eq!(usage_b.cache_hit_tokens, Some(18_000));
+            assert_eq!(usage_b.cache_total_input_tokens, Some(20_000));
+
+            // Missing identity or a mismatched cwd must never borrow usage from
+            // another conversation merely because its transcript is newest.
+            assert!(CodexAdapter::latest_usage(Path::new("/tmp/project"), None).is_none());
+            assert!(CodexAdapter::latest_usage(
+                Path::new("/tmp/other"),
+                Some("session-a")
+            )
+            .is_none());
+        });
+    }
+
+    #[test]
+    fn recovers_missing_resume_key_from_uuid_v7_spawn_time() {
+        with_isolated_homes(|| {
+            let dir = CodexAdapter::sessions_dir().unwrap().join("2026/08/14");
+            std::fs::create_dir_all(&dir).unwrap();
+            let write_meta = |name: &str, id: &str| {
+                let line = serde_json::json!({
+                    "type": "session_meta",
+                    "payload": { "cwd": "/tmp/project", "id": id }
+                });
+                std::fs::write(dir.join(name), format!("{line}\n")).unwrap();
+            };
+            // UUIDv7 timestamps: session-a is 213 ms after the Agent row was
+            // created; session-b is more than two minutes away in the same cwd.
+            write_meta(
+                "a.jsonl",
+                "01a000d2-c39c-7510-86a0-193c9651b2aa",
+            );
+            write_meta(
+                "b.jsonl",
+                "01a000de-1cd7-7d13-a9b7-16b93b7376cf",
+            );
+            assert_eq!(
+                CodexAdapter::recover_session_key(
+                    "agent-without-sidecar",
+                    Path::new("/tmp/project"),
+                    1_786_720_207_559,
+                )
+                .as_deref(),
+                Some("01a000d2-c39c-7510-86a0-193c9651b2aa")
+            );
+
+            // A hook-bound session id is authoritative even when another
+            // transcript has a timestamp closer to the Agent creation time.
+            let sidecar = crate::persistence::status_file("bound-agent");
+            std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+            std::fs::write(
+                sidecar,
+                r#"{"status":"idle","ts":1,"session_id":"01a000de-1cd7-7d13-a9b7-16b93b7376cf"}"#,
+            )
+            .unwrap();
+            assert_eq!(
+                CodexAdapter::recover_session_key(
+                    "bound-agent",
+                    Path::new("/tmp/project"),
+                    1_786_720_207_559,
+                )
+                .as_deref(),
+                Some("01a000de-1cd7-7d13-a9b7-16b93b7376cf")
+            );
+            assert!(CodexAdapter::recover_session_key(
+                "agent-without-sidecar",
+                Path::new("/tmp/other"),
+                1_786_720_207_559,
+            )
+            .is_none());
+        });
     }
 }

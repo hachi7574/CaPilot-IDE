@@ -69,14 +69,14 @@ const capilotThemeSpec = EditorView.theme(
     },
     ".cm-panels input[type=text]": {
       fontFamily: "var(--mono)",
-      fontSize: "12px",
+      fontSize: "var(--fs-sm)",
       backgroundColor: "var(--bg)",
       color: "var(--ink)",
       border: "1px solid var(--rule2)",
     },
     ".cm-panels .cm-button": {
       fontFamily: "var(--pixel)",
-      fontSize: "10px",
+      fontSize: "var(--fs-2xs)",
       textTransform: "uppercase",
       color: "var(--brand)",
       border: "1px solid var(--brand)",

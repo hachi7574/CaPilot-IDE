@@ -264,6 +264,20 @@ body::after {
    own cursor inside the PTY, so this is visually negligible. */
 .xterm .xterm-cursor.xterm-cursor-blink { animation: none !important; }
 
+/* xterm.css hardcodes a black `.xterm-viewport` background. If the screen
+   canvas isn't painted yet (terminal opened in a 0×0 / not-yet-laid-out
+   container during tab restore, or a stale canvas after an app restart), that
+   black shows through as a wrong-colour patch until a window resize forces a
+   repaint. Make the viewport transparent so the terminal's real background
+   (the `.xterm` element's inline theme background) shows regardless of the
+   canvas paint state. App-scoped so it wins over xterm.css in the bundle.
+
+   OpenCode is excluded: its viewport must not be transparent (its TUI paints
+   every cell, and in the pre-paint window it should look like a standalone
+   opencode terminal — xterm.css's opaque `#000` — not the app background). */
+.app .xterm .xterm-viewport { background-color: transparent; }
+.app .xterm-runtime-opencode .xterm .xterm-viewport { background-color: #000; }
+
 .tab-status {
   font-family: var(--pixel); font-size: var(--fs-2xs);
   letter-spacing: 1px; flex-shrink: 0;
@@ -2191,6 +2205,33 @@ body::after {
   /* Hovering a commit row must not change the cursor — the row is interactive
      (right-click menu, drag) but visually it should feel like plain text. */
   cursor: default;
+}
+/* Commit subject: HTML overlay (not SVG) so ellipsis clips at the row's own
+   right edge — full width up to the panel window, never overflowing. The
+   line-height (inline = ROW_H) centers the 11px mono text in the 26px row,
+   matching the SVG dot / pill. pointer-events none keeps the row's hover /
+   context-menu handlers the sole event targets. */
+.gg-subject {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* Mono family follows the panel's `--mono` (which the right sidebar rebinds
+     to `--panel-ui-font`), so the tree text stays consistent with the file rows
+     even when the user overrides the panel UI font. Size uses `--fs-xs` so it
+     scales with the font-size preset. */
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--ink);
+  pointer-events: none;
+}
+/* Ref-pill label inside the SVG commit tree: same mono family as the subject
+   (previously a hardcoded `9px ui-monospace` that ignored the panel font). */
+.gg-pill {
+  font-family: var(--mono);
+  font-size: 9px;
 }
 
 /* Commit hover tooltip: fixed-position, replaces the native SVG <title> which

@@ -56,6 +56,8 @@ IDE 遵循 CaPilot 主仓库的 **LUCY styleguide**（8-bit Pixel × Apple Smoot
 
 > 已解决（2026-08-06）：「会话 permissionMode 未持久化」已在会话生命周期改造中一并完成 —— mode/speed/model 持久化进 `sessions` 表，Composer 三设置跟随当前会话。
 
+> 已解决（2026-08-15）：OpenCode 常驻 PTY 重挂载后滚轮失效 / 任意区域切 prompt 历史。修复约束与协议记录见 `ai-runtime-references.md` 的 “TUI 鼠标协议”，回归命令为 `pnpm test:terminal-mouse`。
+
 ### 待开发项
 
 - **编辑器外部改动监视**（notify → 前端刷新）：Git 面板已用 2.5s 前端轮询兜底，编辑器标签页本身仍未监听磁盘改动

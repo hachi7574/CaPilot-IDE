@@ -469,16 +469,18 @@ async fn agent_spawn(
                 tokio::time::sleep(std::time::Duration::from_millis(400)).await;
                 // If the session was deleted mid-poll, stop before rewriting
                 // .agent-meta.json (which would recreate the removed dir).
-                let still_exists = persistence
+                let record = persistence
                     .db()
                     .lock()
                     .ok()
-                    .and_then(|db| db.get(&agent_id).ok().flatten())
-                    .is_some();
-                if !still_exists {
+                    .and_then(|db| db.get(&agent_id).ok().flatten());
+                let Some(record) = record else {
                     break;
-                }
-                if let Some(key) = adapter.capture_resume_key(&cwd_for_capture) {
+                };
+                let key = adapter
+                    .recover_resume_key(&agent_id, &cwd_for_capture, record.created_at)
+                    .or_else(|| adapter.capture_resume_key(&cwd_for_capture));
+                if let Some(key) = key {
                     if let Ok(db) = persistence.db().lock() {
                         let _ = db.update_resume_key(&agent_id, &key, now_ms());
                     }
@@ -618,11 +620,35 @@ async fn agent_context_usage(
     let cwd = rec.cwd.clone();
     let model = rec.model.clone();
     let runtime = rec.runtime.clone();
-    let usage = tauri::async_runtime::spawn_blocking(move || {
-        get_adapter(&runtime).context_usage(&cwd, model.as_deref())
+    let resume_key = rec.resume_key.clone();
+    let agent_id = rec.id.clone();
+    let created_at = rec.created_at;
+    let (usage, recovered_key) = tauri::async_runtime::spawn_blocking(move || {
+        let adapter = get_adapter(&runtime);
+        let recovered_key = if resume_key.is_none() {
+            adapter.recover_resume_key(&agent_id, &cwd, created_at)
+        } else {
+            None
+        };
+        let effective_key = resume_key.as_deref().or(recovered_key.as_deref());
+        let usage = adapter.context_usage(&cwd, model.as_deref(), effective_key);
+        (usage, recovered_key)
     })
     .await
     .map_err(|e| e.to_string())?;
+
+    // Self-heal sessions created by older builds (or a startup capture race)
+    // so subsequent polls and future resumes use the exact provider session.
+    if let Some(key) = recovered_key {
+        if let Ok(db) = persistence.db().lock() {
+            let _ = db.update_resume_key(&id, &key, now_ms());
+        }
+        if let Ok(mut meta) = read_agent_meta(&rec.project, &id) {
+            meta.resume_key = Some(key);
+            meta.updated_at = now_ms();
+            let _ = write_agent_meta(&rec.project, &meta);
+        }
+    }
 
     {
         let mut cache = cache.inner.lock().unwrap();
@@ -1193,6 +1219,15 @@ async fn runtime_list_available() -> Vec<agent_runtime::adapter::RuntimeInfo> {
         });
     }
     out
+}
+
+/// Current thinking variant for an opencode model, read from OpenCode's own
+/// `model.json` (`variant.<provider/model>`), which the TUI rewrites on each
+/// `variant_cycle` (Ctrl+T). `None` = default (no variant selected). Best-effort:
+/// a stale/missing file degrades to the default label, never an error.
+#[tauri::command]
+fn opencode_current_variant(model: String) -> Option<String> {
+    agent_runtime::runtimes::opencode::OpenCodeAdapter::current_variant(&model)
 }
 
 // ── Rate-limit usage commands ───────────────────────────────────
@@ -2995,6 +3030,12 @@ fn repair_session_titles(persistence: &Persistence) {
 pub fn run() {
     let persistence = Arc::new(Persistence::open().expect("Failed to init persistence"));
     repair_session_titles(&persistence);
+    // Hooks are shared by live PTYs across GUI restarts. Refresh the script at
+    // startup so already-running Codex sessions begin reporting session_id on
+    // their next lifecycle event, even before any new agent is spawned.
+    if let Err(e) = agent_runtime::status_hooks::ensure_status_hooks() {
+        log::warn!("status hook startup refresh failed: {e}");
+    }
     // Startup repair: recreate any missing/corrupt `.agent-meta.json` from the
     // DB row (source of truth). Best-effort — a failed repair only logs.
     if let Err(e) = persistence.store().repair() {
@@ -3057,6 +3098,7 @@ pub fn run() {
             delete_project,
             rename_project,
             runtime_list_available,
+            opencode_current_variant,
             usage_fetch,
             usage_check,
             slash::agent_list_slash_items,

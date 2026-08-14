@@ -5,9 +5,9 @@ use crate::agent_runtime::adapter::{
 use crate::agent_runtime::status_hooks::{ensure_status_hooks, HOOK_ENV_AGENT, HOOK_ENV_DIR};
 use crate::persistence::status_dir;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::SystemTime;
 
 pub struct ClaudeAdapter;
 
@@ -19,6 +19,7 @@ struct TranscriptUsage {
     last_used: Option<u64>,
     cache_hit: u64,
     cache_total: u64,
+    actual_model: Option<String>,
 }
 
 impl ClaudeAdapter {
@@ -45,68 +46,42 @@ impl ClaudeAdapter {
             .unwrap_or(false)
     }
 
-    /// Detect the most recent Claude Code session id for a cwd.
-    ///
-    /// Claude Code stores sessions under `~/.claude/projects/<project-key>/`
-    /// where `<project-key>` is the cwd with **every** non-`[a-zA-Z0-9]`
-    /// character replaced by `-` (including the leading `/` and any dots/spaces,
-    /// e.g. `/home/x/my.proj` → `-home-x-my-proj`). Return the newest `*.jsonl`
-    /// stem, or None if the cwd has no session yet (fresh agent).
-    fn detect_resume_key(cwd: &Path) -> Option<String> {
+    fn project_dir(cwd: &Path) -> Option<PathBuf> {
         let home = std::env::var("HOME").ok()?;
-        let dir = PathBuf::from(&home)
-            .join(".claude")
-            .join("projects")
-            .join(Self::claude_project_key(cwd));
-        let mut sessions: Vec<(SystemTime, String)> = Vec::new();
-        let entries = std::fs::read_dir(dir).ok()?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let mtime = path.metadata().ok()?.modified().ok()?;
-            let stem = path.file_stem()?.to_string_lossy().to_string();
-            sessions.push((mtime, stem));
-        }
-        sessions.sort_by(|a, b| b.0.cmp(&a.0));
-        sessions.first().map(|(_, s)| s.clone())
+        Some(
+            PathBuf::from(&home)
+                .join(".claude")
+                .join("projects")
+                .join(Self::claude_project_key(cwd)),
+        )
     }
 
-    /// Newest `*.jsonl` transcript under `~/.claude/projects/<project-key>/`, or
-    /// `None` when the cwd has no session yet. Shares the project-key encoding
-    /// and directory with `detect_resume_key`, but returns the full path (the
-    /// context-usage read needs the file, not the resume stem).
-    fn newest_transcript(cwd: &Path) -> Option<PathBuf> {
-        let home = std::env::var("HOME").ok()?;
-        let dir = PathBuf::from(&home)
-            .join(".claude")
-            .join("projects")
-            .join(Self::claude_project_key(cwd));
-        let mut sessions: Vec<(SystemTime, PathBuf)> = Vec::new();
-        let entries = std::fs::read_dir(dir).ok()?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-            if let Ok(meta) = entry.metadata() {
-                if let Ok(mtime) = meta.modified() {
-                    sessions.push((mtime, path));
-                }
-            }
-        }
-        sessions.sort_by(|a, b| b.0.cmp(&a.0));
-        sessions.first().map(|(_, p)| p.clone())
+    /// Resolve exactly one provider session. Never substitute the newest file:
+    /// IDE and standalone Claude processes commonly share a working directory.
+    fn transcript_for_resume_key(cwd: &Path, resume_key: &str) -> Option<PathBuf> {
+        uuid::Uuid::parse_str(resume_key).ok()?;
+        let path = Self::project_dir(cwd)?.join(format!("{resume_key}.jsonl"));
+        path.is_file().then_some(path)
     }
 
-    /// Current active-context estimate for a cwd: the summed `message.usage` of
-    /// the LAST assistant record in the newest transcript, plus the session's
-    /// cumulative cache stats. `None` when there is no transcript, no readable
-    /// file, or no usable usage record. This is a single-snapshot read — it
-    /// never accumulates usage across messages.
-    fn read_transcript(cwd: &Path) -> Option<TranscriptUsage> {
-        let path = Self::newest_transcript(cwd)?;
+    fn sidecar_resume_key(agent_id: &str) -> Option<String> {
+        let raw = std::fs::read_to_string(crate::persistence::status_file(agent_id)).ok()?;
+        serde_json::from_str::<Value>(&raw)
+            .ok()?
+            .get("session_id")?
+            .as_str()
+            .map(str::to_owned)
+    }
+
+    fn recover_session_key(agent_id: &str, cwd: &Path) -> Option<String> {
+        let key = Self::sidecar_resume_key(agent_id)?;
+        Self::transcript_for_resume_key(cwd, &key).map(|_| key)
+    }
+
+    /// Missing binding means missing usage, not permission to borrow another
+    /// Claude process's transcript from the same cwd.
+    fn read_transcript(cwd: &Path, resume_key: &str) -> Option<TranscriptUsage> {
+        let path = Self::transcript_for_resume_key(cwd, resume_key)?;
         let content = std::fs::read_to_string(path).ok()?;
         Some(Self::parse_transcript_usage(&content))
     }
@@ -115,7 +90,8 @@ impl ClaudeAdapter {
     ///  - `last_used`: the summed `message.usage` of the LAST assistant record
     ///    (`input_tokens` + `cache_creation_input_tokens` +
     ///    `cache_read_input_tokens` + `output_tokens`);
-    ///  - session-cumulative cache stats across ALL assistant records.
+    ///  - session-cumulative cache stats across unique assistant messages;
+    ///  - the last provider-observed assistant model.
     ///
     /// Records carrying `isSidechain: true` are skipped so main-thread turns
     /// win (a sidechain record that appears last must not shadow the main
@@ -127,8 +103,10 @@ impl ClaudeAdapter {
     /// cached portion is `cache_read`.
     fn parse_transcript_usage(content: &str) -> TranscriptUsage {
         let mut last_used = None;
-        let mut cache_hit = 0u64;
-        let mut cache_total = 0u64;
+        let mut actual_model = None;
+        let mut by_message: HashMap<String, (u64, u64, u64)> = HashMap::new();
+        let mut anonymous_hit = 0u64;
+        let mut anonymous_total = 0u64;
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() {
@@ -138,10 +116,16 @@ impl ClaudeAdapter {
                 continue;
             };
             // Prefer main-thread records when the sidechain marker is present.
-            if v.get("isSidechain").and_then(Value::as_bool).unwrap_or(false) {
+            if v.get("isSidechain")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
                 continue;
             }
-            let Some(usage) = v.get("message").and_then(|m| m.get("usage")) else {
+            let Some(message) = v.get("message") else {
+                continue;
+            };
+            let Some(usage) = message.get("usage") else {
                 continue;
             };
             if !usage.is_object() {
@@ -160,8 +144,15 @@ impl ClaudeAdapter {
                     any = true;
                 }
             }
-            if any {
+            if any && sum > 0 {
                 last_used = Some(sum);
+                if let Some(observed) = message
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .filter(|model| !model.is_empty())
+                {
+                    actual_model = Some(observed.to_owned());
+                }
             }
             let input = usage
                 .get("input_tokens")
@@ -176,14 +167,27 @@ impl ClaudeAdapter {
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             if input + created + read > 0 {
-                cache_hit += read;
-                cache_total += input + created + read;
+                if let Some(message_id) = message
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                {
+                    by_message.insert(message_id.to_owned(), (input, created, read));
+                } else {
+                    anonymous_hit += read;
+                    anonymous_total += input + created + read;
+                }
             }
         }
+        let (cache_hit, cache_total) = by_message.values().fold(
+            (anonymous_hit, anonymous_total),
+            |(hit, total), (input, created, read)| (hit + read, total + input + created + read),
+        );
         TranscriptUsage {
             last_used,
             cache_hit,
             cache_total,
+            actual_model,
         }
     }
 
@@ -358,35 +362,50 @@ impl AgentRuntimeAdapter for ClaudeAdapter {
     }
 
     fn resume_args(&self, session: &AgentSession) -> Vec<String> {
-        // An explicit stored key wins; otherwise fall back to detecting the most
-        // recent session in this context dir.
-        if let Some(key) = &session.resume_key {
-            return vec!["--resume".to_string(), key.clone()];
-        }
-        match Self::detect_resume_key(&session.cwd) {
-            Some(key) => vec!["--resume".to_string(), key],
-            None => vec![], // no previous session — start fresh
-        }
+        session
+            .resume_key
+            .as_ref()
+            .map(|key| vec!["--resume".to_string(), key.clone()])
+            .unwrap_or_default()
     }
 
     fn supports_resume(&self) -> bool {
         true
     }
 
-    fn capture_resume_key(&self, cwd: &Path) -> Option<String> {
-        Self::detect_resume_key(cwd)
+    fn capture_resume_key(&self, _cwd: &Path) -> Option<String> {
+        // A cwd alone cannot identify one Claude process when sessions overlap.
+        // The per-agent SessionStart hook is the authoritative capture source.
+        None
     }
 
-    fn context_usage(&self, cwd: &Path, model: Option<&str>) -> Option<AgentUsage> {
+    fn recover_resume_key(
+        &self,
+        agent_id: &str,
+        cwd: &Path,
+        _created_at_ms: i64,
+    ) -> Option<String> {
+        Self::recover_session_key(agent_id, cwd)
+    }
+
+    fn context_usage(
+        &self,
+        cwd: &Path,
+        model: Option<&str>,
+        resume_key: Option<&str>,
+    ) -> Option<AgentUsage> {
         // Single-snapshot read: the LAST assistant record's summed usage is the
         // provider's current active-context estimate (compaction can lower it).
-        let parsed = Self::read_transcript(cwd)?;
+        let parsed = Self::read_transcript(cwd, resume_key?)?;
         let used = parsed.last_used?;
         Some(AgentUsage {
             context_window_used_tokens: Some(used),
             context_window_max_tokens: Self::context_window_max(model),
-            cache_hit_tokens: (parsed.cache_hit > 0).then_some(parsed.cache_hit),
+            // Zero is a valid measured hit count. Null is reserved for no
+            // accounting data, otherwise the UI hides a real 0%.
+            cache_hit_tokens: (parsed.cache_total > 0).then_some(parsed.cache_hit),
             cache_total_input_tokens: (parsed.cache_total > 0).then_some(parsed.cache_total),
+            actual_model: parsed.actual_model,
         })
     }
 
@@ -493,6 +512,20 @@ mod tests {
     }
 
     #[test]
+    fn deduplicates_streamed_message_ids_and_reports_observed_model() {
+        let content = "\
+{\"type\":\"assistant\",\"message\":{\"id\":\"msg-1\",\"model\":\"deepseek-v4-flash\",\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":900,\"output_tokens\":10}}}\n\
+{\"type\":\"assistant\",\"message\":{\"id\":\"msg-1\",\"model\":\"deepseek-v4-flash\",\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":900,\"output_tokens\":10}}}\n\
+{\"type\":\"assistant\",\"message\":{\"id\":\"partial\",\"model\":\"must-not-win\",\"usage\":{\"input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":0}}}\n\
+";
+        let parsed = ClaudeAdapter::parse_transcript_usage(content);
+        assert_eq!(parsed.last_used, Some(1_010));
+        assert_eq!(parsed.cache_hit, 900);
+        assert_eq!(parsed.cache_total, 1_000);
+        assert_eq!(parsed.actual_model.as_deref(), Some("deepseek-v4-flash"));
+    }
+
+    #[test]
     fn skips_sidechain_records_for_main_thread_usage() {
         // Sidechain records that appear after the main-thread turn must not
         // shadow it — the LAST main-thread record wins, and sidechain usage is
@@ -539,7 +572,10 @@ mod tests {
             Some(200_000)
         );
         // Unknown / gateway models never get a guessed max.
-        assert_eq!(ClaudeAdapter::context_window_max(Some("deepseek-v4-flash")), None);
+        assert_eq!(
+            ClaudeAdapter::context_window_max(Some("deepseek-v4-flash")),
+            None
+        );
         assert_eq!(ClaudeAdapter::context_window_max(None), None);
     }
 
@@ -551,10 +587,11 @@ mod tests {
             context_window_max_tokens: Some(1_000_000),
             cache_hit_tokens: Some(88_000),
             cache_total_input_tokens: Some(110_000),
+            actual_model: Some("deepseek-v4-flash".into()),
         };
         assert_eq!(
             serde_json::to_string(&usage).unwrap(),
-            r#"{"contextWindowUsedTokens":123456,"contextWindowMaxTokens":1000000,"cacheHitTokens":88000,"cacheTotalInputTokens":110000}"#
+            r#"{"contextWindowUsedTokens":123456,"contextWindowMaxTokens":1000000,"cacheHitTokens":88000,"cacheTotalInputTokens":110000,"actualModel":"deepseek-v4-flash"}"#
         );
         // Optional fields serialize as null (still present on the wire).
         let empty = AgentUsage {
@@ -562,11 +599,67 @@ mod tests {
             context_window_max_tokens: None,
             cache_hit_tokens: None,
             cache_total_input_tokens: None,
+            actual_model: None,
         };
         assert_eq!(
             serde_json::to_string(&empty).unwrap(),
-            r#"{"contextWindowUsedTokens":null,"contextWindowMaxTokens":null,"cacheHitTokens":null,"cacheTotalInputTokens":null}"#
+            r#"{"contextWindowUsedTokens":null,"contextWindowMaxTokens":null,"cacheHitTokens":null,"cacheTotalInputTokens":null,"actualModel":null}"#
         );
+    }
+
+    #[test]
+    fn context_usage_reads_only_the_requested_claude_session() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prev_home = std::env::var_os("HOME");
+        let base = std::env::temp_dir().join(format!(
+            "capilot-claude-usage-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::env::set_var("HOME", &base);
+        let cwd = Path::new("/tmp/shared-project");
+        let project_dir = ClaudeAdapter::project_dir(cwd).unwrap();
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let wanted = uuid::Uuid::new_v4().to_string();
+        let other = uuid::Uuid::new_v4().to_string();
+        std::fs::write(
+            project_dir.join(format!("{wanted}.jsonl")),
+            "{\"type\":\"assistant\",\"message\":{\"id\":\"wanted\",\"model\":\"actual-model\",\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":90,\"output_tokens\":5}}}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project_dir.join(format!("{other}.jsonl")),
+            "{\"type\":\"assistant\",\"message\":{\"id\":\"other\",\"model\":\"wrong-model\",\"usage\":{\"input_tokens\":999,\"output_tokens\":1}}}\n",
+        )
+        .unwrap();
+
+        let usage = ClaudeAdapter::new()
+            .context_usage(cwd, Some("claude-sonnet-5"), Some(&wanted))
+            .unwrap();
+        assert_eq!(usage.context_window_used_tokens, Some(105));
+        assert_eq!(usage.cache_hit_tokens, Some(90));
+        assert_eq!(usage.cache_total_input_tokens, Some(100));
+        assert_eq!(usage.actual_model.as_deref(), Some("actual-model"));
+        let sidecar = crate::persistence::status_file("claude-agent");
+        std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        std::fs::write(
+            sidecar,
+            format!(r#"{{"status":"idle","ts":1,"session_id":"{wanted}"}}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            ClaudeAdapter::recover_session_key("claude-agent", cwd).as_deref(),
+            Some(wanted.as_str())
+        );
+        assert!(ClaudeAdapter::new()
+            .context_usage(cwd, None, Some("00000000-0000-4000-8000-000000000000"))
+            .is_none());
+
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(base);
     }
 
     // Serializes tests that repoint `HOME` so parallel runs don't observe each

@@ -173,6 +173,9 @@ export function Composer() {
   const [thinkingMenuOpen, setThinkingMenuOpen] = useState(false);
   const [openCodeAgentModes, setOpenCodeAgentModes] =
     useState<Record<string, "Build" | "Plan">>({});
+  // Current opencode thinking variant for the targeted model (read back from
+  // `$XDG_STATE_HOME/opencode/model.json`). `null` = default / not yet known.
+  const [openCodeVariant, setOpenCodeVariant] = useState<string | null>(null);
   const [refMenuOpen, setRefMenuOpen] = useState(false);
   const [recentEntries, setRecentEntries] = useState<RecentEntry[]>([]);
   const modelAnchorRef = useRef<HTMLSpanElement>(null);
@@ -304,6 +307,18 @@ export function Composer() {
     ? preferredModel
     : defaultModel?.id ?? null;
   const currentModel = models.find((m) => m.id === shownModel) ?? null;
+  // Keep configured selection (`shownModel`) authoritative for checkmarks and
+  // live switching. Provider-observed telemetry only changes the label.
+  const actualModelId = configAgent?.last_usage?.actualModel ?? null;
+  const actualModel = actualModelId
+    ? models.find((model) => model.id === actualModelId) ?? null
+    : null;
+  const displayedModelName = actualModelId
+    ? (actualModel?.name ?? actualModelId)
+    : (currentModel?.name ?? "选择模型");
+  const modelButtonTitle = actualModelId
+    ? `实际模型：${displayedModelName}；配置模型：${currentModel?.name ?? shownModel ?? "runtime 默认"}`
+    : `选择模型（当前：${currentModel?.name ?? "runtime 默认"}）`;
   // Codex model drill-down: map the model's supported reasoning efforts (from
   // the backend catalog) onto CaPilot's speed vocabulary, so the picker only
   // offers tiers the model actually supports. "auto" means "use the model's
@@ -653,6 +668,50 @@ export function Composer() {
       console.error("OpenCode agent switch failed:", error);
     }
   }, [activeTab?.agentId]);
+
+  // ── OpenCode thinking strength (variant_cycle, Ctrl+T) ────────
+  // OpenCode exposes no thinking launch flag; the live control is the TUI's
+  // `variant_cycle` keybind (Ctrl+T), which advances the current model's
+  // variant: default → variant[0] → … → last → default. CaPilot drives that
+  // same keystroke and reads the variant back from `model.json` for the label.
+  const cycleOpenCodeVariant = useCallback(async () => {
+    const s = useStore.getState();
+    const id = activeTab?.agentId;
+    const agent = id ? s.agents.get(id) : undefined;
+    if (!id || agent?.runtime !== "opencode") return;
+    try {
+      const resumed = !s.agentChannels.has(id) ? await ensureAgentChannel(id) : false;
+      if (resumed) await new Promise((resolve) => setTimeout(resolve, 250));
+      await invoke("agent_write", { id, data: "\u0014", raw: true });
+      // The TUI persists the new variant asynchronously; refresh the label.
+      // Best-effort — a stale read just shows the previous/default label.
+      if (shownModel) {
+        const variant = await invoke<string | null>("opencode_current_variant", {
+          model: shownModel,
+        }).catch(() => null);
+        setOpenCodeVariant(variant);
+      }
+    } catch (error) {
+      console.error("OpenCode variant cycle failed:", error);
+    }
+  }, [activeTab?.agentId, shownModel]);
+
+  // Keep the label in sync when the targeted session/model changes.
+  useEffect(() => {
+    if (configRuntimeId !== "opencode" || !shownModel) {
+      setOpenCodeVariant(null);
+      return;
+    }
+    let cancelled = false;
+    invoke<string | null>("opencode_current_variant", { model: shownModel })
+      .then((variant) => {
+        if (!cancelled) setOpenCodeVariant(variant);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [configRuntimeId, shownModel]);
 
   // ── Esc → abort the target agent's current operation ──────────
   // Sends a raw ESC byte to the agent's PTY — the same path the terminal uses
@@ -1525,6 +1584,23 @@ export function Composer() {
         }
       }
 
+      // Ctrl+T on an opencode target drives OpenCode's native `variant_cycle`
+      // (cycle thinking strength) instead of the window-level "new session"
+      // shortcut. Other runtimes keep the global behavior (spawn a new agent).
+      if (
+        configRuntimeId === "opencode" &&
+        e.ctrlKey &&
+        !e.shiftKey &&
+        !e.altKey &&
+        !e.metaKey &&
+        e.key.toLowerCase() === "t"
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        void cycleOpenCodeVariant();
+        return;
+      }
+
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         handleSend();
@@ -1583,6 +1659,7 @@ export function Composer() {
       permissionModes,
       configRuntimeId,
       cycleOpenCodeAgent,
+      cycleOpenCodeVariant,
       applyPermissionMode,
       navigateDraft,
       modelMenuOpen,
@@ -1961,9 +2038,9 @@ export function Composer() {
               setPendingEffortModel(null);
               setModelMenuOpen((o) => !o);
             }}
-            title={`选择模型（当前：${currentModel ? currentModel.name : "runtime 默认"}）`}
+            title={modelButtonTitle}
           >
-            {currentModel ? currentModel.name : "选择模型"}
+            {displayedModelName}
           </span>
           {modelMenuOpen && (
             <div className="cmp-menu" ref={modelMenuRef} role="menu">
@@ -2001,6 +2078,9 @@ export function Composer() {
               ) : (
                 <>
                   <div className="cmp-menu-label">选择模型</div>
+                  {actualModelId && (
+                    <div className="cmp-menu-label">实际运行：{displayedModelName}</div>
+                  )}
                   {models.length === 0 && (
                     <div className="cmp-menu-empty">无可用模型</div>
                   )}
@@ -2040,19 +2120,35 @@ export function Composer() {
         </span>
 
         {configRuntimeId === "opencode" && (
-          <span
-            className="act-btn"
-            title="切换 OpenCode Build / Plan"
-            onClick={() => {
-              setRefMenuOpen(false);
-              setModelMenuOpen(false);
-              setPermissionMenuOpen(false);
-              setThinkingMenuOpen(false);
-              void cycleOpenCodeAgent();
-            }}
-          >
-            {configAgentId ? openCodeAgentModes[configAgentId] ?? "Build" : "Build"}
-          </span>
+          <>
+            <span
+              className="act-btn"
+              title="切换思考强度（Ctrl+T）"
+              onClick={() => {
+                setRefMenuOpen(false);
+                setModelMenuOpen(false);
+                setPermissionMenuOpen(false);
+                setThinkingMenuOpen(false);
+                void cycleOpenCodeVariant();
+              }}
+            >
+              <Icon name="zap" size={13} style={{ marginRight: 4 }} />
+              {openCodeVariant ?? "Default"}
+            </span>
+            <span
+              className="act-btn"
+              title="切换 OpenCode Build / Plan"
+              onClick={() => {
+                setRefMenuOpen(false);
+                setModelMenuOpen(false);
+                setPermissionMenuOpen(false);
+                setThinkingMenuOpen(false);
+                void cycleOpenCodeAgent();
+              }}
+            >
+              {configAgentId ? openCodeAgentModes[configAgentId] ?? "Build" : "Build"}
+            </span>
+          </>
         )}
 
         {menuThinkingOptions.length > 0 && (
