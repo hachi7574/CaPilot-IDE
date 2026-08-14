@@ -761,7 +761,8 @@ function loadFontScale(): FontScale {
 
 // ── New-terminal templates ──────────────────────────────────────
 // The project "+" button opens a picker: bash (fixed, always first) / Claude /
-// Codex / user-defined quick-start commands. Custom templates persist locally.
+// Codex / OpenCode / dsh / user-defined quick-start commands. Custom templates
+// persist locally.
 
 /** A new-terminal template shown in the project "+" picker. `command` is run
  *  after the shell starts (bash / bash-rc) / ignored for agent runtimes;
@@ -770,7 +771,7 @@ export interface TermTemplate {
   id: string;
   name: string;
   command: string;
-  runtime: "bash" | "bash-rc" | "claude" | "codex" | "opencode";
+  runtime: "bash" | "bash-rc" | "claude" | "codex" | "opencode" | "dsh";
   fixed?: boolean;
 }
 
@@ -780,6 +781,7 @@ const DEFAULT_TEMPLATES: TermTemplate[] = [
   { id: "claude", name: "claude", command: "", runtime: "claude" },
   { id: "codex", name: "codex", command: "", runtime: "codex" },
   { id: "opencode", name: "opencode", command: "", runtime: "opencode" },
+  { id: "dsh", name: "dsh", command: "", runtime: "dsh" },
 ];
 function loadTermTemplates(): TermTemplate[] {
   try {

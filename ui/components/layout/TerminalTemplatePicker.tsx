@@ -6,9 +6,9 @@ import { Icon, runtimeIcon } from "../Icon";
 /**
  * New-terminal template picker for the project "+" / tab-bar "+" buttons.
  *
- * bash (fixed, always first) / Claude / Codex / user-defined quick-start commands.
- * Right-click a non-fixed template to rename it or edit its launch command;
- * "＋ 添加快速启动" adds a new one (persisted to localStorage).
+ * bash (fixed, always first) / Claude / Codex / OpenCode / dsh / user-defined
+ * quick-start commands. Right-click a non-fixed template to rename it or edit
+ * its launch command; "＋ 添加快速启动" adds a new one (persisted to localStorage).
  */
 export function TerminalTemplatePicker({
   project,
