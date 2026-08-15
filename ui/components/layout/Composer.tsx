@@ -339,10 +339,23 @@ export function Composer() {
   // model default) from the ⚡ picker so the GUI only offers tiers the CLI
   // accepts. The value stays valid in the store/session config: "auto" spawns
   // without an effort flag and applyThinkingSpeed treats it as "don't move".
+  // dsh reasoning tiers (off/high/max) only exist on the deepseek-official
+  // route; pi-ai providers (e.g. opencode-go) without reasoning metadata only
+  // support "off", so restrict their ⚡ menu to auto/off rather than offering
+  // tiers that would silently not apply.
+  const dshReasoningRestricted =
+    configRuntimeId === "dsh" &&
+    !!currentModel?.id &&
+    currentModel.id.includes("/") &&
+    !currentModel.id.startsWith("deepseek-official/");
   const menuThinkingOptions =
     configRuntimeId === "codex"
       ? thinkingOptions.filter((option) => option.id !== "auto")
-      : thinkingOptions;
+      : dshReasoningRestricted
+        ? thinkingOptions.filter(
+            (option) => option.id === "auto" || option.id === "off"
+          )
+        : thinkingOptions;
   // Button label: on a codex session still on "auto" (fresh spawn), reflect the
   // model's default tier instead of the word "Auto".
   const defaultSpeedForCodex =
@@ -381,14 +394,18 @@ export function Composer() {
       permissionSwitchingRef.current = true;
       try {
         // A restored session may not have its PTY until its terminal is first
-        // shown. Resume it before applying a live mode change. dsh is skipped:
-        // its permission branch below restarts the PTY anyway, so a pre-resume
-        // would only boot the old mode and then be killed.
-        const resumed =
-          agent.runtime !== "dsh" && !s.agentChannels.has(id)
-            ? await ensureAgentChannel(id)
-            : false;
-        if (resumed) await new Promise((r) => setTimeout(r, 250));
+        // shown. Resume it before applying a live mode change — dsh included:
+        // its branch below types `/permission` into the running TUI, so the
+        // PTY must be up first.
+        const resumed = !s.agentChannels.has(id)
+          ? await ensureAgentChannel(id)
+          : false;
+        if (resumed) {
+          // dsh's TUI boots the Cordis app in-process and is slower to reach
+          // its input line than the other CLIs; give it a longer settle window
+          // before typing the permission command.
+          await new Promise((r) => setTimeout(r, agent.runtime === "dsh" ? 800 : 250));
+        }
 
         if (agent.runtime === "codex") {
           // Codex supports changing permissions in the current TUI through the
@@ -457,19 +474,32 @@ export function Composer() {
           await new Promise((r) => setTimeout(r, 80));
           await invoke("agent_write", { id, data: "\r", raw: true });
         } else if (agent.runtime === "dsh") {
-          // dsh-TUI 没有实时权限切换（/permission 未适配，DSH 无沙箱切换
-          // API）。唯一可靠路径：先持久化新模式，再重启 PTY，让下次启动注入
-          // 新的 DSH_PERMISSION_MODE 环境变量。这是刻意选的重路径。
-          await invoke("agent_set_session_config", { id, mode });
-          await invoke("agent_kill", { id }).catch(() => {});
-          useStore.getState().dropAgentChannel(id);
-          await new Promise((r) => setTimeout(r, 250));
-          await ensureAgentChannel(id).catch(() => {});
+          // dsh 把 sandbox 模式/approval 策略在启动时写进 session log
+          // （permission/preset + sandbox/mode + approval/policy 事件），恢复时
+          // 这些事件会覆盖新的 DSH_PERMISSION_MODE 环境变量——所以 kill + 重启
+          // 无法切换已运行会话的权限。正确路径是驱动 TUI 内置的
+          // `/permission <preset>` 命令（dsh-base 挂载的 dsh-permission-presets
+          // 插件），它 live 追加同样的持久事件，恢复后依然生效，无需重启。
+          // 映射：ask→read-only / auto→workspace-write / yolo→danger-full-access。
+          const preset =
+            mode === "yolo"
+              ? "danger-full-access"
+              : mode === "ask"
+                ? "read-only"
+                : "workspace-write";
+          await invoke("agent_write", {
+            id,
+            data: `/permission ${preset}`,
+            raw: true,
+          });
+          await new Promise((r) => setTimeout(r, 80));
+          await invoke("agent_write", { id, data: "\r", raw: true });
         }
 
-        // Persist the selected mode so a later resume starts with the same
-        // policy. Live-switch runtimes keep their PTY; dsh already restarted
-        // it above, so this second persist is a harmless idempotent update.
+        // Persist the selected mode so a later spawn/resume injects the same
+        // DSH_PERMISSION_MODE env default. Live-switch runtimes keep their PTY
+        // (dsh's /permission already appended the durable session-log events;
+        // this persist only sets the next-spawn default).
         await invoke("agent_set_session_config", { id, mode });
         const latest = useStore.getState().agents.get(id);
         if (latest) useStore.getState().addAgent({ ...latest, mode }, null);
@@ -656,24 +686,33 @@ export function Composer() {
             await new Promise((resolve) => setTimeout(resolve, 35));
             await invoke("agent_write", { id, data: "\r", raw: true });
           } else if (agent.runtime === "dsh") {
-            // dsh-cc-tui 的 Shift+Tab 循环 effort（deepseek 档位 off→high→max）。
-            // CaPilot speed 映射 fast→off / mid→high / high→max；auto = 省略
-            // （profile 默认 max）。从当前持久化档位按循环算步数驱动 Shift+Tab。
-            const dshEffortCycle = ["fast", "mid", "high"];
-            const currentIndex =
-              previousSpeed === "auto" ? 2 : dshEffortCycle.indexOf(previousSpeed);
-            const targetIndex =
-              nextSpeed === "auto" ? 2 : dshEffortCycle.indexOf(nextSpeed);
-            if (currentIndex < 0 || targetIndex < 0) {
-              throw new Error(`Unsupported dsh reasoning effort: ${nextSpeed}`);
-            }
-            const steps =
-              (targetIndex - currentIndex + dshEffortCycle.length) %
-              dshEffortCycle.length;
-            for (let step = 0; step < steps; step++) {
-              await invoke("agent_write", { id, data: "\u001b[Z", raw: true });
-              if (step + 1 < steps) {
-                await new Promise((resolve) => setTimeout(resolve, 60));
+            // dsh 的 Shift+Tab 循环 effort（off→high→max）只有 deepseek-official
+            // 路由支持；pi-ai 提供商（如 opencode-go）若模型未声明 reasoning 元数据，
+            // dsh 只支持 off，Shift+Tab 只会提示无法切换。这类会话仅持久化 speed
+            //（作为下一次 deepseek-official 生成的默认档位），不驱动 TUI。
+            const modelId = agent.model ?? s.selectedModel;
+            const reasoningCapable =
+              !modelId?.includes("/") || modelId.startsWith("deepseek-official/");
+            if (reasoningCapable) {
+              // 从当前持久化档位按循环算步数驱动 Shift+Tab。
+              // 注意：若用户在 TUI 里手动 Shift+Tab 过，实际档位会与持久化的
+              // speed 失步，这是已知局限。
+              const dshEffortCycle = ["fast", "mid", "high"];
+              const currentIndex =
+                previousSpeed === "auto" ? 1 : dshEffortCycle.indexOf(previousSpeed);
+              const targetIndex =
+                nextSpeed === "auto" ? 1 : dshEffortCycle.indexOf(nextSpeed);
+              if (currentIndex < 0 || targetIndex < 0) {
+                throw new Error(`Unsupported dsh reasoning effort: ${nextSpeed}`);
+              }
+              const steps =
+                (targetIndex - currentIndex + dshEffortCycle.length) %
+                dshEffortCycle.length;
+              for (let step = 0; step < steps; step++) {
+                await invoke("agent_write", { id, data: "\u001b[Z", raw: true });
+                if (step + 1 < steps) {
+                  await new Promise((resolve) => setTimeout(resolve, 60));
+                }
               }
             }
           }

@@ -5,28 +5,31 @@ use crate::agent_runtime::adapter::{
 use crate::agent_runtime::status_hooks::{HOOK_ENV_AGENT, HOOK_ENV_DIR};
 use crate::persistence::status_dir;
 use ruzstd::decoding::StreamingDecoder;
+use serde::Deserialize;
 use serde_json::Value;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
-/// Adapter for the dsh-TUI (`dsh-cc-tui`) interactive terminal on top of the
-/// DeepSeek Harness CLI (`dsh`). dsh is a Commander launcher that parses only
-/// its own flags (`--profile <name>`, repeatable `--patch <path>`) and passes
-/// everything after them verbatim to the booted Cordis app; the TUI is a
-/// plugin mounted by the `cc-tui` profile.
+/// Adapter for the dsh-TUI (`@deepseek-harness-tui/dsh-tui`) interactive
+/// terminal on top of the DeepSeek Harness CLI (`dsh`). dsh is a Commander
+/// launcher that parses only its own flags (`--profile <name>`, repeatable
+/// `--patch <path>`) and passes everything after them verbatim to the booted
+/// Cordis app; the TUI is a plugin mounted by the `dsh-tui` profile (the
+/// successor to the old `cc-tui` profile / `dsh-tui` package).
 ///
 /// The per-session injection seam is a `--patch` overlay that REPLACES the
-/// `cc-tui` config row (cordis patch semantics), so it must restate the whole
+/// `dsh-tui` config row (cordis patch semantics), so it must restate the whole
 /// route: `provider` + `model` (a complete pair — an incomplete pair loses to
-/// the persisted `/model` choice, issue #67), the reasoning `effort`, and the
-/// resume binding `sessionId`. dsh-cc-tui has NO `--resume` argv parsing
-/// (verified in src/plugin.ts — resume attaches via the config row's
-/// `sessionId`), so resume is driven purely by `DSH_CC_RESUME_SESSION` env,
-/// which the patch's `!!js` expression reads. Permission mode likewise has no
-/// argv seam — the bundle patch (`cordis.patch.yml`) reads `DSH_PERMISSION_MODE`
-/// env — so the adapter maps CaPilot modes to that env instead of args.
+/// the persisted `/model` choice), the reasoning `effort`, and the
+/// resume binding `sessionId`. dsh-tui has NO `--resume` argv parsing
+/// (verified — resume attaches via the config row's `sessionId`), so resume is
+/// driven purely by `DSH_CC_RESUME_SESSION` env (the new package keeps the
+/// legacy `DSH_CC_*` variable names), which the patch's `!!js` expression
+/// reads. Permission mode likewise has no argv seam — the bundle patch
+/// (`cordis.patch.yml`) reads `DSH_PERMISSION_MODE` env — so the adapter maps
+/// CaPilot modes to that env instead of args.
 pub struct DshAdapter;
 
 /// Result of one pass over a dsh session log: the last request's context
@@ -38,6 +41,41 @@ struct DshUsage {
     observed_model: Option<String>,
     cache_hit: u64,
     cache_total: u64,
+}
+
+/// One model entry parsed from `~/.dsh/settings.yaml`.
+#[derive(Debug, Clone, Deserialize)]
+struct SettingsModel {
+    id: String,
+    #[serde(default)]
+    name: String,
+}
+
+/// One `llm-pi-ai.providers` entry: a provider id + its model table.
+#[derive(Debug, Clone, Deserialize)]
+struct SettingsProvider {
+    provider: String,
+    models: Vec<SettingsModel>,
+}
+
+/// The `agent-default-model` route preference from settings.yaml.
+#[derive(Debug, Clone, Deserialize)]
+struct SettingsDefaultModel {
+    provider: String,
+    model: String,
+}
+
+/// The settings.yaml model catalog as surfaced by `model_catalog_probe`.
+/// All fields default so a probe that only carries part of the file still
+/// merges cleanly with the built-in deepseek-official list.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ModelCatalogProbe {
+    #[serde(default)]
+    pi: Vec<SettingsProvider>,
+    #[serde(default)]
+    deepseek: Vec<SettingsModel>,
+    #[serde(default)]
+    default: Option<SettingsDefaultModel>,
 }
 
 impl DshAdapter {
@@ -59,11 +97,11 @@ impl DshAdapter {
         Self::dsh_home().map(|home| home.join("sessions"))
     }
 
-    /// The dsh-cc-tui profile dir (`~/.dsh/profiles/cc-tui`), which must exist
-    /// before `dsh --profile cc-tui` can boot. Created by
-    /// `dsh plugin --profile cc-tui add dsh-cc-tui`.
-    fn cc_tui_profile_dir() -> Option<PathBuf> {
-        Self::dsh_home().map(|home| home.join("profiles").join("cc-tui"))
+    /// The dsh-tui profile dir (`~/.dsh/profiles/dsh-tui`), which must exist
+    /// before `dsh --profile dsh-tui` can boot. Created by
+    /// `dsh plugin --profile dsh-tui add @deepseek-harness-tui/dsh-tui`.
+    fn dsh_tui_profile_dir() -> Option<PathBuf> {
+        Self::dsh_home().map(|home| home.join("profiles").join("dsh-tui"))
     }
 
     /// DeepSeek's project-directory key for a cwd (mirrors
@@ -289,10 +327,14 @@ impl DshAdapter {
         status
     }
 
-    /// Confirmed dsh model context capacities (DeepSeek V4 catalog). Unknown
-    /// models → `None`; the max is never guessed from visible text.
+    /// Confirmed dsh model context capacities (DeepSeek V4 catalog). The log's
+    /// `request/header` records the bare model id, while the caller may pass a
+    /// provider-qualified CaPilot id (`opencode-go/deepseek-v4-flash`), so any
+    /// `provider/` prefix is stripped before matching. Unknown models → `None`;
+    /// the max is never guessed from visible text.
     fn context_window_max(model: Option<&str>) -> Option<u64> {
-        match model {
+        let bare = model.map(|m| m.rsplit_once('/').map(|(_, b)| b).unwrap_or(m));
+        match bare {
             Some("deepseek-v4-flash") | Some("deepseek-v4-pro") => Some(1_000_000),
             _ => None,
         }
@@ -321,10 +363,50 @@ impl DshAdapter {
         }
     }
 
+    /// The TUI's default reasoning effort for an un-pinned (`auto`) session.
+    /// dsh boots with `state.reasoningEffort = options.effort ?? readEffortPref()`,
+    /// where `readEffortPref` reads `~/.dsh-cc/effort.json`; a missing/invalid
+    /// file falls back to the connection default (`deepseek-official` → `high`).
+    /// The composer's Shift+Tab cycle math assumes this position, so it is
+    /// surfaced here both for the `auto` option's description and so the two
+    /// stay in sync.
+    fn dsh_default_effort() -> &'static str {
+        let Some(home) = std::env::var_os("HOME") else {
+            return "high";
+        };
+        let path = PathBuf::from(home).join(".dsh-cc").join("effort.json");
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return "high";
+        };
+        let parsed = serde_json::from_str::<Value>(&content).ok();
+        let effort = parsed
+            .as_ref()
+            .and_then(|v| v.get("effort").and_then(Value::as_str));
+        match effort {
+            Some("off") => "off",
+            Some("max") => "max",
+            _ => "high",
+        }
+    }
+
+    /// Split a CaPilot model id into `(provider, model)` for the patch overlay.
+    /// Provider-qualified ids (`opencode-go/deepseek-v4-flash`) pass through;
+    /// a bare legacy id (stored before the multi-provider catalog, or the
+    /// `None` → flash fallback) routes via `deepseek-official`, preserving the
+    /// pre-catalog behavior for existing sessions.
+    fn split_model_id(model: &str) -> (String, String) {
+        match model.rsplit_once('/') {
+            Some((provider, bare)) if !provider.is_empty() && !bare.is_empty() => {
+                (provider.to_string(), bare.to_string())
+            }
+            _ => ("deepseek-official".to_string(), model.to_string()),
+        }
+    }
+
     /// Per-session `--patch` overlay path (`$XDG_CACHE_HOME/capilot-ide/dsh/
     /// <safe-id>.patch.yml`, `~/.cache` fallback). The overlay replaces the
-    /// `cc-tui` config row for THIS spawn only — the user's global
-    /// `~/.dsh/profiles/cc-tui/cordis.yml` and `~/.dsh-cc/model.json` are never
+    /// `dsh-tui` config row for THIS spawn only — the user's global
+    /// `~/.dsh/profiles/dsh-tui/cordis.yml` and `~/.dsh-cc/model.json` are never
     /// touched.
     fn patch_path(agent_id: &str) -> Option<PathBuf> {
         let cache_root = std::env::var_os("XDG_CACHE_HOME")
@@ -345,8 +427,8 @@ impl DshAdapter {
     }
 
     /// Write the per-session patch overlay. The `sessionId` binding is restated
-    /// unconditionally: replacing the whole `cc-tui` config row would otherwise
-    /// DROP the resume seam (dsh-cc-tui reads resume only from this config key,
+    /// unconditionally: replacing the whole `dsh-tui` config row would otherwise
+    /// DROP the resume seam (dsh-tui reads resume only from this config key,
     /// which is fed by `DSH_CC_RESUME_SESSION` env). Best-effort — a failed
     /// write degrades to no model/effort pin, never an abort.
     fn write_patch(session: &AgentSession) -> Result<PathBuf, String> {
@@ -361,11 +443,24 @@ impl DshAdapter {
             .model
             .clone()
             .unwrap_or_else(|| "deepseek-v4-flash".to_string());
+        let (provider, model_name) = Self::split_model_id(&model);
         let mut config = format!(
-            "- id: cc-tui\n  config:\n    provider: deepseek-official\n    model: {model}\n"
+            "- id: dsh-tui\n  config:\n    provider: {provider}\n    model: {model_name}\n"
         );
-        if let Some(effort) = Self::effort_for_speed(&session.speed) {
-            config.push_str(&format!("    effort: {effort}\n"));
+        // Reasoning effort. The deepseek-official route guarantees off/high/max
+        // (the `dsh-tui` config `effort` also wins over the persisted
+        // Shift+Tab choice in ~/.dsh-cc/effort.json), so pin the CaPilot speed.
+        // pi-ai providers (e.g. opencode-go) may declare no `reasoning`
+        // metadata — dsh then only offers "off" and resolveReasoningLevel would
+        // throw UNSUPPORTED_REASONING_EFFORT for anything else. Pin `effort: off`
+        // there so the machine's persisted effort.json (often high) can't leak
+        // in and the status line shows the level actually applied.
+        if provider == "deepseek-official" {
+            if let Some(effort) = Self::effort_for_speed(&session.speed) {
+                config.push_str(&format!("    effort: {effort}\n"));
+            }
+        } else {
+            config.push_str("    effort: off\n");
         }
         config.push_str("    sessionId: !!js process.env.DSH_CC_RESUME_SESSION ?? undefined\n");
         std::fs::write(&path, config)
@@ -428,7 +523,7 @@ impl DshAdapter {
             .unwrap_or(false)
     }
 
-    /// Pre-flight probe: run `dsh --dump-config --profile cc-tui` and resolve
+    /// Pre-flight probe: run `dsh --dump-config --profile dsh-tui` and resolve
     /// every plugin package the composed profile will load. Returns a Chinese
     /// diagnostic when a package is unresolvable — the "spawn → immediately
     /// clean-exit" failure, which dsh only surfaces at TUI boot as a fiber
@@ -437,7 +532,7 @@ impl DshAdapter {
     /// unavailable): a flaky probe must never block a spawn — the fast-exit
     /// net in `build_on_exit` is the fallback.
     fn preflight_diagnostic() -> Option<String> {
-        let profile = Self::cc_tui_profile_dir()?;
+        let profile = Self::dsh_tui_profile_dir()?;
         let names = Self::parse_dump_names(&Self::profile_dump()?);
         if names.is_empty() {
             return None;
@@ -460,18 +555,18 @@ impl DshAdapter {
             String::new()
         };
         format!(
-            "dsh 无法启动：cc-tui 配置中有插件包无法加载（{shown}{tail}）。\n\
+            "dsh 无法启动：dsh-tui 配置中有插件包无法加载（{shown}{tail}）。\n\
              请检查 ~/.dsh/cordis.patch.yml 等 profile 补丁，禁用未安装的插件，\n\
-             或运行 `dsh --dump-config --profile cc-tui` 核对插件列表。"
+             或运行 `dsh --dump-config --profile dsh-tui` 核对插件列表。"
         )
     }
 
-    /// Effective plugin list of the cc-tui profile, rendered by dsh itself
+    /// Effective plugin list of the dsh-tui profile, rendered by dsh itself
     /// (~0.1s, no plugin mounting). Disabled entries are omitted by the
     /// composer, so this is exactly what the TUI boot will try to load.
     fn profile_dump() -> Option<String> {
         let output = Command::new("dsh")
-            .args(["--dump-config", "--profile", "cc-tui"])
+            .args(["--dump-config", "--profile", "dsh-tui"])
             .output()
             .ok()?;
         if !output.status.success() {
@@ -481,7 +576,7 @@ impl DshAdapter {
     }
 
     /// Extract the package specifier from each `name:` row in a dump. Handles
-    /// both quoted (`name: '@scope/pkg'`) and bare (`name: dsh-cc-tui`) values.
+    /// both quoted (`name: '@scope/pkg'`) and bare (`name: dsh-tui`) values.
     fn parse_dump_names(dump: &str) -> Vec<String> {
         dump.lines()
             .filter_map(|line| {
@@ -499,20 +594,44 @@ impl DshAdapter {
     /// Which of `names` cannot be resolved from the profile directory. Delegates
     /// to Node's own `require.resolve` (the same chain the cordis loader walks,
     /// including the profile → dsh-install pnpm fallback) in a single subprocess
-    /// instead of re-implementing module resolution in Rust. A package whose
-    /// `exports` map is `import`-only (e.g. `dsh-cc-tui`) still resolves via its
-    /// `package.json`, so bare resolution has that fallback. `None` when node is
-    /// unavailable or the subprocess fails.
+    /// instead of re-implementing module resolution in Rust. Two fallbacks cover
+    /// the packages CJS resolution can't see: an `exports` map that is
+    /// `import`-only (e.g. `dsh-tui`'s root, resolved via its `package.json`)
+    /// and an ESM-only subpath export (`@…/dsh-tui/working-activity`, resolved
+    /// by reading the root package.json's exports map and checking the target
+    /// file exists). `None` when node is unavailable or the subprocess fails.
     fn unresolvable(profile: &Path, names: &[String]) -> Option<Vec<String>> {
         let script = r#"
 const names = JSON.parse(process.argv[1]);
 const base = process.argv[2];
+const fs = require("fs");
+const path = require("path");
 const missing = [];
+const esmSubpath = (n, pkgRoot) => {
+  // ESM-only exports entry (import condition, no require/default): CJS
+  // require.resolve can't see it, but the cordis loader's `import` can. Resolve
+  // the package root's package.json, then confirm the subpath's import target
+  // actually exists on disk.
+  let pj;
+  try { pj = require.resolve(pkgRoot + "/package.json", { paths: [base] }); } catch (_) { return false; }
+  let exp;
+  try { exp = JSON.parse(fs.readFileSync(pj, "utf8")).exports; } catch (_) { return false; }
+  if (!exp || typeof exp !== "object") return false;
+  const sub = "./" + n.slice(pkgRoot.length + 1);
+  const entry = exp[sub];
+  const target = entry && (typeof entry === "string" ? entry : (entry.import || entry.default));
+  if (typeof target !== "string") return false;
+  return fs.existsSync(path.resolve(path.dirname(pj), target));
+};
 for (const n of names) {
   let ok = false;
   try { require.resolve(n, { paths: [base] }); ok = true; } catch (_) {}
   if (!ok) {
     try { require.resolve(n + "/package.json", { paths: [base] }); ok = true; } catch (_) {}
+  }
+  if (!ok) {
+    const pkgRoot = n.startsWith("@") ? n.split("/").slice(0, 2).join("/") : n.split("/")[0];
+    if (pkgRoot !== n && esmSubpath(n, pkgRoot)) ok = true;
   }
   if (!ok) missing.push(n);
 }
@@ -530,6 +649,115 @@ console.log(JSON.stringify(missing));
             return None;
         }
         serde_json::from_slice(&output.stdout).ok()
+    }
+
+    /// The `~/.dsh/settings.yaml` model catalog (llm-pi-ai providers + optional
+    /// llm-deepseek overrides + the agent-default-model), read via a single
+    /// `node -e` subprocess that reuses dsh's own YAML parser. `None` when the
+    /// settings file is absent/unparseable or node/yaml is unavailable — the
+    /// catalog then falls back to the built-in deepseek-official list.
+    fn model_catalog_probe() -> Option<ModelCatalogProbe> {
+        let profile = Self::dsh_tui_profile_dir()?;
+        let settings_path = Self::dsh_home()?.join("settings.yaml");
+        if !settings_path.exists() {
+            return None;
+        }
+        let script = r#"
+const base = process.argv[1];
+const settingsPath = process.argv[2];
+let YAML = null;
+try { YAML = require(require.resolve("js-yaml", { paths: [base] })); } catch (_) {}
+if (!YAML) { try { YAML = require(require.resolve("yaml", { paths: [base] })); } catch (_) {} }
+const parse = YAML && (YAML.load || YAML.parse);
+if (!parse) { console.log("null"); process.exit(0); }
+const fs = require("fs");
+let settings;
+try { settings = parse(fs.readFileSync(settingsPath, "utf8")); }
+catch (_) { console.log("null"); process.exit(0); }
+const out = { pi: [], deepseek: [], default: null };
+const pi = settings && settings["llm-pi-ai"] && settings["llm-pi-ai"].providers;
+if (pi && typeof pi === "object") {
+  for (const [provider, cfg] of Object.entries(pi)) {
+    const list = [];
+    for (const m of (cfg && cfg.models) || []) {
+      if (!m || !m.id) continue;
+      list.push({ id: String(m.id), name: m.name ? String(m.name) : String(m.id) });
+    }
+    if (list.length) out.pi.push({ provider, models: list });
+  }
+}
+const ds = settings && settings["llm-deepseek"] && settings["llm-deepseek"].models;
+if (Array.isArray(ds)) {
+  out.deepseek = ds.filter((m) => m && m.id)
+    .map((m) => ({ id: String(m.id), name: m.name ? String(m.name) : String(m.id) }));
+}
+const adm = settings && settings["agent-default-model"];
+if (adm && adm.provider && adm.model) {
+  out.default = { provider: String(adm.provider), model: String(adm.model) };
+}
+console.log(JSON.stringify(out));
+"#;
+        let output = Command::new("node")
+            .arg("-e")
+            .arg(script)
+            .arg(&profile)
+            .arg(&settings_path)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        serde_json::from_slice(&output.stdout).ok()
+    }
+
+    /// Assemble the provider-qualified ModelInfo list from the deepseek-official
+    /// entries plus any llm-pi-ai providers, marking the user's
+    /// `agent-default-model` (when present in the catalog) as the default.
+    fn build_model_list(
+        ds_models: &[(&str, &str)],
+        probe: Option<&ModelCatalogProbe>,
+    ) -> Vec<ModelInfo> {
+        let mut models: Vec<ModelInfo> = ds_models
+            .iter()
+            .map(|(id, name)| ModelInfo {
+                id: format!("deepseek-official/{id}"),
+                name: name.to_string(),
+                provider: "deepseek-official".into(),
+                is_default: false,
+                efforts: None,
+            })
+            .collect();
+        if let Some(probe) = probe {
+            for provider in &probe.pi {
+                for m in &provider.models {
+                    models.push(ModelInfo {
+                        id: format!("{}/{}", provider.provider, m.id),
+                        name: m.name.clone(),
+                        provider: provider.provider.clone(),
+                        is_default: false,
+                        efforts: None,
+                    });
+                }
+            }
+        }
+        // Default = the model the user's settings.yaml points at (what a bare
+        // `dsh` TUI boots), else the first deepseek-official flash entry.
+        let preferred = probe
+            .and_then(|p| p.default.as_ref())
+            .map(|d| format!("{}/{}", d.provider, d.model));
+        let default_idx = preferred
+            .as_ref()
+            .and_then(|id| models.iter().position(|m| &m.id == id))
+            .unwrap_or_else(|| {
+                models
+                    .iter()
+                    .position(|m| m.id == "deepseek-official/deepseek-v4-flash")
+                    .unwrap_or(0)
+            });
+        if let Some(m) = models.get_mut(default_idx) {
+            m.is_default = true;
+        }
+        models
     }
 
     /// Status-sidecar fallback for the frontend's hook-status poll (dsh has no
@@ -568,10 +796,10 @@ impl AgentRuntimeAdapter for DshAdapter {
         "DeepSeek dsh"
     }
     fn is_available(&self) -> bool {
-        // `dsh --version` alone is not enough: the TUI boots from the cc-tui
+        // `dsh --version` alone is not enough: the TUI boots from the dsh-tui
         // profile, which must have been created once
-        // (`dsh plugin --profile cc-tui add dsh-cc-tui`).
-        Self::check_available() && Self::cc_tui_profile_dir().is_some_and(|dir| dir.exists())
+        // (`dsh plugin --profile dsh-tui add @deepseek-harness-tui/dsh-tui`).
+        Self::check_available() && Self::dsh_tui_profile_dir().is_some_and(|dir| dir.exists())
     }
     fn is_authenticated(&self) -> bool {
         std::env::var_os("DEEPSEEK_API_KEY").is_some()
@@ -582,69 +810,85 @@ impl AgentRuntimeAdapter for DshAdapter {
     }
 
     fn list_models(&self) -> Vec<ModelInfo> {
-        // dsh has no model-list CLI subcommand; the two DeepSeek V4 catalog
-        // entries are hardcoded (mirrors the claude adapter's hardcoded list).
-        vec![
-            ModelInfo {
-                id: "deepseek-v4-flash".into(),
-                name: "DeepSeek-V4-Flash".into(),
-                provider: "deepseek-official".into(),
-                is_default: true,
-                efforts: None,
-            },
-            ModelInfo {
-                id: "deepseek-v4-pro".into(),
-                name: "DeepSeek-V4-Pro".into(),
-                provider: "deepseek-official".into(),
-                is_default: false,
-                efforts: None,
-            },
-        ]
+        // dsh has no model-list CLI subcommand. The deepseek-official catalog
+        // entries are hardcoded (mirrors the claude adapter's hardcoded list),
+        // optionally replaced by an `llm-deepseek.models` override from
+        // settings.yaml; the user's `llm-pi-ai.providers` (settings.yaml) are
+        // merged in so the composer shows the same union the dsh TUI's
+        // ModelPicker lists. Ids are provider-qualified (`provider/model`) —
+        // `deepseek-v4-flash` exists in both deepseek-official and the pi-ai
+        // provider, so a bare id would make the composer's menu rows collide.
+        const DEEPSEEK_FLASH: (&str, &str) = ("deepseek-v4-flash", "DeepSeek-V4-Flash");
+        const DEEPSEEK_PRO: (&str, &str) = ("deepseek-v4-pro", "DeepSeek-V4-Pro");
+        let probe = Self::model_catalog_probe();
+        let ds_models: Vec<(&str, &str)> = match probe.as_ref() {
+            Some(p) if !p.deepseek.is_empty() => p
+                .deepseek
+                .iter()
+                .map(|m| (m.id.as_str(), m.name.as_str()))
+                .collect(),
+            _ => vec![DEEPSEEK_FLASH, DEEPSEEK_PRO],
+        };
+        Self::build_model_list(&ds_models, probe.as_ref())
     }
 
     fn list_permission_modes(&self) -> Vec<PermissionModeInfo> {
+        // The three dsh `sandbox-policy` presets map 1:1 to CaPilot modes. A
+        // running TUI switches via `/permission <preset>` (durable session-log
+        // events); a fresh spawn defaults from DSH_PERMISSION_MODE.
         vec![
             PermissionModeInfo {
                 id: "ask".into(),
                 label: "read only".into(),
-                description: "只读沙箱 + 工作区写入需确认（DSH_PERMISSION_MODE=read-only）".into(),
+                description: "只读沙箱 + 工作区写入需确认（dsh 预设 read-only）".into(),
                 requires_confirmation: false,
             },
             PermissionModeInfo {
                 id: "auto".into(),
                 label: "workspace".into(),
-                description: "工作区写 + 需确认（DSH_PERMISSION_MODE=workspace-write）".into(),
+                description: "工作区写 + 需确认（dsh 预设 workspace-write）".into(),
                 requires_confirmation: false,
             },
             PermissionModeInfo {
                 id: "yolo".into(),
                 label: "full access".into(),
-                description: "全权限 + 免确认（DSH_PERMISSION_MODE=danger-full-access）".into(),
+                description: "全权限 + 免确认（dsh 预设 danger-full-access）".into(),
                 requires_confirmation: true,
             },
         ]
     }
 
     fn list_thinking_options(&self) -> Vec<ThinkingOptionInfo> {
+        // Labels mirror the dsh TUI's own effort vocabulary (off/high/max), so
+        // the composer's ⚡ menu reads the same as the Shift+Tab cycle it
+        // drives. `auto` (no effort pinned) sits at the dsh default.
+        let default = Self::dsh_default_effort();
+        let default_label = match default {
+            "off" => "Off",
+            "max" => "Max",
+            _ => "High",
+        };
         vec![
             ThinkingOptionInfo {
                 id: "auto".into(),
                 label: "Auto".into(),
-                description: "使用 dsh 配置默认思考强度（max）".into(),
+                description: format!(
+                    "使用 dsh 当前默认思考强度（{default_label}，读 ~/.dsh-cc/effort.json）"
+                ),
             },
             ThinkingOptionInfo {
                 id: "fast".into(),
-                label: "Low".into(),
+                label: "Off".into(),
                 description: "effort=off：不思考，响应最快".into(),
             },
             ThinkingOptionInfo {
                 id: "mid".into(),
-                label: "Medium".into(),
+                label: "High".into(),
                 description: "effort=high".into(),
             },
             ThinkingOptionInfo {
                 id: "high".into(),
-                label: "High".into(),
+                label: "Max".into(),
                 description: "effort=max：最强推理".into(),
             },
         ]
@@ -659,7 +903,7 @@ impl AgentRuntimeAdapter for DshAdapter {
             "dsh".to_string(),
             vec![
                 "--profile".to_string(),
-                "cc-tui".to_string(),
+                "dsh-tui".to_string(),
                 "--patch".to_string(),
                 patch.to_string_lossy().into_owned(),
             ],
@@ -676,7 +920,7 @@ impl AgentRuntimeAdapter for DshAdapter {
         match Self::write_patch(session) {
             Ok(patch) => vec![
                 "--profile".to_string(),
-                "cc-tui".to_string(),
+                "dsh-tui".to_string(),
                 "--patch".to_string(),
                 patch.to_string_lossy().into_owned(),
             ],
@@ -688,7 +932,7 @@ impl AgentRuntimeAdapter for DshAdapter {
         // NODE_ENV=production is mandatory: dsh-cc's React dev renderer
         // accumulates unbounded performance.measure() records and OOMs on long
         // sessions (dsh-cc.cmd sets it). Permission mode and the resume key are
-        // injected as env (dsh-cc-tui has no argv seams for them). The status
+        // injected as env (dsh-tui has no argv seams for them). The status
         // hook env is env-gated and inert without a hook consumer.
         let mut env = vec![
             ("NODE_ENV".to_string(), "production".to_string()),
@@ -709,8 +953,8 @@ impl AgentRuntimeAdapter for DshAdapter {
     }
 
     fn resume_args(&self, _session: &AgentSession) -> Vec<String> {
-        // dsh-cc-tui resume is driven solely by `DSH_CC_RESUME_SESSION` env
-        // (read by the cc-tui config row's `sessionId` binding); there is no
+        // dsh-tui resume is driven solely by `DSH_CC_RESUME_SESSION` env
+        // (read by the dsh-tui config row's `sessionId` binding); there is no
         // resume argv to build.
         vec![]
     }
@@ -849,7 +1093,7 @@ mod tests {
                 .spawn_interactive(&session("ask", Some("session-abc")))
                 .unwrap();
             assert_eq!(cmd, "dsh");
-            assert!(args.windows(2).any(|v| v == ["--profile", "cc-tui"]));
+            assert!(args.windows(2).any(|v| v == ["--profile", "dsh-tui"]));
             let patch_idx = args
                 .windows(2)
                 .position(|v| v == ["--patch", args.last().unwrap().as_str()]);
@@ -884,14 +1128,57 @@ mod tests {
     }
 
     #[test]
+    fn write_patch_routes_provider_qualified_model() {
+        with_isolated_env(|| {
+            // A provider-qualified model (opencode-go) must route the patch via
+            // that provider instead of the hardcoded deepseek-official.
+            let mut s = session("auto", None);
+            s.model = Some("opencode-go/deepseek-v4-flash".into());
+            let patch = DshAdapter::write_patch(&s).unwrap();
+            let content = std::fs::read_to_string(&patch).unwrap();
+            assert!(content.contains("provider: opencode-go"));
+            assert!(content.contains("model: deepseek-v4-flash"));
+            assert!(!content.contains("provider: deepseek-official"));
+            DshAdapter::remove_session_patch("test");
+        });
+    }
+
+    #[test]
+    fn write_patch_pins_effort_only_for_deepseek_official_route() {
+        with_isolated_env(|| {
+            // speed "high" maps to effort "max" on the deepseek-official route,
+            // which guarantees off/high/max support.
+            let mut ds = session("auto", None);
+            ds.speed = "high".into();
+            ds.model = Some("deepseek-official/deepseek-v4-pro".into());
+            let content = std::fs::read_to_string(DshAdapter::write_patch(&ds).unwrap()).unwrap();
+            assert!(content.contains("effort: max"));
+
+            // pi-ai providers may declare no `reasoning` metadata for a model —
+            // dsh then offers only "off" and resolveReasoningLevel throws
+            // UNSUPPORTED_REASONING_EFFORT for anything else. Pin `effort: off`
+            // (valid on every route) so the machine's ~/.dsh-cc/effort.json
+            // (often high) can't leak in and mislabel the status line.
+            let mut pi = session("auto", None);
+            pi.speed = "high".into();
+            pi.model = Some("opencode-go/deepseek-v4-flash".into());
+            let content = std::fs::read_to_string(DshAdapter::write_patch(&pi).unwrap()).unwrap();
+            assert!(content.contains("effort: off"));
+            assert!(!content.contains("effort: max"));
+            assert!(content.contains("provider: opencode-go"));
+            DshAdapter::remove_session_patch("test");
+        });
+    }
+
+    #[test]
     fn status_hook_args_reappends_profile_and_patch() {
         with_isolated_env(|| {
             // A user launch override replaces the adapter's arg list wholesale;
             // status_hook_args must re-append the profile + patch scaffolding so
-            // the TUI still boots the cc-tui profile with the model/effort/resume
+            // the TUI still boots the dsh-tui profile with the model/effort/resume
             // overlay (mirror of codex's `-p` re-append).
             let args = DshAdapter::new().status_hook_args(&session("yolo", None));
-            assert!(args.windows(2).any(|v| v == ["--profile", "cc-tui"]));
+            assert!(args.windows(2).any(|v| v == ["--profile", "dsh-tui"]));
             assert!(args.windows(2).any(|v| v == ["--patch", args[3].as_str()]));
             let patch = PathBuf::from(&args[3]);
             assert!(patch.exists());
@@ -1028,8 +1315,134 @@ mod tests {
             DshAdapter::context_window_max(Some("deepseek-v4-pro")),
             Some(1_000_000)
         );
+        // Provider-qualified ids (the composer's catalog form) strip to the bare
+        // model before matching.
+        assert_eq!(
+            DshAdapter::context_window_max(Some("opencode-go/deepseek-v4-flash")),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            DshAdapter::context_window_max(Some("deepseek-official/deepseek-v4-pro")),
+            Some(1_000_000)
+        );
         assert_eq!(DshAdapter::context_window_max(Some("unknown-model")), None);
         assert_eq!(DshAdapter::context_window_max(None), None);
+    }
+
+    #[test]
+    fn split_model_id_handles_qualified_and_legacy_bare_ids() {
+        // Provider-qualified (the catalog form) passes through.
+        assert_eq!(
+            DshAdapter::split_model_id("opencode-go/deepseek-v4-flash"),
+            ("opencode-go".to_string(), "deepseek-v4-flash".to_string())
+        );
+        assert_eq!(
+            DshAdapter::split_model_id("deepseek-official/deepseek-v4-pro"),
+            ("deepseek-official".to_string(), "deepseek-v4-pro".to_string())
+        );
+        // Bare legacy ids (stored before the multi-provider catalog) route via
+        // deepseek-official, preserving existing sessions.
+        assert_eq!(
+            DshAdapter::split_model_id("deepseek-v4-flash"),
+            ("deepseek-official".to_string(), "deepseek-v4-flash".to_string())
+        );
+        // A stray trailing slash must not produce an empty provider/model.
+        assert_eq!(
+            DshAdapter::split_model_id("opencode-go/"),
+            ("deepseek-official".to_string(), "opencode-go/".to_string())
+        );
+    }
+
+    #[test]
+    fn dsh_default_effort_reads_effort_json_and_falls_back_to_high() {
+        with_isolated_env(|| {
+            // No effort.json → the deepseek connection default (high).
+            assert_eq!(DshAdapter::dsh_default_effort(), "high");
+            let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+            let cc_dir = home.join(".dsh-cc");
+            std::fs::create_dir_all(&cc_dir).unwrap();
+            std::fs::write(cc_dir.join("effort.json"), "{\"effort\":\"max\"}").unwrap();
+            assert_eq!(DshAdapter::dsh_default_effort(), "max");
+            std::fs::write(cc_dir.join("effort.json"), "{\"effort\":\"off\"}").unwrap();
+            assert_eq!(DshAdapter::dsh_default_effort(), "off");
+            // Invalid JSON → fall back.
+            std::fs::write(cc_dir.join("effort.json"), "not json").unwrap();
+            assert_eq!(DshAdapter::dsh_default_effort(), "high");
+        });
+    }
+
+    #[test]
+    fn list_models_falls_back_to_builtins_without_settings_and_qualifies_ids() {
+        with_isolated_env(|| {
+            // No settings.yaml / js-yaml in the isolated profile → the probe
+            // returns None and the catalog is just the two deepseek-official
+            // entries, with provider-qualified ids so the composer's menu keys
+            // stay unique.
+            let models = DshAdapter::new().list_models();
+            assert_eq!(models.len(), 2);
+            assert_eq!(models[0].id, "deepseek-official/deepseek-v4-flash");
+            assert!(models[0].is_default);
+            assert_eq!(models[1].id, "deepseek-official/deepseek-v4-pro");
+            assert!(!models[1].is_default);
+        });
+    }
+
+    #[test]
+    fn build_model_list_merges_pi_ai_providers_and_marks_user_default() {
+        // Pure assembly test (no node needed): a settings.yaml carrying an
+        // opencode-go provider + an agent-default-model must produce the union
+        // with the opencode-go model as default.
+        let probe = ModelCatalogProbe {
+            pi: vec![SettingsProvider {
+                provider: "opencode-go".into(),
+                models: vec![SettingsModel {
+                    id: "deepseek-v4-flash".into(),
+                    name: "DeepSeek V4 Flash".into(),
+                }],
+            }],
+            deepseek: vec![],
+            default: Some(SettingsDefaultModel {
+                provider: "opencode-go".into(),
+                model: "deepseek-v4-flash".into(),
+            }),
+        };
+        let models = DshAdapter::build_model_list(
+            &[("deepseek-v4-flash", "DeepSeek-V4-Flash"), ("deepseek-v4-pro", "DeepSeek-V4-Pro")],
+            Some(&probe),
+        );
+        assert_eq!(models.len(), 3);
+        // The deepseek-official flash keeps its id but loses the default to the
+        // user's agent-default-model.
+        assert_eq!(models[0].id, "deepseek-official/deepseek-v4-flash");
+        assert!(!models[0].is_default);
+        assert_eq!(models[1].id, "deepseek-official/deepseek-v4-pro");
+        assert!(!models[1].is_default);
+        assert_eq!(models[2].id, "opencode-go/deepseek-v4-flash");
+        assert_eq!(models[2].provider, "opencode-go");
+        assert!(models[2].is_default);
+    }
+
+    #[test]
+    fn build_model_list_default_falls_back_to_deepseek_flash() {
+        // No agent-default-model in settings.yaml → deepseek-official flash
+        // stays the default.
+        let probe = ModelCatalogProbe {
+            pi: vec![SettingsProvider {
+                provider: "opencode-go".into(),
+                models: vec![SettingsModel {
+                    id: "deepseek-v4-flash".into(),
+                    name: "DeepSeek V4 Flash".into(),
+                }],
+            }],
+            deepseek: vec![],
+            default: None,
+        };
+        let models = DshAdapter::build_model_list(
+            &[("deepseek-v4-flash", "DeepSeek-V4-Flash"), ("deepseek-v4-pro", "DeepSeek-V4-Pro")],
+            Some(&probe),
+        );
+        assert!(models.iter().any(|m| m.id == "deepseek-official/deepseek-v4-flash" && m.is_default));
+        assert!(models.iter().any(|m| m.id == "opencode-go/deepseek-v4-flash" && !m.is_default));
     }
 
     #[test]
@@ -1143,8 +1556,8 @@ mod tests {
         let dump = "# == @deepseek-ai/dsh-base\n\
 - id: timer\n\
   name: '@deepseek-ai/cordis-plugin-timer'\n\
-- id: cc-tui\n\
-  name: dsh-cc-tui\n\
+- id: dsh-tui\n\
+  name: dsh-tui\n\
   config:\n\
     root:\n      - .\n\
 - id: hmr\n\
@@ -1153,7 +1566,7 @@ mod tests {
             DshAdapter::parse_dump_names(dump),
             vec![
                 "@deepseek-ai/cordis-plugin-timer".to_string(),
-                "dsh-cc-tui".to_string(),
+                "dsh-tui".to_string(),
                 "@deepseek-ai/cordis-plugin-hmr".to_string(),
             ]
         );

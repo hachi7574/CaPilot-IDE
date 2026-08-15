@@ -181,7 +181,7 @@ fn build_on_exit(
                 "agent://exit-diagnostic",
                 ExitDiagnostic {
                     id: agent_id.clone(),
-                    message: "dsh 启动后立即退出（exit 0）。插件包均可加载，可能是插件初始化或配置问题；请运行 `dsh --dump-config --profile cc-tui` 检查配置。".to_string(),
+                    message: "dsh 启动后立即退出（exit 0）。插件包均可加载，可能是插件初始化或配置问题；请运行 `dsh --dump-config --profile dsh-tui` 检查配置。".to_string(),
                 },
             );
         }

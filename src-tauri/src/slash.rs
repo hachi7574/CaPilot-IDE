@@ -658,7 +658,7 @@ const CLAUDE_COMMANDS: &[BuiltinCommand] = &[
     },
 ];
 
-// dsh-TUI（dsh-cc-tui）的本地命令全集，按分组顺序与上游 README 保持一致。
+// dsh-TUI（@deepseek-harness-tui/dsh-tui）的本地命令全集，按分组顺序与上游 README 保持一致。
 // `/resume` 等动态选择器命令在 EXCLUDED 中排除；其余命令是叶子项，选中后
 // 把 `/name` 发给 PTY，由 TUI 在终端内自行展开（模型、主题、子代理等选择器）。
 const DSH_COMMANDS: &[BuiltinCommand] = &[

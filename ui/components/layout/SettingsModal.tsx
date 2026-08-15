@@ -15,9 +15,9 @@ const DEFAULT_LAUNCH: Record<string, { command: string; args: string }> = {
   claude: { command: "claude", args: "--model claude-sonnet-5" },
   codex: { command: "codex", args: "--no-alt-screen" },
   opencode: { command: "opencode", args: "" },
-  // dsh 走 cc-tui profile；每会话的 model/effort/恢复经 `--patch <临时文件>`
+  // dsh 走 dsh-tui profile；每会话的 model/effort/恢复经 `--patch <临时文件>`
   // 注入（spawn 时由适配器追加），编辑器只展示静态前缀。
-  dsh: { command: "dsh", args: "--profile cc-tui" },
+  dsh: { command: "dsh", args: "--profile dsh-tui" },
 };
 
 export function SettingsModal({ onClose }: SettingsModalProps) {

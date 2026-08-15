@@ -13,7 +13,7 @@
 | **Claude Code** | https://code.claude.com/docs （索引 `llms.txt`） | [CLI reference](https://code.claude.com/docs/en/cli-reference) · [Settings](https://code.claude.com/docs/en/settings) · [Permissions](https://code.claude.com/docs/en/permissions) · [Permission modes（Shift+Tab 环）](https://code.claude.com/docs/en/permission-modes) · [Slash commands（`/model` `/effort`）](https://code.claude.com/docs/en/commands) · [Interactive mode](https://code.claude.com/docs/en/interactive-mode) · [Keybindings](https://code.claude.com/docs/en/keybindings) · [Sessions & resume](https://code.claude.com/docs/en/sessions) · [Model config](https://code.claude.com/docs/en/model-config) |
 | **Codex / ChatGPT** | https://learn.chatgpt.com/docs/codex | [CLI 总览](https://learn.chatgpt.com/docs/codex/cli) · [CLI 命令参考（含 flags）](https://learn.chatgpt.com/docs/codex/developer-commands?surface=cli) · [Slash commands（`/model` `/permissions`）](https://learn.chatgpt.com/docs/codex/reference/slash-commands) · [Config file reference](https://learn.chatgpt.com/docs/codex/config-file/config-reference) · [Settings](https://learn.chatgpt.com/docs/codex/reference/settings) · [Permission modes](https://learn.chatgpt.com/docs/codex/permission-modes) · [Sandboxing](https://learn.chatgpt.com/docs/codex/sandboxing) · [Projects & chats](https://learn.chatgpt.com/docs/codex/projects) · [app-server（模型目录）](https://learn.chatgpt.com/docs/codex/app-server) |
 | **OpenCode** | https://opencode.ai/docs | [CLI](https://opencode.ai/docs/cli/) · [TUI](https://opencode.ai/docs/tui/) · [Config](https://opencode.ai/docs/config/) · [Keybinds（`tui.json`）](https://opencode.ai/docs/keybinds/) · [Permissions](https://opencode.ai/docs/permissions/) · [Agents](https://opencode.ai/docs/agents/) · [Models](https://opencode.ai/docs/models/) · [Commands](https://opencode.ai/docs/commands/) |
-| **dsh（DeepSeek Harness）** | https://github.com/deepseek-ai/dsh（CLI 包 `@deepseek-ai/dsh`，TUI 为 `dsh-cc-tui` 插件，随 `dsh plugin --profile cc-tui add dsh-cc-tui` 安装；集成设计见 `docs/dsh-runtime-integration.md`） | 已落库事实以本文件 §2.4 / §3 为准；上游为 Commander launcher + Cordis app，官方文档在仓库 README 与 `dsh-cc-tui` 插件 README（本地 `~/.dsh/profiles/cc-tui` 下有安装副本） |
+| **dsh（DeepSeek Harness）** | https://github.com/deepseek-ai/dsh（CLI 包 `@deepseek-ai/dsh`，TUI 为 `@deepseek-harness-tui/dsh-tui` 插件，随 `dsh plugin --profile dsh-tui add @deepseek-harness-tui/dsh-tui` 安装；集成设计见 `docs/dsh-runtime-integration.md`） | 已落库事实以本文件 §2.4 / §3 为准；上游为 Commander launcher + Cordis app，官方文档在仓库 README 与 `dsh-tui` 插件 README（本地 `~/.dsh/profiles/dsh-tui` 下有安装副本） |
 
 ---
 
@@ -116,26 +116,26 @@ opencode [--model <provider/model>] [--auto]
 - 插件监听事件总线（`Hooks.event`）：首次观察到 cwd 一致、无 parent 的根 session 后锁定 `sessionID`，后续 child session 不得覆盖；生命周期映射保持 `session.status` busy/retry→`working`、idle→`idle`，permission/question 事件分别映射待确认/待选择。侧车格式为 `{"status","ts","session_id"}`；插件加载时先写一次无 session id 的 `idle`，根 session 创建后补齐 id。
 - 会话删除时清理整个 `opencode-status/<agent_id>/` 目录（`opencode.rs` `remove_status_plugin`；`sessions_delete` 调用）。插件写失败只降级为无 hook（沿用 PTY 活动启发式），不 abort 启动。
 
-### 2.4 dsh（runtime `dsh`，DeepSeek Harness cc-tui）
+### 2.4 dsh（runtime `dsh`，DeepSeek Harness dsh-tui）
 
 > 集成设计全文见 `docs/dsh-runtime-integration.md`（Phase 1-4 + 验收）。适配器 `dsh.rs`；Composer 的 dsh 分支在 `Composer.tsx`；`/` 命令目录在 `slash.rs` `DSH_COMMANDS`。
 
 **Launch**（`dsh.rs:546-602`）：
 ```text
-dsh --profile cc-tui --patch <每会话临时 patch>
+dsh --profile dsh-tui --patch <每会话临时 patch>
 ```
-- 无 argv 注入模型/权限/effort：模型 + effort 经 `--patch` 每会话 overlay（cordis patch 语义**整体替换** cc-tui 配置行）；权限经 env `DSH_PERMISSION_MODE=read-only|workspace-write|danger-full-access`（`dsh.rs:316-322`）。
-- `NODE_ENV=production` 必须：dsh-cc 的 React dev renderer 会累积 unbounded `performance.measure()` 记录、长会话 OOM（`dsh.rs:580-586`）。
-- patch 写在 `$XDG_CACHE_HOME/capilot-ide/dsh/<safe-id>.patch.yml`（`~/.cache` 回退），仅本次 spawn 生效；用户全局 `~/.dsh/profiles/cc-tui/cordis.yml`、`~/.dsh-cc/model.json` 不动。会话删除时清理（`dsh.rs:324-382`、`remove_session_patch`）。
-- patch 内容：`- id: cc-tui` + `config: {provider: deepseek-official, model: <id>, [effort: off|high|max], sessionId: !!js process.env.DSH_CC_RESUME_SESSION ?? undefined}`。`sessionId` **必须**无条件重写——dsh-cc-tui 只从该 config 键读 resume（由 `DSH_CC_RESUME_SESSION` env 喂入），patch 整体替换配置行会丢 resume 缝（`dsh.rs:347-374`）。
-- 模型：`deepseek-v4-flash`（默认）/ `deepseek-v4-pro`，provider `deepseek-official`，**hard-code**（dsh 无 model-list CLI，`dsh.rs:477-496`）。
+- 无 argv 注入模型/权限/effort：模型 + effort 经 `--patch` 每会话 overlay（cordis patch 语义**整体替换** dsh-tui 配置行）；权限经 env `DSH_PERMISSION_MODE=read-only|workspace-write|danger-full-access`（`dsh.rs:316-322`）。
+- `NODE_ENV=production` 必须：dsh 的 React dev renderer 会累积 unbounded `performance.measure()` 记录、长会话 OOM（`dsh.rs:580-586`）。
+- patch 写在 `$XDG_CACHE_HOME/capilot-ide/dsh/<safe-id>.patch.yml`（`~/.cache` 回退），仅本次 spawn 生效；用户全局 `~/.dsh/profiles/dsh-tui/cordis.yml`、`~/.dsh-cc/model.json` 不动。会话删除时清理（`dsh.rs:324-382`、`remove_session_patch`）。
+- patch 内容：`- id: dsh-tui` + `config: {provider: <provider>, model: <id>, [effort: off|high|max], sessionId: !!js process.env.DSH_CC_RESUME_SESSION ?? undefined}`。`sessionId` **必须**无条件重写——dsh-tui 只从该 config 键读 resume（由 `DSH_CC_RESUME_SESSION` env 喂入），patch 整体替换配置行会丢 resume 缝（`dsh.rs:347-374`）。
+- 模型：**settings.yaml 探测**（provider-qualified，`dsh.rs` `model_catalog_probe`）——`agent-default-model` 标默认，`deepseek-official` 路由内建 flash/pro，另有 `opencode-go/deepseek-v4-flash` 等 pi-ai 提供商标的模型；default = settings.yaml 的 `agent-default-model`（实测 `opencode-go/deepseek-v4-flash`）。
 - 权限映射 `ask→read-only`、`auto→workspace-write`、`yolo→danger-full-access`（yolo `requires_confirmation: true`）（`dsh.rs:498-519`）。
-- 思考档位：`auto→max`（默认）、`fast→off`、`mid→high`、`high→max`（`dsh.rs:301-311`、`521-544`）。
+- 思考档位：`auto→max`（deepseek-official 默认）、`fast→off`、`mid→high`、`high→max`；**pi-ai 路由（opencode-go 等）固定 `effort: off`**——pi-ai 对未声明 reasoning 元数据的模型只支持 off，钉 off 可覆盖机器残留的 effort.json（`dsh.rs:301-311`、`521-544`）。
 
 **Live 控制（PTY 注入）**：
-- 权限**无 live 切换**：dsh 无沙箱切换 API，`/permissions` 只是查看说明。Composer 权限环对 dsh 隐藏，改权限走**持久化 + 重启 PTY**：`agent_set_session_config` 写新 mode → `agent_kill` → 丢弃 channel → `ensureAgentChannel` 重启，让下次 spawn 注入新 `DSH_PERMISSION_MODE`（`Composer.tsx:444-459`）。
-- 换模型：**dsh 不支持原位换模型**——`/model` 是会话 fork 续聊（历史保留、新会话路由新模型、旧会话留在 `/resume`），会破坏「tab id = session id」身份。Composer 只持久化配置，由下一次 spawn / resume 经 `--patch` 钉死生效，不驱动运行中的 TUI（`Composer.tsx:559-566`）。
-- 思考强度：**Shift+Tab**（`ESC[Z`）环 `off → high → max`（dsh-cc-tui 的 effort 循环，deepseek 档位）。CaPilot speed 映射 fast→off / mid→high / high→max，auto=省略（profile 默认 max）；按当前持久化档位到目标档位的环距步数驱动（`Composer.tsx:643-662`）。
+- 权限 **live 切换**：dsh-base 挂载的 `dsh-permission-presets` 提供 `/permission <preset>`（read-only / workspace-write / danger-full-access），live 追加持久 session-log 事件（`permission/preset`+`sandbox/mode`，重启/恢复后仍生效）——所以 dsh 不再走「持久化 + kill + 重启」路径，而是直接驱动 TUI 命令（`Composer.tsx:461-482`）。
+- 换模型：**dsh 不支持原位换模型**——`/model` 是会话 fork 续聊（历史保留、新会话路由新模型、旧会话留在 `/resume`），会破坏「tab id = session id」身份。Composer 只持久化配置，由下一次 spawn / resume 经 `--patch` 钉死生效，不驱动运行中的 TUI（`Composer.tsx:589-604`）。
+- 思考强度：**Shift+Tab**（`ESC[Z`）环 `off → high → max`（dsh-tui 的 effort 循环，deepseek 档位）。CaPilot speed 映射 fast→off / mid→high / high→max，auto=省略（profile 默认 max）；按当前持久化档位到目标档位的环距步数驱动（`Composer.tsx:673-696`）。**仅 deepseek-official 路由可调**：pi-ai 路由（opencode-go 等）只持久化 speed（作为下次 deepseek-official 生成的默认档位）、不驱动 TUI；⚡ 菜单只留 auto/off（`Composer.tsx:327-340`）。
 
 **Resume / 会话**：
 - `DSH_CC_RESUME_SESSION=<session-id>` env（无 argv；`dsh.rs:598-600`，`resume_args` 返回空）。
@@ -179,14 +179,14 @@ dsh --profile cc-tui --patch <每会话临时 patch>
 | 18 | Claude 上下文占用 + 缓存命中数据源 | 通过 Agent `resume_key` 精确读取 `<project-key>/<session-id>.jsonl`，禁止按 cwd 取最新。跳过 sidechain，并按 assistant `message.id` 去重。used = 最后一个非零 usage 的 input + cache creation + cache read + output；累计命中率分子/分母 = cache read 与 input + cache creation + cache read。`message.model` 只作为实际模型展示 | `claude.rs` `context_usage`/`parse_transcript_usage`/`read_transcript` | 实测 transcript JSONL |
 | 19 | OpenCode TUI 鼠标协议 | SGR 1006；滚轮 `64/65` + 1-based cell 坐标。xterm tracking enable 被剥离以保留文本选择，IDE 用 capture-phase wheel 手工转发并禁用 alternate-buffer 方向键降级；resident PTY 重挂载不得依赖启动帧仍在 replay 中 | `XTermPanel.tsx` + `mouseProtocol.ts` | 实测 OpenCode 1.18.18；`pnpm test:terminal-mouse` |
 | 20 | OpenCode 思考强度键 | `ctrl+t` = `variant_cycle`（默认键）；循环顺序 = catalog `variants` 对象键序，`默认 → 首 → … → 末 → 默认`。Composer 把 opencode 目标的 Ctrl+T 重定向为给 PTY 发 ``，按钮标签读 `model.json` `variant.<provider/model>` | `Composer.tsx` `cycleOpenCodeVariant` + `opencode.rs` `current_variant` | [keybinds](https://opencode.ai/docs/keybinds/) + 源码 `packages/tui/src/context/local.tsx`（1.18.18 实测） |
-| 21 | dsh launch 方式 | `dsh --profile cc-tui --patch <每会话临时文件>`；**无 argv 注入模型/权限/effort**——模型+effort 经 `--patch` overlay（整体替换 cc-tui 配置行），权限经 env `DSH_PERMISSION_MODE=read-only\|workspace-write\|danger-full-access`；`NODE_ENV=production` 必须（dev renderer OOM）。patch 落 `$XDG_CACHE_HOME/capilot-ide/dsh/<safe-id>.patch.yml`，会话删除时清理 | `dsh.rs` `write_patch`/`spawn_interactive`/`launch_env`/`dsh_permission_mode` | dsh-cc-tui 插件 README（本地 `~/.dsh/profiles/cc-tui` 副本） |
-| 22 | dsh 思考档位 | **Shift+Tab**（`ESC[Z`）环 `off → high → max`（dsh-cc-tui effort 循环）；speed 映射 fast→off / mid→high / high→max，auto=省略（profile 默认 max） | `dsh.rs` `effort_for_speed` + `Composer.tsx:643-662`（环距步数驱动） | 实测 dsh-cc-tui 循环 |
-| 23 | dsh 模型换法 | **不支持原位换模型**：`/model` 是会话 fork 续聊（新会话路由新模型、旧会话留 `/resume`），会破坏「tab id = session id」身份。Composer 只持久化配置，下次 spawn / resume 经 `--patch` 钉死生效 | `Composer.tsx:559-566`（dsh 分支空操作）+ `dsh.rs` `write_patch` | dsh-cc-tui README（model 命令语义） |
+| 21 | dsh launch 方式 | `dsh --profile dsh-tui --patch <每会话临时文件>`；**无 argv 注入模型/权限/effort**——模型+effort 经 `--patch` overlay（整体替换 dsh-tui 配置行），权限经 env `DSH_PERMISSION_MODE=read-only\|workspace-write\|danger-full-access`；`NODE_ENV=production` 必须（dev renderer OOM）。patch 落 `$XDG_CACHE_HOME/capilot-ide/dsh/<safe-id>.patch.yml`，会话删除时清理 | `dsh.rs` `write_patch`/`spawn_interactive`/`launch_env`/`dsh_permission_mode` | dsh-tui 插件 README（本地 `~/.dsh/profiles/dsh-tui` 副本） |
+| 22 | dsh 思考档位 | **Shift+Tab**（`ESC[Z`）环 `off → high → max`（dsh-tui effort 循环，仅 deepseek-official 路由）；speed 映射 fast→off / mid→high / high→max，auto=省略（profile 默认 max）；**pi-ai 路由固定 `effort: off`**、⚡ 菜单只留 auto/off（防 UNSUPPORTED_REASONING_EFFORT） | `dsh.rs` `effort_for_speed` + `Composer.tsx:673-696`/`327-340`（环距步数驱动） | 实测 dsh-tui 循环 |
+| 23 | dsh 模型换法 | **不支持原位换模型**：`/model` 是会话 fork 续聊（新会话路由新模型、旧会话留 `/resume`），会破坏「tab id = session id」身份。Composer 只持久化配置，下次 spawn / resume 经 `--patch` 钉死生效 | `Composer.tsx:589-604`（dsh 分支空操作）+ `dsh.rs` `write_patch` | dsh-tui README（model 命令语义） |
 | 24 | dsh resume / 会话 | `DSH_CC_RESUME_SESSION=<id>` env（无 argv）；resume key = 10 秒内新会话目录名（`$DSH_HOME/sessions/--<projectKey>--/<id>/session.jsonl[.zstd]`，header `cwd` 匹配），回退 `~/.dsh-cc/resume.txt`。patch `sessionId: !!js process.env.DSH_CC_RESUME_SESSION ?? undefined` 必须**无条件重写**（漏写丢 resume 缝） | `dsh.rs` `capture_resume_key`/`detect_recent_resume_key`/`write_patch` + `lib.rs` `agent_resume` | 实测 dsh 会话目录 |
 | 25 | dsh hook 注入方式 | **无 hook 面**（非 claude/codex/opencode 型）。方案 B：Rust 侧 tail JSONL 推断（`turn/start`→working、`turn/end`→idle、`assistant/chunk`→working，**最后一条命中胜出**），`agent_status_read` 对 dsh 走 DB(runtime+cwd)→`newest_session_log_meta`(mtime_ns+len 指纹)→`StatusInferenceCache` 命中复用、未命中 `spawn_blocking` 解码+推断 | `lib.rs` `agent_status_read`/`StatusInferenceCache` + `dsh.rs` `infer_status_from_content`/`infer_status` | 实测 dsh session.jsonl.zstd 结构 |
 | 26 | dsh 上下文占用 + 缓存命中数据源 | `assistant/chunk` usage 事件：used = `inputTokens + cacheReadTokens`（DeepSeek 把输入拆 fresh/cache 两部分，cacheRead 随上下文单调增长；结尾 `{0,0}` 重置块跳过）；max = 模型清单 `context_window_max`（flash/pro 均 1M，未知不猜）。**会话累计**命中率分子/分母 = 所有 usage 事件的 `cacheReadTokens` 与 `inputTokens + cacheReadTokens` | `dsh.rs` `context_usage`/`parse_usage_from_content`/`context_window_max` | 实测 dsh session.jsonl.zstd（usage 事件） |
 
-> 编号 1、5、8、20、22 都是「顺序/键位」型事实，**最容易随版本漂移**。改它们时，确认当前 TUI 实际行为后再动代码，别只凭旧文档。22 是 dsh 侧同样的顺序型事实（Shift+Tab 环）——改前先确认 dsh-cc-tui 实际循环。
+> 编号 1、5、8、20、22 都是「顺序/键位」型事实，**最容易随版本漂移**。改它们时，确认当前 TUI 实际行为后再动代码，别只凭旧文档。22 是 dsh 侧同样的顺序型事实（Shift+Tab 环）——改前先确认 dsh-tui 实际循环。
 
 **OpenCode 首轮低命中基线（1.18.18 / Zen DeepSeek V4 Flash Free，2026-08-15 实测）**：两个全新会话的首轮分别为 `input=8886, cache_read=1792`（16.78%）和 `input=8370, cache_read=1792`（17.63%）。固定的 1792 说明首轮大概率只复用了 provider 可识别的公共前缀；OpenCode/Zen 只返回 token 数量，不返回命中的具体文本区间，因此不能进一步断言是哪一段。Build agent 首轮还会带上 system prompt、工具 schema、权限、环境和项目规则；CaPilot-Ide 会额外加载 2,216 字节的 `CLAUDE.md`，两个项目的非缓存 input 相差 516 tokens（路径与环境差异也可能占一部分）。同一台机器上的长工具循环会话累计命中率可达到 92.05%，所以首轮低值不能通过改公式“修高”，应保留 provider 原始会计语义并把它视为冷启动基线。
 
@@ -202,4 +202,4 @@ dsh --profile cc-tui --patch <每会话临时 patch>
 - 四个 runtime 官方文档都在周更级迭代。改 adapter 前：
   1. 先在 §1 的对应子页确认最新 flag/键位/顺序；
   2. 更新 §3 表格与对应代码锚点；
-  3. 若 `claude`/`codex`/`opencode` CLI 已安装到本机，可 `--help` / 实测 TUI 行为做最终校验（本机 UI 自动化受限，见运行手册）。dsh 同理：`dsh --help` 只见 launcher 面，TUI 行为以 `dsh-cc-tui` 插件 README（`~/.dsh/profiles/cc-tui`）与实测会话日志为准。
+  3. 若 `claude`/`codex`/`opencode` CLI 已安装到本机，可 `--help` / 实测 TUI 行为做最终校验（本机 UI 自动化受限，见运行手册）。dsh 同理：`dsh --help` 只见 launcher 面，TUI 行为以 `dsh-tui` 插件 README（`~/.dsh/profiles/dsh-tui`）与实测会话日志为准。

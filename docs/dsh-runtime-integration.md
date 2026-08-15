@@ -1,7 +1,14 @@
 # dsh-TUI Runtime 集成设计
 
-> 目标：将 [dsh-TUI](https://github.com/ccch1mneyyy/dsh-TUI)（`dsh-cc-tui`）以与 claude / codex / opencode / bash 相同的适配标准接入 CaPilot IDE。
+> 目标：将 [dsh-TUI](https://github.com/ccch1mneyyy/dsh-TUI)（现名 `@deepseek-harness-tui/dsh-tui`）以与 claude / codex / opencode / bash 相同的适配标准接入 CaPilot IDE。
 > 本文是分析与设计文档，不包含已合入的实现。所有外部事实均在对应上游源码处验证（见文末「参考来源」）。
+
+> **⚠️ 2026-08-15 迁移通告**：本文写作时 dsh-TUI 仍为旧名 `dsh-cc-tui` / profile `cc-tui`。已升级到 `@deepseek-harness-tui/dsh-tui` 0.6.1 / profile `dsh-tui`。升级后以下事实已变化，以 `docs/ai-runtime-references.md` §2.4 / §3 为准（下文历史性描述不再逐处改写）：
+> 1. profile / 插件包：`cc-tui` → `dsh-tui`（`dsh plugin --profile dsh-tui add @deepseek-harness-tui/dsh-tui`）；CaPilot patch id 相应为 `- id: dsh-tui`。
+> 2. **权限有 live 切换**：dsh-base 挂载 `dsh-permission-presets`，`/permission read-only|workspace-write|danger-full-access` 实时生效并落盘持久 session-log 事件（`permission/preset`+`sandbox/mode`）——本文 §2.2 / §4.7「TUI 不提供实时权限切换」已过时。
+> 3. **模型不再是 hard-code**：`model_catalog_probe` 读 `~/.dsh/settings.yaml`（provider-qualified，`agent-default-model` 标默认）——本文 §4.3「参照 claude.rs 硬编码两个」已过时。
+> 4. 数据目录 / 环境变量**未变**：`~/.dsh-cc/`（effort.json / resume.txt）、`DSH_CC_*` / `CC_TUI_*`（官方文档声称 DSH_TUI_*，实测 0.6.1 仍用旧名）。
+> 5. 状态推断事件类型（`turn/start`/`turn/end`/`assistant/chunk`/`request/header`）与 session 头格式在新包中逐字确认（`@deepseek-ai/dsh-session`），方案 B 无需改动。
 
 ## 1. 结论摘要
 
