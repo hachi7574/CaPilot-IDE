@@ -51,7 +51,7 @@
 
 1. **新建 dsh 终端**（默认模型应为 `opencode-go/deepseek-v4-flash`）：应正常打开，状态行显示 **Off effort**（pi-ai 固定 off，而非高）。
 2. **模型列表**：打开模型选择器，应看到 `opencode-go/deepseek-v4-flash`（默认）、`deepseek-official/deepseek-v4-flash`、`deepseek-official/deepseek-v4-pro`。若为空/不全 → 检查 `~/.dsh/settings.yaml`（CaPilot 从它读 provider 模型）。
-3. **思考强度**：在 **opencode-go 会话**里点 ⚡ 应只有 auto/off；切到 **deepseek-official** 会话应看到 auto/off/high/max，且 High↔Max 切换后 TUI 状态行实时变化。
+3. **思考强度**：在 **opencode-go 会话**里点 ⚡ 应只有 Auto / Off（id 为 `auto`/`fast`）；切到 **deepseek-official** 会话应看到 Auto / Off / High / Max，且 High↔Max 切换后 TUI 状态行实时变化。
 4. **权限**：在**运行中**的 dsh 会话切换 ask↔auto↔yolo，TUI 应立即生效；`/exit` 后 resume 该会话，权限应保持（持久事件覆盖 env）。
 5. **回归**：dsh 建终端后若又出现「闪一下即关」（exit 0 无 stderr），应弹「终端启动失败: dsh-tui 配置中有插件包无法加载…」，按提示核对 profile；正常长会话**不应**触发该通知。
 6. **旧 profile 清理（可选）**：CaPilot 现在只认 `~/.dsh/profiles/dsh-tui`；`~/.dsh/profiles/cc-tui` 确认无用后可 `dsh plugin --profile cc-tui remove dsh-cc-tui`（不影响新 profile）。

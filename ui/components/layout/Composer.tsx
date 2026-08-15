@@ -341,8 +341,10 @@ export function Composer() {
   // without an effort flag and applyThinkingSpeed treats it as "don't move".
   // dsh reasoning tiers (off/high/max) only exist on the deepseek-official
   // route; pi-ai providers (e.g. opencode-go) without reasoning metadata only
-  // support "off", so restrict their ⚡ menu to auto/off rather than offering
-  // tiers that would silently not apply.
+  // support "off", so restrict their ⚡ menu to auto + Off rather than offering
+  // tiers that would silently not apply. Option ids are CaPilot speed tiers
+  // (auto/fast/mid/high) — dsh labels them Auto/Off/High/Max; there is no
+  // option whose id is "off".
   const dshReasoningRestricted =
     configRuntimeId === "dsh" &&
     !!currentModel?.id &&
@@ -353,7 +355,7 @@ export function Composer() {
       ? thinkingOptions.filter((option) => option.id !== "auto")
       : dshReasoningRestricted
         ? thinkingOptions.filter(
-            (option) => option.id === "auto" || option.id === "off"
+            (option) => option.id === "auto" || option.id === "fast"
           )
         : thinkingOptions;
   // Button label: on a codex session still on "auto" (fresh spawn), reflect the
