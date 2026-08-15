@@ -362,3 +362,16 @@ DEEPSEEK_API_KEY               # 透传（若已在环境中）
 5. Composer 思考档位切换 → Shift+Tab 环按 fast/mid/high 步进；context 用量 chip 显示（`input+cacheRead`）。
 6. Settings → dsh ⚙ override 加参数 → 确认 patch 注入仍被重追加（hook 状态仍工作）。
 
+### 2026-08-15 Bug 修复 · 交接给用户
+
+**Bug 1（新建终端 picker 无 dsh）** — 已修，`ce333006b`。
+- 根因：`ui/state/store.ts` 的 `TermTemplate.runtime` union 与 `DEFAULT_TEMPLATES` 缺 dsh 条目。
+- 修法：加 `"dsh"` union 成员 + dsh 默认模板；`loadTermTemplates()` 会把 localStorage 缺的默认 id 补进去，老安装也能看到 dsh。
+
+**Bug 2（dsh 终端创建后立即自动关闭）** — 根因在**机器 dsh 全局配置**，非本仓库代码，无需代码改动。
+- 现象：spawn 后 ~0.5s 干净退出（exit 0，无 stderr）。用 `script` PTY 直跑 `dsh --profile cc-tui` 复现，排除了 CaPilot 侧。
+- 根因：`~/.dsh/cordis.patch.yml`（dsh-skin 管理器自动生成的全局层）`insert` 了 `ui-skin-miku`（`@linxin666/dsh-client-ui-skin-miku`），但该包只装在 `web` profile、没装在 `cc-tui` profile。cc-tui 启动时 cordis loader 导入该包失败 → 触发插件树 fiber unload → `ctx.effect` 清理 → `instance.unmount()` → 干净退出。已全量核过 cc-tui 组合配置引用的 82 个包，唯一缺失就是它。
+- 修法：用户选择「禁用 miku 皮肤」，把 `~/.dsh/cordis.patch.yml` 的 `- insert: ui-skin-miku` 改成 `- id: ui-skin-miku, disabled: true`（与其余 8 个禁用 skin 同款）。改前已备份 `~/.dsh/cordis.patch.yml.bak-20260815`。
+- 验证：无 `--patch` overlay 直跑 `dsh --profile cc-tui` 及带 CaPilot 生成的 patch 文件均稳定存活（timeout 8s 超时被杀时仍在渲染，40KB/32KB 输出）。
+- **可复用的排障签名**：dsh TUI「启动后 ~0.5s 干净退出（exit 0 + `Resume with -c`）」，几乎总是 profile 组合里有不可加载的条目（缺失插件包 / 配置损坏）。排查先 `dsh --dump-config --profile cc-tui`，再对每个 `name:` 包做 `require.resolve`。后续可选产品级加固：adapter 检测「spawn 后短时干净退出」并向用户给出诊断提示（本次未做，用户选了配置侧修复）。
+
