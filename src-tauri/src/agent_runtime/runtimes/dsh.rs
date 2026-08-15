@@ -1,5 +1,5 @@
 use crate::agent_runtime::adapter::{
-    AgentRuntimeAdapter, AgentSession, AgentUsage, ModelInfo, PermissionModeInfo,
+    AgentRuntimeAdapter, AgentSession, AgentUsage, EffortInfo, ModelInfo, PermissionModeInfo,
     ThinkingOptionInfo,
 };
 use crate::agent_runtime::status_hooks::{HOOK_ENV_AGENT, HOOK_ENV_DIR};
@@ -341,13 +341,32 @@ impl DshAdapter {
     }
 
     /// Effort for one CaPilot speed tier (dsh adapter levels: `off`/`high`/
-    /// `max`). `auto` and unknown tiers omit the key so the profile default
-    /// (`max`) applies.
+    /// Map a CaPilot `session.speed` value to a dsh-native effort id.
+    ///
+    /// dsh's own vocabulary is `off` / `high` / `max` (deepseek-official
+    /// `REASONING_EFFORTS`). The composer now persists those ids directly for
+    /// dsh sessions. Legacy CaPilot speed ids (`fast`/`mid`/`high`) are still
+    /// accepted so sessions created before the rename keep working. `auto` and
+    /// unknown tiers omit the key so the profile / `~/.dsh-cc/effort.json`
+    /// default applies.
     fn effort_for_speed(speed: &str) -> Option<&'static str> {
         match speed {
+            // Native dsh effort ids (current).
+            "off" => Some("off"),
+            // "high" is both the native effort id and the legacy CaPilot speed
+            // tier that used to mean "max" — prefer the native reading so a
+            // freshly picked "High" menu item pins effort=high, not max.
+            "high" => Some("high"),
+            "max" => Some("max"),
+            // Legacy CaPilot speed tiers (pre-rename).
             "fast" => Some("off"),
             "mid" => Some("high"),
-            "high" => Some("max"),
+            // Pre-rename "high" meant max; kept only via explicit legacy path
+            // above when the value is already handled. Nothing else maps to max
+            // except the native "max" id (and the old mid/high remap is gone for
+            // the ambiguous "high"). Sessions that still store the old "high"
+            // (Max) will now pin effort=high — a one-time soft downgrade that
+            // the user can re-pick as Max.
             _ => None,
         }
     }
@@ -710,6 +729,39 @@ console.log(JSON.stringify(out));
         serde_json::from_slice(&output.stdout).ok()
     }
 
+    /// deepseek-official's adapter-owned reasoning efforts (Off → High → Max).
+    /// Source: `@deepseek-ai/dsh-llm-deepseek` `REASONING_EFFORTS`. Exposed on
+    /// each deepseek-official `ModelInfo` so the composer's ⚡ menu can filter
+    /// per route the same way it does for codex.
+    ///
+    /// `is_default` follows the machine's current un-pinned boot effort
+    /// (`~/.dsh-cc/effort.json`, falling back to `high`) so the composer's
+    /// Shift+Tab step math for `auto` lands on the same tier the TUI actually
+    /// boots with.
+    fn deepseek_official_efforts() -> Vec<EffortInfo> {
+        let default = Self::dsh_default_effort();
+        vec![
+            EffortInfo {
+                id: "off".into(),
+                label: "Off".into(),
+                description: "不思考，响应最快".into(),
+                is_default: default == "off",
+            },
+            EffortInfo {
+                id: "high".into(),
+                label: "High".into(),
+                description: "effort=high".into(),
+                is_default: default == "high",
+            },
+            EffortInfo {
+                id: "max".into(),
+                label: "Max".into(),
+                description: "effort=max：最强推理".into(),
+                is_default: default == "max",
+            },
+        ]
+    }
+
     /// Assemble the provider-qualified ModelInfo list from the deepseek-official
     /// entries plus any llm-pi-ai providers, marking the user's
     /// `agent-default-model` (when present in the catalog) as the default.
@@ -717,6 +769,7 @@ console.log(JSON.stringify(out));
         ds_models: &[(&str, &str)],
         probe: Option<&ModelCatalogProbe>,
     ) -> Vec<ModelInfo> {
+        let ds_efforts = Self::deepseek_official_efforts();
         let mut models: Vec<ModelInfo> = ds_models
             .iter()
             .map(|(id, name)| ModelInfo {
@@ -724,7 +777,9 @@ console.log(JSON.stringify(out));
                 name: name.to_string(),
                 provider: "deepseek-official".into(),
                 is_default: false,
-                efforts: None,
+                // deepseek-official always advertises off/high/max (unless the
+                // deployment disables thinking, which we don't model here).
+                efforts: Some(ds_efforts.clone()),
             })
             .collect();
         if let Some(probe) = probe {
@@ -735,7 +790,11 @@ console.log(JSON.stringify(out));
                         name: m.name.clone(),
                         provider: provider.provider.clone(),
                         is_default: false,
-                        efforts: None,
+                        // Hand-declared pi-ai models (settings.yaml) carry no
+                        // reasoning metadata → dsh-llm-pi-ai omits `reasoning`
+                        // entirely, so Shift+Tab only warns. Empty efforts list
+                        // tells the composer to hide multi-tier choices.
+                        efforts: Some(vec![]),
                     });
                 }
             }
@@ -859,9 +918,11 @@ impl AgentRuntimeAdapter for DshAdapter {
     }
 
     fn list_thinking_options(&self) -> Vec<ThinkingOptionInfo> {
-        // Labels mirror the dsh TUI's own effort vocabulary (off/high/max), so
-        // the composer's ⚡ menu reads the same as the Shift+Tab cycle it
-        // drives. `auto` (no effort pinned) sits at the dsh default.
+        // Native dsh effort ids (off/high/max) — same vocabulary as the TUI's
+        // Shift+Tab cycle and the deepseek-official adapter. The composer
+        // persists these ids directly as `session.speed` for dsh (no more
+        // CaPilot fast/mid/high remapping). `auto` means "don't pin" so the
+        // profile / ~/.dsh-cc/effort.json default applies.
         let default = Self::dsh_default_effort();
         let default_label = match default {
             "off" => "Off",
@@ -877,17 +938,17 @@ impl AgentRuntimeAdapter for DshAdapter {
                 ),
             },
             ThinkingOptionInfo {
-                id: "fast".into(),
+                id: "off".into(),
                 label: "Off".into(),
                 description: "effort=off：不思考，响应最快".into(),
             },
             ThinkingOptionInfo {
-                id: "mid".into(),
+                id: "high".into(),
                 label: "High".into(),
                 description: "effort=high".into(),
             },
             ThinkingOptionInfo {
-                id: "high".into(),
+                id: "max".into(),
                 label: "Max".into(),
                 description: "effort=max：最强推理".into(),
             },
@@ -1013,7 +1074,7 @@ mod tests {
             id: "test".into(),
             runtime: "dsh".into(),
             mode: mode.into(),
-            speed: "high".into(),
+            speed: "max".into(),
             model: Some("deepseek-v4-flash".into()),
             cwd: "/tmp/project".into(),
             context_dir: "/tmp/project".into(),
@@ -1146,13 +1207,19 @@ mod tests {
     #[test]
     fn write_patch_pins_effort_only_for_deepseek_official_route() {
         with_isolated_env(|| {
-            // speed "high" maps to effort "max" on the deepseek-official route,
+            // Native speed "max" pins effort "max" on the deepseek-official route,
             // which guarantees off/high/max support.
             let mut ds = session("auto", None);
-            ds.speed = "high".into();
+            ds.speed = "max".into();
             ds.model = Some("deepseek-official/deepseek-v4-pro".into());
             let content = std::fs::read_to_string(DshAdapter::write_patch(&ds).unwrap()).unwrap();
             assert!(content.contains("effort: max"));
+
+            // Native "high" pins effort "high" (no longer remapped to max).
+            ds.speed = "high".into();
+            let content = std::fs::read_to_string(DshAdapter::write_patch(&ds).unwrap()).unwrap();
+            assert!(content.contains("effort: high"));
+            assert!(!content.contains("effort: max"));
 
             // pi-ai providers may declare no `reasoning` metadata for a model —
             // dsh then offers only "off" and resolveReasoningLevel throws
@@ -1160,7 +1227,7 @@ mod tests {
             // (valid on every route) so the machine's ~/.dsh-cc/effort.json
             // (often high) can't leak in and mislabel the status line.
             let mut pi = session("auto", None);
-            pi.speed = "high".into();
+            pi.speed = "max".into();
             pi.model = Some("opencode-go/deepseek-v4-flash".into());
             let content = std::fs::read_to_string(DshAdapter::write_patch(&pi).unwrap()).unwrap();
             assert!(content.contains("effort: off"));
@@ -1199,11 +1266,13 @@ mod tests {
             DshAdapter::dsh_permission_mode("yolo"),
             "danger-full-access"
         );
-        // Effort mapping per the doc (§4.5): fast→off, mid→high, high→max,
-        // auto→omitted.
+        // Native dsh effort ids (off/high/max) pass through; legacy CaPilot
+        // speed tiers (fast/mid) still map; auto → omitted.
+        assert_eq!(DshAdapter::effort_for_speed("off"), Some("off"));
+        assert_eq!(DshAdapter::effort_for_speed("high"), Some("high"));
+        assert_eq!(DshAdapter::effort_for_speed("max"), Some("max"));
         assert_eq!(DshAdapter::effort_for_speed("fast"), Some("off"));
         assert_eq!(DshAdapter::effort_for_speed("mid"), Some("high"));
-        assert_eq!(DshAdapter::effort_for_speed("high"), Some("max"));
         assert_eq!(DshAdapter::effort_for_speed("auto"), None);
     }
 
@@ -1420,6 +1489,19 @@ mod tests {
         assert_eq!(models[2].id, "opencode-go/deepseek-v4-flash");
         assert_eq!(models[2].provider, "opencode-go");
         assert!(models[2].is_default);
+        // deepseek-official always exposes off/high/max; hand-declared pi-ai
+        // models expose an empty efforts list so the composer hides multi-tier
+        // choices on those routes.
+        let ds_efforts = models[0].efforts.as_ref().expect("ds efforts");
+        assert_eq!(
+            ds_efforts.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec!["off", "high", "max"]
+        );
+        // Exactly one effort is marked default (whatever dsh_default_effort
+        // resolves to under the isolated HOME — "high" when effort.json is
+        // missing).
+        assert_eq!(ds_efforts.iter().filter(|e| e.is_default).count(), 1);
+        assert_eq!(models[2].efforts.as_ref().map(|e| e.len()), Some(0));
     }
 
     #[test]

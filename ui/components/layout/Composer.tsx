@@ -339,27 +339,41 @@ export function Composer() {
   // model default) from the ⚡ picker so the GUI only offers tiers the CLI
   // accepts. The value stays valid in the store/session config: "auto" spawns
   // without an effort flag and applyThinkingSpeed treats it as "don't move".
-  // dsh reasoning tiers (off/high/max) only exist on the deepseek-official
-  // route; pi-ai providers (e.g. opencode-go) without reasoning metadata only
-  // support "off", so restrict their ⚡ menu to auto + Off rather than offering
-  // tiers that would silently not apply. Option ids are CaPilot speed tiers
-  // (auto/fast/mid/high) — dsh labels them Auto/Off/High/Max; there is no
-  // option whose id is "off".
-  const dshReasoningRestricted =
+  // dsh reasoning tiers are model-scoped (deepseek-official: off/high/max;
+  // hand-declared pi-ai models like opencode-go advertise no reasoning). Mirror
+  // the codex per-model filter: when the current model carries an `efforts`
+  // list, only offer those ids (+ auto). Empty list → auto only. Missing
+  // efforts (legacy / unknown model) fall through to the full runtime list.
+  // Legacy CaPilot speed ids (fast/mid) that may still be stored on old
+  // sessions are treated as aliases of off/high for "current" highlighting.
+  const dshLegacySpeedAlias: Record<string, string> = {
+    fast: "off",
+    mid: "high",
+  };
+  const dshNativeSpeed =
+    dshLegacySpeedAlias[shownSpeed] ?? shownSpeed;
+  const dshEffortsEmpty =
     configRuntimeId === "dsh" &&
-    !!currentModel?.id &&
-    currentModel.id.includes("/") &&
-    !currentModel.id.startsWith("deepseek-official/");
+    !!currentModel &&
+    currentModel.efforts !== undefined &&
+    currentModel.efforts.length === 0;
   const menuThinkingOptions =
     configRuntimeId === "codex"
       ? thinkingOptions.filter((option) => option.id !== "auto")
-      : dshReasoningRestricted
-        ? thinkingOptions.filter(
-            (option) => option.id === "auto" || option.id === "fast"
-          )
-        : thinkingOptions;
+      : dshEffortsEmpty
+        ? [] // model has no selectable reasoning — hide the ⚡ menu entirely
+        : configRuntimeId === "dsh" && currentModel?.efforts !== undefined
+          ? (() => {
+              const supported = new Set(currentModel.efforts.map((e) => e.id));
+              return thinkingOptions.filter(
+                (option) => option.id === "auto" || supported.has(option.id)
+              );
+            })()
+          : thinkingOptions;
   // Button label: on a codex session still on "auto" (fresh spawn), reflect the
-  // model's default tier instead of the word "Auto".
+  // model's default tier instead of the word "Auto". On dsh, remap legacy
+  // CaPilot speed ids (fast/mid) so an old session still shows Off/High rather
+  // than a blank label.
   const defaultSpeedForCodex =
     configRuntimeId === "codex"
       ? (() => {
@@ -370,13 +384,18 @@ export function Composer() {
         })()
       : undefined;
   const currentSpeedLabel =
-    shownSpeed === "auto" && configRuntimeId === "codex"
+    dshEffortsEmpty
+      ? "—"
+      : shownSpeed === "auto" && configRuntimeId === "codex"
       ? (defaultSpeedForCodex
           ? (thinkingOptions.find((option) => option.id === defaultSpeedForCodex)
               ?.label ?? "思考强度")
           : "思考强度")
-      : (thinkingOptions.find((option) => option.id === shownSpeed)?.label ??
-        "思考强度");
+      : (thinkingOptions.find(
+          (option) =>
+            option.id ===
+            (configRuntimeId === "dsh" ? dshNativeSpeed : shownSpeed)
+        )?.label ?? "思考强度");
 
   const applyPermissionMode = useCallback(
     async (mode: ComposerPermissionMode) => {
@@ -688,28 +707,36 @@ export function Composer() {
             await new Promise((resolve) => setTimeout(resolve, 35));
             await invoke("agent_write", { id, data: "\r", raw: true });
           } else if (agent.runtime === "dsh") {
-            // dsh 的 Shift+Tab 循环 effort（off→high→max）只有 deepseek-official
-            // 路由支持；pi-ai 提供商（如 opencode-go）若模型未声明 reasoning 元数据，
-            // dsh 只支持 off，Shift+Tab 只会提示无法切换。这类会话仅持久化 speed
-            //（作为下一次 deepseek-official 生成的默认档位），不驱动 TUI。
-            const modelId = agent.model ?? s.selectedModel;
-            const reasoningCapable =
-              !modelId?.includes("/") || modelId.startsWith("deepseek-official/");
-            if (reasoningCapable) {
-              // 从当前持久化档位按循环算步数驱动 Shift+Tab。
-              // 注意：若用户在 TUI 里手动 Shift+Tab 过，实际档位会与持久化的
-              // speed 失步，这是已知局限。
-              const dshEffortCycle = ["fast", "mid", "high"];
-              const currentIndex =
-                previousSpeed === "auto" ? 1 : dshEffortCycle.indexOf(previousSpeed);
-              const targetIndex =
-                nextSpeed === "auto" ? 1 : dshEffortCycle.indexOf(nextSpeed);
+            // dsh Shift+Tab cycles the live route's adapter-owned efforts in
+            // adapter order (deepseek-official: off→high→max). Per-model
+            // `efforts` from the catalog is the source of truth:
+            //  - empty / missing → no live switch (pi-ai hand-declared models);
+            //  - populated → walk the cycle from the CURRENT native effort to
+            //    the target. `auto` resolves to the model's is_default effort.
+            // Persist the NATIVE effort id (off/high/max) as session.speed so
+            // the next spawn pins the same value via --patch.
+            const efforts = (
+              s.runtimes
+                .find((r) => r.id === agent.runtime)
+                ?.models?.find((m) => m.id === (agent.model ?? s.selectedModel))
+            )?.efforts;
+            const cycle =
+              efforts && efforts.length > 1 ? efforts.map((e) => e.id) : null;
+            if (cycle) {
+              const alias: Record<string, string> = { fast: "off", mid: "high" };
+              const defaultEffort =
+                efforts!.find((e) => e.is_default)?.id ?? cycle[0];
+              const normalize = (speed: string) =>
+                speed === "auto" ? defaultEffort : (alias[speed] ?? speed);
+              const currentIndex = cycle.indexOf(normalize(previousSpeed));
+              const targetIndex = cycle.indexOf(normalize(nextSpeed));
               if (currentIndex < 0 || targetIndex < 0) {
-                throw new Error(`Unsupported dsh reasoning effort: ${nextSpeed}`);
+                throw new Error(
+                  `Unsupported dsh reasoning effort: ${previousSpeed} → ${nextSpeed}`
+                );
               }
               const steps =
-                (targetIndex - currentIndex + dshEffortCycle.length) %
-                dshEffortCycle.length;
+                (targetIndex - currentIndex + cycle.length) % cycle.length;
               for (let step = 0; step < steps; step++) {
                 await invoke("agent_write", { id, data: "\u001b[Z", raw: true });
                 if (step + 1 < steps) {
@@ -2257,7 +2284,12 @@ export function Composer() {
                 {menuThinkingOptions.map((option) => (
                   <div
                     key={option.id}
-                    className={`cmp-menu-item${option.id === shownSpeed ? " current" : ""}`}
+                    className={`cmp-menu-item${
+                      option.id ===
+                      (configRuntimeId === "dsh" ? dshNativeSpeed : shownSpeed)
+                        ? " current"
+                        : ""
+                    }`}
                     title={option.description}
                     onClick={() => {
                       void applyThinkingSpeed(option.id);
@@ -2265,7 +2297,8 @@ export function Composer() {
                     }}
                   >
                     <span className="cmp-menu-name">{option.label}</span>
-                    {option.id === shownSpeed && (
+                    {option.id ===
+                      (configRuntimeId === "dsh" ? dshNativeSpeed : shownSpeed) && (
                       <span className="cmp-menu-check">
                         <Icon name="check" size={12} />
                       </span>
