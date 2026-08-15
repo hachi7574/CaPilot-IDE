@@ -375,3 +375,17 @@ DEEPSEEK_API_KEY               # 透传（若已在环境中）
 - 验证：无 `--patch` overlay 直跑 `dsh --profile cc-tui` 及带 CaPilot 生成的 patch 文件均稳定存活（timeout 8s 超时被杀时仍在渲染，40KB/32KB 输出）。
 - **可复用的排障签名**：dsh TUI「启动后 ~0.5s 干净退出（exit 0 + `Resume with -c`）」，几乎总是 profile 组合里有不可加载的条目（缺失插件包 / 配置损坏）。排查先 `dsh --dump-config --profile cc-tui`，再对每个 `name:` 包做 `require.resolve`。后续可选产品级加固：adapter 检测「spawn 后短时干净退出」并向用户给出诊断提示（本次未做，用户选了配置侧修复）。
 
+### 2026-08-15 快速退出诊断 · 产品级加固（已实现）
+
+用户事后确认需要「spawn 后立即干净退出」给诊断而非静默死掉，实现为三层：
+
+**L1 预检探针（根因级）** — `DshAdapter::preflight()`（trait 默认 `None`，`build_and_spawn` 在 `is_available` 之后调用，`Err` 直接上抛 UI）：
+- `dsh --dump-config --profile cc-tui`（~0.1s，disabled 条目被 composer 省略 → 即启动将要加载的集合）→ 解析 `name:` → 单个 `node -e` 子进程用 `require.resolve(name, {paths:[profile]})`（+ `name/package.json` 兜底，规避 `dsh-cc-tui` 这种 `import`-only `exports` 的误报）→ 任一不可解析即返回中文诊断（≤3 个 + 计数，含修法提示）。
+- 探针自身不可靠（dump/node 失败）一律返回 `None` 放行，绝不让探针阻塞正常 spawn；兜底交给 L3。
+
+**L2 前端兜底可见** — `spawnAgent`/`spawnBashAt` 包住 `invoke("agent_spawn")`，失败先 `notify("终端启动失败", err)` 再 rethrow（此前调用方只 `console.error`，全静默）。
+
+**L3 快速退出安全网（通用兜底）** — `build_on_exit` 捕获 `runtime` + `Instant` 启动时刻；dsh 会话 spawn 后 3s 内 exit 0 时，在正常 `agent://exited`/`agent://removed` 之外追加发 `agent://exit-diagnostic`，前端 listener 用 `notify` 弹「dsh 启动后立即退出…」提示。覆盖探针看不到的启动崩溃/配置错误。
+
+**验证**：`cargo test`（lib 158 通过，含新增 `parse_dump_names` / `format_missing` 单测）；`pnpm tsc --noEmit` 通过；探针 E2E——临时把 miku insert 加回 `~/.dsh/cordis.patch.yml` 后探针报 83 项里唯一缺失 `@linxin666/dsh-client-ui-skin-miku`，还原后 82 项全过。
+

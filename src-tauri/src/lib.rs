@@ -147,6 +147,16 @@ struct AgentRemoved {
     id: String,
 }
 
+/// Payload emitted on `agent://exit-diagnostic` — a session ended in a way
+/// that looks like an immediate boot failure, so the frontend can surface the
+/// reason instead of the terminal silently dying. Additive to `agent://exited`
+/// / `agent://removed`, which still fire so the tab closes normally.
+#[derive(Clone, Serialize)]
+struct ExitDiagnostic {
+    id: String,
+    message: String,
+}
+
 /// Wrap the natural-exit bookkeeping into an `OnExit` for `PtyBridge.spawn`.
 /// Fired only on natural exit (EOF / read error); intentional kills never reach
 /// it.
@@ -154,8 +164,27 @@ struct AgentRemoved {
 /// The persistence half lives in `SessionStore` / `Persistence::apply_natural_exit`
 /// (shared with the daemon, §6.1); this closure only layers the Tauri `emit` on
 /// top, so "persist the event" and "tell the WebView" stay separate.
-fn build_on_exit(persistence: Arc<Persistence>, app: tauri::AppHandle) -> OnExit {
+fn build_on_exit(
+    persistence: Arc<Persistence>,
+    app: tauri::AppHandle,
+    runtime: String,
+    spawned_at: Instant,
+) -> OnExit {
     Arc::new(move |agent_id, exit_code| {
+        // Fast-exit safety net: a dsh TUI that clean-exits within seconds of
+        // spawn (boot failure signature: exit 0, no stderr) gets a diagnostic
+        // even when the pre-flight probe missed the cause. Normal sessions run
+        // far longer; a user /exit inside the window is a harmless false alarm.
+        if runtime == "dsh" && exit_code == 0 && spawned_at.elapsed() <= Duration::from_secs(3)
+        {
+            let _ = app.emit(
+                "agent://exit-diagnostic",
+                ExitDiagnostic {
+                    id: agent_id.clone(),
+                    message: "dsh 启动后立即退出（exit 0）。插件包均可加载，可能是插件初始化或配置问题；请运行 `dsh --dump-config --profile cc-tui` 检查配置。".to_string(),
+                },
+            );
+        }
         // Poisoned lock / read error → defaults to "keep" (see SessionStore), so
         // a session is never silently dropped because of a transient DB failure.
         let outcome = persistence.apply_natural_exit(&agent_id, exit_code);
@@ -197,6 +226,13 @@ fn build_and_spawn(
     let adapter = get_adapter(runtime);
     if !adapter.is_available() {
         return Err(format!("Runtime '{}' is not available", runtime));
+    }
+    // Runtime-specific pre-flight validation (e.g. dsh's composed-plugin
+    // probe): reject a broken launch with the reason instead of a terminal
+    // that spawns and immediately clean-exits.
+    if let Some(message) = adapter.preflight() {
+        log::warn!("spawn preflight rejected {runtime}: {message}");
+        return Err(message);
     }
 
     // Provider adapters own the valid choices. This also normalizes a legacy
@@ -280,7 +316,12 @@ fn build_and_spawn(
             80,
             &launch_env,
             on_data,
-            Some(build_on_exit(persistence.clone(), app.clone())),
+            Some(build_on_exit(
+                persistence.clone(),
+                app.clone(),
+                runtime.to_string(),
+                Instant::now(),
+            )),
         )
         .map_err(|e| match e {
             AgentError::CapacityReached { limit } => {

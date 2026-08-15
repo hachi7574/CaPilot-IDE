@@ -167,6 +167,14 @@ pub trait AgentRuntimeAdapter: Send + Sync {
     /// Is the user authenticated with this runtime?
     fn is_authenticated(&self) -> bool;
 
+    /// Best-effort pre-flight validation before spawning. Returns a diagnostic
+    /// string when the runtime is installed but known to fail immediately on
+    /// boot, so CaPilot can surface the reason instead of a silently dead
+    /// terminal. `None` = healthy or unknown (spawn proceeds).
+    fn preflight(&self) -> Option<String> {
+        None
+    }
+
     /// List available models for this runtime
     fn list_models(&self) -> Vec<ModelInfo>;
 

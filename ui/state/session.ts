@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useStore, RestoredSession } from "./store";
+import { notify } from "./notify";
 
 /** One journaled lifecycle event returned by `agent_sync_events` (§6.2). */
 interface JournalEvent {
@@ -146,6 +147,12 @@ export function useAgentEvents() {
         const s = useStore.getState();
         s.closeTab(e.payload.id);
         s.removeAgent(e.payload.id);
+      }),
+      // Fast-exit safety net: a session that ended in an immediately-after-spawn
+      // boot failure emits this alongside the normal exited/removed event so the
+      // reason reaches the user instead of the terminal silently vanishing.
+      listen<{ id: string; message: string }>("agent://exit-diagnostic", (e) => {
+        notify("dsh 启动失败", e.payload.message);
       }),
       listen<{
         id: string;

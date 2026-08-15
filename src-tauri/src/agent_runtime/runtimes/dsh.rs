@@ -428,6 +428,110 @@ impl DshAdapter {
             .unwrap_or(false)
     }
 
+    /// Pre-flight probe: run `dsh --dump-config --profile cc-tui` and resolve
+    /// every plugin package the composed profile will load. Returns a Chinese
+    /// diagnostic when a package is unresolvable — the "spawn → immediately
+    /// clean-exit" failure, which dsh only surfaces at TUI boot as a fiber
+    /// unload + `process.exit(0)` with no stderr. Returns `None` when the
+    /// profile is healthy OR the probe itself is unreliable (dump/node
+    /// unavailable): a flaky probe must never block a spawn — the fast-exit
+    /// net in `build_on_exit` is the fallback.
+    fn preflight_diagnostic() -> Option<String> {
+        let profile = Self::cc_tui_profile_dir()?;
+        let names = Self::parse_dump_names(&Self::profile_dump()?);
+        if names.is_empty() {
+            return None;
+        }
+        let missing = Self::unresolvable(&profile, &names)?;
+        if missing.is_empty() {
+            return None;
+        }
+        Some(Self::format_missing(&missing))
+    }
+
+    /// Format a missing-package list into a user-facing diagnostic (≤3 shown,
+    /// count suffix when truncated).
+    fn format_missing(missing: &[String]) -> String {
+        let shown = missing.iter().take(3).cloned().collect::<Vec<_>>().join("、");
+        let extra = missing.len().saturating_sub(3);
+        let tail = if extra > 0 {
+            format!(" 等 {extra} 个")
+        } else {
+            String::new()
+        };
+        format!(
+            "dsh 无法启动：cc-tui 配置中有插件包无法加载（{shown}{tail}）。\n\
+             请检查 ~/.dsh/cordis.patch.yml 等 profile 补丁，禁用未安装的插件，\n\
+             或运行 `dsh --dump-config --profile cc-tui` 核对插件列表。"
+        )
+    }
+
+    /// Effective plugin list of the cc-tui profile, rendered by dsh itself
+    /// (~0.1s, no plugin mounting). Disabled entries are omitted by the
+    /// composer, so this is exactly what the TUI boot will try to load.
+    fn profile_dump() -> Option<String> {
+        let output = Command::new("dsh")
+            .args(["--dump-config", "--profile", "cc-tui"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8(output.stdout).ok()
+    }
+
+    /// Extract the package specifier from each `name:` row in a dump. Handles
+    /// both quoted (`name: '@scope/pkg'`) and bare (`name: dsh-cc-tui`) values.
+    fn parse_dump_names(dump: &str) -> Vec<String> {
+        dump.lines()
+            .filter_map(|line| {
+                let value = line.trim_start().strip_prefix("name:")?.trim();
+                let value = value.trim_matches(|c| c == '\'' || c == '"');
+                if value.is_empty() {
+                    None
+                } else {
+                    Some(value.to_string())
+                }
+            })
+            .collect()
+    }
+
+    /// Which of `names` cannot be resolved from the profile directory. Delegates
+    /// to Node's own `require.resolve` (the same chain the cordis loader walks,
+    /// including the profile → dsh-install pnpm fallback) in a single subprocess
+    /// instead of re-implementing module resolution in Rust. A package whose
+    /// `exports` map is `import`-only (e.g. `dsh-cc-tui`) still resolves via its
+    /// `package.json`, so bare resolution has that fallback. `None` when node is
+    /// unavailable or the subprocess fails.
+    fn unresolvable(profile: &Path, names: &[String]) -> Option<Vec<String>> {
+        let script = r#"
+const names = JSON.parse(process.argv[1]);
+const base = process.argv[2];
+const missing = [];
+for (const n of names) {
+  let ok = false;
+  try { require.resolve(n, { paths: [base] }); ok = true; } catch (_) {}
+  if (!ok) {
+    try { require.resolve(n + "/package.json", { paths: [base] }); ok = true; } catch (_) {}
+  }
+  if (!ok) missing.push(n);
+}
+console.log(JSON.stringify(missing));
+"#;
+        let names_json = serde_json::to_string(names).ok()?;
+        let output = Command::new("node")
+            .arg("-e")
+            .arg(script)
+            .arg(&names_json)
+            .arg(profile)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        serde_json::from_slice(&output.stdout).ok()
+    }
+
     /// Status-sidecar fallback for the frontend's hook-status poll (dsh has no
     /// hook — integration doc §4.8 方案 B). Returns `(status, ts)` where status
     /// is `idle`/`working` inferred from the newest session log under `cwd` and
@@ -472,6 +576,9 @@ impl AgentRuntimeAdapter for DshAdapter {
     fn is_authenticated(&self) -> bool {
         std::env::var_os("DEEPSEEK_API_KEY").is_some()
             || Self::dsh_home().is_some_and(|home| home.join(".credentials.yaml").exists())
+    }
+    fn preflight(&self) -> Option<String> {
+        Self::preflight_diagnostic()
     }
 
     fn list_models(&self) -> Vec<ModelInfo> {
@@ -1029,5 +1136,60 @@ mod tests {
                 Some("ses_recent")
             );
         });
+    }
+
+    #[test]
+    fn parse_dump_names_handles_quoted_and_bare_specifiers() {
+        let dump = "# == @deepseek-ai/dsh-base\n\
+- id: timer\n\
+  name: '@deepseek-ai/cordis-plugin-timer'\n\
+- id: cc-tui\n\
+  name: dsh-cc-tui\n\
+  config:\n\
+    root:\n      - .\n\
+- id: hmr\n\
+  name: '@deepseek-ai/cordis-plugin-hmr'\n";
+        assert_eq!(
+            DshAdapter::parse_dump_names(dump),
+            vec![
+                "@deepseek-ai/cordis-plugin-timer".to_string(),
+                "dsh-cc-tui".to_string(),
+                "@deepseek-ai/cordis-plugin-hmr".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_dump_names_skips_non_name_lines_and_empty_values() {
+        let dump = "- id: a\n\
+  name: ''\n\
+# == bundle\n\
+  name: \"@scope/pkg\"\n\
+  extra: value\n\
+  name:   'plain'\n";
+        assert_eq!(
+            DshAdapter::parse_dump_names(dump),
+            vec!["@scope/pkg".to_string(), "plain".to_string()]
+        );
+    }
+
+    #[test]
+    fn format_missing_lists_up_to_three_and_counts_rest() {
+        let one = vec!["@a/pkg".to_string()];
+        let formatted = DshAdapter::format_missing(&one);
+        assert!(formatted.contains("（@a/pkg）。"));
+        assert!(!formatted.contains("等 1 个"));
+        assert!(formatted.contains("dsh 无法启动"));
+
+        let many = vec![
+            "@a/one".to_string(),
+            "@b/two".to_string(),
+            "@c/three".to_string(),
+            "@d/four".to_string(),
+            "@e/five".to_string(),
+        ];
+        let formatted_many = DshAdapter::format_missing(&many);
+        assert!(formatted_many.contains("@a/one、@b/two、@c/three 等 2 个"));
+        assert!(!formatted_many.contains("@d/four"));
     }
 }

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useStore, AgentInfo, RestoredSession, createBufferedChannel } from "./store";
+import { notify } from "./notify";
 
 const DEFAULT_RUNTIME = "claude";
 
@@ -30,16 +31,25 @@ export async function spawnAgent(
         ? s.selectedModel
         : null
       : null;
-  const info = (await invoke("agent_spawn", {
-    runtime,
-    project: proj,
-    projectRoot: projectRoot ?? null,
-    resumeKey: null,
-    model: pinnedModel,
-    speed: s.speed,
-    mode: s.permissionMode,
-    onData: channel,
-  })) as AgentInfo;
+  let info: AgentInfo;
+  try {
+    info = (await invoke("agent_spawn", {
+      runtime,
+      project: proj,
+      projectRoot: projectRoot ?? null,
+      resumeKey: null,
+      model: pinnedModel,
+      speed: s.speed,
+      mode: s.permissionMode,
+      onData: channel,
+    })) as AgentInfo;
+  } catch (e) {
+    // Spawn failures used to be swallowed by caller `.catch(console.error)` —
+    // surface the reason (e.g. a dsh pre-flight diagnostic) instead of a
+    // silently dead terminal. Re-throw so callers keep their own handling.
+    notify("终端启动失败", typeof e === "string" ? e : String(e));
+    throw e;
+  }
   flush(info.id);
   s.addAgent({ ...info, project: proj }, channel);
   s.addTab({
@@ -82,16 +92,22 @@ export async function spawnBashAt(
 ): Promise<string> {
   const s = useStore.getState();
   const { channel, flush } = createBufferedChannel();
-  const info = (await invoke("agent_spawn", {
-    runtime: "bash-rc",
-    project,
-    projectRoot: dir,
-    resumeKey: null,
-    model: null,
-    speed: "auto",
-    mode: "ask",
-    onData: channel,
-  })) as AgentInfo;
+  let info: AgentInfo;
+  try {
+    info = (await invoke("agent_spawn", {
+      runtime: "bash-rc",
+      project,
+      projectRoot: dir,
+      resumeKey: null,
+      model: null,
+      speed: "auto",
+      mode: "ask",
+      onData: channel,
+    })) as AgentInfo;
+  } catch (e) {
+    notify("终端启动失败", typeof e === "string" ? e : String(e));
+    throw e;
+  }
   flush(info.id);
   s.addAgent({ ...info, project }, channel);
   s.addTab({
