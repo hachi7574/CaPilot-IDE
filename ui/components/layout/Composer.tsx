@@ -319,6 +319,25 @@ export function Composer() {
   const modelButtonTitle = actualModelId
     ? `实际模型：${displayedModelName}；配置模型：${currentModel?.name ?? shownModel ?? "runtime 默认"}`
     : `选择模型（当前：${currentModel?.name ?? "runtime 默认"}）`;
+  // Group models by provider so the picker shows one section header per
+  // supplier (deepseek-official / opencode-go / anthropic / …) instead of a
+  // flat list where the same model name can appear under multiple routes.
+  // Order follows first appearance in the catalog (runtime list_models order).
+  const modelsByProvider = useMemo(() => {
+    const groups: { provider: string; models: typeof models }[] = [];
+    const index = new Map<string, number>();
+    for (const model of models) {
+      const key = model.provider || "other";
+      let i = index.get(key);
+      if (i === undefined) {
+        i = groups.length;
+        index.set(key, i);
+        groups.push({ provider: key, models: [] });
+      }
+      groups[i].models.push(model);
+    }
+    return groups;
+  }, [models]);
   // Codex model drill-down: map the model's supported reasoning efforts (from
   // the backend catalog) onto CaPilot's speed vocabulary, so the picker only
   // offers tiers the model actually supports. "auto" means "use the model's
@@ -2196,33 +2215,52 @@ export function Composer() {
                   {models.length === 0 && (
                     <div className="cmp-menu-empty">无可用模型</div>
                   )}
-                  {models.map((m) => (
-                    <div
-                      key={m.id}
-                      className={`cmp-menu-item${m.id === shownModel ? " current" : ""}`}
-                      onClick={() => {
-                        // Codex models with several reasoning efforts drill
-                        // into an effort picker; other runtimes apply directly.
-                        // Only drill down when the model has more than one tier
-                        // the GUI can actually select (avoids an empty submenu
-                        // for models whose efforts are all advanced tiers).
-                        const drillDown =
-                          configRuntimeId === "codex" &&
-                          effortOptionsFor(m.id).length > 1;
-                        if (drillDown) {
-                          setPendingEffortModel(m.id);
-                        } else {
-                          applyModel(m.id);
-                          setModelMenuOpen(false);
-                        }
-                      }}
-                    >
-                      <span className="cmp-menu-name">{m.name}</span>
-                      {m.id === shownModel && (
-                        <span className="cmp-menu-check">
-                          <Icon name="check" size={12} />
-                        </span>
+                  {modelsByProvider.map((group, groupIndex) => (
+                    <div key={group.provider}>
+                      {/* Skip a redundant "选择模型" twin when there's only one
+                          provider — the section header still names the supplier
+                          so multi-provider catalogs (dsh) stay scannable. */}
+                      {(modelsByProvider.length > 1 ||
+                        group.provider !== "other") && (
+                        <div
+                          className={
+                            groupIndex === 0
+                              ? "cmp-menu-label"
+                              : "cmp-menu-label cmp-menu-label-group"
+                          }
+                        >
+                          {group.provider}
+                        </div>
                       )}
+                      {group.models.map((m) => (
+                        <div
+                          key={m.id}
+                          className={`cmp-menu-item${m.id === shownModel ? " current" : ""}`}
+                          onClick={() => {
+                            // Codex models with several reasoning efforts drill
+                            // into an effort picker; other runtimes apply directly.
+                            // Only drill down when the model has more than one tier
+                            // the GUI can actually select (avoids an empty submenu
+                            // for models whose efforts are all advanced tiers).
+                            const drillDown =
+                              configRuntimeId === "codex" &&
+                              effortOptionsFor(m.id).length > 1;
+                            if (drillDown) {
+                              setPendingEffortModel(m.id);
+                            } else {
+                              applyModel(m.id);
+                              setModelMenuOpen(false);
+                            }
+                          }}
+                        >
+                          <span className="cmp-menu-name">{m.name}</span>
+                          {m.id === shownModel && (
+                            <span className="cmp-menu-check">
+                              <Icon name="check" size={12} />
+                            </span>
+                          )}
+                        </div>
+                      ))}
                     </div>
                   ))}
                 </>

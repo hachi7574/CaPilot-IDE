@@ -1513,6 +1513,13 @@ body::after {
   color: var(--ink2);
   font-family: var(--pixel);
 }
+/* Subsequent provider groups in the model picker: a hair more top padding so
+   the section break reads as a group boundary without a hard rule line. */
+.cmp-menu-label-group {
+  padding-top: 8px;
+  margin-top: 2px;
+  border-top: 1px solid var(--rule2);
+}
 
 .cmp-menu-item {
   display: flex;
