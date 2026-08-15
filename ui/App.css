@@ -1717,9 +1717,15 @@ body::after {
 
 /* ── New-project modal: choose existing folder (ug-*) ─────────── */
 
-.ug-nproj-sep {
-  border-top: 1px solid var(--rule);
-  margin: 4px 0 2px;
+/* Each creation method is its own bordered panel (bg3 fill on the bg2 card), so
+   the four ways to create a project read as distinct, separated choices. */
+.ug-nproj-method {
+  background: var(--bg3);
+  border: 1px solid var(--rule2);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .ug-nproj-label {
@@ -1728,6 +1734,11 @@ body::after {
   letter-spacing: 1px;
   text-transform: uppercase;
   color: var(--ink2);
+}
+.ug-nproj-method .ug-nproj-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .ug-nproj-folder {
@@ -1987,8 +1998,20 @@ body::after {
 }
 
 /* Isolation-worktree create flow: the source-repo `<select>` reuses the modal
-   input chrome (`.nproj-input` already supplies the shared styling); only the
-   native `<option>` list needs explicit theme colors. */
+   input chrome (`.nproj-input` already supplies the shared styling). WebKitGTK
+   draws the closed control with native chrome unless `appearance` is removed —
+   which is why the box came up white — so strip it, match the text inputs, and
+   add a chevron so the dropdown affordance survives. The native `<option>`
+   list still needs explicit theme colors. */
+.wt-repo-select {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  padding-right: 26px;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%23DCE2EA' stroke-width='1.5' fill='none' stroke-linecap='round'/></svg>");
+  background-position: right 10px center;
+  background-repeat: no-repeat;
+}
 .wt-repo-select option {
   color: var(--ink);
   background: var(--bg2);

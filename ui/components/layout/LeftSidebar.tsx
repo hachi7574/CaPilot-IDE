@@ -1011,132 +1011,138 @@ function NewProjectModal({
           <Icon name="folder-plus" size={16} /> 新建项目
         </div>
 
-        <div className="ug-nproj-label">新建文件夹</div>
-        <input
-          ref={inputRef}
-          className="nproj-input"
-          placeholder="项目名称（如 my-project）"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") submit();
-            if (e.key === "Escape") onClose();
-          }}
-        />
-        {error && <div className="nproj-error">{error}</div>}
-        <div className="nproj-actions">
-          <button className="nproj-btn" onClick={onClose}>
-            取消
-          </button>
-          <button
-            className="nproj-btn primary"
-            onClick={submit}
-            disabled={busy || !name.trim()}
-          >
-            {busy ? "创建中…" : "创建"}
+        <div className="ug-nproj-method">
+          <div className="ug-nproj-label">
+            <Icon name="folder-plus" size={12} /> 新建文件夹
+          </div>
+          <input
+            ref={inputRef}
+            className="nproj-input"
+            placeholder="项目名称（如 my-project）"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") submit();
+              if (e.key === "Escape") onClose();
+            }}
+          />
+          {error && <div className="nproj-error">{error}</div>}
+          <div className="nproj-actions">
+            <button className="nproj-btn" onClick={onClose}>
+              取消
+            </button>
+            <button
+              className="nproj-btn primary"
+              onClick={submit}
+              disabled={busy || !name.trim()}
+            >
+              {busy ? "创建中…" : "创建"}
+            </button>
+          </div>
+        </div>
+
+        <div className="ug-nproj-method">
+          <div className="ug-nproj-label">
+            <Icon name="folder-open" size={12} /> 或选择现有文件夹
+          </div>
+          <button className="ug-nproj-folder" onClick={pickFolder} disabled={busy}>
+            <Icon name="folder-open" size={13} /> 选择现有文件夹…
           </button>
         </div>
 
-        <div className="ug-nproj-sep" />
-
-        <div className="ug-nproj-label">或选择现有文件夹</div>
-        <button className="ug-nproj-folder" onClick={pickFolder} disabled={busy}>
-          <Icon name="folder-open" size={13} /> 选择现有文件夹…
-        </button>
-
-        <div className="ug-nproj-sep" />
-
-        <div className="ug-nproj-label">
-          <Icon name="refresh-cw" size={12} /> 从 Git 克隆
-        </div>
-        <input
-          className="nproj-input"
-          placeholder="https://github.com/owner/repo.git"
-          value={gitUrl}
-          onChange={(e) => setGitUrl(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") cloneSubmit();
-            if (e.key === "Escape") onClose();
-          }}
-        />
-        <div className="un-git-row">
+        <div className="ug-nproj-method">
+          <div className="ug-nproj-label">
+            <Icon name="refresh-cw" size={12} /> 从 Git 克隆
+          </div>
+          <input
+            className="nproj-input"
+            placeholder="https://github.com/owner/repo.git"
+            value={gitUrl}
+            onChange={(e) => setGitUrl(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") cloneSubmit();
+              if (e.key === "Escape") onClose();
+            }}
+          />
+          <div className="un-git-row">
+            <button
+              className="ug-nproj-folder"
+              onClick={pickParentDir}
+              disabled={busy}
+            >
+              <Icon name="folder-open" size={13} /> 选择父目录…
+            </button>
+            {parentDir ? (
+              <span className="un-git-parent" title={parentDir}>
+                {parentDir}
+              </span>
+            ) : null}
+          </div>
+          <input
+            className="nproj-input"
+            placeholder="项目名称（默认取仓库名）"
+            value={gitName}
+            onChange={(e) => setGitName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") cloneSubmit();
+              if (e.key === "Escape") onClose();
+            }}
+          />
           <button
-            className="ug-nproj-folder"
-            onClick={pickParentDir}
+            className="nproj-btn primary un-git-clone"
+            onClick={cloneSubmit}
             disabled={busy}
           >
-            <Icon name="folder-open" size={13} /> 选择父目录…
+            {busy ? "克隆中…" : "克隆并创建"}
           </button>
-          {parentDir ? (
-            <span className="un-git-parent" title={parentDir}>
-              {parentDir}
-            </span>
-          ) : null}
         </div>
-        <input
-          className="nproj-input"
-          placeholder="项目名称（默认取仓库名）"
-          value={gitName}
-          onChange={(e) => setGitName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") cloneSubmit();
-            if (e.key === "Escape") onClose();
-          }}
-        />
-        <button
-          className="nproj-btn primary un-git-clone"
-          onClick={cloneSubmit}
-          disabled={busy}
-        >
-          {busy ? "克隆中…" : "克隆并创建"}
-        </button>
 
-        <div className="ug-nproj-sep" />
-
-        <div className="ug-nproj-label">
-          <Icon name="git-branch" size={12} /> 从仓库创建隔离工作区
+        <div className="ug-nproj-method">
+          <div className="ug-nproj-label">
+            <Icon name="git-branch" size={12} /> 从仓库创建隔离工作区
+          </div>
+          <select
+            className="nproj-input wt-repo-select"
+            value={wtRepo}
+            onChange={(e) => setWtRepo(e.target.value)}
+            disabled={busy}
+          >
+            <option value="">选择源仓库…</option>
+            {wtRepos.map((r) => (
+              <option key={r.root} value={r.root}>
+                {r.name}
+                {r.branch ? `（${r.branch}）` : ""}
+              </option>
+            ))}
+          </select>
+          <input
+            className="nproj-input"
+            placeholder="工作区名称（用作分支名，必填）"
+            value={wtName}
+            onChange={(e) => setWtName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") wtSubmit();
+              if (e.key === "Escape") onClose();
+            }}
+          />
+          <input
+            className="nproj-input"
+            placeholder="基础分支（可空 = 当前分支）"
+            value={wtBase}
+            onChange={(e) => setWtBase(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") wtSubmit();
+              if (e.key === "Escape") onClose();
+            }}
+          />
+          <button
+            className="nproj-btn primary un-git-clone"
+            onClick={wtSubmit}
+            disabled={busy || !wtRepo || !wtName.trim()}
+          >
+            {busy ? "创建中…" : "创建隔离工作区"}
+          </button>
         </div>
-        <select
-          className="nproj-input wt-repo-select"
-          value={wtRepo}
-          onChange={(e) => setWtRepo(e.target.value)}
-          disabled={busy}
-        >
-          <option value="">选择源仓库…</option>
-          {wtRepos.map((r) => (
-            <option key={r.root} value={r.root}>
-              {r.name}
-              {r.branch ? `（${r.branch}）` : ""}
-            </option>
-          ))}
-        </select>
-        <input
-          className="nproj-input"
-          placeholder="工作区名称（用作分支名，必填）"
-          value={wtName}
-          onChange={(e) => setWtName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") wtSubmit();
-            if (e.key === "Escape") onClose();
-          }}
-        />
-        <input
-          className="nproj-input"
-          placeholder="基础分支（可空 = 当前分支）"
-          value={wtBase}
-          onChange={(e) => setWtBase(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") wtSubmit();
-            if (e.key === "Escape") onClose();
-          }}
-        />
-        <button
-          className="nproj-btn primary un-git-clone"
-          onClick={wtSubmit}
-          disabled={busy || !wtRepo || !wtName.trim()}
-        >
-          {busy ? "创建中…" : "创建隔离工作区"}
-        </button>
       </div>
     </div>
   );
