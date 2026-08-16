@@ -115,12 +115,15 @@ impl AcpBridge {
             &desc,
             cwd,
             resume_key,
+            model.as_deref(),
             sink,
             self.permissions.clone(),
         )?;
         let handle = Arc::new(handle);
 
         let acp_sid = handle.acp_session_id();
+        // Prefer caller model; else bootstrap effective (zen free / preferred).
+        let effective_model = model.or_else(|| handle.last_model());
         let info = AgentInfo {
             id: id.to_string(),
             workspace_id,
@@ -132,7 +135,7 @@ impl AcpBridge {
             pid: None,
             mode: mode.to_string(),
             speed: speed.to_string(),
-            model,
+            model: effective_model,
             last_usage: None,
         };
 
@@ -188,6 +191,17 @@ impl AcpBridge {
         );
         // Long timeout: real models can be slow; mock is instant.
         let result = handle.prompt(text, Duration::from_secs(300));
+        // Reflect rate-limit fallback model onto AgentInfo + panel error was
+        // already humanized inside host.
+        if let Some(m) = handle.last_model() {
+            if let Ok(mut g) = self.sessions.lock() {
+                if let Some(entry) = g.get_mut(id) {
+                    if entry.info.model.as_deref() != Some(m.as_str()) {
+                        entry.info.model = Some(m);
+                    }
+                }
+            }
+        }
         // On hard failure before turn_done, drop back to idle so the strip
         // does not stick on 运行中. Successful turns already emit idle via
         // handle_line(stopReason).
@@ -230,6 +244,46 @@ impl AcpBridge {
     /// Cancel in-flight turn — **notification only** (DEF-002).
     pub fn cancel(&self, id: &str) -> Result<(), AcpHostError> {
         self.handle(id)?.cancel()
+    }
+
+    /// Live model switch via `session/set_config_option` + update AgentInfo.model.
+    pub fn set_model(&self, id: &str, model: &str) -> Result<(), AcpHostError> {
+        let handle = self.handle(id)?;
+        handle.set_model(model, Duration::from_secs(30))?;
+        if let Ok(mut g) = self.sessions.lock() {
+            if let Some(entry) = g.get_mut(id) {
+                entry.info.model = Some(model.to_string());
+            }
+        }
+        Ok(())
+    }
+
+    /// Live config option (effort / mode / …).
+    pub fn set_config_option(
+        &self,
+        id: &str,
+        config_id: &str,
+        value: &str,
+    ) -> Result<(), AcpHostError> {
+        self.handle(id)?
+            .set_config_option(config_id, value, Duration::from_secs(30))?;
+        if config_id == "model" {
+            if let Ok(mut g) = self.sessions.lock() {
+                if let Some(entry) = g.get_mut(id) {
+                    entry.info.model = Some(value.to_string());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Update cached AgentInfo.model without RPC (e.g. after bootstrap event).
+    pub fn note_model(&self, id: &str, model: Option<String>) {
+        if let Ok(mut g) = self.sessions.lock() {
+            if let Some(entry) = g.get_mut(id) {
+                entry.info.model = model;
+            }
+        }
     }
 
     pub fn respond_permission(
@@ -356,6 +410,7 @@ mod tests {
             &mock_descriptor(),
             &cwd,
             None,
+            None,
             sink.clone() as Arc<dyn AcpEventSink>,
             perms,
         )
@@ -399,6 +454,7 @@ mod tests {
             "acp:mock",
             &mock_descriptor(),
             &cwd,
+            None,
             None,
             sink as Arc<dyn AcpEventSink>,
             perms,
@@ -467,6 +523,7 @@ mod tests {
                 &mock_descriptor(),
                 &cwd,
                 None,
+                None,
                 sink.clone() as Arc<dyn AcpEventSink>,
                 perms,
             )
@@ -528,6 +585,7 @@ mod tests {
                 "acp:mock",
                 &mock_descriptor(),
                 &cwd,
+                None,
                 None,
                 sink.clone() as Arc<dyn AcpEventSink>,
                 perms,
@@ -599,6 +657,7 @@ mod tests {
             &mock_descriptor(),
             &root,
             None,
+            None,
             sink.clone() as Arc<dyn AcpEventSink>,
             perms,
         )
@@ -645,5 +704,64 @@ mod tests {
         handle.kill().ok();
         let _ = std::fs::remove_file(&outside);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Product smoke against real `opencode acp` when available.
+    /// Prefers zen free; host falls back to go on rate limit.
+    #[test]
+    fn opencode_acp_real_prompt_smoke() {
+        if std::env::var("CAP_SKIP_OPENCODE_ACP").ok().as_deref() == Some("1") {
+            eprintln!("skip: CAP_SKIP_OPENCODE_ACP=1");
+            return;
+        }
+        // Resolve opencode on PATH.
+        let has = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("command -v opencode")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !has {
+            eprintln!("skip: opencode not on PATH");
+            return;
+        }
+
+        let bridge = AcpBridge::new();
+        let cwd = std::env::temp_dir();
+        let desc = AcpAgentDescriptor {
+            id: "opencode".into(),
+            name: "OpenCode ACP smoke".into(),
+            command: "opencode".into(),
+            args: vec!["acp".into()],
+            env: HashMap::new(),
+            cwd_mode: "session".into(),
+            icon: None,
+            enabled: true,
+        };
+        // Prefer go first for reliability when zen free is rate-limited in CI/dev;
+        // user UI still defaults to zen free via registry is_default.
+        let info = bridge
+            .start(
+                "oc-smoke-1",
+                "acp:opencode",
+                &cwd,
+                "smoke",
+                "ask",
+                "low",
+                Some("opencode-go/deepseek-v4-flash".into()),
+                None,
+                None,
+                None,
+                Some(desc),
+            )
+            .expect("start opencode acp");
+        assert_eq!(info.runtime, "acp:opencode");
+        let stop = bridge
+            .prompt("oc-smoke-1", "Reply with exactly one word: pong")
+            .expect("prompt must succeed");
+        assert_eq!(stop, "end_turn");
+        let live = bridge.info("oc-smoke-1").expect("info");
+        eprintln!("opencode smoke model={:?}", live.model);
+        bridge.kill("oc-smoke-1").ok();
     }
 }

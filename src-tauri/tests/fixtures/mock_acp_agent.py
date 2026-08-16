@@ -88,6 +88,26 @@ def main() -> None:
                     "result": {"sessionId": session_id, "configOptions": []},
                 }
             )
+        elif method == "session/set_config_option":
+            # Echo success so host bootstrap / live model switch do not fail.
+            cid = params.get("configId") or "model"
+            val = params.get("value") or ""
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": mid,
+                    "result": {
+                        "configOptions": [
+                            {
+                                "id": cid,
+                                "type": "select",
+                                "currentValue": val,
+                                "options": [{"value": val, "name": val}],
+                            }
+                        ]
+                    },
+                }
+            )
         elif method == "session/prompt":
             session_id = params.get("sessionId") or session_id
             text = ""

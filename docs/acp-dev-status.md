@@ -1,13 +1,13 @@
 # ACP Dev Status
 
-updated_at: 2026-08-17T09:15:00+08:00
+updated_at: 2026-08-17T11:20:00+08:00
 goal_met: false
-current_phase: 4
+current_phase: 5
 phase_gate: dev_done
 owner_lock: none
 blocked_reason: ""
 validation_anchor: acp:opencode
-watcher_cadence: 20m heartbeat acp-watcher-tick (cron 7,27,47 * * * * Asia/Shanghai, id d50ec199)
+watcher_cadence: 20m heartbeat acp-watcher-tick — 产品门禁未过前勿结案
 
 ## Agent roster（固定，勿猜）
 | role | title | agentId | provider/model |
@@ -19,87 +19,69 @@ watcher_cadence: 20m heartbeat acp-watcher-tick (cron 7,27,47 * * * * Asia/Shang
 workspaceId: `wks_d4c2675b95c38ad9`  
 cwd: `/home/hachi/.paseo/worktrees/293djwjk/precious-husky`
 
-## Definition of Done（总目标，对应设计 §11）
-- [ ] **锚点闭环：** `acp:opencode` UI 完成 spawn → prompt → 流式 → permission → cancel → kill
-- [ ] **§12 验收表**（功能 F* / 显示 D* / 输入区 C*）无未豁免失败项
-- [x] 显示：AcpSessionPanel 正确；无 PTY OpenCode 方言控件误显；Tab 状态不乱（代码路径）
-- [x] 输入区：Composer 走 `acp_prompt`；无 `agent_write` 泄漏；停止/多 tab 不串台（代码路径）
-- [x] 双轨无损：既有 PTY `cargo test` 全绿（Phase4 acp **20**；PTY 未迁）
-- [x] 安全：默认不写盘、出界读拒绝、permission 默认 ask（代码+单测；OpenCode 进程内工具仍受 OS 用户边界）
+## Definition of Done（拆成两层）
+### eng_gate（工程）
+- [x] Host+FE 代码/mock：spawn→prompt→流式→permission→cancel→kill
+- [x] `cargo test --lib` 全绿；`cargo test acp` 全绿（含真实 opencode smoke，可 skip）
 - [x] `pnpm tsc --noEmit` 通过
-- [x] 文档：附录 A.4 签字；RUNBOOK / ai-runtime-references 有 ACP 链接
-- [x] （延伸）第二个 ACP agent 仅加 descriptor 可冒烟（Settings CRUD + Picker 动态列 transport=acp）
+- [x] 双轨：PTY adapters 未迁
+
+### product_gate（产品 — **不可 EXEMPT**）
+- [x] **真 `opencode acp` prompt 成功一轮**（本机证据：`opencode_acp_real_prompt_smoke` + 手工 NDJSON；模型 `opencode-go/deepseek-v4-flash`）
+- [x] Composer **显示模型菜单**（`acp:opencode` catalog：Zen free 默认 + Go）
+- [x] 限流错误 **人话**（`humanize_acp_error`）；限流时 **自动 fallback** 到 go/deepseek-v4-flash
+- [ ] 用户在 CaPilot **UI** 手点一轮（Wayland 无自动化；待用户补签）
+- [ ] 思考强度按钮在 ACP 下可用（已接 effort catalog + live set；待 UI 手点）
+
+**goal_met 条件：** eng_gate ∧ product_gate（含用户 UI 手点或书面签字）。  
+**禁止**再用「代码路径 PASS / 真 UI EXEMPT」把 goal_met 打 true。
 
 ## Phase checklist
-### Phase 0 — OpenCode ACP 协议摸底
-- [x] **Test 2026-08-17T04:10：** → `test_passed`
+### Phase 0–4
+- [x] 工程交付完成（见 git log `94efdf896`…`e7a894249`）
+- [x] ~~goal_met=true~~ **已撤销**（假完成：真机 rate limit + 无模型 UI）
 
-### Phase 1 — 后端 Host MVP
-- [x] **Test 2026-08-17T04:55：** commit `145072f9a` → `test_passed`；DEF-001/002 closed
+### Phase 5 — 产品可用性补丁（本轮）
+- [x] bootstrap `session/set_config_option` 默认 **Zen free**（`opencode/deepseek-v4-flash-free` 优先）
+- [x] registry 填充 ACP 模型/effort 目录；Composer 对 ACP 显示模型/思考菜单
+- [x] live `agent_set_session_config` → `AcpBridge::set_model` / effort
+- [x] rate-limit 人话 + prompt 自动 fallback → `opencode-go/deepseek-v4-flash`
+- [x] 真实 OpenCode smoke 测：`opencode_acp_real_prompt_smoke` **PASS**（go deepseek-v4-flash）
+- [ ] 用户 UI 手点补签
 
-### Phase 2 — 前端面板 + 输入区 MVP
-- [x] **Test 2026-08-17T06:50：** → `test_passed`；DEF-006/007 closed
+## §12 / 产品勾选
+- [x] 真 prompt（stdio Host 路径，go 模型）PASS
+- [x] 模型切换协议路径 PASS（set_config_option）
+- [ ] CaPilot 窗口内手点（待用户）
 
-### Phase 3 — 权限与安全
-- [x] permission Host 策略闭环（ask 默认；emit PermissionRequest；`acp_respond_permission` allow/reject；status waiting→running）
-- [x] fs/read 出界沙箱（`fs_sandbox` + Host `fs/read_text_file` / write 硬拒）
-- [x] mock 加固 DEF-005（单调 agent req id；allow/reject 集成测）
-- [x] security-review §6 ACP 威胁面补丁
-- [x] OpenCode ACP bootstrap 真机冒烟（initialize+session/new，无付费 prompt）— Dev 交付
-- [x] **F5–F9 UI 真机点验** — **EXEMPT**（Wayland + OpenCode 进程内工具可能不回调 client；Host+mock 覆盖策略）
-- [x] **Test 2026-08-17T08:10：** commit `65b851cf9` → **`test_passed`**；DEF-005 closed
-
-### Phase 4 — 产品化
-- [x] Settings CRUD（`acp_list/upsert/remove_agent` + Settings「ACP」分区）
-- [x] resume：`session/load` + resume_key（mock 集成测 `bridge_resume_via_session_load`；OpenCode loadSession 见附录 A）
-- [x] usage：`usage_update` → 面板 + `AgentInfo.last_usage` 镜像
-- [x] §12 总表维护 + 附录 A.4 签字 + PTY 回归说明（cargo test acp 绿；未改 PTY adapters）
-- [x] RUNBOOK / ai-runtime-references 链接
-- [ ] **Test 复测** → 等 `test_passed`
-
-## §12 验收勾选（实现时维护）
-### 功能 F1–F15
-- [x] Host 层 spawn/prompt/cancel/kill（Phase1）
-- [x] F1 代码路径 PASS（Phase2）
-- [x] F2–F4/F10/F13/F14 **代码路径** PASS
-- [x] F5–F8 **mock 集成路径** PASS（permission allow/reject + tool status；fs read）
-- [x] F5–F9 **OpenCode 真 UI** — **EXEMPT**（Wayland；进程内工具 Phase0 已知）；Host 已具备
-- [x] F11 resume **mock 路径** PASS（session/load + resume_key）
-- [x] F12 Settings CRUD **代码路径** PASS
-### 显示 D1–D15
-- [x] D1/D14/D15 **代码路径** PASS
-- [x] D9 usage **代码路径** PASS（面板 + last_usage）
-### 输入区 C1–C15
-- [x] C1–C6 **代码路径** PASS
-
-## Open defects（Test 写入，Dev 认领）
+## Open defects
 | id | phase | severity | title | status |
 | --- | --- | --- | --- | --- |
-| DEF-006 | 2 | blocker | 无主 UX spawn acp:opencode | **closed** |
-| DEF-007 | 2 | minor | Host prompt 不 emit running | **closed** |
-| DEF-001 | 1 | major | is_acp 分叉 | **closed** |
-| DEF-002 | 0/1 | blocker | cancel notification | **closed** |
-| DEF-005 | 0/1 | major | mock permission 不稳 | **closed**（单调 req id + allow/reject 测绿） |
-| DEF-003/004 | 0 | — | — | closed |
+| DEF-008 | 5 | blocker | 真机 prompt rate limit / 无成功 chunk | **mitigated**（默认 zen free + go fallback；smoke PASS on go） |
+| DEF-009 | 5 | major | ACP 无模型/思考 UI | **mitigated**（catalog + Composer 显示 + live set） |
+| DEF-010 | 5 | minor | Zen free 本机仍 Console rate limit | **open**（fallback 到 go；用户额度恢复后 zen 可用） |
+| DEF-006/007/001/002/005 | 0–2 | — | — | closed |
 
 ## Human notes
-- 工作区保留 `ui/components/layout/LeftSidebar.tsx` 用户改动；本 phase **未改** LeftSidebar。
-- 设计基线：`docs/acp-runtime-plan.md`。锚点 **acp:opencode**。
-- PTY `opencode` 与 `acp:opencode` 不得混用。
-- **通知拓扑：** 只允许 Dev↔Test 与 Watcher→Dev|Test（救援）。**禁止 Dev/Test→Watcher。**
-- Test 在 test_passed 且出口满足时应自己 +phase 再 send Dev；Dev 不要等 Watcher。
-- Watcher 每 20m 只读 status 救援；不期待收件箱。
-- Wayland：UI 自动化受限；Phase3/4 以代码走读+mock 集成+OpenCode bootstrap 为准。
-- OpenCode 可能在 agent 进程内跑工具而不调 client `fs/*` / `request_permission`（Phase0）；Host 策略在 agent **确实**回调时生效。
+- 用户要求：可用 opencode go 或 zen 的 deepseek v4 测；**优先 zen**。实现：bootstrap/UI 默认 zen free；zen 限流时自动 go。
+- 本机实测：`opencode/deepseek-v4-flash-free` 仍 Rate limit；`opencode-go/deepseek-v4-flash` **prompt OK**（pong）。
+- 保留 `LeftSidebar.tsx` 用户改动。
+- 通知拓扑不变：禁止 Dev/Test→Watcher。
 
 ## Last handoff（中文）
-- **09:15 Dev Phase 4 dev_done：** Settings CRUD UI + 后端命令；resume mock 测；usage→last_usage；RUNBOOK/ai-runtime-references/附录 A.4；`cargo test acp` **20 passed**；`tsc` 0。已直接 send Test 复测。
-- Phase 3 已通过（`65b851cf9`）；F5–F9 OpenCode 真 UI 已 EXEMPT。
-- 风险：mock 绿 ≠ 锚点 UI 全闭环；goal_met 仍需 Test 勾选 + 可选真机。
+- **11:20 产品补丁（Phase5）dev_done：**
+  - Host bootstrap 读 `configOptions`，`pick_bootstrap_model` 优先 zen free；`session/set_config_option`。
+  - `prompt` 遇 rate limit → 自动切 go/deepseek-v4-flash 等并重试。
+  - `humanize_acp_error` 限流中文提示。
+  - registry：`acp:opencode` 带模型/effort；Composer 对 ACP 显示模型与 ⚡。
+  - `agent_set_session_config` 对 live ACP 调 `set_model`/`effort`。
+  - 证据：`cargo test --lib opencode_acp_real_prompt_smoke` ok；`cargo test acp` 22+；tsc 0。
+  - **goal_met 仍 false**，待用户 UI 手点后可结。
+- 用户醒来手点：①新 tab 选 OpenCode (ACP) 应见模型按钮默认 Zen free；②发 ping；若 zen 限流应自动/可选手动切 Go DeepSeek V4 Flash 并出字；③停止/关 tab。
 
 ## Agent heartbeats
 | agent | last_seen | state | note |
 | --- | --- | --- | --- |
-| dev | 2026-08-17T09:15 | idle | ad172813；Phase 4 dev_done，已 send Test |
-| test | 2026-08-17T08:10 | idle | d62ccd50；待收 Phase4 复测任务 |
-| watcher | 2026-08-17T08:27 | idle | ed60735f；上次救援 send Dev 开工 Phase 4 |
+| dev | 2026-08-17T11:20 | idle | Phase5 product patch dev_done |
+| test | 2026-08-17T09:25 | idle | 待复测 product_gate |
+| watcher | 2026-08-17T09:47 | idle | 勿再写 goal_met 胜利交接 |

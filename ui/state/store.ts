@@ -1425,6 +1425,14 @@ export const useStore = create<AppState>((set, get) => {
             },
           };
         }
+        // Bootstrap model after zen-free default / preferred apply.
+        if (
+          payload.type === "session_started" &&
+          payload.model &&
+          patched.model !== payload.model
+        ) {
+          patched = { ...patched, model: payload.model };
+        }
         if (status !== agent.status || patched !== agent) {
           agents.set(id, { ...patched, status });
           agentsOut = agents;

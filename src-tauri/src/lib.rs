@@ -495,12 +495,15 @@ fn build_and_spawn_acp(
     let acp_sid = acp_bridge.acp_session_id(id);
     let persisted_key = acp_sid.or(resume_key);
 
+    // Bootstrap may have applied zen-free default or honored preferred model.
+    let effective_model = info.model.clone().or(model.clone());
+
     info.runtime = runtime.to_string();
     info.workspace_id = Some(workspace_id.clone());
     info.project = Some(project.to_string());
     info.mode = normalized_mode.clone();
     info.speed = normalized_speed.clone();
-    info.model = model.clone();
+    info.model = effective_model.clone();
     info.title = title.clone();
 
     let now = now_ms();
@@ -514,7 +517,7 @@ fn build_and_spawn_acp(
         title: title.clone(),
         mode: normalized_mode.clone(),
         speed: normalized_speed.clone(),
-        model: model.clone(),
+        model: effective_model.clone(),
         updated_at: now,
     };
     if let Err(e) = write_agent_meta(project, &meta) {
@@ -531,7 +534,7 @@ fn build_and_spawn_acp(
         status: "running".to_string(),
         mode: normalized_mode,
         speed: normalized_speed,
-        model,
+        model: effective_model,
         created_at: now,
         updated_at: now,
     };
@@ -1190,11 +1193,13 @@ async fn agent_switch_runtime(
 
 /// Update a session's composer config (permission mode / speed / model).
 /// Persists to the DB row + `.agent-meta.json` so the next `agent_resume` uses
-/// the new values; the running PTY is intentionally NOT touched (no restart, no
-/// interruption). Omitted fields keep their current value.
+/// the new values. For PTY sessions the running process is intentionally NOT
+/// restarted. For ACP sessions, model/effort are also applied live via
+/// `session/set_config_option` when the process is up.
 #[tauri::command]
 async fn agent_set_session_config(
     persistence: tauri::State<'_, Arc<Persistence>>,
+    acp_bridge: tauri::State<'_, Arc<AcpBridge>>,
     id: String,
     mode: Option<String>,
     speed: Option<String>,
@@ -1202,21 +1207,26 @@ async fn agent_set_session_config(
 ) -> Result<(), String> {
     // Read the record, validate/normalize the new values (unknown strings keep
     // the stored value rather than clobbering it), and update the DB row.
-    let (project, mode, speed, model) = {
+    let (project, mode, speed, model, is_acp, model_changed, speed_changed) = {
         let db = persistence.db().lock().unwrap();
         let rec = db
             .get(&id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Session not found: {id}"))?;
+        let is_acp = acp::is_acp_runtime(&rec.runtime);
         // ACP: only ask/auto/yolo; do not call get_adapter (DEF-001).
-        let (mode, speed, model) = if acp::is_acp_runtime(&rec.runtime) {
+        let (mode, speed, model, model_changed, speed_changed) = if is_acp {
             let mode = match mode.as_deref() {
                 Some("ask") | Some("auto") | Some("yolo") => mode.unwrap(),
                 _ => rec.mode.clone(),
             };
+            let speed_in = speed.clone();
             let speed = speed.unwrap_or_else(|| rec.speed.clone());
+            let model_in = model.clone();
             let model = model.or_else(|| rec.model.clone());
-            (mode, speed, model)
+            let model_changed = model_in.is_some() && model != rec.model;
+            let speed_changed = speed_in.is_some() && speed != rec.speed;
+            (mode, speed, model, model_changed, speed_changed)
         } else {
             let adapter = get_adapter(&rec.runtime);
             let permission_modes = adapter.list_permission_modes();
@@ -1230,13 +1240,37 @@ async fn agent_set_session_config(
                 _ => rec.speed.clone(),
             };
             let model = model.or_else(|| rec.model.clone());
-            (mode, speed, model)
+            (mode, speed, model, false, false)
         };
         let now = now_ms();
         db.update_config(&id, &mode, &speed, model.as_deref(), now)
             .map_err(|e| e.to_string())?;
-        (rec.project.clone(), mode, speed, model)
+        (
+            rec.project.clone(),
+            mode,
+            speed,
+            model,
+            is_acp,
+            model_changed,
+            speed_changed,
+        )
     };
+
+    // ACP live apply outside the DB lock (RPC can take hundreds of ms).
+    if is_acp && acp_bridge.contains(&id) {
+        if model_changed {
+            if let Some(ref m) = model {
+                acp_bridge
+                    .set_model(&id, m)
+                    .map_err(|e| format!("切换 ACP 模型失败：{e}"))?;
+            }
+        }
+        if speed_changed && speed != "auto" {
+            if let Err(e) = acp_bridge.set_config_option(&id, "effort", &speed) {
+                log::warn!("acp live set effort {id}: {e}");
+            }
+        }
+    }
 
     // Keep the per-agent meta file in sync (used by custom_project_root recovery).
     let now = now_ms();

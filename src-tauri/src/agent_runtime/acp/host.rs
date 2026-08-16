@@ -88,6 +88,8 @@ pub struct AcpSessionHandle {
     pub acp_session_id: Arc<Mutex<Option<String>>>,
     pub capabilities: Arc<Mutex<Value>>,
     pub status: Arc<Mutex<AcpSessionStatus>>,
+    /// Last known model id (bootstrap or fallback).
+    pub last_model: Arc<Mutex<Option<String>>>,
     cmd_tx: Sender<HostCmd>,
     /// Set when the IO thread exits.
     dead: Arc<AtomicBool>,
@@ -113,7 +115,22 @@ impl AcpSessionHandle {
             .and_then(|g| g.clone())
     }
 
+    pub fn last_model(&self) -> Option<String> {
+        self.last_model.lock().ok().and_then(|g| g.clone())
+    }
+
+    pub fn note_last_model(&self, model: &str) {
+        if let Ok(mut g) = self.last_model.lock() {
+            *g = Some(model.to_string());
+        }
+    }
+
     /// Send `session/prompt` and wait for the final result (`stopReason`).
+    ///
+    /// On OpenCode provider rate-limit, one automatic fallback is attempted:
+    /// switch to `opencode-go/deepseek-v4-flash` (or the next zen-free id) and
+    /// retry the same prompt once so the first user message is not a hard fail
+    /// when Console/Zen quota is exhausted.
     pub fn prompt(&self, text: &str, timeout: Duration) -> Result<String, AcpHostError> {
         let sid = self
             .acp_session_id()
@@ -126,7 +143,81 @@ impl AcpSessionHandle {
             "sessionId": sid,
             "prompt": [{ "type": "text", "text": text }],
         });
-        let result = self.request("session/prompt", params, timeout)?;
+        let result = match self.request("session/prompt", params.clone(), timeout) {
+            Ok(v) => v,
+            Err(e) => {
+                let msg = e.to_string();
+                let lower = msg.to_ascii_lowercase();
+                if lower.contains("rate limit") {
+                    // One-shot fallback chain for product usability.
+                    const FALLBACKS: &[&str] = &[
+                        "opencode-go/deepseek-v4-flash",
+                        "opencode/nemotron-3.5-lightning-free",
+                        "opencode/hy3-free",
+                        "opencode-go/deepseek-v4-pro",
+                    ];
+                    // Keep fallback prompts shorter so a dead provider does not
+                    // block the UI thread for the full 300s × N window.
+                    let fb_timeout = timeout.min(Duration::from_secs(90));
+                    let mut last_err = e;
+                    for fb in FALLBACKS {
+                        log::warn!("acp prompt rate-limited; trying fallback model {fb}");
+                        match self.set_model(fb, Duration::from_secs(15)) {
+                            Ok(_) => {
+                                match self.request(
+                                    "session/prompt",
+                                    json!({
+                                        "sessionId": sid,
+                                        "prompt": [{ "type": "text", "text": text }],
+                                    }),
+                                    fb_timeout,
+                                ) {
+                                    Ok(v) => {
+                                        let stop = v
+                                            .get("stopReason")
+                                            .and_then(|s| s.as_str())
+                                            .unwrap_or("end_turn")
+                                            .to_string();
+                                        {
+                                            let mut st = self
+                                                .status
+                                                .lock()
+                                                .unwrap_or_else(|e| e.into_inner());
+                                            *st = AcpSessionStatus::Ready;
+                                        }
+                                        self.note_last_model(fb);
+                                        return Ok(stop);
+                                    }
+                                    Err(e2) => {
+                                        last_err = e2;
+                                        if !last_err
+                                            .to_string()
+                                            .to_ascii_lowercase()
+                                            .contains("rate limit")
+                                        {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e2) => {
+                                last_err = e2;
+                            }
+                        }
+                    }
+                    {
+                        let mut st = self.status.lock().unwrap_or_else(|e| e.into_inner());
+                        *st = AcpSessionStatus::Ready;
+                    }
+                    return Err(last_err);
+                }
+                {
+                    let mut st = self.status.lock().unwrap_or_else(|e| e.into_inner());
+                    *st = AcpSessionStatus::Ready;
+                }
+                return Err(e);
+            }
+        };
         let stop = result
             .get("stopReason")
             .and_then(|v| v.as_str())
@@ -152,6 +243,29 @@ impl AcpSessionHandle {
             })
             .map_err(|_| AcpHostError::ChannelClosed)?;
         Ok(())
+    }
+
+    /// Live `session/set_config_option` (OpenCode: model / effort / mode).
+    pub fn set_config_option(
+        &self,
+        config_id: &str,
+        value: &str,
+        timeout: Duration,
+    ) -> Result<Value, AcpHostError> {
+        let sid = self.acp_session_id().ok_or(AcpHostError::NotReady)?;
+        let params = json!({
+            "sessionId": sid,
+            "configId": config_id,
+            "value": value,
+        });
+        self.request("session/set_config_option", params, timeout)
+    }
+
+    /// Convenience: switch model via config option id `"model"`.
+    pub fn set_model(&self, model: &str, timeout: Duration) -> Result<Value, AcpHostError> {
+        let v = self.set_config_option("model", model, timeout)?;
+        self.note_last_model(model);
+        Ok(v)
     }
 
     /// Answer a pending `session/request_permission`.
@@ -252,13 +366,95 @@ fn rpc_id_key(id: &Value) -> String {
     }
 }
 
+/// Prefer OpenCode Zen free models (especially deepseek-v4-flash-free) so
+/// product smoke does not die on the paid/Console default (`big-pickle`).
+pub fn pick_bootstrap_model(
+    available: &[String],
+    preferred: Option<&str>,
+) -> Option<String> {
+    if available.is_empty() {
+        return preferred.map(|s| s.to_string());
+    }
+    let has = |id: &str| available.iter().any(|a| a == id);
+    if let Some(p) = preferred {
+        if has(p) {
+            return Some(p.to_string());
+        }
+    }
+    const PREFERRED_FREE: &[&str] = &[
+        "opencode/deepseek-v4-flash-free",
+        "opencode/nemotron-3.5-lightning-free",
+        "opencode/hy3-free",
+        "opencode/mimo-v2.5-free",
+        "opencode/laguna-s-2.1-free",
+        "opencode/nemotron-3-ultra-free",
+    ];
+    for id in PREFERRED_FREE {
+        if has(id) {
+            return Some((*id).to_string());
+        }
+    }
+    // Any remaining free zen id, then go/deepseek flash, else first catalog entry.
+    if let Some(id) = available.iter().find(|a| a.contains("-free") || a.ends_with("/free")) {
+        return Some(id.clone());
+    }
+    if has("opencode-go/deepseek-v4-flash") {
+        return Some("opencode-go/deepseek-v4-flash".into());
+    }
+    available.first().cloned()
+}
+
+fn model_values_from_config_options(opts: &Value) -> (Vec<String>, Option<String>) {
+    let mut values = Vec::new();
+    let mut current = None;
+    let Some(arr) = opts.as_array() else {
+        return (values, current);
+    };
+    for opt in arr {
+        if opt.get("id").and_then(|v| v.as_str()) != Some("model") {
+            continue;
+        }
+        current = opt
+            .get("currentValue")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if let Some(options) = opt.get("options").and_then(|v| v.as_array()) {
+            for o in options {
+                if let Some(v) = o.get("value").and_then(|v| v.as_str()) {
+                    values.push(v.to_string());
+                }
+            }
+        }
+    }
+    (values, current)
+}
+
+/// Human-facing message for JSON-RPC / provider failures (rate limit, etc.).
+pub fn humanize_acp_error(raw: &str) -> String {
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("rate limit") {
+        return format!(
+            "模型额度已用尽或触发限流。请在 Composer 切换到 OpenCode Zen 免费模型（优先 deepseek-v4-flash-free）或 OpenCode Go。原始错误：{raw}"
+        );
+    }
+    if lower.contains("insufficient") && (lower.contains("quota") || lower.contains("credit")) {
+        return format!("账户额度不足。请切换模型或检查 OpenCode 账单。原始错误：{raw}");
+    }
+    raw.to_string()
+}
+
 /// Spawn the agent process, run initialize + session/new|load, return handle.
+///
+/// When `preferred_model` is set (or the agent advertises a model catalog),
+/// bootstrap applies `session/set_config_option` so the first prompt is not
+/// stuck on a rate-limited default.
 pub fn start_session(
     agent_id: &str,
     runtime: &str,
     desc: &AcpAgentDescriptor,
     cwd: &Path,
     resume_key: Option<&str>,
+    preferred_model: Option<&str>,
     sink: Arc<dyn AcpEventSink>,
     permissions: PermissionBoard,
 ) -> Result<AcpSessionHandle, AcpHostError> {
@@ -296,6 +492,7 @@ pub fn start_session(
     let dead = Arc::new(AtomicBool::new(false));
     let status = Arc::new(Mutex::new(AcpSessionStatus::Connecting));
     let acp_session_id = Arc::new(Mutex::new(None::<String>));
+    let last_model = Arc::new(Mutex::new(None::<String>));
     let capabilities = Arc::new(Mutex::new(Value::Null));
     let child_arc = Arc::new(Mutex::new(Some(child)));
 
@@ -324,10 +521,12 @@ pub fn start_session(
     let perms_io = permissions.clone();
     let child_io = Arc::clone(&child_arc);
     let resume_owned = resume_key.map(|s| s.to_string());
+    let preferred_owned = preferred_model.map(|s| s.to_string());
     let cwd_owned = cwd.to_path_buf();
 
     // Bootstrap channel: IO thread signals initialize+session ready (or err).
-    let (boot_tx, boot_rx) = mpsc::channel::<Result<(), AcpHostError>>();
+    // Also returns effective model id after set_config_option (if any).
+    let (boot_tx, boot_rx) = mpsc::channel::<Result<Option<String>, AcpHostError>>();
 
     thread::Builder::new()
         .name(format!("acp-io-{agent_id_owned}"))
@@ -345,6 +544,7 @@ pub fn start_session(
                 caps_io.clone(),
                 child_io,
                 resume_owned,
+                preferred_owned,
                 cwd_owned,
                 boot_tx,
             );
@@ -364,9 +564,15 @@ pub fn start_session(
         })
         .map_err(|e| AcpHostError::Message(format!("spawn io thread: {e}")))?;
 
-    // Wait for bootstrap (initialize + session/new|load).
-    match boot_rx.recv_timeout(Duration::from_secs(30)) {
-        Ok(Ok(())) => {}
+    // Wait for bootstrap (initialize + session/new|load + optional model set).
+    match boot_rx.recv_timeout(Duration::from_secs(45)) {
+        Ok(Ok(effective_model)) => {
+            if let Some(m) = effective_model {
+                if let Ok(mut g) = last_model.lock() {
+                    *g = Some(m);
+                }
+            }
+        }
         Ok(Err(e)) => {
             let _ = cmd_tx.send(HostCmd::Kill);
             return Err(e);
@@ -384,6 +590,7 @@ pub fn start_session(
         acp_session_id,
         capabilities,
         status,
+        last_model,
         cmd_tx,
         dead,
         child: child_arc,
@@ -412,8 +619,9 @@ fn io_loop(
     capabilities: Arc<Mutex<Value>>,
     child: Arc<Mutex<Option<Child>>>,
     resume_key: Option<String>,
+    preferred_model: Option<String>,
     cwd: PathBuf,
-    boot_tx: Sender<Result<(), AcpHostError>>,
+    boot_tx: Sender<Result<Option<String>, AcpHostError>>,
 ) -> Result<(), AcpHostError> {
     let next_id = AtomicU64::new(1);
     let mut pending: HashMap<String, Sender<Result<Value, AcpHostError>>> = HashMap::new();
@@ -569,6 +777,78 @@ fn io_loop(
     if let Ok(mut g) = acp_session_id.lock() {
         *g = Some(sid.clone());
     }
+
+    // Apply model from preferred / zen-free defaults when the agent exposes a catalog.
+    let mut config_options = sess_val.get("configOptions").cloned();
+    let (catalog, current_model) = config_options
+        .as_ref()
+        .map(model_values_from_config_options)
+        .unwrap_or_default();
+    let target_model = pick_bootstrap_model(&catalog, preferred_model.as_deref());
+    let mut effective_model = current_model.clone();
+
+    if let Some(target) = target_model.as_ref() {
+        let needs_switch = current_model.as_deref() != Some(target.as_str());
+        if needs_switch && !catalog.is_empty() {
+            let set_id = next_id.fetch_add(1, Ordering::SeqCst);
+            let set_req = json!({
+                "jsonrpc": "2.0",
+                "id": set_id,
+                "method": "session/set_config_option",
+                "params": {
+                    "sessionId": sid,
+                    "configId": "model",
+                    "value": target,
+                }
+            });
+            if let Err(e) = write_line(&mut stdin, &set_req) {
+                let _ = boot_tx.send(Err(e));
+                return Ok(());
+            }
+            let (set_tx, set_rx) = mpsc::channel();
+            pending.insert(set_id.to_string(), set_tx);
+            match pump_until(
+                &agent_id,
+                &mut stdin,
+                &line_rx,
+                &cmd_rx,
+                &mut pending,
+                &sink,
+                &permissions,
+                &status,
+                &next_id,
+                &set_rx,
+                Duration::from_secs(20),
+                &cwd,
+            ) {
+                Ok(v) => {
+                    if let Some(opts) = v.get("configOptions").cloned() {
+                        config_options = Some(opts.clone());
+                        let (_, cur) = model_values_from_config_options(&opts);
+                        effective_model = cur.or_else(|| Some(target.clone()));
+                    } else {
+                        effective_model = Some(target.clone());
+                    }
+                }
+                Err(e) => {
+                    // Non-fatal: keep session with agent default; surface warning.
+                    log::warn!("acp bootstrap set_config_option(model) failed: {e}");
+                    sink.emit(
+                        &agent_id,
+                        AcpEvent::Error {
+                            message: format!(
+                                "未能切换到模型 {target}：{}。将使用 agent 默认模型。",
+                                humanize_acp_error(&e.to_string())
+                            ),
+                        },
+                    );
+                }
+            }
+        } else if !needs_switch {
+            effective_model = Some(target.clone());
+        }
+    }
+
     if let Ok(mut st) = status.lock() {
         *st = AcpSessionStatus::Ready;
     }
@@ -582,6 +862,8 @@ fn io_loop(
         AcpEvent::SessionStarted {
             session_id: sid,
             capabilities: caps_snapshot,
+            config_options,
+            model: effective_model.clone(),
         },
     );
     sink.emit(
@@ -590,7 +872,7 @@ fn io_loop(
             status: "idle".into(),
         },
     );
-    let _ = boot_tx.send(Ok(()));
+    let _ = boot_tx.send(Ok(effective_model));
 
     // ── steady state ────────────────────────────────────────────
     loop {
@@ -793,11 +1075,19 @@ fn handle_line(
             let key = rpc_id_key(id);
             if let Some(tx) = pending.remove(&key) {
                 if let Some(err) = msg.get("error") {
-                    let message = err
+                    let raw = err
                         .get("message")
                         .and_then(|m| m.as_str())
                         .unwrap_or("ACP error")
                         .to_string();
+                    let message = humanize_acp_error(&raw);
+                    // Also push to the panel so the user sees rate-limit etc.
+                    sink.emit(
+                        agent_id,
+                        AcpEvent::Error {
+                            message: message.clone(),
+                        },
+                    );
                     let _ = tx.send(Err(AcpHostError::Message(message)));
                 } else {
                     let result = msg.get("result").cloned().unwrap_or(Value::Null);
@@ -1086,5 +1376,25 @@ fn dispatch_update(agent_id: &str, params: &Value, sink: &Arc<dyn AcpEventSink>)
         _ => {
             log::debug!("acp ignore sessionUpdate={kind}");
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn humanize_rate_limit() {
+        let h = humanize_acp_error(
+            "Internal error: Error from provider (Console): Rate limit exceeded. Please try again later.",
+        );
+        assert!(h.contains("限流") || h.contains("额度"), "{h}");
+    }
+
+    #[test]
+    fn pick_prefers_preferred_when_present() {
+        let cat = vec!["a".into(), "opencode/deepseek-v4-flash-free".into()];
+        assert_eq!(pick_bootstrap_model(&cat, Some("a")).as_deref(), Some("a"));
     }
 }

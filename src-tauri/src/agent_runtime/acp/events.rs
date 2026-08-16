@@ -11,6 +11,12 @@ pub enum AcpEvent {
         #[serde(rename = "sessionId")]
         session_id: String,
         capabilities: Value,
+        /// OpenCode (and other agents) return select options from session/new|load.
+        #[serde(rename = "configOptions", default, skip_serializing_if = "Option::is_none")]
+        config_options: Option<Value>,
+        /// Effective model id after bootstrap defaulting / preferred apply.
+        #[serde(rename = "model", default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     MessageChunk {
         #[serde(rename = "messageId", skip_serializing_if = "Option::is_none")]

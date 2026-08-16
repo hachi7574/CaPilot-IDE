@@ -27,12 +27,20 @@ export async function spawnAgent(
   // selection from another runtime falls back to the target's own default
   // rather than leaking a provider-specific id across runtimes.
   const targetRuntime = s.runtimes.find((r) => r.id === runtime);
+  const catalog = targetRuntime?.models ?? [];
+  const pickDefault = () =>
+    catalog.find((m) => m.is_default)?.id ?? catalog[0]?.id ?? null;
   const pinnedModel =
     runtime === DEFAULT_RUNTIME || runtime === "dsh" || runtime === "pi"
-      ? targetRuntime?.models?.some((m) => m.id === s.selectedModel)
+      ? catalog.some((m) => m.id === s.selectedModel)
         ? s.selectedModel
         : null
-      : null;
+      : isAcpRuntime(runtime)
+        ? catalog.some((m) => m.id === s.selectedModel)
+          ? s.selectedModel
+          : // Prefer zen free default when nothing selected.
+            pickDefault()
+        : null;
 
   // ACP sessions do not use a PTY data channel — backend ignores onData.
   // Still pass a throwaway channel to satisfy the command signature.

@@ -747,6 +747,15 @@ export function Composer() {
 
       thinkingSwitchingRef.current = true;
       try {
+        // ACP: effort is session/set_config_option — no PTY key injection.
+        if (isAcpRuntime(agent.runtime)) {
+          await invoke("agent_set_session_config", { id, speed: nextSpeed });
+          const latest = useStore.getState();
+          latest.setSpeed(nextSpeed as never);
+          const current = latest.agents.get(id);
+          if (current) latest.addAgent({ ...current, speed: nextSpeed }, null);
+          return;
+        }
         // If the restored session has no running PTY, only persist the choice;
         // selecting an effort must not start/restart a session as a side effect.
         if (s.agentChannels.has(id)) {
@@ -2278,7 +2287,8 @@ export function Composer() {
           )}
         </span>
 
-        {!configIsAcp && (
+        {/* Model picker: PTY always; ACP when runtime advertises a catalog */}
+        {(!configIsAcp || models.length > 0) && (
         <span className="cmp-pop" ref={modelAnchorRef}>
           <span
             className="act-btn"
@@ -2423,7 +2433,9 @@ export function Composer() {
           </>
         )}
 
-        {!configIsAcp && menuThinkingOptions.length > 0 && (
+        {/* ACP effort (session/set_config_option effort) + generic PTY thinking */}
+        {((configIsAcp && menuThinkingOptions.length > 0) ||
+          (!configIsAcp && menuThinkingOptions.length > 0)) && (
           <span className="cmp-pop" ref={thinkingAnchorRef}>
             <span
               className="act-btn"

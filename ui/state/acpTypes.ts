@@ -56,7 +56,7 @@ export function emptyAcpSession(): AcpSessionState {
 
 /** Wire payload from backend `AcpEventEnvelope` (`acp://event`). */
 export type AcpEventPayload =
-  | { agentId: string; type: "session_started"; sessionId: string; capabilities?: unknown }
+  | { agentId: string; type: "session_started"; sessionId: string; capabilities?: unknown; configOptions?: unknown; model?: string | null }
   | { agentId: string; type: "message_chunk"; messageId?: string; text: string; role?: string }
   | {
       agentId: string;
