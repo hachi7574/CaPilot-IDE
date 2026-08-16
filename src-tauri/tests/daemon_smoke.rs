@@ -5,6 +5,12 @@
 //! through the `DaemonClient`: spawn → banner output → second-client attach
 //! (checkpoint) → live echo. This exercises the actual process boundary, not
 //! just the in-process `DaemonServer` used by the library tests.
+//!
+//! Unix-only: the daemon's IPC socket is AF_UNIX and the smoke PTY shells are
+//! `/bin/sh` (the Windows daemon uses the same protocol over an AF_UNIX socket
+//! via `uds_windows`, but the Windows CI gate covers compilation only).
+
+#![cfg(unix)]
 
 use capilot_ide_lib::daemon::client::{ClientError, DaemonClient};
 use capilot_ide_lib::daemon::protocol::ClientEvent;
