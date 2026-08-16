@@ -42,8 +42,8 @@ target/
 # Generated icon component (regenerate: python3 scripts/gen_icon_component.py)
 ui/components/Icon.tsx
 
-# Local dev tooling
-scripts/
+# Local dev tooling (root-level only; .github/scripts must stay tracked)
+/scripts/
 
 # Claude Code local config (machine-specific paths / run caches / transient worktrees)
 reasonix.toml
