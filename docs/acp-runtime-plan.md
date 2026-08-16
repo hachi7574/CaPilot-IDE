@@ -840,7 +840,7 @@ Zed custom 参考：
 
 | 日期 | opencode 版本 | §12 通过/失败/N/A | 备注 |
 | --- | --- | --- | --- |
-| | | | |
+| 2026-08-17 | 本机 `opencode`（ACP bootstrap OK） | **代码/mock 路径 PASS**；F5–F9 OpenCode 真 UI **EXEMPT**（Wayland + 进程内工具可能不回调 client） | Phase 0–3 Test `test_passed`（commits 至 `65b851cf9`）。Phase 4：Settings CRUD + usage mirror + RUNBOOK/ai-runtime-references 链接 + resume 路径（`loadSession` 能力见 A.2）。锚点 UI 全闭环仍受 Wayland 限；Host+mock+bootstrap 为门禁。详见 `acp-dev-status.md`。 |
 
 ---
 

@@ -145,6 +145,129 @@ pub fn write_user_file(path: &Path, file: &AcpAgentsFile) -> Result<(), String> 
     fs::write(path, raw).map_err(|e| e.to_string())
 }
 
+/// Validate a descriptor before writing (id / command non-empty; id is a short
+/// slug without `acp:` prefix).
+pub fn validate_descriptor(d: &AcpAgentDescriptor) -> Result<(), String> {
+    let id = d.id.trim();
+    if id.is_empty() {
+        return Err("descriptor id is required".into());
+    }
+    if id.contains(':') || id.contains('/') || id.contains('\\') || id.contains(' ') {
+        return Err(
+            "descriptor id must be a short slug (no 'acp:' prefix, no path separators)".into(),
+        );
+    }
+    if d.command.trim().is_empty() {
+        return Err("descriptor command is required".into());
+    }
+    if d.name.trim().is_empty() {
+        return Err("descriptor name is required".into());
+    }
+    Ok(())
+}
+
+/// Upsert one entry into the user file (does not rewrite built-in defaults).
+/// When the id matches a default, writing a user override shadows it.
+pub fn upsert_user_descriptor(desc: AcpAgentDescriptor) -> Result<AcpAgentDescriptor, String> {
+    validate_descriptor(&desc)?;
+    let path = user_descriptors_path();
+    let mut file = load_user_file(&path);
+    let mut desc = desc;
+    desc.id = desc.id.trim().to_string();
+    desc.name = desc.name.trim().to_string();
+    desc.command = desc.command.trim().to_string();
+    if let Some(slot) = file.agents.iter_mut().find(|a| a.id == desc.id) {
+        *slot = desc.clone();
+    } else {
+        file.agents.push(desc.clone());
+    }
+    file.version = 1;
+    write_user_file(&path, &file)?;
+    Ok(desc)
+}
+
+/// Remove a user override by id. If only the built-in default existed, write an
+/// `enabled: false` shadow so the default disappears from the merged list.
+/// Returns true when the file was modified.
+pub fn remove_user_descriptor(short_id: &str) -> Result<bool, String> {
+    let id = short_id.trim();
+    if id.is_empty() {
+        return Err("id is required".into());
+    }
+    let path = user_descriptors_path();
+    let mut file = load_user_file(&path);
+    let before = file.agents.len();
+    file.agents.retain(|a| a.id != id);
+    let removed = file.agents.len() != before;
+
+    let is_default = default_descriptors().iter().any(|d| d.id == id);
+    if is_default {
+        // Shadow the built-in so it no longer appears until the user re-adds it.
+        file.agents.push(AcpAgentDescriptor {
+            id: id.to_string(),
+            name: id.to_string(),
+            command: String::new(),
+            args: vec![],
+            env: HashMap::new(),
+            cwd_mode: "session".to_string(),
+            icon: None,
+            enabled: false,
+        });
+        write_user_file(&path, &file)?;
+        return Ok(true);
+    }
+
+    if removed {
+        write_user_file(&path, &file)?;
+    }
+    Ok(removed)
+}
+
+/// List every descriptor as stored for Settings: merged view + disabled user
+/// shadows so the UI can show "off" defaults. Each entry includes whether the
+/// command is currently on PATH.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpAgentListItem {
+    #[serde(flatten)]
+    pub descriptor: AcpAgentDescriptor,
+    pub available: bool,
+    /// Full runtime id (`acp:{id}`).
+    pub runtime_id: String,
+    pub is_default: bool,
+}
+
+/// Settings list: defaults + user overrides (including disabled).
+pub fn list_for_settings() -> Vec<AcpAgentListItem> {
+    let mut by_id: HashMap<String, AcpAgentDescriptor> = HashMap::new();
+    let defaults = default_descriptors();
+    let default_ids: std::collections::HashSet<String> =
+        defaults.iter().map(|d| d.id.clone()).collect();
+    for d in defaults {
+        by_id.insert(d.id.clone(), d);
+    }
+    let user = load_user_file(&user_descriptors_path());
+    for d in user.agents {
+        by_id.insert(d.id.clone(), d);
+    }
+    let mut out: Vec<AcpAgentListItem> = by_id
+        .into_values()
+        .map(|d| {
+            let available = d.enabled && command_available(&d.command);
+            let is_default = default_ids.contains(&d.id);
+            let runtime_id = format!("acp:{}", d.id);
+            AcpAgentListItem {
+                descriptor: d,
+                available,
+                runtime_id,
+                is_default,
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| a.descriptor.id.cmp(&b.descriptor.id));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,5 +350,17 @@ mod tests {
         let all = load_all_from(&path);
         assert!(all.is_empty());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_bad_id() {
+        let mut d = default_descriptors().remove(0);
+        d.id = "acp:opencode".into();
+        assert!(validate_descriptor(&d).is_err());
+        d.id = "ok".into();
+        d.command = "".into();
+        assert!(validate_descriptor(&d).is_err());
+        d.command = "opencode".into();
+        assert!(validate_descriptor(&d).is_ok());
     }
 }

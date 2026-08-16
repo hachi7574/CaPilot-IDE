@@ -1333,7 +1333,10 @@ export const useStore = create<AppState>((set, get) => {
           break;
         }
         case "usage":
-          next.usage = { used: payload.used, size: payload.size };
+          next.usage = {
+            used: Number(payload.used) || 0,
+            size: Number(payload.size) || 0,
+          };
           break;
         case "permission_request":
           next.pendingPermission = {
@@ -1387,6 +1390,7 @@ export const useStore = create<AppState>((set, get) => {
       let agentsOut = s.agents;
       if (agent) {
         let status = agent.status;
+        let patched: AgentInfo = agent;
         if (payload.type === "permission_request") {
           status = "waiting_input";
         } else if (payload.type === "turn_done" || payload.type === "error") {
@@ -1408,8 +1412,21 @@ export const useStore = create<AppState>((set, get) => {
             if (status === "idle") status = "running";
           }
         }
-        if (status !== agent.status) {
-          agents.set(id, { ...agent, status });
+        // D9: mirror ACP usage_update onto AgentInfo.last_usage for shared meters.
+        if (payload.type === "usage" && next.usage && next.usage.size > 0) {
+          patched = {
+            ...patched,
+            last_usage: {
+              contextWindowUsedTokens: next.usage.used,
+              contextWindowMaxTokens: next.usage.size,
+              cacheHitTokens: null,
+              cacheTotalInputTokens: null,
+              actualModel: null,
+            },
+          };
+        }
+        if (status !== agent.status || patched !== agent) {
+          agents.set(id, { ...patched, status });
           agentsOut = agents;
         }
       }

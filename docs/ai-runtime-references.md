@@ -1,7 +1,7 @@
 # AI Runtime Integration References
 
-> **日期:** 2026-08-16
-> **定位:** CaPilot 对接各 AI 编码 CLI（claude / codex / opencode / dsh / pi）的**权威链接 + 已落库集成事实**。
+> **日期:** 2026-08-17（增补 ACP 双轨索引；PTY 事实仍以 08-16 核对为准）
+> **定位:** CaPilot 对接各 AI 编码 CLI（claude / codex / opencode / dsh / pi）的**权威链接 + 已落库集成事实**；并索引 **ACP** 通用通道。
 > 原则：仓库里只存「稳定的、属于本项目的事实」；动态的官方细节留在线，用时以官方文档为准。文档站在迭代，以下事实若与官方冲突，**以官方为准**并更新本文件。
 
 ---
@@ -12,7 +12,8 @@
 | --- | --- | --- |
 | **Claude Code** | https://code.claude.com/docs （索引 `llms.txt`） | [CLI reference](https://code.claude.com/docs/en/cli-reference) · [Settings](https://code.claude.com/docs/en/settings) · [Permissions](https://code.claude.com/docs/en/permissions) · [Permission modes（Shift+Tab 环）](https://code.claude.com/docs/en/permission-modes) · [Slash commands（`/model` `/effort`）](https://code.claude.com/docs/en/commands) · [Interactive mode](https://code.claude.com/docs/en/interactive-mode) · [Keybindings](https://code.claude.com/docs/en/keybindings) · [Sessions & resume](https://code.claude.com/docs/en/sessions) · [Model config](https://code.claude.com/docs/en/model-config) |
 | **Codex / ChatGPT** | https://learn.chatgpt.com/docs/codex | [CLI 总览](https://learn.chatgpt.com/docs/codex/cli) · [CLI 命令参考（含 flags）](https://learn.chatgpt.com/docs/codex/developer-commands?surface=cli) · [Slash commands（`/model` `/permissions`）](https://learn.chatgpt.com/docs/codex/reference/slash-commands) · [Config file reference](https://learn.chatgpt.com/docs/codex/config-file/config-reference) · [Settings](https://learn.chatgpt.com/docs/codex/reference/settings) · [Permission modes](https://learn.chatgpt.com/docs/codex/permission-modes) · [Sandboxing](https://learn.chatgpt.com/docs/codex/sandboxing) · [Projects & chats](https://learn.chatgpt.com/docs/codex/projects) · [app-server（模型目录）](https://learn.chatgpt.com/docs/codex/app-server) |
-| **OpenCode** | https://opencode.ai/docs | [CLI](https://opencode.ai/docs/cli/) · [TUI](https://opencode.ai/docs/tui/) · [Config](https://opencode.ai/docs/config/) · [Keybinds（`tui.json`）](https://opencode.ai/docs/keybinds/) · [Permissions](https://opencode.ai/docs/permissions/) · [Agents](https://opencode.ai/docs/agents/) · [Models](https://opencode.ai/docs/models/) · [Commands](https://opencode.ai/docs/commands/) |
+| **OpenCode（PTY）** | https://opencode.ai/docs | [CLI](https://opencode.ai/docs/cli/) · [TUI](https://opencode.ai/docs/tui/) · [Config](https://opencode.ai/docs/config/) · [Keybinds（`tui.json`）](https://opencode.ai/docs/keybinds/) · [Permissions](https://opencode.ai/docs/permissions/) · [Agents](https://opencode.ai/docs/agents/) · [Models](https://opencode.ai/docs/models/) · [Commands](https://opencode.ai/docs/commands/) |
+| **OpenCode ACP / ACP 通用** | [Agent Client Protocol](https://github.com/agentclientprotocol/agent-client-protocol) · 本机 `opencode acp` | **方案与验收：** [`acp-runtime-plan.md`](./acp-runtime-plan.md)（§12 / 附录 A）· **状态：** [`acp-dev-status.md`](./acp-dev-status.md) · runtime id **`acp:opencode`**（≠ PTY `opencode`） |
 | **dsh（DeepSeek Harness）** | https://github.com/deepseek-ai/dsh（CLI 包 `@deepseek-ai/dsh`，TUI 为 `@deepseek-harness-tui/dsh-tui` 插件，随 `dsh plugin --profile dsh-tui add @deepseek-harness-tui/dsh-tui` 安装） | 已落库事实以本文件 §2.4 / §3 为准；上游为 Commander launcher + Cordis app，官方文档在仓库 README 与 `dsh-tui` 插件 README（本地 `~/.dsh/profiles/dsh-tui` 下有安装副本） |
 | **pi（Earendil pi-coding-agent）** | https://www.npmjs.com/package/@earendil-works/pi-coding-agent（CLI `pi`，本机 `~/APP/n/bin/pi`；官方细节在 npm 包 README 与 `dist` 源码注释） | 已落库事实以本文件 §2.5 / §3 为准；`pi --help` / `pi --list-models` / `pi --list-providers` 为本地权威 |
 
@@ -116,6 +117,27 @@ opencode [--model <provider/model>] [--auto]
 - `OPENCODE_CONFIG_DIR` 是**追加**语义：opencode 把该目录加进 `ConfigPaths.directories()` 搜索链（`packages/opencode/src/config/paths.ts`），用户的全局配置（`~/.opencode/opencode.json[c]` 等）**照常加载**；实测 run log 先列 `~/.opencode/*` 再列 override 目录。插件的 `{plugin,plugins}/*.{ts,js}` 与全局插件一起被扫描（`config/plugin.ts` `ConfigPlugin.load`），故只对本会话生效，独立 `opencode` 运行不受影响。
 - 插件监听事件总线（`Hooks.event`）：首次观察到 cwd 一致、无 parent 的根 session 后锁定 `sessionID`，后续 child session 不得覆盖；生命周期映射保持 `session.status` busy/retry→`working`、idle→`idle`，permission/question 事件分别映射待确认/待选择。侧车格式为 `{"status","ts","session_id"}`；插件加载时先写一次无 session id 的 `idle`，根 session 创建后补齐 id。
 - 会话删除时清理整个 `opencode-status/<agent_id>/` 目录（`opencode.rs` `remove_status_plugin`；`sessions_delete` 调用）。插件写失败只降级为无 hook（沿用 PTY 活动启发式），不 abort 启动。
+
+### 2.3a ACP 双轨（runtime `acp:<id>`，锚点 `acp:opencode`）
+
+> **完整设计 / §12 验收 / 附录 A：** [`acp-runtime-plan.md`](./acp-runtime-plan.md)  
+> **开发相位：** [`acp-dev-status.md`](./acp-dev-status.md)  
+> **实现：** `src-tauri/src/agent_runtime/acp/` · UI `AcpSessionPanel` · Settings → ACP
+
+**与 PTY `opencode` 的硬边界：**
+
+| | PTY `opencode` | ACP `acp:opencode` |
+| --- | --- | --- |
+| Transport | portable-pty + xterm | stdio NDJSON JSON-RPC |
+| Launch | `opencode` + `OPENCODE_TUI_CONFIG` / status 插件 | `opencode acp`（descriptor）；**不**注入 TUI config / status 插件 |
+| UI | `XTermPanel` + Composer 方言（F12 / Ctrl+T variant…） | `AcpSessionPanel` + `acp_prompt` / `acp_cancel` |
+| 写输入 | `agent_write` | **禁止** `agent_write`；走 `session/prompt` |
+| resume_key | OpenCode 内部 session 侧车 | ACP `sessionId`（`session/new` 或 `session/load`） |
+| 权限 | TUI / `--auto` | Host `request_permission` → 默认 ask（MVP） |
+
+**Descriptor：** `~/CaPilot/acp-agents.json`（用户）∪ 内置默认 `opencode` → `acp:opencode`。Settings CRUD：`acp_list_agents` / `acp_upsert_agent` / `acp_remove_agent`。  
+**Usage：** `session/update` → `usage_update{used,size}` → 面板 + `AgentInfo.last_usage`。  
+**安全：** `fs/write` 关；`fs/read` cwd 沙箱；见 `security-review.md` §6。
 
 ### 2.4 dsh（runtime `dsh`，DeepSeek Harness dsh-tui）
 

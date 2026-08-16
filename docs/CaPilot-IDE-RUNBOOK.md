@@ -76,4 +76,15 @@ IDE 遵循 CaPilot 主仓库的 **LUCY styleguide**（8-bit Pixel × Apple Smoot
 | --- | --- | --- |
 | 本手册 | `docs/CaPilot-IDE-RUNBOOK.md` | 运行 / 已知坑 / 文档地图 |
 | 安全审查 | `docs/security-review.md` | CSP / 权限 / 路径 / IPC 审查与发布前 checklist |
+| AI Runtime 集成事实 | `docs/ai-runtime-references.md` | 各 CLI 官方链接 + 已落库集成事实（含 ACP 双轨） |
+| **ACP Runtime 方案** | [`docs/acp-runtime-plan.md`](./acp-runtime-plan.md) | Agent Client Protocol 双轨设计、§12 验收表、附录 A OpenCode 摸底 |
+| ACP 开发状态 | [`docs/acp-dev-status.md`](./acp-dev-status.md) | Dev/Test/Watcher 相位与缺陷 |
 | LUCY 风格 | `docs/styleguide/` | 设计规范（源：主仓库 `Doc/styleguide/`）|
+
+### 5.1 ACP 双轨速览
+
+- **Transport：** `pty`（现有 claude/codex/dsh/pi + 历史 `opencode`）与 `acp`（`acp:<id>`，锚点 **`acp:opencode`**）并行，互不迁移。
+- **Descriptor：** `~/CaPilot/acp-agents.json` + 内置默认；Settings → **ACP** 分区 CRUD（`acp_list_agents` / `acp_upsert_agent` / `acp_remove_agent`）。
+- **UI：** ACP 会话走 `AcpSessionPanel` + Composer `acp_prompt`/`acp_cancel`；**禁止**对 ACP 调 `agent_write` / OpenCode PTY 方言控件。
+- **安全：** permission 默认 ask；`fs/write` 关闭；`fs/read` 限制在 session cwd（见 `docs/security-review.md` §6）。
+- **细节与验收：** 见 [`acp-runtime-plan.md`](./acp-runtime-plan.md) §12 / 附录 A。

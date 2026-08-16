@@ -427,6 +427,33 @@ mod tests {
         let _ = info;
     }
 
+    /// F11: when agent advertises loadSession, start with resume_key → session/load.
+    #[test]
+    fn bridge_resume_via_session_load() {
+        let bridge = AcpBridge::new();
+        let cwd = std::env::temp_dir();
+        let info = bridge
+            .start_with_descriptor(
+                "br-resume",
+                mock_descriptor(),
+                &cwd,
+                Some("sess_resumed_42"),
+            )
+            .expect("start with resume_key");
+        assert_eq!(info.runtime, "acp:mock");
+        let sid = bridge.acp_session_id("br-resume");
+        assert_eq!(
+            sid.as_deref(),
+            Some("sess_resumed_42"),
+            "session/load must adopt resume_key as sessionId"
+        );
+        let stop = bridge
+            .prompt("br-resume", "after-load")
+            .expect("prompt after load");
+        assert_eq!(stop, "end_turn");
+        bridge.kill("br-resume").expect("kill");
+    }
+
     #[test]
     fn permission_request_allow_roundtrip() {
         use crate::agent_runtime::acp::permission::PermissionOutcome;

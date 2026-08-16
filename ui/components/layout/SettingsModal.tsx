@@ -10,6 +10,29 @@ interface SettingsModalProps {
   onClose: () => void;
 }
 
+/** ACP descriptor as returned by `acp_list_agents` (flat list item). */
+interface AcpAgentListItem {
+  id: string;
+  name: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  cwd_mode: string;
+  icon: string | null;
+  enabled: boolean;
+  available: boolean;
+  runtimeId: string;
+  isDefault: boolean;
+}
+
+interface AcpAgentDraft {
+  id: string;
+  name: string;
+  command: string;
+  argsText: string;
+  enabled: boolean;
+}
+
 /** Adapter defaults, mirrored from the Rust spawn_interactive() implementations.
  *  Shown in the launch editor when the user has not overridden a runtime. */
 const DEFAULT_LAUNCH: Record<string, { command: string; args: string }> = {
@@ -39,11 +62,11 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const themePickerRef = useRef<HTMLDivElement>(null);
   const currentTheme = getTheme(themeId) ?? THEMES[0];
   const [activeSection, setActiveSection] = useState<
-    "runtimes" | "appearance" | "sessions" | "updates"
+    "runtimes" | "acp" | "appearance" | "sessions" | "updates"
   >("runtimes");
 
   const jumpToSection = (
-    section: "runtimes" | "appearance" | "sessions" | "updates"
+    section: "runtimes" | "acp" | "appearance" | "sessions" | "updates"
   ) => {
     setActiveSection(section);
     document
@@ -53,7 +76,13 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
 
   const syncSectionFromScroll = (event: UIEvent<HTMLElement>) => {
     const container = event.currentTarget;
-    const sectionIds = ["runtimes", "appearance", "sessions", "updates"] as const;
+    const sectionIds = [
+      "runtimes",
+      "acp",
+      "appearance",
+      "sessions",
+      "updates",
+    ] as const;
     let visible: (typeof sectionIds)[number] = "runtimes";
     for (const section of sectionIds) {
       const element = document.getElementById(`settings-${section}`);
@@ -124,6 +153,146 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
       })
       .catch(() => {})
       .finally(() => setScanning(false));
+  };
+
+  // ACP Agents (Settings → ACP)：descriptor CRUD over ~/CaPilot/acp-agents.json.
+  // Separate from PTY runtime launch overrides — ids are short slugs (no `acp:`).
+  const [acpAgents, setAcpAgents] = useState<AcpAgentListItem[]>([]);
+  const [acpLoading, setAcpLoading] = useState(false);
+  const [acpError, setAcpError] = useState<string | null>(null);
+  const [acpEditingId, setAcpEditingId] = useState<string | null>(null);
+  const [acpDraft, setAcpDraft] = useState<AcpAgentDraft | null>(null);
+  const [acpAdding, setAcpAdding] = useState(false);
+  const [acpBusy, setAcpBusy] = useState(false);
+
+  const emptyAcpDraft = (): AcpAgentDraft => ({
+    id: "",
+    name: "",
+    command: "",
+    argsText: "",
+    enabled: true,
+  });
+
+  const loadAcpAgents = () => {
+    setAcpLoading(true);
+    invoke<AcpAgentListItem[]>("acp_list_agents")
+      .then((items) => {
+        setAcpAgents(Array.isArray(items) ? items : []);
+        setAcpError(null);
+      })
+      .catch((e) => {
+        setAcpError(String(e));
+      })
+      .finally(() => setAcpLoading(false));
+  };
+
+  useEffect(() => {
+    loadAcpAgents();
+  }, []);
+
+  const beginEditAcp = (item: AcpAgentListItem) => {
+    setAcpAdding(false);
+    setAcpEditingId(item.id);
+    setAcpDraft({
+      id: item.id,
+      name: item.name,
+      command: item.command,
+      argsText: (item.args ?? []).join(" "),
+      enabled: item.enabled,
+    });
+    setAcpError(null);
+  };
+
+  const beginAddAcp = () => {
+    setAcpEditingId(null);
+    setAcpAdding(true);
+    setAcpDraft(emptyAcpDraft());
+    setAcpError(null);
+  };
+
+  const cancelAcpEdit = () => {
+    setAcpEditingId(null);
+    setAcpAdding(false);
+    setAcpDraft(null);
+    setAcpError(null);
+  };
+
+  const saveAcpDraft = async () => {
+    if (!acpDraft) return;
+    const id = acpDraft.id.trim();
+    const name = acpDraft.name.trim();
+    const command = acpDraft.command.trim();
+    if (!id || !name || !command) {
+      setAcpError("id / name / command 均为必填");
+      return;
+    }
+    const args = acpDraft.argsText
+      .trim()
+      .split(/\s+/)
+      .filter((a) => a.length > 0);
+    setAcpBusy(true);
+    setAcpError(null);
+    try {
+      await invoke("acp_upsert_agent", {
+        descriptor: {
+          id,
+          name,
+          command,
+          args,
+          env: {},
+          cwd_mode: "session",
+          icon: null,
+          enabled: acpDraft.enabled,
+        },
+      });
+      cancelAcpEdit();
+      loadAcpAgents();
+      reDetect();
+    } catch (e) {
+      setAcpError(String(e));
+    } finally {
+      setAcpBusy(false);
+    }
+  };
+
+  const removeAcpAgent = async (shortId: string) => {
+    setAcpBusy(true);
+    setAcpError(null);
+    try {
+      await invoke("acp_remove_agent", { id: shortId });
+      if (acpEditingId === shortId) cancelAcpEdit();
+      loadAcpAgents();
+      reDetect();
+    } catch (e) {
+      setAcpError(String(e));
+    } finally {
+      setAcpBusy(false);
+    }
+  };
+
+  const toggleAcpEnabled = async (item: AcpAgentListItem) => {
+    setAcpBusy(true);
+    setAcpError(null);
+    try {
+      await invoke("acp_upsert_agent", {
+        descriptor: {
+          id: item.id,
+          name: item.name,
+          command: item.command,
+          args: item.args ?? [],
+          env: item.env ?? {},
+          cwd_mode: item.cwd_mode || "session",
+          icon: item.icon,
+          enabled: !item.enabled,
+        },
+      });
+      loadAcpAgents();
+      reDetect();
+    } catch (e) {
+      setAcpError(String(e));
+    } finally {
+      setAcpBusy(false);
+    }
   };
 
   // Session-end handling: "keep" (default) marks a naturally-exited session done
@@ -345,6 +514,13 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               >
                 <Icon name="bot" size={14} />
                 <span><b>运行时</b><small>Agent 与用量</small></span>
+              </button>
+              <button
+                className={activeSection === "acp" ? "active" : ""}
+                onClick={() => jumpToSection("acp")}
+              >
+                <Icon name="plug" size={14} />
+                <span><b>ACP</b><small>协议 Agent</small></span>
               </button>
               <button
                 className={activeSection === "appearance" ? "active" : ""}
@@ -608,6 +784,394 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               )}
             </div>
           ))}
+        </section>
+
+        {/* ACP Agents — config-driven stdio agents (acp:*) */}
+        <section id="settings-acp" className="modal-section settings-panel settings-runtime-panel">
+          <div className="settings-section-head">
+            <span>ACP BUS</span>
+            <h4>ACP Agents</h4>
+            <p>
+              配置驱动的 Agent Client Protocol 接入（stdio NDJSON）。内置锚点{" "}
+              <code>acp:opencode</code>；用户覆盖写入{" "}
+              <code>~/CaPilot/acp-agents.json</code>。与 PTY{" "}
+              <code>opencode</code> 互不混用。
+            </p>
+          </div>
+          <div className="settings-toolbar">
+            <div className="modal-title">
+              已配置 <span className="settings-count">{acpAgents.length}</span>
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button
+                className="settings-compact-btn"
+                onClick={loadAcpAgents}
+                disabled={acpLoading || acpBusy}
+              >
+                <Icon name="refresh-cw" size={11} />
+                {acpLoading ? "加载中…" : "刷新"}
+              </button>
+              <button
+                className="settings-compact-btn"
+                onClick={beginAddAcp}
+                disabled={acpBusy || acpAdding}
+              >
+                <Icon name="plus" size={11} />
+                添加
+              </button>
+            </div>
+          </div>
+
+          {acpError && (
+            <div
+              style={{
+                fontSize: "var(--fs-xs)",
+                color: "var(--warn)",
+                marginBottom: 8,
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+              }}
+            >
+              <Icon name="triangle-alert" size={12} />
+              {acpError}
+            </div>
+          )}
+
+          {acpAgents.length === 0 && !acpAdding && (
+            <div className="settings-empty-runtime">
+              <Icon name="plug" size={18} />
+              <span>暂无 ACP Agent</span>
+              <small>添加 descriptor 或恢复内置 opencode。</small>
+            </div>
+          )}
+
+          {acpAgents.map((item) => {
+            const editing = acpEditingId === item.id && acpDraft && !acpAdding;
+            return (
+              <div
+                key={item.id}
+                className={`settings-runtime${editing ? " expanded" : ""}`}
+              >
+                <div
+                  className="modal-row settings-runtime-row"
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    padding: "8px 0",
+                    fontSize: "var(--fs-sm)",
+                  }}
+                >
+                  <span className="settings-runtime-name">
+                    <Icon name={runtimeIcon(item.runtimeId)} size={14} />{" "}
+                    {item.name}
+                    <span
+                      className="settings-runtime-version"
+                      title={item.runtimeId}
+                    >
+                      {item.runtimeId}
+                    </span>
+                    {item.isDefault && (
+                      <span
+                        className="settings-runtime-version"
+                        title="内置默认"
+                      >
+                        default
+                      </span>
+                    )}
+                  </span>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span
+                      style={{
+                        color: !item.enabled
+                          ? "var(--ink2)"
+                          : item.available
+                            ? "var(--success)"
+                            : "var(--warn)",
+                        fontFamily: "var(--mono)",
+                        fontSize: "var(--fs-xs)",
+                      }}
+                    >
+                      {!item.enabled
+                        ? "已禁用"
+                        : item.available
+                          ? "可用"
+                          : "命令未找到"}
+                    </span>
+                    <button
+                      onClick={() => toggleAcpEnabled(item)}
+                      disabled={acpBusy}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        height: 22,
+                        padding: "0 8px",
+                        borderRadius: 6,
+                        cursor: "pointer",
+                        background: item.enabled
+                          ? "rgb(var(--brand-rgb) / .08)"
+                          : "transparent",
+                        border: `1px solid ${item.enabled ? "var(--brand)" : "var(--rule2)"}`,
+                        color: item.enabled ? "var(--brand)" : "var(--ink2)",
+                        fontSize: "var(--fs-2xs)",
+                      }}
+                      title={item.enabled ? "禁用" : "启用"}
+                    >
+                      {item.enabled ? "ON" : "OFF"}
+                    </button>
+                    <button
+                      onClick={() =>
+                        editing ? cancelAcpEdit() : beginEditAcp(item)
+                      }
+                      disabled={acpBusy}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        width: 22,
+                        height: 22,
+                        borderRadius: 6,
+                        cursor: "pointer",
+                        background: editing
+                          ? "rgb(var(--brand-rgb) / .1)"
+                          : "transparent",
+                        border: `1px solid ${editing ? "var(--brand)" : "var(--rule2)"}`,
+                        color: editing ? "var(--brand)" : "var(--ink2)",
+                      }}
+                      title="编辑 descriptor"
+                    >
+                      <Icon name="settings" size={12} />
+                    </button>
+                    <button
+                      onClick={() => removeAcpAgent(item.id)}
+                      disabled={acpBusy}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        width: 22,
+                        height: 22,
+                        borderRadius: 6,
+                        cursor: "pointer",
+                        background: "transparent",
+                        border: "1px solid var(--rule2)",
+                        color: "var(--ink2)",
+                      }}
+                      title={
+                        item.isDefault
+                          ? "隐藏内置默认（写入 enabled:false 阴影）"
+                          : "删除用户覆盖"
+                      }
+                    >
+                      <Icon name="trash-2" size={12} />
+                    </button>
+                  </div>
+                </div>
+                {editing && acpDraft && (
+                  <div
+                    style={{
+                      padding: "0 0 10px",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 6,
+                    }}
+                  >
+                    <div>
+                      <div
+                        style={{
+                          fontSize: "var(--fs-2xs)",
+                          color: "var(--ink2)",
+                          marginBottom: 2,
+                        }}
+                      >
+                        显示名称
+                      </div>
+                      <input
+                        className="modal-text-input"
+                        value={acpDraft.name}
+                        onChange={(e) =>
+                          setAcpDraft({ ...acpDraft, name: e.target.value })
+                        }
+                      />
+                    </div>
+                    <div>
+                      <div
+                        style={{
+                          fontSize: "var(--fs-2xs)",
+                          color: "var(--ink2)",
+                          marginBottom: 2,
+                        }}
+                      >
+                        启动命令
+                      </div>
+                      <input
+                        className="modal-text-input"
+                        value={acpDraft.command}
+                        onChange={(e) =>
+                          setAcpDraft({ ...acpDraft, command: e.target.value })
+                        }
+                        placeholder="例如 opencode"
+                      />
+                    </div>
+                    <div>
+                      <div
+                        style={{
+                          fontSize: "var(--fs-2xs)",
+                          color: "var(--ink2)",
+                          marginBottom: 2,
+                        }}
+                      >
+                        命令参数（空格分隔）
+                      </div>
+                      <input
+                        className="modal-text-input"
+                        value={acpDraft.argsText}
+                        onChange={(e) =>
+                          setAcpDraft({ ...acpDraft, argsText: e.target.value })
+                        }
+                        placeholder="例如 acp"
+                      />
+                    </div>
+                    <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+                      <button
+                        className="settings-compact-btn"
+                        onClick={saveAcpDraft}
+                        disabled={acpBusy}
+                      >
+                        保存
+                      </button>
+                      <button
+                        className="settings-compact-btn"
+                        onClick={cancelAcpEdit}
+                        disabled={acpBusy}
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          {acpAdding && acpDraft && (
+            <div className="settings-runtime expanded" style={{ marginTop: 8 }}>
+              <div
+                className="modal-row"
+                style={{
+                  padding: "8px 0 4px",
+                  fontSize: "var(--fs-sm)",
+                  color: "var(--ink2)",
+                }}
+              >
+                新建 ACP Agent（id 为短 slug，runtime 将为{" "}
+                <code>acp:{"{id}"}</code>）
+              </div>
+              <div
+                style={{
+                  padding: "0 0 10px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 6,
+                }}
+              >
+                <div>
+                  <div
+                    style={{
+                      fontSize: "var(--fs-2xs)",
+                      color: "var(--ink2)",
+                      marginBottom: 2,
+                    }}
+                  >
+                    id（短 slug，勿加 acp: 前缀）
+                  </div>
+                  <input
+                    className="modal-text-input"
+                    value={acpDraft.id}
+                    onChange={(e) =>
+                      setAcpDraft({ ...acpDraft, id: e.target.value })
+                    }
+                    placeholder="例如 goose"
+                  />
+                </div>
+                <div>
+                  <div
+                    style={{
+                      fontSize: "var(--fs-2xs)",
+                      color: "var(--ink2)",
+                      marginBottom: 2,
+                    }}
+                  >
+                    显示名称
+                  </div>
+                  <input
+                    className="modal-text-input"
+                    value={acpDraft.name}
+                    onChange={(e) =>
+                      setAcpDraft({ ...acpDraft, name: e.target.value })
+                    }
+                    placeholder="例如 Goose (ACP)"
+                  />
+                </div>
+                <div>
+                  <div
+                    style={{
+                      fontSize: "var(--fs-2xs)",
+                      color: "var(--ink2)",
+                      marginBottom: 2,
+                    }}
+                  >
+                    启动命令
+                  </div>
+                  <input
+                    className="modal-text-input"
+                    value={acpDraft.command}
+                    onChange={(e) =>
+                      setAcpDraft({ ...acpDraft, command: e.target.value })
+                    }
+                    placeholder="例如 goose"
+                  />
+                </div>
+                <div>
+                  <div
+                    style={{
+                      fontSize: "var(--fs-2xs)",
+                      color: "var(--ink2)",
+                      marginBottom: 2,
+                    }}
+                  >
+                    命令参数（空格分隔）
+                  </div>
+                  <input
+                    className="modal-text-input"
+                    value={acpDraft.argsText}
+                    onChange={(e) =>
+                      setAcpDraft({ ...acpDraft, argsText: e.target.value })
+                    }
+                    placeholder="例如 acp"
+                  />
+                </div>
+                <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+                  <button
+                    className="settings-compact-btn"
+                    onClick={saveAcpDraft}
+                    disabled={acpBusy}
+                  >
+                    创建
+                  </button>
+                  <button
+                    className="settings-compact-btn"
+                    onClick={cancelAcpEdit}
+                    disabled={acpBusy}
+                  >
+                    取消
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </section>
 
         {/* Preferences */}

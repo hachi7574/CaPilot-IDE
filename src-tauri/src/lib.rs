@@ -2091,6 +2091,28 @@ async fn acp_respond_permission(
         .map_err(|e| e.to_string())
 }
 
+/// List ACP agent descriptors for Settings (merged defaults + user file).
+#[tauri::command]
+fn acp_list_agents() -> Vec<acp::descriptor::AcpAgentListItem> {
+    acp::descriptor::list_for_settings()
+}
+
+/// Create or update one user ACP descriptor (`~/CaPilot/acp-agents.json`).
+/// `id` is the short slug (no `acp:` prefix). After a successful write the
+/// runtime catalog should be re-fetched by the frontend.
+#[tauri::command]
+fn acp_upsert_agent(descriptor: acp::descriptor::AcpAgentDescriptor) -> Result<acp::descriptor::AcpAgentDescriptor, String> {
+    acp::descriptor::upsert_user_descriptor(descriptor)
+}
+
+/// Remove a user ACP descriptor. Built-in defaults are shadowed with
+/// `enabled: false` so they disappear from the merged list until re-added.
+#[tauri::command]
+fn acp_remove_agent(id: String) -> Result<(), String> {
+    let _ = acp::descriptor::remove_user_descriptor(&id)?;
+    Ok(())
+}
+
 /// Current thinking variant for an opencode model, read from OpenCode's own
 /// `model.json` (`variant.<provider/model>`), which the TUI rewrites on each
 /// `variant_cycle` (Ctrl+T). `None` = default (no variant selected). Best-effort:
@@ -4183,6 +4205,9 @@ pub fn run() {
             acp_prompt,
             acp_cancel,
             acp_respond_permission,
+            acp_list_agents,
+            acp_upsert_agent,
+            acp_remove_agent,
             opencode_current_variant,
             pi_current_thinking_level,
             usage_fetch,
