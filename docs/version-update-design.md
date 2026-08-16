@@ -95,7 +95,7 @@ async fn update_download_and_install(
 "plugins": {
   "updater": {
     "endpoints": [
-      "https://github.com/hachi7574/CaPilot-Ide/releases/latest/download/latest.json"
+      "https://github.com/hachi7574/CaPilot-IDE/releases/latest/download/latest.json"
     ],
     "pubkey": "<生成的公钥>",
     "windows": { "installMode": "passive" }
