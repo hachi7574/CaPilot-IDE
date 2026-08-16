@@ -1,5 +1,4 @@
 // GENERATED FILE - do not edit by hand. Source: docs/Assets/Icons/*.svg
-// Regenerate: python3 scripts/gen_icon_component.py
 import type { CSSProperties } from 'react';
 
 type IconDef = { inner: string; fill: boolean };

@@ -39,6 +39,12 @@ target/
 # Generated Tauri icons
 # (keep default icons committed)
 
+# Generated icon component (regenerate: python3 scripts/gen_icon_component.py)
+ui/components/Icon.tsx
+
+# Local dev tooling
+scripts/
+
 # Claude Code local config (machine-specific paths / run caches / transient worktrees)
 reasonix.toml
 .reasonix/

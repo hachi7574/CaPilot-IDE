@@ -110,6 +110,9 @@ export function AnnotationLayer() {
       const t = e.target as HTMLElement | null;
       if (!t) return;
       if (t.closest("[data-annot-ui]")) return; // our chrome handles its own clicks
+      // First-run onboarding sits above the app chrome and must stay clickable
+      // even if annotation mode is left on — let its own buttons handle clicks.
+      if (t.closest(".onboarding-overlay")) return;
       e.preventDefault();
       e.stopPropagation();
       if (pendingRef.current) {

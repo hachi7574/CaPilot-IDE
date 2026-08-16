@@ -22,11 +22,13 @@ use session_store::SESSION_END_MODE_KEY;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
 use tauri::{Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_updater::UpdaterExt;
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -76,6 +78,11 @@ const USAGE_CONFIG_KEY: &str = usage::USAGE_CONFIG_KEY;
 /// a JSON array of `TodoTag` objects (see `ui/state/store.ts`); written by the
 /// frontend on every tag mutation.
 const TODOS_KEY: &str = "todos";
+
+/// Settings KV key: whether the app checks for updates in the background on
+/// startup (Settings → 关于 → 启动时自动检查更新). Defaults to enabled when
+/// unset; `setting_set` allow-lists it alongside the other settings keys.
+const AUTO_CHECK_UPDATE_KEY: &str = "auto_check_update";
 
 /// User-configured launch override for one runtime (the adapter's defaults win
 /// unless a field is set to a non-empty string).
@@ -1632,12 +1639,111 @@ fn setting_set(
         USAGE_ENABLED_KEY,
         USAGE_CONFIG_KEY,
         TODOS_KEY,
+        AUTO_CHECK_UPDATE_KEY,
     ];
     if !ALLOWED.contains(&key.as_str()) {
         return Err(format!("unknown setting key: {}", key));
     }
     let db = persistence.db().lock().unwrap();
     db.set_setting(&key, &value).map_err(|e| e.to_string())
+}
+
+// ── Version check / self-update ─────────────────────────────────
+
+/// Result of a version check, serialized to the frontend (camelCase).
+/// `available` is true only when the update server announced a strictly newer
+/// version (the updater's own semver comparator decides).
+#[derive(Serialize, Clone)]
+struct UpdateStatus {
+    current_version: String,
+    latest_version: Option<String>,
+    available: bool,
+    notes: Option<String>,
+    published_at: Option<String>,
+    target: String,
+    /// Whether the running build can self-install. False in dev builds — the
+    /// check is still allowed for testing, but install is refused.
+    installable: bool,
+}
+
+/// Check the update server for a newer version. Network / server failures are
+/// surfaced as a friendly error string rather than a crash — the frontend shows
+/// it inline in Settings → 关于 and never blocks startup on it.
+#[tauri::command]
+async fn update_check(app: tauri::AppHandle) -> Result<UpdateStatus, String> {
+    let current = app.package_info().version.to_string();
+    let installable = !cfg!(debug_assertions);
+    let updater = app
+        .updater()
+        .map_err(|e| format!("更新器初始化失败: {e}"))?;
+    match updater.check().await {
+        Ok(Some(update)) => Ok(UpdateStatus {
+            current_version: current,
+            latest_version: Some(update.version.clone()),
+            available: true,
+            notes: update.body.clone(),
+            published_at: update.date.map(|d| d.to_string()),
+            target: update.target.clone(),
+            installable,
+        }),
+        Ok(None) => Ok(UpdateStatus {
+            current_version: current,
+            latest_version: None,
+            available: false,
+            notes: None,
+            published_at: None,
+            target: tauri_plugin_updater::target().unwrap_or_default(),
+            installable,
+        }),
+        Err(e) => Err(format!("无法连接更新服务器: {e}")),
+    }
+}
+
+/// Download and install the pending update, streaming 0..1 progress through
+/// `on_progress`. `install()` relaunches the app, so on success this command
+/// typically never returns a value to the frontend — the process restarts first.
+#[tauri::command]
+async fn update_download_and_install(
+    app: tauri::AppHandle,
+    on_progress: tauri::ipc::Channel<f64>,
+) -> Result<(), String> {
+    if cfg!(debug_assertions) {
+        return Err("开发构建不支持自动安装，请下载安装包手动升级。".to_string());
+    }
+    let updater = app
+        .updater()
+        .map_err(|e| format!("更新器初始化失败: {e}"))?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| format!("无法连接更新服务器: {e}"))?
+        .ok_or_else(|| "当前已是最新版本。".to_string())?;
+
+    // Track accumulated bytes so the progress channel reports true 0..1, not a
+    // per-chunk ratio (the updater only hands us each chunk's length).
+    let downloaded = AtomicU64::new(0);
+    let bytes = update
+        .download(
+            |chunk_len, content_length| {
+                if let Some(total) = content_length {
+                    if total > 0 {
+                        let acc = downloaded.fetch_add(chunk_len as u64, Ordering::Relaxed)
+                            + chunk_len as u64;
+                        let _ = on_progress.send(acc as f64 / total as f64);
+                    }
+                }
+            },
+            || {
+                let _ = on_progress.send(1.0);
+            },
+        )
+        .await
+        .map_err(|e| format!("下载失败: {e}"))?;
+
+    update
+        .install(bytes)
+        .map_err(|e| format!("安装失败: {e}"))?;
+    Ok(())
 }
 
 // ── Runtime commands ────────────────────────────────────────────
@@ -3672,6 +3778,8 @@ pub fn run() {
             sessions_delete,
             setting_get,
             setting_set,
+            update_check,
+            update_download_and_install,
             workspace_root,
             create_project,
             list_projects,

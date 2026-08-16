@@ -339,6 +339,30 @@ body::after {
 }
 .empty-state img { width: 64px; height: 64px; opacity: 0.3; }
 .empty-state h3 { font-family: var(--pixel-body); font-size: var(--fs-xl); color: var(--ink2); }
+.empty-state-hint {
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  color: var(--ink2);
+}
+/* Primary CTA shown when there are no projects yet. */
+.empty-state-cta {
+  font-family: var(--pixel);
+  font-size: var(--fs-xs);
+  letter-spacing: 1px;
+  padding: 8px 16px;
+  color: var(--brand);
+  border: 1px solid var(--brand);
+  background: rgb(var(--brand-rgb) / 0.06);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all .2s var(--ease-apple);
+}
+.empty-state-cta:hover {
+  color: var(--ink);
+  background: rgb(var(--brand-rgb) / 0.15);
+}
 
 /* ── Right Sidebar ────────────────────────────────────────────── */
 
@@ -1208,7 +1232,8 @@ body::after {
   align-items: center;
   justify-content: center;
   background: rgba(4, 6, 10, 0.78);
-  backdrop-filter: blur(3px);
+  /* No backdrop-filter: on WebKitGTK the blurred backdrop can break hit-testing
+     for the overlay's children, which made the onboarding buttons unclickable. */
 }
 
 .onboarding-card {
@@ -1708,13 +1733,26 @@ body::after {
 }
 .nproj-btn.primary:disabled { opacity: 0.5; cursor: default; }
 
-/* Muted placeholder row inside a project with no agents yet. */
+/* No-projects row: actionable "添加新项目" that opens the new-project modal. */
 .nproj-empty-row {
-  padding: 5px 10px 5px 26px;
+  padding: 8px 10px 8px 26px;
   font-family: var(--mono);
-  font-size: var(--fs-xs);
-  color: var(--ink2);
-  font-style: italic;
+  font-size: var(--fs-sm);
+  color: var(--primary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: background .2s var(--ease-apple);
+}
+.nproj-empty-row:hover {
+  background: var(--bg3);
+  color: var(--brand);
+}
+.nproj-empty-row .nproj-empty-add {
+  font-family: var(--pixel);
+  font-size: var(--fs-md);
+  color: var(--brand);
 }
 .proj.collapsed .nproj-empty-row { display: none; }
 

@@ -10,6 +10,23 @@
 > 4. 数据目录 / 环境变量**未变**：`~/.dsh-cc/`（effort.json / resume.txt）、`DSH_CC_*` / `CC_TUI_*`（官方文档声称 DSH_TUI_*，实测 0.6.1 仍用旧名）。
 > 5. 状态推断事件类型（`turn/start`/`turn/end`/`assistant/chunk`/`request/header`）与 session 头格式在新包中逐字确认（`@deepseek-ai/dsh-session`），方案 B 无需改动。
 
+## 0. 前置条件：安装 dsh 运行时
+
+> 面向开源读者：CaPilot 的 dsh runtime 需要本机预先装好 dsh 生态（CLI + profile + 凭据）。以下步骤与 CaPilot 无关，是 dsh 自身的安装；装好后 dsh 才会出现在「已安装」列表——`is_available` = `dsh --version` 成功 **且** `~/.dsh/profiles/dsh-tui` 存在（`dsh.rs:872-877`）。装完可运行 `dsh --dump-config --profile dsh-tui` 核对组合配置，或 `dsh --profile dsh-tui` 直接启动。
+
+| # | 前置 | 验证 | 命令 / 配置 |
+|---|---|---|---|
+| 1 | dsh CLI（`@deepseek-ai/dsh`）在 PATH | `dsh --version` | `npm install -g @deepseek-ai/dsh`。dsh 是 Commander 启动器，源码在 `deepseek-ai/deepseek-harness` 的 `apps/cli` |
+| 2 | pnpm 在 PATH | `pnpm --version` | `dsh plugin` 把剩余参数转发给 profile 目录里的 pnpm（`corepack enable` 或 `npm i -g pnpm`） |
+| 3 | dsh-tui profile | `~/.dsh/profiles/dsh-tui/` 存在 | `dsh plugin --profile dsh-tui add @deepseek-harness-tui/dsh-tui`——首次自动 init profile，再 `pnpm add` 并把 `dsh.profile.bundles` 插件层对账（`dsh-base` 由 dsh CLI 安装自带解析，无需单独装）。**此步必须先做**，否则 CaPilot 不认为 dsh 可用 |
+| 4 | 认证 | `DEEPSEEK_API_KEY` 环境变量，或 `~/.dsh/.credentials.yaml` 存在 | deepseek-official 路由读 `DEEPSEEK_API_KEY`；pi-ai 提供商标在 `~/.dsh/settings.yaml` 的 `llm-pi-ai.providers.<p>.apiKeyEnv` 各自声明密钥 env（例：`OPENCODE_GO_API_KEY`） |
+| 5 | Node.js 在 PATH | `node --version` | 预检插件完整性（`require.resolve`）与模型目录探测（`model_catalog_probe`）走 `node -e` 子进程；缺省时优雅降级（预检不阻塞 spawn、模型列表回退内建 deepseek-official），但 pi-ai 模型目录与启动前插件检查失效 |
+| 6 | provider 目录（可选） | `~/.dsh/settings.yaml` 存在 | `llm-pi-ai.providers`（每个模型 `id`/`name`/`contextWindow`/`maxTokens`/`apiKeyEnv`）+ `agent-default-model`。CaPilot 模型选择器读它（provider-qualified，`model_catalog_probe`）；缺失时只剩内建 `deepseek-official` 的 flash/pro |
+
+**CaPilot 侧自动注入（用户无需设置）**：启动固定为 `dsh --profile dsh-tui --patch <每会话临时文件>`；env 含 `NODE_ENV=production`（**必须**，dsh 的 React dev renderer 会累积 unbounded `performance.measure()` 长会话 OOM）、`DSH_PERMISSION_MODE`、恢复时 `DSH_CC_RESUME_SESSION`。易变接缝见 `docs/ai-runtime-references.md` §2.4 / §3 行 21-23。
+
+> 注：CaPilot 的 dsh 集成事实在 **dsh-tui 0.6.1** 上实测；npm 已发布更高版本（0.7.x）。升级前先对照 ai-runtime-references 的 volatile-facts 表核对键位 / env / 配置键是否变化。
+
 ## 1. 结论摘要
 
 **完全可行，工作量和 codex / opencode 同量级。** `dsh-cc-tui` 是官方 dsh CLI（`@deepseek-ai/dsh`）之上的 Claude Code 风格 TUI 插件，通过 `dsh --profile cc-tui` 启动。模型、权限、恢复、思考档位都有干净的注入缝（`--patch` overlay + 环境变量）。两个真正需要处理/验证的缺口：

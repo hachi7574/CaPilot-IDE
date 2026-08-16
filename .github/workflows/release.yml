@@ -1,0 +1,112 @@
+name: Release
+
+# Tag-triggered release pipeline (docs/version-update-design.md §8):
+# builds + signs the Linux/Windows/macOS bundles, uploads them to the GitHub
+# release for the tag, then assembles the updater `latest.json` manifest from
+# the build-time `.sig` files and uploads that too.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  # Cargo.toml is the single source of truth; fail the release early if the tag
+  # doesn't match every version source (see .github/scripts/bump-version.mjs).
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node .github/scripts/bump-version.mjs --check "${{ github.ref_name }}"
+
+  build:
+    needs: version-check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            os: ubuntu-22.04
+          - platform: windows
+            os: windows-latest
+          - platform: macos
+            os: macos-14
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Install JS dependencies
+        run: pnpm install
+
+      # `pnpm tauri build` runs `beforeBuildCommand: pnpm build` (tsc + vite).
+      # With `createUpdaterArtifacts: true` and the signing key present, the
+      # bundler emits the `.sig` files the updater verifies against.
+      - name: Build and sign bundles
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm tauri build
+
+      - name: Upload bundles to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: CaPilot ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          files: |
+            src-tauri/target/release/bundle/appimage/*
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/nsis/*
+            src-tauri/target/release/bundle/macos/*
+            src-tauri/target/release/bundle/dmg/*.dmg
+
+  # Runs after every platform upload finished. Reads each platform's `.sig`
+  # content (produced at build time) and writes the static latest.json the app
+  # polls. The raw `latest.json` is NOT signed itself — signatures live inside it.
+  manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Assemble latest.json
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/make-manifest.mjs
+
+      - name: Upload latest.json
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          files: latest.json

@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { useStore, FontScale, RuntimeInfo, UsageConfig } from "../../state/store";
+import { checkForUpdate, downloadAndInstall } from "../../state/update";
 import { Icon } from "../Icon";
 
 interface SettingsModalProps {
   onClose: () => void;
 }
-
-const APP_VERSION = "0.1.0";
 
 /** Adapter defaults, mirrored from the Rust spawn_interactive() implementations.
  *  Shown in the launch editor when the user has not overridden a runtime. */
@@ -26,6 +26,27 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const setOnboarded = useStore((s) => s.setOnboarded);
   const fontScale = useStore((s) => s.fontScale);
   const setFontScale = useStore((s) => s.setFontScale);
+
+  // App self-update slice (docs/version-update-design.md).
+  const currentVersion = useStore((s) => s.currentVersion);
+  const updateStatus = useStore((s) => s.updateStatus);
+  const updateLatest = useStore((s) => s.updateLatest);
+  const updateNotes = useStore((s) => s.updateNotes);
+  const updateError = useStore((s) => s.updateError);
+  const updateDownloading = useStore((s) => s.updateDownloading);
+  const updateProgress = useStore((s) => s.updateProgress);
+  const updateInstallable = useStore((s) => s.updateInstallable);
+  const autoCheckUpdate = useStore((s) => s.autoCheckUpdate);
+  const setAutoCheckUpdate = useStore((s) => s.setAutoCheckUpdate);
+
+  // If the About panel opens before useUpdateSync has resolved the bundle
+  // version, fetch it here so v{…} never shows a stale hardcoded number.
+  useEffect(() => {
+    if (currentVersion) return;
+    getVersion()
+      .then((v) => useStore.setState({ currentVersion: v }))
+      .catch(() => {});
+  }, [currentVersion]);
 
   const [scanning, setScanning] = useState(false);
   const reDetect = () => {
@@ -583,16 +604,129 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           </div>
         </div>
 
-        {/* About */}
+        {/* About / Updates */}
         <div className="modal-section" style={{ borderTop: "1px solid var(--rule)", paddingTop: 10 }}>
           <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-sm)", color: "var(--ink2)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
-            关于
+            关于与更新
           </div>
           <div style={{ fontSize: "var(--fs-sm)", color: "var(--ink2)" }}>
-            CaPilot IDE <span style={{ fontFamily: "var(--mono)", color: "var(--ink2)" }}>v{APP_VERSION}</span>
+            CaPilot IDE <span style={{ fontFamily: "var(--mono)", color: "var(--ink2)" }}>v{currentVersion ?? "…"}</span>
           </div>
           <div style={{ fontSize: "var(--fs-xs)", color: "var(--ink2)", marginTop: 4, fontFamily: "var(--mono)" }}>
             Local AI coding workspace
+          </div>
+
+          {/* Version check row */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+            <button
+              onClick={() => checkForUpdate()}
+              disabled={updateStatus === "checking" || updateDownloading}
+              style={{
+                display: "flex", alignItems: "center", gap: 4,
+                fontFamily: "var(--pixel)",
+                fontSize: "var(--fs-2xs)",
+                padding: "4px 12px",
+                border: "1px solid var(--rule2)",
+                color: "var(--ink2)",
+                background: "transparent",
+                borderRadius: 6,
+                cursor: updateStatus === "checking" || updateDownloading ? "default" : "pointer",
+              }}
+            >
+              <Icon name="refresh-cw" size={11} />
+              {updateStatus === "checking" ? "检查中…" : "检查更新"}
+            </button>
+            {updateStatus === "available" && updateLatest && (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: "var(--fs-xs)", color: "var(--success)" }}>
+                <Icon name="circle-dot" size={12} />
+                发现新版本 v{updateLatest}
+              </span>
+            )}
+            {updateStatus === "up-to-date" && (
+              <span style={{ fontSize: "var(--fs-xs)", color: "var(--ink2)" }}>已是最新版本</span>
+            )}
+            {updateStatus === "error" && updateError && (
+              <span style={{ fontSize: "var(--fs-xs)", color: "var(--warn)" }}>{updateError}</span>
+            )}
+          </div>
+
+          {/* Release notes + install */}
+          {updateStatus === "available" && (
+            <>
+              {updateNotes && (
+                <details style={{ marginTop: 8, fontSize: "var(--fs-xs)", color: "var(--ink2)" }}>
+                  <summary style={{ cursor: "pointer", userSelect: "none" }}>发布说明</summary>
+                  <pre style={{ whiteSpace: "pre-wrap", fontFamily: "var(--mono)", fontSize: "var(--fs-2xs)", color: "var(--ink2)", background: "var(--bg)", border: "1px solid var(--rule)", borderRadius: 6, padding: 8, marginTop: 6, maxHeight: 140, overflowY: "auto" }}>
+                    {updateNotes}
+                  </pre>
+                </details>
+              )}
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                <button
+                  onClick={() => downloadAndInstall()}
+                  disabled={!updateInstallable || updateDownloading}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 4,
+                    fontFamily: "var(--pixel)",
+                    fontSize: "var(--fs-2xs)",
+                    padding: "6px 14px",
+                    border: `1px solid ${updateInstallable ? "var(--brand)" : "var(--rule2)"}`,
+                    color: updateInstallable ? "var(--brand)" : "var(--ink2)",
+                    background: updateInstallable ? "rgb(var(--brand-rgb) / .08)" : "transparent",
+                    borderRadius: 6,
+                    cursor: updateInstallable && !updateDownloading ? "pointer" : "default",
+                  }}
+                >
+                  <Icon name="download" size={12} />
+                  {updateDownloading ? "下载中…" : "下载并安装"}
+                </button>
+                {!updateInstallable && (
+                  <span style={{ fontSize: "var(--fs-2xs)", color: "var(--warn)" }}>
+                    开发构建不支持自动安装
+                  </span>
+                )}
+              </div>
+              {updateDownloading && updateProgress != null && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ height: 6, background: "var(--rule2)", borderRadius: 3, overflow: "hidden" }}>
+                    <div
+                      style={{
+                        height: "100%",
+                        width: `${Math.round(updateProgress * 100)}%`,
+                        background: "var(--brand)",
+                        transition: "width 0.2s ease",
+                      }}
+                    />
+                  </div>
+                  <div style={{ fontSize: "var(--fs-2xs)", color: "var(--ink2)", marginTop: 4, fontFamily: "var(--mono)" }}>
+                    {Math.round(updateProgress * 100)}%
+                  </div>
+                </div>
+              )}
+              <div style={{ fontSize: "var(--fs-2xs)", color: "var(--ink2)", marginTop: 8 }}>
+                安装完成后应用将自动重启，正在运行的会话会保留在侧栏，重启后可继续或恢复。
+              </div>
+            </>
+          )}
+
+          {/* Startup auto-check toggle */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12, borderTop: "1px solid var(--rule)", paddingTop: 10 }}>
+            <span style={{ fontSize: "var(--fs-sm)", color: "var(--ink2)" }}>启动时自动检查更新</span>
+            <button
+              onClick={() => setAutoCheckUpdate(!autoCheckUpdate)}
+              style={{
+                fontFamily: "var(--pixel)",
+                fontSize: "var(--fs-2xs)",
+                padding: "4px 12px",
+                border: `1px solid ${autoCheckUpdate ? "var(--brand)" : "var(--rule2)"}`,
+                color: autoCheckUpdate ? "var(--brand)" : "var(--ink2)",
+                background: autoCheckUpdate ? "rgb(var(--brand-rgb) / .08)" : "transparent",
+                borderRadius: 6,
+                cursor: "pointer",
+              }}
+            >
+              {autoCheckUpdate ? "已开启" : "已关闭"}
+            </button>
           </div>
         </div>
       </div>

@@ -24,7 +24,10 @@ export function Onboarding() {
   const isLast = step === total - 1;
   const isFirst = step === 0;
 
-  /** Create the first agent session, then finish onboarding. */
+  /** Create the first agent session, then finish onboarding. The spawn is
+   *  race-guarded so a hung backend can't leave the button stuck on
+   *  "正在创建…" (disabled) forever — after the timeout the error path runs and
+   *  the button becomes clickable again. */
   const handleCreateAgent = async () => {
     setCreatingAgent(true);
     setAgentErr(null);
@@ -33,7 +36,12 @@ export function Onboarding() {
         setOnboarded(true);
         return;
       }
-      await spawnAgent();
+      await Promise.race([
+        spawnAgent(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("创建超时，请重试")), 15000)
+        ),
+      ]);
       setOnboarded(true);
     } catch (e) {
       setAgentErr(`创建失败：${e}。可稍后在左侧栏或底部输入框重试。`);

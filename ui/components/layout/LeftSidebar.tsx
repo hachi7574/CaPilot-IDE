@@ -120,7 +120,10 @@ export function LeftSidebar() {
     });
   const [ctx, setCtx] = useState<CtxState | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [nprojOpen, setNprojOpen] = useState(false);
+  // New-project modal visibility is global (opened from the sidebar "+", the
+  // sidebar empty row, and the main-area empty state) — read/write the store.
+  const nprojOpen = useStore((s) => s.nprojOpen);
+  const setNprojOpen = useStore((s) => s.setNprojOpen);
   const [nprojError, setNprojError] = useState<string | null>(null);
   const [renameTarget, setRenameTarget] = useState<string | null>(null);
   // The terminal being renamed via the agent context menu (右键 → 重命名).
@@ -524,7 +527,18 @@ export function LeftSidebar() {
               {/* Dynamic projects (driven by store.projects, includes empties) */}
               {(() => {
                 if (projectNames.length === 0) {
-                  return <div className="nproj-empty-row">暂无项目</div>;
+                  // No projects yet: an actionable row opens the new-project
+                  // modal instead of a dead "暂无项目" label.
+                  return (
+                    <div
+                      className="nproj-empty-row"
+                      onClick={() => setNprojOpen(true)}
+                      role="button"
+                      title="添加新项目"
+                    >
+                      <span className="nproj-empty-add">+</span> 添加新项目
+                    </div>
+                  );
                 }
 
                 return projectNames.map((name) => {

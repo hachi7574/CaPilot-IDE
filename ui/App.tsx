@@ -10,6 +10,7 @@ import { useCloneEvents } from "./state/clone";
 import { useWorktreeEvents } from "./state/worktree";
 import { useUsageSync } from "./state/usage";
 import { useContextUsageSync } from "./state/usageContext";
+import { useUpdateSync } from "./state/update";
 import { useStore } from "./state/store";
 import { AnnotationLayer } from "./components/annotations/AnnotationLayer";
 import { AnnotationTray } from "./components/annotations/AnnotationTray";
@@ -24,6 +25,7 @@ function App() {
   useWorktreeEvents();
   useUsageSync();
   useContextUsageSync();
+  useUpdateSync();
   const onboarded = useStore((s) => s.onboarded);
   const fontScale = useStore((s) => s.fontScale);
   // Reflect the chosen font-size preset on <html> so the CSS `html[data-fs=…]`

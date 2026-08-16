@@ -4,6 +4,7 @@ import { splitLeafTabIds } from "../../state/store";
 import { XTermPanel } from "../terminal/XTermPanel";
 import { EditorPanel } from "../editor/EditorPanel";
 import { DiffPanel } from "../editor/DiffPanel";
+import { Icon } from "../Icon";
 import { spawnAgent } from "../../state/agentActions";
 
 type DropEdge = "left" | "right" | "top" | "bottom" | null;
@@ -168,6 +169,8 @@ export function ContentArea() {
   const splitPane = useStore((s) => s.splitPane);
   const setActiveTab = useStore((s) => s.setActiveTab);
   const requestSearch = useStore((s) => s.requestSearch);
+  const projects = useStore((s) => s.projects);
+  const setNprojOpen = useStore((s) => s.setNprojOpen);
 
   const [resizingId, setResizingId] = useState<string | null>(null);
 
@@ -268,16 +271,26 @@ export function ContentArea() {
     window.addEventListener("mouseup", onUp);
   };
 
-  // Empty state (no tab to show anywhere).
+  // Empty state (no tab to show anywhere). With no projects yet, guide the
+  // user to create one first (the sidebar empty row is the same CTA); with
+  // projects but no open tab, keep the Ctrl+T agent-session hint.
   if (!activeTab && !splitTree) {
+    const noProjects = projects.length === 0;
     return (
       <div className="content-area">
         <div className="empty-state">
           <img src="/logo.png" alt="CaPilot" />
           <h3>CaPilot IDE</h3>
-          <p style={{ fontFamily: "var(--mono)", fontSize: "var(--fs-sm)", color: "var(--ink2)" }}>
-            Press 'ctrl+t' to start a new agent session
-          </p>
+          {noProjects ? (
+            <>
+              <p className="empty-state-hint">还没有项目 — 先创建一个新项目</p>
+              <button className="empty-state-cta" onClick={() => setNprojOpen(true)}>
+                <Icon name="folder-plus" size={13} /> 新建项目
+              </button>
+            </>
+          ) : (
+            <p className="empty-state-hint">Press 'ctrl+t' to start a new agent session</p>
+          )}
         </div>
       </div>
     );

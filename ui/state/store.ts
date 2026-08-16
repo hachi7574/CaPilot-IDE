@@ -253,6 +253,26 @@ export interface UsageConfig {
   workspace_id?: string;
 }
 
+// ── App self-update (docs/version-update-design.md) ─────────────
+
+export type UpdateStatusKind =
+  | "idle"
+  | "checking"
+  | "available"
+  | "up-to-date"
+  | "error";
+
+/** Wire shape of the Rust `update_check` command (serde camelCase). */
+export interface UpdateStatus {
+  currentVersion: string;
+  latestVersion: string | null;
+  available: boolean;
+  notes: string | null;
+  publishedAt: string | null;
+  target: string;
+  installable: boolean;
+}
+
 export interface Tab {
   id: string;
   type: "agent" | "editor" | "diff";
@@ -619,8 +639,31 @@ interface AppState {
   // Onboarding
   onboarded: boolean;
 
+  // New-project modal (opened from sidebar "+" / empty row / main-area empty state)
+  nprojOpen: boolean;
+
   // UI font size preset ("s" | "m" | "l" | "xl" | "xxl"); base = smallest.
   fontScale: FontScale;
+
+  // App self-update (docs/version-update-design.md). State is written by
+  // `ui/state/update.ts`; only the auto-check toggle has a dedicated action.
+  /** Real app version, read at runtime via getVersion(). */
+  currentVersion: string | null;
+  updateStatus: UpdateStatusKind;
+  /** Latest published version string when an update is available. */
+  updateLatest: string | null;
+  updateNotes: string | null;
+  updateError: string | null;
+  updateDownloading: boolean;
+  /** 0..1 download progress while installing. */
+  updateProgress: number | null;
+  /** Whether the running build supports in-app install (false = dev build). */
+  updateInstallable: boolean;
+  /** Latest version already surfaced via notification this session (dedup —
+   *  a fresh update is announced once per app launch, not every check). */
+  updateNotifiedVersion: string | null;
+  /** Whether the app auto-checks for updates on startup (default true). */
+  autoCheckUpdate: boolean;
 
   // Actions
   addAgent: (info: AgentInfo, channel: Channel<number[]> | null, createdAtTs?: number) => void;
@@ -723,6 +766,7 @@ interface AppState {
   removeTermTemplate: (id: string) => void;
   applyResourceSample: (resources: AgentResource[]) => void;
   setOnboarded: (onboarded: boolean) => void;
+  setNprojOpen: (open: boolean) => void;
   setFontScale: (scale: FontScale) => void;
   setTodos: (todos: TodoTag[]) => void;
   addTodo: (text: string) => void;
@@ -734,6 +778,8 @@ interface AppState {
   ) => void;
   deleteTodo: (id: string) => void;
   toggleTodoScope: () => void;
+  /** Persist the startup auto-check toggle (Settings → 关于). */
+  setAutoCheckUpdate: (enabled: boolean) => void;
 }
 
 /** Persisted preference: has the user completed first-run onboarding? */
@@ -897,10 +943,21 @@ export const useStore = create<AppState>((set, get) => {
   pendingClones: {},
   worktrees: [],
   onboarded: loadOnboarded(),
+  nprojOpen: false,
   termTemplates: loadTermTemplates(),
   fontScale: loadFontScale(),
   todos: [],
   todoScope: "global",
+  currentVersion: null,
+  updateStatus: "idle",
+  updateLatest: null,
+  updateNotes: null,
+  updateError: null,
+  updateDownloading: false,
+  updateProgress: null,
+  updateInstallable: false,
+  updateNotifiedVersion: null,
+  autoCheckUpdate: true,
 
   addAgent: (info, channel, createdAtTs) =>
     set((s) => {
@@ -1562,6 +1619,10 @@ export const useStore = create<AppState>((set, get) => {
     set({ onboarded });
   },
 
+  // New-project modal visibility is global (opened from the sidebar "+", the
+  // sidebar empty row, and the main-area empty state), so it lives in the store.
+  setNprojOpen: (open) => set({ nprojOpen: open }),
+
   setFontScale: (scale) => {
     try {
       localStorage.setItem(FONT_SCALE_KEY, scale);
@@ -1569,6 +1630,18 @@ export const useStore = create<AppState>((set, get) => {
       // ignore storage errors
     }
     set({ fontScale: scale });
+  },
+
+  // ── App self-update (docs/version-update-design.md) ───────────
+  // Only the auto-check toggle persists through the store; the rest of the
+  // slice is written imperatively by `ui/state/update.ts` via setState.
+
+  setAutoCheckUpdate: (enabled) => {
+    set({ autoCheckUpdate: enabled });
+    invoke("setting_set", {
+      key: "auto_check_update",
+      value: enabled ? "true" : "false",
+    }).catch(() => {});
   },
 
   // ── Todo tags ─────────────────────────────────────────────────
