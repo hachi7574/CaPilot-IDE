@@ -2,6 +2,13 @@ import { create } from "zustand";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { THEMES, DEFAULT_THEME_ID } from "./themes";
 import { playConfirmationSound } from "./sound";
+import {
+  emptyAcpSession,
+  type AcpEventPayload,
+  type AcpItem,
+  type AcpSessionState,
+} from "./acpTypes";
+import { isAcpRuntime } from "./runtimeTransport";
 
 // ── Types ───────────────────────────────────────────────────────
 
@@ -129,9 +136,19 @@ export function effectiveAgentStatus(
   if (!agent) return "idle";
   if (agent.status === "done") return "done";
   if (agent.status === "failed") return "failed";
-  // No live PTY → dormant (restored after restart, sleepProject, killed-kept).
+  // No live PTY / ACP host → dormant (restored after restart, sleepProject, killed-kept).
   // These sessions are resumable, not dead and not running.
+  // ACP "connected" is `acpSessions.live` (see TabBar); never require a PTY channel.
   if (!connected) return "dormant";
+  // ACP has no hook sidecar — derive from AgentInfo.status + submit flash.
+  if (isAcpRuntime(agent.runtime)) {
+    if (agent.status === "waiting_input" || agent.status === "awaiting_choice") {
+      return agent.status;
+    }
+    if (agent.status === "busy" || agent.status === "running") return "running";
+    if (submittedAt && Date.now() - submittedAt < SUBMIT_FLASH_MS) return "running";
+    return agent.status === "idle" ? "idle" : agent.status;
+  }
   if (hook) {
     switch (hook.status) {
       case "working":
@@ -624,10 +641,19 @@ export function createBufferedChannel(): {
 
 // ── Store ────────────────────────────────────────────────────────
 
+/** Cap ACP transcript rows per session (MVP in-memory only). */
+const MAX_ACP_ITEMS = 2000;
+
 interface AppState {
   // Agents
   agents: Map<string, AgentInfo>;
   agentChannels: Map<string, Channel<number[]>>;
+  /**
+   * In-memory ACP session view-models (messages / tools / turn flags).
+   * Keyed by agent id. Presence of a live entry also acts as the ACP
+   * "connected" signal (parallel to `agentChannels` for PTY).
+   */
+  acpSessions: Map<string, AcpSessionState>;
   /** Last input/output activity epoch-ms per agent, for the 运行中/空闲 split.
    *  Updated throttled (≈1/s) so a streaming PTY doesn't re-render the tab
    *  strip per chunk. */
@@ -789,6 +815,13 @@ interface AppState {
 
   // Actions
   addAgent: (info: AgentInfo, channel: Channel<number[]> | null, createdAtTs?: number) => void;
+  /**
+   * Register a freshly spawned/resumed ACP session as live (no PTY channel).
+   * Creates an empty transcript buffer if missing.
+   */
+  markAcpLive: (id: string) => void;
+  /** Apply one `acp://event` envelope (already scoped by agentId). */
+  applyAcpEvent: (payload: AcpEventPayload) => void;
   removeAgent: (id: string) => void;
   updateAgentStatus: (id: string, status: AgentStatus) => void;
   /** Replace an agent's live context-window usage (`null` = runtime has no
@@ -1104,6 +1137,7 @@ export const useStore = create<AppState>((set, get) => {
   return {
     agents: new Map(),
   agentChannels: new Map(),
+  acpSessions: new Map(),
   agentActiveAt: new Map(),
   agentWakeAt: new Map(),
   hookStatus: new Map(),
@@ -1163,6 +1197,242 @@ export const useStore = create<AppState>((set, get) => {
   autoCheckUpdate: true,
   ciStatus: null,
   ciPolling: false,
+
+  markAcpLive: (id) =>
+    set((s) => {
+      if (s.closedAgentIds.has(id)) return {};
+      const acpSessions = new Map(s.acpSessions);
+      const prev = acpSessions.get(id);
+      acpSessions.set(id, prev ? { ...prev, live: true } : emptyAcpSession());
+      return { acpSessions };
+    }),
+
+  applyAcpEvent: (payload) =>
+    set((s) => {
+      const id = payload.agentId;
+      if (!id || s.closedAgentIds.has(id)) return {};
+      const acpSessions = new Map(s.acpSessions);
+      const prev = acpSessions.get(id) ?? emptyAcpSession();
+      let next: AcpSessionState = { ...prev, items: prev.items.slice() };
+      const now = Date.now();
+      const push = (item: Omit<AcpItem, "at" | "key"> & { key?: string }) => {
+        const row: AcpItem = {
+          ...item,
+          key: item.key ?? `${id}-${now}-${next.items.length}`,
+          at: now,
+        };
+        next.items.push(row);
+        if (next.items.length > MAX_ACP_ITEMS) {
+          next.items = next.items.slice(next.items.length - MAX_ACP_ITEMS);
+        }
+      };
+
+      switch (payload.type) {
+        case "session_started":
+          next.live = true;
+          break;
+        case "message_chunk": {
+          const role = payload.role ?? "agent";
+          const mid = payload.messageId;
+          // Append to the last open chunk of the same messageId when possible.
+          const last = next.items[next.items.length - 1];
+          if (
+            last &&
+            last.kind === "message" &&
+            mid &&
+            last.messageId === mid &&
+            last.role === role
+          ) {
+            next.items[next.items.length - 1] = {
+              ...last,
+              text: last.text + (payload.text ?? ""),
+            };
+          } else {
+            push({
+              kind: "message",
+              role,
+              text: payload.text ?? "",
+              messageId: mid,
+            });
+          }
+          break;
+        }
+        case "tool_call": {
+          const existing = next.items.findIndex(
+            (it) => it.kind === "tool" && it.toolCallId === payload.toolCallId
+          );
+          if (existing >= 0) {
+            const cur = next.items[existing];
+            next.items[existing] = {
+              ...cur,
+              text: payload.title || cur.text,
+              status: payload.status,
+            };
+          } else {
+            push({
+              kind: "tool",
+              role: "system",
+              text: payload.title || payload.toolCallId,
+              toolCallId: payload.toolCallId,
+              status: payload.status,
+            });
+          }
+          break;
+        }
+        case "tool_call_update": {
+          const existing = next.items.findIndex(
+            (it) => it.kind === "tool" && it.toolCallId === payload.toolCallId
+          );
+          if (existing >= 0) {
+            const cur = next.items[existing];
+            next.items[existing] = {
+              ...cur,
+              status: payload.status,
+              detail: payload.detail ?? cur.detail,
+            };
+          } else {
+            push({
+              kind: "tool",
+              role: "system",
+              text: payload.toolCallId,
+              toolCallId: payload.toolCallId,
+              status: payload.status,
+              detail: payload.detail,
+            });
+          }
+          break;
+        }
+        case "plan": {
+          const entries = Array.isArray(payload.entries) ? payload.entries : [];
+          const text = entries
+            .map((e) => {
+              if (e && typeof e === "object") {
+                const o = e as Record<string, unknown>;
+                const content = String(o.content ?? o.title ?? o.text ?? "");
+                const st = String(o.status ?? "");
+                const mark =
+                  st === "completed" ? "☑" : st === "in_progress" ? "►" : "☐";
+                return `${mark} ${content}`.trim();
+              }
+              return String(e);
+            })
+            .filter(Boolean)
+            .join("\n");
+          // Replace previous plan row if any.
+          const pi = next.items.findIndex((it) => it.kind === "plan");
+          if (pi >= 0) {
+            next.items[pi] = {
+              ...next.items[pi],
+              text,
+              at: now,
+            };
+          } else {
+            push({ kind: "plan", role: "system", text });
+          }
+          break;
+        }
+        case "usage":
+          next.usage = { used: payload.used, size: payload.size };
+          break;
+        case "permission_request":
+          next.pendingPermission = {
+            requestId: payload.requestId,
+            summary: payload.summary,
+            toolCallId: payload.toolCallId,
+          };
+          push({
+            kind: "permission",
+            role: "system",
+            text: payload.summary,
+            requestId: payload.requestId,
+            toolCallId: payload.toolCallId,
+            status: "pending",
+            key: `${id}-perm-${payload.requestId}`,
+          });
+          break;
+        case "turn_done":
+          next.turnActive = false;
+          next.lastStopReason = payload.stopReason;
+          push({
+            kind: "turn",
+            role: "system",
+            text: payload.stopReason,
+            status: payload.stopReason,
+          });
+          break;
+        case "status": {
+          const st = payload.status;
+          if (st === "busy" || st === "running") next.turnActive = true;
+          if (st === "idle") next.turnActive = false;
+          break;
+        }
+        case "error":
+          push({ kind: "error", role: "system", text: payload.message });
+          next.turnActive = false;
+          break;
+        case "stderr":
+          push({ kind: "stderr", role: "system", text: payload.line });
+          break;
+        default:
+          break;
+      }
+
+      acpSessions.set(id, next);
+
+      // Mirror turn/permission into AgentInfo.status so TabBar/effectiveAgentStatus
+      // can show 运行中 / 待确认 without a PTY channel or hook sidecar.
+      const agents = new Map(s.agents);
+      const agent = agents.get(id);
+      let agentsOut = s.agents;
+      if (agent) {
+        let status = agent.status;
+        if (payload.type === "permission_request") {
+          status = "waiting_input";
+        } else if (payload.type === "turn_done" || payload.type === "error") {
+          status = "idle";
+        } else if (
+          payload.type === "status" &&
+          (payload.status === "busy" || payload.status === "running")
+        ) {
+          status = "running";
+        } else if (payload.type === "status" && payload.status === "idle") {
+          status = "idle";
+        } else if (
+          payload.type === "message_chunk" ||
+          payload.type === "tool_call" ||
+          payload.type === "tool_call_update"
+        ) {
+          if (status === "idle" || status === "waiting_input") {
+            // streaming after grant — treat as running
+            if (status === "idle") status = "running";
+          }
+        }
+        if (status !== agent.status) {
+          agents.set(id, { ...agent, status });
+          agentsOut = agents;
+        }
+      }
+
+      // Stamp activity for ACP streams (throttled).
+      let activeAt = s.agentActiveAt;
+      if (
+        payload.type === "message_chunk" ||
+        payload.type === "tool_call" ||
+        payload.type === "tool_call_update" ||
+        payload.type === "turn_done"
+      ) {
+        if (now - (s.agentActiveAt.get(id) ?? 0) >= ACTIVE_STAMP_THROTTLE_MS) {
+          activeAt = new Map(s.agentActiveAt);
+          activeAt.set(id, now);
+        }
+      }
+
+      return {
+        acpSessions,
+        agents: agentsOut,
+        agentActiveAt: activeAt,
+      };
+    }),
 
   addAgent: (info, channel, createdAtTs) =>
     set((s) => {
@@ -1224,6 +1494,8 @@ export const useStore = create<AppState>((set, get) => {
       agents.delete(id);
       const channels = new Map(s.agentChannels);
       channels.delete(id);
+      const acpSessions = new Map(s.acpSessions);
+      acpSessions.delete(id);
       const activeAt = new Map(s.agentActiveAt);
       activeAt.delete(id);
       const wakeAt = new Map(s.agentWakeAt);
@@ -1254,6 +1526,7 @@ export const useStore = create<AppState>((set, get) => {
       return {
         agents,
         agentChannels: channels,
+        acpSessions,
         agentActiveAt: activeAt,
         agentWakeAt: wakeAt,
         hookStatus,
@@ -1485,10 +1758,24 @@ export const useStore = create<AppState>((set, get) => {
 
   dropAgentChannel: (id) =>
     set((s) => {
-      if (!s.agentChannels.has(id)) return {};
-      const agentChannels = new Map(s.agentChannels);
-      agentChannels.delete(id);
-      return { agentChannels };
+      const hasPty = s.agentChannels.has(id);
+      const hasAcp = s.acpSessions.has(id);
+      if (!hasPty && !hasAcp) return {};
+      const agentChannels = hasPty
+        ? (() => {
+            const m = new Map(s.agentChannels);
+            m.delete(id);
+            return m;
+          })()
+        : s.agentChannels;
+      // Keep transcript; mark host not live so status reads dormant until resume.
+      let acpSessions = s.acpSessions;
+      if (hasAcp) {
+        acpSessions = new Map(s.acpSessions);
+        const prev = acpSessions.get(id);
+        if (prev) acpSessions.set(id, { ...prev, live: false, turnActive: false });
+      }
+      return { agentChannels, acpSessions };
     }),
 
   setSessionsRestored: () => set({ sessionsRestored: true }),
@@ -1782,7 +2069,7 @@ export const useStore = create<AppState>((set, get) => {
       return { projects };
     }),
 
-  // Sleep a project (free CPU/memory): kill every agent's PTY process, close its
+  // Sleep a project (free CPU/memory): kill every agent's PTY/ACP process, close its
   // terminal + editor/diff tabs. The agent stays in the store as idle (reopening
   // the terminal resumes the session) and the DB rows persist for restart.
   sleepProject: (name) => {
@@ -1793,12 +2080,17 @@ export const useStore = create<AppState>((set, get) => {
       if (projectOfAgent(a) === name) doomed.push(id);
     });
     const channels = new Map(s.agentChannels);
+    const acpSessions = new Map(s.acpSessions);
     for (const id of doomed) {
       invoke("agent_kill", { id }).catch(() => {});
       s.closeTab(id);
       channels.delete(id);
+      const prev = acpSessions.get(id);
+      if (prev) {
+        acpSessions.set(id, { ...prev, live: false, turnActive: false });
+      }
     }
-    set({ agentChannels: channels });
+    set({ agentChannels: channels, acpSessions });
     for (const id of doomed) s.updateAgentStatus(id, "idle");
     // Close editor / diff tabs whose file lives under the project root.
     if (root) {

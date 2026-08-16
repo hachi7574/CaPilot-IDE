@@ -6,6 +6,7 @@ import { Onboarding } from "./components/onboarding/Onboarding";
 import { useResourceSync } from "./state/resource";
 import { useRuntimeSync } from "./state/runtime";
 import { useSessionRestore, useAgentEvents } from "./state/session";
+import { useAcpEvents } from "./state/acpEvents";
 import { useCloneEvents } from "./state/clone";
 import { useWorktreeEvents } from "./state/worktree";
 import { useUsageSync } from "./state/usage";
@@ -21,6 +22,7 @@ function App() {
   useRuntimeSync();
   useSessionRestore();
   useAgentEvents();
+  useAcpEvents();
   useCloneEvents();
   useWorktreeEvents();
   useUsageSync();

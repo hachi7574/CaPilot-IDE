@@ -22,11 +22,13 @@ import {
   spawnAgent,
   ensureAgentChannel,
   sendPromptToAgent,
+  cancelAcpTurn,
 } from "../../state/agentActions";
 import { PermissionConfirmationDialog } from "./PermissionConfirmationDialog";
 import { ContextWindowMeter } from "./ContextWindowMeter";
 import { CacheHitRate } from "./CacheHitRate";
 import { Icon } from "../Icon";
+import { isAcpRuntime } from "../../state/runtimeTransport";
 
 const DEFAULT_RUNTIME = "claude";
 type ComposerPermissionMode = PermissionMode;
@@ -294,6 +296,11 @@ export function Composer() {
   const configAgentId = activeTab?.agentId;
   const configAgent = configAgentId ? agents.get(configAgentId) : undefined;
   const configRuntimeId = configAgent?.runtime ?? DEFAULT_RUNTIME;
+  // ACP vs PTY — never use `=== "opencode"` to detect ACP (`acp:opencode` ≠ PTY).
+  const configIsAcp = isAcpRuntime(configRuntimeId);
+  const acpTurnActive = useStore((s) =>
+    configAgentId ? !!s.acpSessions.get(configAgentId)?.turnActive : false
+  );
   const configRuntime = runtimes.find((runtime) => runtime.id === configRuntimeId);
   const models = configRuntime?.models ?? [];
   const permissionModes: PermissionModeInfo[] = configRuntime?.permission_modes ?? [];
@@ -433,6 +440,17 @@ export function Composer() {
 
       permissionSwitchingRef.current = true;
       try {
+        // ACP: never inject TUI key sequences. Persist mode only (Host policy Phase 3).
+        if (isAcpRuntime(agent.runtime)) {
+          await invoke("agent_set_session_config", { id, mode });
+          useStore.setState((st) => {
+            const agents = new Map(st.agents);
+            const a = agents.get(id);
+            if (a) agents.set(id, { ...a, mode });
+            return { agents, permissionMode: mode };
+          });
+          return;
+        }
         // A restored session may not have its PTY until its terminal is first
         // shown. Resume it before applying a live mode change — dsh included:
         // its branch below types `/permission` into the running TUI, so the
@@ -586,6 +604,17 @@ export function Composer() {
 
       modelSwitchingRef.current = true;
       try {
+        // ACP: no model catalog / TUI injection in MVP — persist only.
+        if (isAcpRuntime(agent.runtime)) {
+          await invoke("agent_set_session_config", { id, model: modelId });
+          useStore.setState((st) => {
+            const agents = new Map(st.agents);
+            const a = agents.get(id);
+            if (a) agents.set(id, { ...a, model: modelId });
+            return { agents, selectedModel: modelId };
+          });
+          return;
+        }
         // dsh 的模型只在 spawn 时钉死：`/model` 会 fork 会话（历史保留、新
         // 会话路由新模型），破坏「tab id = session id」身份。恢复会话只需
         // 持久化配置，无需启动 PTY（见下方 dsh 分支）。pi 走 live selector，
@@ -894,7 +923,7 @@ export function Composer() {
 
   // Keep the label in sync when the targeted session/model changes.
   useEffect(() => {
-    if (configRuntimeId !== "opencode" || !shownModel) {
+    if (configIsAcp || configRuntimeId !== "opencode" || !shownModel) {
       setOpenCodeVariant(null);
       return;
     }
@@ -910,14 +939,26 @@ export function Composer() {
   }, [configRuntimeId, shownModel]);
 
   // ── Esc → abort the target agent's current operation ──────────
-  // Sends a raw ESC byte to the agent's PTY — the same path the terminal uses
-  // (xterm keydown → agent_write raw:true), so the CLI aborts its in-flight
-  // turn exactly like pressing Esc inside the terminal.
+  // PTY: raw ESC byte (same as terminal). ACP: session/cancel notification.
   const abortAgentOperation = useCallback(() => {
     const id = activeTab?.agentId;
     if (!id || !agents.has(id)) return;
+    const rt = agents.get(id)?.runtime;
+    if (isAcpRuntime(rt)) {
+      void cancelAcpTurn(id).catch(() => {});
+      return;
+    }
     invoke("agent_write", { id, data: "\u001b", raw: true }).catch(() => {});
   }, [activeTab?.agentId, agents]);
+
+  const stopAcpTurn = useCallback(() => {
+    const id =
+      effectiveTarget?.kind === "agent"
+        ? effectiveTarget.agentId
+        : activeTab?.agentId;
+    if (!id) return;
+    void cancelAcpTurn(id).catch(() => {});
+  }, [effectiveTarget, activeTab?.agentId]);
 
   // ── Popover open/close (click-outside + Escape) ───────────────
   useEffect(() => {
@@ -1780,10 +1821,10 @@ export function Composer() {
         }
       }
 
-      // Ctrl+T on an opencode target drives OpenCode's native `variant_cycle`
-      // (cycle thinking strength) instead of the window-level "new session"
-      // shortcut. Other runtimes keep the global behavior (spawn a new agent).
+      // Ctrl+T on a PTY opencode target drives OpenCode's native `variant_cycle`.
+      // ACP (`acp:opencode`) must never take this path.
       if (
+        !configIsAcp &&
         configRuntimeId === "opencode" &&
         e.ctrlKey &&
         !e.shiftKey &&
@@ -1803,10 +1844,8 @@ export function Composer() {
       } else if (e.key === "Tab") {
         e.preventDefault();
         if (e.shiftKey) {
-          // In OpenCode, Shift+Tab in CaPilot's composer mirrors the native
-          // primary-agent switch: Build ⇄ Plan. Permission switching remains
-          // available from its dedicated button/menu.
-          if (configRuntimeId === "opencode") {
+          // PTY OpenCode only: Shift+Tab mirrors Build ⇄ Plan.
+          if (!configIsAcp && configRuntimeId === "opencode") {
             void cycleOpenCodeAgent();
             return;
           }
@@ -1854,6 +1893,7 @@ export function Composer() {
       shownMode,
       permissionModes,
       configRuntimeId,
+      configIsAcp,
       cycleOpenCodeAgent,
       cycleOpenCodeVariant,
       applyPermissionMode,
@@ -2056,18 +2096,30 @@ export function Composer() {
             onKeyDown={handleKeyDown}
             onInput={handleInput}
           />
-          <button
-            className="ul-send-btn"
-            title={
-              effectiveTarget?.kind === "todo"
-                ? "添加到待分配（Enter）"
-                : "发送消息（Enter）"
-            }
-            onClick={() => handleSend()}
-            disabled={sendingRef.current || !hasInput}
-          >
-            发送
-          </button>
+          {configIsAcp && acpTurnActive ? (
+            <button
+              className="ul-send-btn ul-stop-btn"
+              title="停止当前 ACP 回合（Esc / acp_cancel）"
+              onClick={() => stopAcpTurn()}
+            >
+              停止
+            </button>
+          ) : (
+            <button
+              className="ul-send-btn"
+              title={
+                effectiveTarget?.kind === "todo"
+                  ? "添加到待分配（Enter）"
+                  : configIsAcp
+                    ? "发送消息（Enter → acp_prompt）"
+                    : "发送消息（Enter）"
+              }
+              onClick={() => handleSend()}
+              disabled={sendingRef.current || !hasInput}
+            >
+              发送
+            </button>
+          )}
         </div>
       </div>
 
@@ -2226,6 +2278,7 @@ export function Composer() {
           )}
         </span>
 
+        {!configIsAcp && (
         <span className="cmp-pop" ref={modelAnchorRef}>
           <span
             className="act-btn"
@@ -2335,8 +2388,10 @@ export function Composer() {
             </div>
           )}
         </span>
+        )}
 
-        {configRuntimeId === "opencode" && (
+        {/* PTY OpenCode dialect only — never for acp:opencode */}
+        {!configIsAcp && configRuntimeId === "opencode" && (
           <>
             <span
               className="act-btn"
@@ -2368,7 +2423,7 @@ export function Composer() {
           </>
         )}
 
-        {menuThinkingOptions.length > 0 && (
+        {!configIsAcp && menuThinkingOptions.length > 0 && (
           <span className="cmp-pop" ref={thinkingAnchorRef}>
             <span
               className="act-btn"

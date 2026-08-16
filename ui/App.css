@@ -4194,3 +4194,194 @@ html[data-theme="quantum"] .app::before {
   .settings-version-plate { grid-template-columns: 42px 1fr; }
   .settings-version-plate > small { grid-column: 1 / -1; }
 }
+
+
+/* ── ACP session panel (structured, not xterm) ───────────────── */
+.acp-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: var(--fs-body, 13px);
+}
+.acp-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+  background: var(--bg2);
+}
+.acp-panel-title { font-weight: 600; }
+.acp-panel-runtime {
+  color: var(--ink2);
+  font-size: 11px;
+  font-family: var(--mono, ui-monospace, monospace);
+}
+.acp-panel-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  text-transform: lowercase;
+}
+.acp-panel-badge.running {
+  color: var(--brand);
+  border-color: var(--brand);
+  background: var(--brand-dim);
+}
+.acp-panel-badge.waiting {
+  color: #c9842e;
+  border-color: #c9842e;
+}
+.acp-panel-usage {
+  margin-left: auto;
+  color: var(--ink2);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.acp-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 14px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.acp-empty {
+  color: var(--ink2);
+  padding: 24px 8px;
+  text-align: center;
+}
+.acp-msg {
+  border-left: 2px solid var(--line);
+  padding: 4px 0 4px 10px;
+}
+.acp-msg-user { border-left-color: var(--brand); }
+.acp-msg-agent { border-left-color: var(--primary, var(--brand)); }
+.acp-msg-thought { border-left-color: var(--ink2); opacity: 0.9; }
+.acp-msg-role {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink2);
+  margin-bottom: 2px;
+}
+.acp-msg-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.45;
+}
+.acp-tool {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 10px;
+  background: var(--bg2);
+}
+.acp-tool-title {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.acp-tool-kind {
+  font-size: 10px;
+  color: var(--ink2);
+  text-transform: uppercase;
+}
+.acp-tool-status {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--ink2);
+}
+.acp-tool-completed .acp-tool-status { color: var(--brand); }
+.acp-tool-detail {
+  margin-top: 4px;
+  white-space: pre-wrap;
+  font-size: 12px;
+  color: var(--ink2);
+}
+.acp-plan {
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: var(--bg2);
+}
+.acp-plan-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  color: var(--ink2);
+  margin-bottom: 4px;
+}
+.acp-plan-body {
+  margin: 0;
+  white-space: pre-wrap;
+  font-family: inherit;
+  font-size: 12px;
+}
+.acp-turn-end {
+  text-align: center;
+  color: var(--ink2);
+  font-size: 11px;
+  padding: 6px 0;
+}
+.acp-error {
+  color: #d45;
+  white-space: pre-wrap;
+  border: 1px solid #d45;
+  border-radius: 6px;
+  padding: 6px 10px;
+  background: color-mix(in srgb, #d45 8%, var(--bg));
+}
+.acp-stderr {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--ink2);
+  white-space: pre-wrap;
+  opacity: 0.85;
+}
+.acp-perm-card {
+  flex-shrink: 0;
+  margin: 8px 12px 0;
+  padding: 10px 12px;
+  border: 1px solid #c9842e;
+  border-radius: 8px;
+  background: color-mix(in srgb, #c9842e 12%, var(--bg));
+}
+.acp-perm-summary {
+  white-space: pre-wrap;
+  margin-bottom: 8px;
+}
+.acp-perm-actions { display: flex; gap: 8px; }
+.acp-perm-allow,
+.acp-perm-reject {
+  border: 1px solid var(--line);
+  background: var(--bg2);
+  color: var(--ink);
+  border-radius: 6px;
+  padding: 4px 12px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.acp-perm-allow:hover { border-color: var(--brand); color: var(--brand); }
+.acp-perm-reject:hover { border-color: #d45; color: #d45; }
+.acp-perm-inline {
+  font-size: 12px;
+  color: var(--ink2);
+}
+.acp-perm-badge {
+  display: inline-block;
+  font-size: 10px;
+  text-transform: uppercase;
+  margin-right: 6px;
+  color: #c9842e;
+}
+.ul-stop-btn {
+  background: color-mix(in srgb, #d45 18%, var(--bg2)) !important;
+  border-color: #d45 !important;
+  color: #d45 !important;
+}

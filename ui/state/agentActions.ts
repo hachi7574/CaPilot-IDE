@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useStore, AgentInfo, RestoredSession, createBufferedChannel } from "./store";
 import { notify } from "./notify";
+import { isAcpRuntime } from "./runtimeTransport";
 
 const DEFAULT_RUNTIME = "claude";
 
@@ -12,7 +13,6 @@ export async function spawnAgent(
   runtime: string = DEFAULT_RUNTIME
 ): Promise<string> {
   const s = useStore.getState();
-  const { channel, flush } = createBufferedChannel();
   const proj = project ?? DEFAULT_PROJECT;
   // A git-cloned / local-folder project carries its own on-disk root (the
   // store's `projectRoots` map). Pass it through so the agent's cwd lives under
@@ -33,6 +33,10 @@ export async function spawnAgent(
         ? s.selectedModel
         : null
       : null;
+
+  // ACP sessions do not use a PTY data channel — backend ignores onData.
+  // Still pass a throwaway channel to satisfy the command signature.
+  const { channel, flush } = createBufferedChannel();
   let info: AgentInfo;
   try {
     info = (await invoke("agent_spawn", {
@@ -52,8 +56,15 @@ export async function spawnAgent(
     notify("终端启动失败", typeof e === "string" ? e : String(e));
     throw e;
   }
-  flush(info.id);
-  s.addAgent({ ...info, project: proj }, channel);
+
+  if (isAcpRuntime(runtime) || isAcpRuntime(info.runtime)) {
+    // No PTY buffer — mark ACP host live so TabBar treats the session as connected.
+    s.addAgent({ ...info, project: proj }, null);
+    s.markAcpLive(info.id);
+  } else {
+    flush(info.id);
+    s.addAgent({ ...info, project: proj }, channel);
+  }
   s.addTab({
     id: info.id,
     type: "agent",
@@ -132,9 +143,23 @@ export async function spawnBashAt(
 }
 
 /** Ensure the target agent has a live PTY channel (resume restored sessions).
- *  Returns true if a resume was required (caller may want to delay input). */
+ *  Returns true if a resume was required (caller may want to delay input).
+ *  ACP sessions use AcpBridge — no PTY channel; marks live instead. */
 export async function ensureAgentChannel(agentId: string): Promise<boolean> {
   const s = useStore.getState();
+  const agent = s.agents.get(agentId);
+  if (isAcpRuntime(agent?.runtime)) {
+    if (s.acpSessions.get(agentId)?.live) return false;
+    // Resume via agent_resume (backend forks to AcpBridge). onData is ignored.
+    const { channel } = createBufferedChannel();
+    const info = (await invoke("agent_resume", {
+      id: agentId,
+      onData: channel,
+    })) as AgentInfo;
+    s.addAgent(info, null);
+    s.markAcpLive(info.id);
+    return true;
+  }
   if (s.agentChannels.has(agentId)) return false;
   const { channel, flush } = createBufferedChannel();
   const info = (await invoke("agent_resume", {
@@ -149,15 +174,13 @@ export async function ensureAgentChannel(agentId: string): Promise<boolean> {
 /**
  * Send a prompt to an agent with the Composer's exact send semantics, shared by
  * the Composer and the todo-tag drop targets:
- *   1. ensure a live PTY channel (resume restored/dormant sessions);
+ *   1. ensure a live PTY channel / ACP host (resume restored/dormant sessions);
  *   2. give a freshly-booted TUI time to attach its input loop before injecting
- *      the message (see `waitForTui` / the resumed-detection comment in the
- *      Composer);
+ *      the message (PTY only — ACP has no TUI boot delay);
  *   3. stamp the submission (tab bar reads 运行中) and clear the
  *      unviewed-completion flag;
- *   4. write the message — codex gets the text+Enter keystroke burst its TUI
- *      needs to treat the input as a submitted prompt, other runtimes a plain
- *      write (raw:false appends the Enter).
+ *   4. write the message — ACP → `acp_prompt`; codex PTY gets text+Enter burst;
+ *      other PTY runtimes a plain write.
  */
 export async function sendPromptToAgent(
   agentId: string,
@@ -165,13 +188,36 @@ export async function sendPromptToAgent(
   opts?: { waitForTui?: boolean }
 ): Promise<void> {
   const s = useStore.getState();
+  const runtime = s.agents.get(agentId)?.runtime;
+  if (isAcpRuntime(runtime)) {
+    const resumed = await ensureAgentChannel(agentId);
+    void resumed;
+    // Optimistically show the user turn in the panel.
+    s.applyAcpEvent({
+      agentId,
+      type: "message_chunk",
+      role: "user",
+      text,
+      messageId: `user-${Date.now()}`,
+    });
+    // Mark turn active before the async host responds.
+    const acp = s.acpSessions.get(agentId);
+    if (acp) {
+      // applyAcpEvent above already set; flip turn via status event shape
+      s.applyAcpEvent({ agentId, type: "status", status: "busy" });
+    }
+    s.markAgentSubmitted(agentId);
+    s.setAgentUnread(agentId, false);
+    await invoke("acp_prompt", { id: agentId, text });
+    return;
+  }
+
   const resumed = await ensureAgentChannel(agentId);
-  if ((opts?.waitForTui) || resumed) {
+  if (opts?.waitForTui || resumed) {
     await new Promise((r) => setTimeout(r, 800));
   }
   s.markAgentSubmitted(agentId);
   s.setAgentUnread(agentId, false);
-  const runtime = s.agents.get(agentId)?.runtime;
   if (runtime === "codex") {
     // Codex's TUI detects a text+Enter burst as pasted input. When both are
     // delivered in one PTY write, the trailing CR may remain in the editor
@@ -183,6 +229,14 @@ export async function sendPromptToAgent(
   } else {
     await invoke("agent_write", { id: agentId, data: text });
   }
+}
+
+/** Cancel an in-flight ACP turn (session/cancel notification). No-op for PTY. */
+export async function cancelAcpTurn(agentId: string): Promise<void> {
+  const s = useStore.getState();
+  const runtime = s.agents.get(agentId)?.runtime;
+  if (!isAcpRuntime(runtime)) return;
+  await invoke("acp_cancel", { id: agentId });
 }
 
 /**
@@ -201,8 +255,12 @@ export async function assignTodoAndSend(tagId: string, agentId: string): Promise
   // The tag keeps its creation-time scope (project) — see `assignTodoToAgent`.
   st.assignTodoToAgent(tagId, agentId, sessionName);
 
-  // Live session (channel attached, not ended) → straight in.
-  if (!st.agentChannels.has(agentId) || agent?.status === "done") {
+  const isAcp = isAcpRuntime(agent?.runtime);
+  // Live session (channel / acp host attached, not ended) → straight in.
+  const live = isAcp
+    ? !!st.acpSessions.get(agentId)?.live
+    : st.agentChannels.has(agentId);
+  if (!live || agent?.status === "done") {
     // Ended/dormant: reopen like the sidebar "已结束" click — force a fresh
     // terminal mount that resumes — then wait for the resumed channel before
     // sending, so `sendPromptToAgent`'s ensureAgentChannel can't double-resume.
@@ -219,7 +277,10 @@ export async function assignTodoAndSend(tagId: string, agentId: string): Promise
     }
     st.setActiveTab(agentId);
     for (let i = 0; i < 30; i++) {
-      if (useStore.getState().agentChannels.has(agentId)) break;
+      const cur = useStore.getState();
+      if (isAcp ? cur.acpSessions.get(agentId)?.live : cur.agentChannels.has(agentId)) {
+        break;
+      }
       await new Promise((r) => setTimeout(r, 100));
     }
   }
@@ -239,7 +300,7 @@ export async function renameAgent(agentId: string, title: string): Promise<void>
   useStore.getState().updateAgentTitle(agentId, updated.title);
 }
 
-/** Close an agent: kill PTY, remove session row (so it won't resurrect), close tabs. */
+/** Close an agent: kill PTY/ACP, remove session row (so it won't resurrect), close tabs. */
 export async function closeAgent(agentId: string): Promise<void> {
   const s = useStore.getState();
   // Close the UI first (tab + sidebar row) so the terminal disappears from the
@@ -248,7 +309,7 @@ export async function closeAgent(agentId: string): Promise<void> {
   s.closeTab(agentId);
   s.removeAgent(agentId);
   try {
-    // sessions_delete kills the PTY and removes the agent dir + DB session row.
+    // sessions_delete kills the PTY/ACP and removes the agent dir + DB session row.
     await invoke("sessions_delete", { id: agentId });
   } catch {
     // Fall back to a plain kill so the terminal still closes even if session

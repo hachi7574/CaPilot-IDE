@@ -96,6 +96,7 @@ export function TabBar() {
   const activeTabId = useStore((s) => s.activeTabId);
   const agents = useStore((s) => s.agents);
   const agentChannels = useStore((s) => s.agentChannels);
+  const acpSessions = useStore((s) => s.acpSessions);
   const agentActiveAt = useStore((s) => s.agentActiveAt);
   const hookStatus = useStore((s) => s.hookStatus);
   const agentSubmittedAt = useStore((s) => s.agentSubmittedAt);
@@ -465,10 +466,12 @@ export function TabBar() {
     >
       {visibleTabs.map((tab) => {
         const agent = tab.agentId ? agents.get(tab.agentId) : undefined;
-        // A PTY channel is attached on spawn/resume and dropped when a session
-        // is killed/removed — it is the "connected" signal. Restored sessions
-        // have no channel yet, so they must not display as 运行中.
-        const connected = tab.agentId ? agentChannels.has(tab.agentId) : false;
+        // Connected signal: PTY sessions use the data channel; ACP sessions use
+        // `acpSessions.live` (no PTY). Restored sessions have neither yet → dormant.
+        const connected = tab.agentId
+          ? agentChannels.has(tab.agentId) ||
+            !!acpSessions.get(tab.agentId)?.live
+          : false;
         // Connected-but-quiet sessions read as 空闲; recent output/input (a task
         // in flight) reads as 运行中. `agentActiveAt` is throttled so streaming
         // doesn't re-render the strip per chunk.

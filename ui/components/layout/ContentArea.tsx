@@ -2,6 +2,7 @@ import { useEffect, useState, ReactNode } from "react";
 import { useStore, Tab, SplitNode, resolveCtrlTRuntime } from "../../state/store";
 import { splitLeafTabIds } from "../../state/store";
 import { XTermPanel } from "../terminal/XTermPanel";
+import { AcpSessionPanel } from "../acp/AcpSessionPanel";
 import { EditorPanel } from "../editor/EditorPanel";
 import { DiffPanel } from "../editor/DiffPanel";
 import { ImageViewerPanel } from "../editor/ImageViewerPanel";
@@ -9,10 +10,11 @@ import { Icon } from "../Icon";
 import { CaPilotLogo } from "../CaPilotLogo";
 import { spawnAgent } from "../../state/agentActions";
 import { notify } from "../../state/notify";
+import { isAcpRuntime } from "../../state/runtimeTransport";
 
 type DropEdge = "left" | "right" | "top" | "bottom" | null;
 
-/** A single tab's panel (terminal / editor), reused in split panes. */
+/** A single tab's panel (terminal / ACP / editor), reused in split panes. */
 function Panel({
   tab,
   active,
@@ -21,9 +23,16 @@ function Panel({
   /** True for the panel of the active tab (drives F1 terminal-focus gating). */
   active?: boolean;
 }) {
+  const agentRuntime = useStore((s) =>
+    tab.agentId ? s.agents.get(tab.agentId)?.runtime : undefined
+  );
+  const acp = isAcpRuntime(agentRuntime);
   return (
     <div className="content-panel">
-      {tab.type === "agent" && tab.agentId && (
+      {tab.type === "agent" && tab.agentId && acp && (
+        <AcpSessionPanel agentId={tab.agentId} active={active} />
+      )}
+      {tab.type === "agent" && tab.agentId && !acp && (
         <XTermPanel agentId={tab.agentId} active={active} />
       )}
       {tab.type === "agent" && !tab.agentId && (
@@ -244,8 +253,12 @@ export function ContentArea() {
   }, []);
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
+  // PTY OpenCode only — `acp:opencode` must NOT enter the resident-xterm path.
   const openCodeTabs = tabs.filter(
-    (tab) => tab.type === "agent" && tab.agentId && agents.get(tab.agentId)?.runtime === "opencode"
+    (tab) =>
+      tab.type === "agent" &&
+      tab.agentId &&
+      agents.get(tab.agentId)?.runtime === "opencode"
   );
   const activeIsOpenCode = openCodeTabs.some((tab) => tab.id === activeTab?.id);
 
