@@ -90,6 +90,11 @@ const AUTO_CHECK_UPDATE_KEY: &str = "auto_check_update";
 /// 运行中 (Settings → 外观与显示 → 提示音). Defaults to enabled when unset.
 const SOUND_ENABLED_KEY: &str = "sound_enabled";
 
+/// Settings KV key: last focused sidebar project name. Restored on startup so
+/// the IDE reopens the project the user was last working in, not the first
+/// alphabetically-sorted entry from `list_projects`.
+const FOCUSED_PROJECT_KEY: &str = "focused_project";
+
 /// User-configured launch override for one runtime (the adapter's defaults win
 /// unless a field is set to a non-empty string).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1647,6 +1652,7 @@ fn setting_set(
         TODOS_KEY,
         AUTO_CHECK_UPDATE_KEY,
         SOUND_ENABLED_KEY,
+        FOCUSED_PROJECT_KEY,
     ];
     if !ALLOWED.contains(&key.as_str()) {
         return Err(format!("unknown setting key: {}", key));

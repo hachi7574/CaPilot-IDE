@@ -55,7 +55,7 @@ export function isContextMeterActive(
 }
 
 /**
- * Live context-window usage sync (docs/context-window-usage.md).
+ * Live context-window usage sync.
  *
  * Three sources reconciled into `agent.last_usage`:
  *  - an immediate poll when the composer's active agent changes (opening or

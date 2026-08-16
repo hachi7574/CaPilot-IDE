@@ -13,7 +13,7 @@
 | **Claude Code** | https://code.claude.com/docs （索引 `llms.txt`） | [CLI reference](https://code.claude.com/docs/en/cli-reference) · [Settings](https://code.claude.com/docs/en/settings) · [Permissions](https://code.claude.com/docs/en/permissions) · [Permission modes（Shift+Tab 环）](https://code.claude.com/docs/en/permission-modes) · [Slash commands（`/model` `/effort`）](https://code.claude.com/docs/en/commands) · [Interactive mode](https://code.claude.com/docs/en/interactive-mode) · [Keybindings](https://code.claude.com/docs/en/keybindings) · [Sessions & resume](https://code.claude.com/docs/en/sessions) · [Model config](https://code.claude.com/docs/en/model-config) |
 | **Codex / ChatGPT** | https://learn.chatgpt.com/docs/codex | [CLI 总览](https://learn.chatgpt.com/docs/codex/cli) · [CLI 命令参考（含 flags）](https://learn.chatgpt.com/docs/codex/developer-commands?surface=cli) · [Slash commands（`/model` `/permissions`）](https://learn.chatgpt.com/docs/codex/reference/slash-commands) · [Config file reference](https://learn.chatgpt.com/docs/codex/config-file/config-reference) · [Settings](https://learn.chatgpt.com/docs/codex/reference/settings) · [Permission modes](https://learn.chatgpt.com/docs/codex/permission-modes) · [Sandboxing](https://learn.chatgpt.com/docs/codex/sandboxing) · [Projects & chats](https://learn.chatgpt.com/docs/codex/projects) · [app-server（模型目录）](https://learn.chatgpt.com/docs/codex/app-server) |
 | **OpenCode** | https://opencode.ai/docs | [CLI](https://opencode.ai/docs/cli/) · [TUI](https://opencode.ai/docs/tui/) · [Config](https://opencode.ai/docs/config/) · [Keybinds（`tui.json`）](https://opencode.ai/docs/keybinds/) · [Permissions](https://opencode.ai/docs/permissions/) · [Agents](https://opencode.ai/docs/agents/) · [Models](https://opencode.ai/docs/models/) · [Commands](https://opencode.ai/docs/commands/) |
-| **dsh（DeepSeek Harness）** | https://github.com/deepseek-ai/dsh（CLI 包 `@deepseek-ai/dsh`，TUI 为 `@deepseek-harness-tui/dsh-tui` 插件，随 `dsh plugin --profile dsh-tui add @deepseek-harness-tui/dsh-tui` 安装；集成设计见 `docs/dsh-runtime-integration.md`） | 已落库事实以本文件 §2.4 / §3 为准；上游为 Commander launcher + Cordis app，官方文档在仓库 README 与 `dsh-tui` 插件 README（本地 `~/.dsh/profiles/dsh-tui` 下有安装副本） |
+| **dsh（DeepSeek Harness）** | https://github.com/deepseek-ai/dsh（CLI 包 `@deepseek-ai/dsh`，TUI 为 `@deepseek-harness-tui/dsh-tui` 插件，随 `dsh plugin --profile dsh-tui add @deepseek-harness-tui/dsh-tui` 安装） | 已落库事实以本文件 §2.4 / §3 为准；上游为 Commander launcher + Cordis app，官方文档在仓库 README 与 `dsh-tui` 插件 README（本地 `~/.dsh/profiles/dsh-tui` 下有安装副本） |
 | **pi（Earendil pi-coding-agent）** | https://www.npmjs.com/package/@earendil-works/pi-coding-agent（CLI `pi`，本机 `~/APP/n/bin/pi`；官方细节在 npm 包 README 与 `dist` 源码注释） | 已落库事实以本文件 §2.5 / §3 为准；`pi --help` / `pi --list-models` / `pi --list-providers` 为本地权威 |
 
 ---
@@ -119,7 +119,7 @@ opencode [--model <provider/model>] [--auto]
 
 ### 2.4 dsh（runtime `dsh`，DeepSeek Harness dsh-tui）
 
-> 集成设计全文见 `docs/dsh-runtime-integration.md`（Phase 1-4 + 验收）。适配器 `dsh.rs`；Composer 的 dsh 分支在 `Composer.tsx`；`/` 命令目录在 `slash.rs` `DSH_COMMANDS`。
+> 适配器 `dsh.rs`；Composer 的 dsh 分支在 `Composer.tsx`；`/` 命令目录在 `slash.rs` `DSH_COMMANDS`。
 
 **Launch**（`dsh.rs:546-602`）：
 ```text
@@ -228,7 +228,7 @@ pi [--provider <p>] [--model <provider/id>] [--thinking off|low|medium|high|xhig
 
 **缓存命中率 chip（composer target 行）**：`AgentUsage` 新增 `cache_hit_tokens` / `cache_total_input_tokens` 两个**会话累计**字段（wire camelCase，`adapter.rs` `AgentUsage`）。各 adapter 按自己 runtime 的会计语义归一化后再上报（Claude/opencode：分子 `cache_read`、分母 `input+cache_read(+cache_write/creation)`；codex：分子 `cached_input_tokens`、分母 `input_tokens`），前端只算 `cache_hit/cache_total` 比例、不做跨 runtime 换算。只有两者都在且分母 > 0 才渲染 chip（`ui/components/layout/CacheHitRate.tsx`）；bash 等无 `context_usage` 的 runtime 永不渲染。
 
-新增 Provider 必须通过 [context-window-usage.md](context-window-usage.md#mandatory-provider-invariants) 的 identity、隔离、0 值、去重/聚合边界、实际模型和双会话回归清单；只在单会话 happy path 上能显示数字不算完成。
+新增 Provider 必须通过 context-window-usage 的 identity、隔离、0 值、去重/聚合边界、实际模型和双会话回归清单；只在单会话 happy path 上能显示数字不算完成。
 
 ---
 

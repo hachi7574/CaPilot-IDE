@@ -1,6 +1,6 @@
 name: Release
 
-# Tag-triggered release pipeline (docs/version-update-design.md §8):
+# Tag-triggered release pipeline:
 # builds + signs the Linux/Windows/macOS bundles, uploads them to the GitHub
 # release for the tag, then assembles the updater `latest.json` manifest from
 # the build-time `.sig` files and uploads that too.
@@ -40,13 +40,22 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
+      # pnpm must be on PATH before setup-node so `cache: pnpm` can resolve
+      # the store dir; the node/pnpm caches restore `pnpm install` to seconds.
       - uses: pnpm/action-setup@v4
         with:
           version: 10.24.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
+      # Warm cargo cache shared across runs (keyed on Cargo.lock + rustc).
+      # Without this every tag run recompiles the whole Tauri dependency tree
+      # in release mode on all three platforms — the long pole (~7min/job).
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
 
       - name: Install Linux system dependencies
         if: matrix.platform == 'linux'

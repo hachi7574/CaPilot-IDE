@@ -94,7 +94,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     return () => document.removeEventListener("pointerdown", closeThemeMenu);
   }, [themeMenuOpen]);
 
-  // App self-update slice (docs/version-update-design.md).
+  // App self-update slice.
   const currentVersion = useStore((s) => s.currentVersion);
   const updateStatus = useStore((s) => s.updateStatus);
   const updateLatest = useStore((s) => s.updateLatest);
@@ -755,26 +755,29 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           <div className="settings-help-text">
             默认为 Claude；未安装时自动回退到 Bash，若一个运行时都没有则 Ctrl+T 会给出提示。
           </div>
-          <div className="settings-choice-grid">
-            {runtimes.filter((rt) => rt.available).map((rt) => (
-              <button
-                key={rt.id}
-                className={ctrlTRuntime === rt.id ? "active" : ""}
-                onClick={() => setCtrlTRuntime(rt.id)}
-                style={{
-                  fontFamily: "var(--pixel)",
-                  fontSize: "var(--fs-2xs)",
-                  padding: "6px 12px",
-                  border: `1px solid ${ctrlTRuntime === rt.id ? "var(--brand)" : "var(--rule2)"}`,
-                  color: ctrlTRuntime === rt.id ? "var(--brand)" : "var(--ink2)",
-                  background: ctrlTRuntime === rt.id ? "rgb(var(--brand-rgb) / .08)" : "transparent",
-                  cursor: "pointer",
-                }}
-              >
-                <Icon name={runtimeIcon(rt.id)} size={14} />
-                <span><b>{rt.name}</b><small>{rt.id}</small></span>
-              </button>
-            ))}
+          <div className="settings-choice-list" role="listbox" aria-label="Ctrl+T 新建终端运行时">
+            {runtimes.filter((rt) => rt.available).map((rt) => {
+              const active = ctrlTRuntime === rt.id;
+              return (
+                <button
+                  key={rt.id}
+                  type="button"
+                  role="option"
+                  aria-selected={active}
+                  className={active ? "active" : ""}
+                  onClick={() => setCtrlTRuntime(rt.id)}
+                >
+                  <span className="settings-choice-icon">
+                    <Icon name={runtimeIcon(rt.id)} size={14} />
+                  </span>
+                  <span className="settings-choice-copy">
+                    <b>{rt.name}</b>
+                    <small>{rt.id}</small>
+                  </span>
+                  <span className="settings-choice-state">{active ? "ACTIVE" : "SET"}</span>
+                </button>
+              );
+            })}
           </div>
           <div className="settings-field-label">
             <span>终端自然退出后</span>

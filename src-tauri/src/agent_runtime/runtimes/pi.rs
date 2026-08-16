@@ -308,6 +308,10 @@ impl AgentRuntimeAdapter for PiAdapter {
         Self::check_authenticated()
     }
 
+    fn version(&self) -> Option<String> {
+        crate::agent_runtime::adapter::cli_version("pi")
+    }
+
     fn list_models(&self) -> Vec<ModelInfo> {
         Self::list_models()
     }

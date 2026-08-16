@@ -1,4 +1,4 @@
-//! GUI ↔ PTY bridge (§8 of docs/pty-daemon-brief.md).
+//! GUI ↔ PTY bridge.
 //!
 //! Every `agent_*` command talks to a single [`PtyBridge`] instead of the PTY
 //! core directly. The bridge owns exactly one PTY owner:

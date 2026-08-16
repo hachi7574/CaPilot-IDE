@@ -1,8 +1,7 @@
 //! Rate-limit usage fetching — powers the status-bar "剩余用量" readout and the
 //! Settings → 已安装 → ⚙ availability check.
 //!
-//! Strategy mirrors `docs/reference/rate-limit-usage-fetching.md`, scoped to the
-//! two runtimes CaPilot surfaces quota for:
+//! Strategy covers the two runtimes CaPilot surfaces quota for:
 //! - **codex**: JSON-RPC over the `codex app-server` stdio channel
 //!   (`account/rateLimits/read`). Auth is auto-discovered from `~/.codex/auth.json`,
 //!   so no manual configuration is needed.

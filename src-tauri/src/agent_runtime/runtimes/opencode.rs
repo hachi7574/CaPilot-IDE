@@ -376,7 +376,7 @@ impl OpenCodeAdapter {
         !Self::discover_models().is_empty()
     }
 
-    // ── Context-window usage (docs/context-window-usage.md) ────────────────
+    // ── Context-window usage ─────────────────────────────────────────────
     //
     // OpenCode keeps sessions in a local SQLite store (`opencode.db`, WAL) and
     // reports per-step token accounting in `step-finish` parts. The current

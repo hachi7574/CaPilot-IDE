@@ -5,7 +5,7 @@ import { useStore, UpdateStatus } from "./store";
 import { notify } from "./notify";
 
 /**
- * App self-update slice (docs/version-update-design.md).
+ * App self-update slice.
  *
  * `useUpdateSync` runs once at app mount: it reads the real app version, loads
  * the 启动时自动检查更新 preference, and (when enabled) schedules a background

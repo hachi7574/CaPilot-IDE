@@ -260,7 +260,7 @@ export interface UsageConfig {
   workspace_id?: string;
 }
 
-// ── App self-update (docs/version-update-design.md) ─────────────
+// ── App self-update ─────────────────────────────────────────────
 
 export type UpdateStatusKind =
   | "idle"
@@ -759,7 +759,7 @@ interface AppState {
    *  `resolveCtrlTRuntime` (configured → claude → bash → hint). */
   ctrlTRuntime: string;
 
-  // App self-update (docs/version-update-design.md). State is written by
+  // App self-update. State is written by
   // `ui/state/update.ts`; only the auto-check toggle has a dedicated action.
   /** Real app version, read at runtime via getVersion(). */
   currentVersion: string | null;
@@ -1073,11 +1073,20 @@ export const useStore = create<AppState>((set, get) => {
     const s = get();
     const projectRoots = { ...s.projectRoots };
     delete projectRoots[name];
+    const focusedProject = s.focusedProject === name ? null : s.focusedProject;
     set({
       projects: s.projects.filter((p) => p !== name),
       projectRoots,
-      focusedProject: s.focusedProject === name ? null : s.focusedProject,
+      focusedProject,
     });
+    // Clear the persisted focus when the focused project itself is removed,
+    // so the next startup doesn't try to restore a missing name.
+    if (s.focusedProject === name) {
+      invoke("setting_set", {
+        key: "focused_project",
+        value: "",
+      }).catch(() => {});
+    }
     const doomed: string[] = [];
     s.agents.forEach((a, id) => {
       if (projectOfAgent(a) === name) doomed.push(id);
@@ -1684,7 +1693,15 @@ export const useStore = create<AppState>((set, get) => {
   setProjectRoots: (roots) =>
     set((s) => ({ projectRoots: { ...s.projectRoots, ...roots } })),
 
-  setFocusedProject: (name) => set({ focusedProject: name }),
+  setFocusedProject: (name) => {
+    set({ focusedProject: name });
+    // Remember the last focused project across restarts. Empty string clears
+    // a stale value when focus is dropped (e.g. the focused project was removed).
+    invoke("setting_set", {
+      key: "focused_project",
+      value: name ?? "",
+    }).catch(() => {});
+  },
 
   projectRoot: (name) => get().projectRoots[name],
 
@@ -1849,6 +1866,14 @@ export const useStore = create<AppState>((set, get) => {
       }
     });
     set({ projects, projectRoots, focusedProject, agents });
+    // Keep the persisted last-focus key in sync when the focused project is
+    // renamed, otherwise the next startup restores the old name and falls back.
+    if (s.focusedProject === oldName) {
+      invoke("setting_set", {
+        key: "focused_project",
+        value: newName,
+      }).catch(() => {});
+    }
     return newName;
   },
 
@@ -1903,7 +1928,7 @@ export const useStore = create<AppState>((set, get) => {
     set({ ctrlTRuntime: runtime });
   },
 
-  // ── App self-update (docs/version-update-design.md) ───────────
+  // ── App self-update ───────────────────────────────────────────
   // Only the auto-check toggle persists through the store; the rest of the
   // slice is written imperatively by `ui/state/update.ts` via setState.
 
@@ -1978,11 +2003,16 @@ export const useStore = create<AppState>((set, get) => {
       // lands back in the global 待验收 when the session's turn ends — re-homing
       // it to the session's project here would make it vanish from the view it
       // was created in.
-      const todos = s.todos.map((t) =>
-        t.id === id && t.status === "todo"
-          ? { ...t, status: "assigned" as const, agentId, sessionName }
-          : t
-      );
+      // A session never accumulates multiple task tags: if it already has one
+      // (assigned in-flight or a 待验收 tag), the new assignment supersedes it —
+      // drop the session's existing tag(s) so only the newest one remains.
+      const todos = s.todos
+        .filter((t) => t.id !== id && t.agentId !== agentId)
+        .map((t) =>
+          t.id === id && t.status === "todo"
+            ? { ...t, status: "assigned" as const, agentId, sessionName }
+            : t
+        );
       saveTodos(todos);
       return { todos };
     }),

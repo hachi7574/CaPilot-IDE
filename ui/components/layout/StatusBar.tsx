@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useStore, AgentInfo, ResourcePoint, RuntimeUsage } from "../../state/store";
 import { fmtCpu, fmtMem } from "../../state/resource";
 import { Icon, runtimeIcon } from "../Icon";
-import { CiProgressModal } from "./CiProgressModal";
+
 
 /** System-wide CPU/MEM snapshot from the backend `system_stats` command. */
 interface SystemStats {
@@ -69,7 +69,6 @@ export function StatusBar() {
   const usageState = useStore((s) => s.usageState);
   const bumpUsageRevision = useStore((s) => s.bumpUsageRevision);
   const [resourceOpen, setResourceOpen] = useState(false);
-  const [ciOpen, setCiOpen] = useState(false);
 
   // Live system-wide CPU/MEM for the readout (2s tick). Always available, so
   // the bar shows the machine's overall state even when no agent is running.
@@ -144,22 +143,7 @@ export function StatusBar() {
             onRefresh={bumpUsageRevision}
           />
         ))}
-      {/* CI build status (developer tool) — opens the progress modal. */}
-      <span
-        className="sb-item ci-item"
-        onClick={() => setCiOpen((o) => !o)}
-        style={{ cursor: "pointer" }}
-        title="CI 构建进度（当前版本的 GitHub Actions 状态）"
-      >
-        <Icon
-          name={ciOpen ? "loader-circle" : "activity"}
-          size={13}
-          style={{ color: ciOpen ? "var(--brand)" : "var(--ink2)" }}
-        />
-        <span className="sb-val">CI</span>
-      </span>
       <span className="sb-spacer" />
-      {ciOpen && <CiProgressModal onClose={() => setCiOpen(false)} />}
     </div>
   );
 }

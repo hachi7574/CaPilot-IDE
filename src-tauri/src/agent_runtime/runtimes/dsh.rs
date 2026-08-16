@@ -105,6 +105,24 @@ impl DshAdapter {
         Self::dsh_home().map(|home| home.join("profiles").join("dsh-tui"))
     }
 
+    /// The installed dsh-tui plugin version, read from the profile's resolved
+    /// `@deepseek-harness-tui/dsh-tui` package.json. The `dsh` launcher's own
+    /// `--version` reports the harness release (0.1.0-rc.x), not the TUI the
+    /// profile actually boots, so the Settings panel shows the plugin version
+    /// instead of the CLI's.
+    fn dsh_tui_version() -> Option<String> {
+        let profile = Self::dsh_tui_profile_dir()?;
+        let path = profile
+            .join("node_modules")
+            .join("@deepseek-harness-tui")
+            .join("dsh-tui")
+            .join("package.json");
+        let text = std::fs::read_to_string(path).ok()?;
+        let pkg = serde_json::from_str::<Value>(&text).ok()?;
+        let version = pkg.get("version")?.as_str()?;
+        Some(version.to_string())
+    }
+
     /// The dsh-tui preferences/data dir (`~/.dsh-tui`). 0.7.2 renamed this
     /// from `~/.dsh-cc`: on first launch the TUI copies the legacy dir over
     /// and afterwards only reads/writes the new one (the one exception —
@@ -160,9 +178,19 @@ impl DshAdapter {
     }
 
     /// Every `<session-dir>/session.jsonl[.zstd]` log under a project dir, with
-    /// its mtime. dsh names the session dir by the encoded session id (the
-    /// `session-<uuid>` strings observed under `--home-hachi-Project-CaPilot--`
-    /// are literal session ids), so the subdir name is the resume key.
+    /// the LOG FILE's mtime. dsh names the session dir by the encoded session
+    /// id (the `session-<uuid>` strings observed under
+    /// `--home-hachi-Project-CaPilot--` are literal session ids), so the subdir
+    /// name is the resume key.
+    ///
+    /// The mtime must come from the log file itself, NOT the session dir: dsh
+    /// writes turns by appending to the log, which updates the file mtime while
+    /// the dir mtime stays frozen at creation. A dsh chat boot also creates a
+    /// stub session dir (permission records only, no turn events) that is the
+    /// newest *dir* while the real conversation's log keeps being appended —
+    /// selecting by dir mtime would pin status inference to the stale stub and
+    /// never see the active session's turn/end (the running→idle edge the
+    /// frontend uses to complete assigned todos).
     fn visit_session_logs(project_dir: &Path) -> Vec<(SystemTime, PathBuf)> {
         let Ok(entries) = std::fs::read_dir(project_dir) else {
             return vec![];
@@ -180,7 +208,7 @@ impl DshAdapter {
             } else {
                 continue;
             };
-            if let Ok(meta) = entry.metadata() {
+            if let Ok(meta) = log.metadata() {
                 if let Ok(modified) = meta.modified() {
                     out.push((modified, log));
                 }
@@ -570,7 +598,9 @@ impl DshAdapter {
     /// launchers read only the legacy path), so the new path is read first,
     /// then the legacy one. The TUI writes it when the USER exits via `/exit`
     /// — a convenience for manual resume runs, NOT the session a fresh IDE
-    /// spawn creates, so it is only a fallback.
+    /// spawn creates, so it is only a fallback. It is GLOBAL (any project's
+    /// last /exit), so `capture_resume_key` validates the named session lives
+    /// under the cwd's project dir before binding it.
     fn read_resume_txt() -> Option<String> {
         for dir in [Self::data_dir(), Self::legacy_data_dir()] {
             let Some(dir) = dir else {
@@ -906,7 +936,7 @@ impl AgentRuntimeAdapter for DshAdapter {
         "dsh"
     }
     fn name(&self) -> &str {
-        "DeepSeek dsh"
+        "dsh-tui"
     }
     fn is_available(&self) -> bool {
         // `dsh --version` alone is not enough: the TUI boots from the dsh-tui
@@ -919,7 +949,7 @@ impl AgentRuntimeAdapter for DshAdapter {
             || Self::dsh_home().is_some_and(|home| home.join(".credentials.yaml").exists())
     }
     fn version(&self) -> Option<String> {
-        crate::agent_runtime::adapter::cli_version("dsh")
+        Self::dsh_tui_version()
     }
     fn preflight(&self) -> Option<String> {
         Self::preflight_diagnostic()
@@ -1089,9 +1119,16 @@ impl AgentRuntimeAdapter for DshAdapter {
 
     fn capture_resume_key(&self, cwd: &Path) -> Option<String> {
         // Prefer the session this spawn actually created (newest young log in
-        // the cwd's project dir); fall back to the launcher marker only when
-        // nothing recent is found yet.
-        Self::detect_recent_resume_key(cwd).or_else(Self::read_resume_txt)
+        // the cwd's project dir).
+        if let Some(key) = Self::detect_recent_resume_key(cwd) {
+            return Some(key);
+        }
+        // Launcher-marker fallback. resume.txt is GLOBAL — the TUI writes the
+        // session the user last /exit'ed in ANY project. Only bind it when the
+        // session it names actually lives under THIS cwd's project dir: a
+        // cross-project key would resume the wrong conversation and mis-scope
+        // the context-usage attribution (resume_key pins the log for usage).
+        Self::read_resume_txt().filter(|key| Self::session_log_for_key(cwd, key).is_some())
     }
 
     fn context_usage(
@@ -1499,6 +1536,75 @@ mod tests {
     }
 
     #[test]
+    fn newest_session_is_the_most_recently_written_log_not_the_newest_dir() {
+        with_isolated_env(|| {
+            // dsh writes turns by APPENDING to a session's log (file mtime
+            // moves) while the session dir mtime stays frozen at creation, and
+            // a chat boot creates stub dirs (permission records only, no turn
+            // events). Selection must follow the LOG FILE's mtime so the active
+            // session's turn/end is never shadowed by a newer stub dir.
+            let dsh_home = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".dsh");
+            let project_dir = dsh_home
+                .join("sessions")
+                .join(DshAdapter::project_key(Path::new("/tmp/project")));
+            std::fs::create_dir_all(&project_dir).unwrap();
+            let now = std::time::SystemTime::now();
+
+            // Active conversation: OLD dir, log written RECENTLY (mid-turn).
+            let active_dir = project_dir.join("ses_active");
+            std::fs::create_dir_all(&active_dir).unwrap();
+            let active_log = active_dir.join("session.jsonl");
+            std::fs::write(
+                &active_log,
+                concat!(
+                    "{\"type\":\"session\",\"id\":\"ses_active\",\"cwd\":\"/tmp/project\"}\n",
+                    "{\"type\":\"turn/start\",\"data\":{}}\n",
+                ),
+            )
+            .unwrap();
+
+            // Stub chat boot: NEWEST dir, log written a moment ago with no
+            // turn events (permission records only).
+            let stub_dir = project_dir.join("ses_stub");
+            std::fs::create_dir_all(&stub_dir).unwrap();
+            let stub_log = stub_dir.join("session.jsonl");
+            std::fs::write(
+                &stub_log,
+                concat!(
+                    "{\"type\":\"session\",\"id\":\"ses_stub\",\"cwd\":\"/tmp/project\"}\n",
+                    "{\"type\":\"approval/policy\",\"data\":{\"policy\":\"ask\"}}\n",
+                ),
+            )
+            .unwrap();
+
+            // Set file mtimes: active log is NEWEST file (a turn is streaming),
+            // stub log is older. Dir mtimes are the reverse — stub dir newest,
+            // active dir old — so a dir-mtime selection would pick the stub.
+            let active_ts = now
+                .checked_sub(std::time::Duration::from_secs(100))
+                .unwrap();
+            let older_ts = now
+                .checked_sub(std::time::Duration::from_secs(200))
+                .unwrap();
+            std::fs::File::open(&active_log).unwrap().set_modified(now).unwrap();
+            std::fs::File::open(&stub_log)
+                .unwrap()
+                .set_modified(active_ts)
+                .unwrap();
+            std::fs::File::open(&active_dir)
+                .unwrap()
+                .set_modified(older_ts)
+                .unwrap();
+            std::fs::File::open(&stub_dir).unwrap().set_modified(now).unwrap();
+
+            let (status, _ts) = DshAdapter::new()
+                .infer_status(Path::new("/tmp/project"))
+                .expect("log exists");
+            assert_eq!(status, "working");
+        });
+    }
+
+    #[test]
     fn context_window_max_maps_known_models_only() {
         assert_eq!(
             DshAdapter::context_window_max(Some("deepseek-v4-flash")),
@@ -1770,6 +1876,56 @@ mod tests {
                     .capture_resume_key(Path::new("/tmp/project"))
                     .as_deref(),
                 Some("ses_recent")
+            );
+        });
+    }
+
+    #[test]
+    fn capture_resume_key_rejects_cross_project_launcher_marker() {
+        with_isolated_env(|| {
+            let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+            let dsh_home = home.join(".dsh");
+            // Marker names a session in ANOTHER project's dir (like the real
+            // ~/.dsh-tui/resume.txt pointing at a 桌面 session).
+            let other_dir = dsh_home
+                .join("sessions")
+                .join(DshAdapter::project_key(Path::new("/tmp/elsewhere")));
+            let other_session = other_dir.join("ses_other");
+            std::fs::create_dir_all(&other_session).unwrap();
+            std::fs::write(
+                other_session.join("session.jsonl"),
+                "{\"type\":\"session\",\"id\":\"ses_other\",\"cwd\":\"/tmp/elsewhere\"}\n",
+            )
+            .unwrap();
+            let tui_dir = home.join(".dsh-tui");
+            std::fs::create_dir_all(&tui_dir).unwrap();
+            std::fs::write(tui_dir.join("resume.txt"), "  ses_other  \n").unwrap();
+
+            // No recent session in THIS cwd's project dir and the marker's
+            // session is elsewhere → nothing to bind (fresh conversation).
+            assert_eq!(
+                DshAdapter::new().capture_resume_key(Path::new("/tmp/project")),
+                None
+            );
+
+            // A marker that DOES name a session under this cwd's project dir is
+            // still honored (a same-project manual /exit resume).
+            let project_dir = dsh_home
+                .join("sessions")
+                .join(DshAdapter::project_key(Path::new("/tmp/project")));
+            let own_session = project_dir.join("ses_own");
+            std::fs::create_dir_all(&own_session).unwrap();
+            std::fs::write(
+                own_session.join("session.jsonl"),
+                "{\"type\":\"session\",\"id\":\"ses_own\",\"cwd\":\"/tmp/project\"}\n",
+            )
+            .unwrap();
+            std::fs::write(tui_dir.join("resume.txt"), "ses_own\n").unwrap();
+            assert_eq!(
+                DshAdapter::new()
+                    .capture_resume_key(Path::new("/tmp/project"))
+                    .as_deref(),
+                Some("ses_own")
             );
         });
     }

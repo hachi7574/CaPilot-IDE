@@ -1,6 +1,6 @@
 [package]
 name = "capilot-ide"
-version = "0.1.3"
+version = "0.1.4"
 description = "CaPilot IDE — local AI coding workspace"
 authors = ["hachi7574"]
 edition = "2021"
@@ -51,7 +51,7 @@ tauri-plugin-log = "2.9.0"
 tauri-plugin-single-instance = "2.4.3"
 tauri-plugin-process = "2.3.1"
 portable-pty = "0.9.0"
-# VT parser backing the daemon's attach checkpoint (§5 of docs/pty-daemon-brief.md).
+# VT parser backing the daemon's attach checkpoint.
 # Pure Rust, Tauri-independent — the daemon feeds every PTY chunk through a
 # `vt100::Parser` and serializes the active screen (main/alt + styles + cursor)
 # into a replayable byte stream on Attach. Version pinned to what the lockfile

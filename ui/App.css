@@ -689,7 +689,7 @@ body::after {
 .composer-f1-hint:hover { color: var(--brand); }
 .composer-f1-hint:hover kbd { border-color: var(--brand); color: var(--brand); }
 
-/* Composer: live context-window usage meter (docs/context-window-usage.md).
+/* Composer: live context-window usage meter.
    Sits between the agent name and .composer-target-right; the divider only
    renders when the meter itself renders. */
 .cw-meter {
@@ -3632,6 +3632,76 @@ html[data-theme="quantum"] .app::before {
 }
 .settings-theme-option.active .settings-theme-option-state { color: var(--brand); }
 
+/* Settings · choice list (session runtime selector, mirrors color cartridge). */
+.settings-choice-list {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+  border: 1px solid var(--rule2);
+  border-radius: var(--control-radius);
+  box-shadow: var(--control-shadow);
+}
+.settings-choice-list button {
+  width: 100%;
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 48px;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px !important;
+  color: var(--ink2);
+  text-align: left;
+  background: transparent !important;
+  border: 0 !important;
+  border-bottom: 1px solid var(--rule) !important;
+  border-radius: 0 !important;
+  cursor: pointer;
+}
+.settings-choice-list button:last-child { border-bottom: 0 !important; }
+.settings-choice-list button:hover { color: var(--ink); background: var(--bg3) !important; }
+.settings-choice-list button.active {
+  color: var(--brand);
+  background: rgb(var(--brand-rgb) / .08) !important;
+  box-shadow: inset 3px 0 0 var(--brand);
+}
+.settings-choice-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.settings-choice-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.settings-choice-copy b {
+  overflow: hidden;
+  font-family: var(--pixel-body);
+  font-size: var(--fs-md);
+  font-weight: 400;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-choice-copy small {
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: var(--fs-2xs);
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-choice-state {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: .7px;
+  color: var(--muted);
+  text-align: right;
+}
+.settings-choice-list button.active .settings-choice-state { color: var(--brand); }
+
 /* ── Settings control cartridge ──────────────────────────────── */
 
 .settings-overlay {
@@ -4117,6 +4187,8 @@ html[data-theme="quantum"] .app::before {
   .settings-theme-option-state { display: none; }
   .settings-theme-option-palette > small { font-size: 7px; letter-spacing: -.45px; }
   .settings-choice-grid { grid-template-columns: 1fr; }
+  .settings-choice-list button { grid-template-columns: 24px minmax(0, 1fr); gap: 8px; }
+  .settings-choice-state { display: none; }
   .settings-segmented { width: 100%; }
   .settings-segmented button { min-width: 0; flex: 1; padding-inline: 4px !important; }
   .settings-version-plate { grid-template-columns: 42px 1fr; }

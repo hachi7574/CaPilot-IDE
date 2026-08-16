@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 /**
- * Assembles the updater `latest.json` for a GitHub Releases release
- * (docs/version-update-design.md §8).
+ * Assembles the updater `latest.json` for a GitHub Releases release.
  *
  * Signatures are produced at BUILD time by `tauri build`
  * (`bundle.createUpdaterArtifacts: true`) as `.sig` files next to each update

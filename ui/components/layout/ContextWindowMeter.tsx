@@ -24,8 +24,7 @@ export function formatTokens(n: number): string {
 }
 
 /**
- * Live context-window occupancy meter for the composer target line
- * (docs/context-window-usage.md).
+ * Live context-window occupancy meter for the composer target line.
  *
  * Rendering rules:
  *  - BOTH used and max present → determinate bar + percentage; the static

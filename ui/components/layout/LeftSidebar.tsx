@@ -173,11 +173,14 @@ export function LeftSidebar() {
   // On mount, pull the on-disk workspace list so empty projects render too.
   // Rust `list_projects` returns `{name, root}` entries — feed both the name
   // list (tree grouping) and the root map (tab-bar editor-file resolution).
-  // Then default the focus to the first project so the very first view is
-  // already project-scoped.
+  // Restore the last focused project when still present; otherwise fall back
+  // to the first entry so the initial view is already project-scoped.
   useEffect(() => {
-    invoke<{ name: string; root: string }[]>("list_projects")
-      .then((entries) => {
+    Promise.all([
+      invoke<{ name: string; root: string }[]>("list_projects"),
+      invoke<string | null>("setting_get", { key: "focused_project" }),
+    ])
+      .then(([entries, savedFocus]) => {
         if (Array.isArray(entries) && entries.length) {
           const names = entries.map((e) => e.name);
           const roots: Record<string, string> = {};
@@ -185,7 +188,9 @@ export function LeftSidebar() {
           setProjects(names);
           setProjectRoots(roots);
           if (useStore.getState().focusedProject === null) {
-            setFocusedProject(names[0]);
+            const preferred =
+              savedFocus && names.includes(savedFocus) ? savedFocus : names[0];
+            setFocusedProject(preferred);
           }
         }
       })

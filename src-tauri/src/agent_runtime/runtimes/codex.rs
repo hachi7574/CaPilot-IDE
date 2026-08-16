@@ -353,7 +353,7 @@ impl CodexAdapter {
 
     /// Context-window reading from one session transcript: the LAST
     /// `token_count` event's `info.last_token_usage.total_tokens` as used
-    /// (docs/context-window-usage.md — the `last` object, not the session
+    /// (the `last` object, not the session
     /// total) and the last seen `model_context_window` as max (emitted on both
     /// `token_count` and `task_started`). Both fields stay optional: a session
     /// still on its first turn may have no `token_count` yet.

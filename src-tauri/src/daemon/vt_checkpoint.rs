@@ -1,4 +1,4 @@
-//! VT checkpoint serialization (§5 of docs/pty-daemon-brief.md).
+//! VT checkpoint serialization.
 //!
 //! The daemon feeds every PTY chunk through a `vt100::Parser`, so at any moment
 //! the parser's active screen (main or alternate) is a valid terminal state at a

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Version alignment helper (docs/version-update-design.md §9).
+ * Version alignment helper.
  *
  * Cargo.toml is the single source of truth for the app version. This script
  * syncs `package.json` and `src-tauri/tauri.conf.json` to match it, and can
