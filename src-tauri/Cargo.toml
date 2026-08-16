@@ -29,6 +29,11 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# File-content search (fs_search): line matching in the pure-Rust walker engine
+# plus glob support for include/exclude filters. `regex` is already in the tree;
+# globset pulls a few small pure-Rust crates.
+regex = "1"
+globset = "0.4"
 # Rate-limit usage fetch (opencode.ai workspace page). reqwest 0.13 is already
 # in the dependency tree (via tauri-plugin-updater) with `rustls-no-provider`
 # TLS enabled, so this adds no new compiled crates. rustls (ring provider) is

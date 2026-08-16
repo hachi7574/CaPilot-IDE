@@ -286,6 +286,66 @@ export interface Tab {
   title: string;
 }
 
+// ── File content search (right sidebar Files tab) ─────────────────
+
+/** One match inside a file, from the `fs_search` backend command. `column` /
+ *  `matchLength` are char offsets into the *raw* line; `displayColumn` /
+ *  `displayMatchLength` are char offsets into the possibly-truncated
+ *  `lineContent` (they differ when the backend clamped a long line).
+ *  The frontend highlights `lineContent` with the display_* pair. */
+export interface ContentSearchMatch {
+  line: number;
+  column: number;
+  matchLength: number;
+  lineContent: string;
+  displayColumn?: number;
+  displayMatchLength?: number;
+}
+
+export interface ContentSearchFileResult {
+  filePath: string;
+  relativePath: string;
+  matches: ContentSearchMatch[];
+  matchCount?: number;
+}
+
+export interface ContentSearchResult {
+  files: ContentSearchFileResult[];
+  totalMatches: number;
+  truncated: boolean;
+}
+
+/** Per-project-root content-search state (query, options, results, collapsed
+ *  files). Kept in the store so switching right-sidebar tabs doesn't lose the
+ *  query. `searchId` is bumped per execution; async results only land if they
+ *  carry the latest id (anti-race). */
+export interface FileSearchState {
+  query: string;
+  caseSensitive: boolean;
+  wholeWord: boolean;
+  useRegex: boolean;
+  includePattern: string;
+  excludePattern: string;
+  results: ContentSearchResult | null;
+  loading: boolean;
+  /** absolute filePath → collapsed in the result list. */
+  collapsed: Record<string, boolean>;
+  searchId: number;
+}
+
+export const defaultFileSearchState = (): FileSearchState => ({
+  query: "",
+  caseSensitive: false,
+  wholeWord: false,
+  useRegex: false,
+  includePattern: "",
+  excludePattern: "",
+  results: null,
+  loading: false,
+  collapsed: {},
+  searchId: 0,
+});
+
 // ── Todo tags (overview task tracker) ─────────────────────────────
 
 /** Drag-payload MIME for todo tags. Distinct from the `text/plain` payloads
@@ -590,6 +650,12 @@ interface AppState {
   /** One-shot Ctrl+F search directive routed to the active panel (terminal or
    *  editor). Same `seq` discipline as `focusRequest`. */
   searchRequest: { target: "terminal" | "editor"; seq: number } | null;
+  /** One-shot "open file at line/column" directive from a content-search result
+   *  click. Consumed by the matching EditorPanel after its document loads.
+   *  Same `seq` discipline as `focusRequest`/`searchRequest`. */
+  revealRequest: { filePath: string; line: number; column?: number; seq: number } | null;
+  /** Content-search state per project root (see `FileSearchState`). */
+  fileSearchByRoot: Record<string, FileSearchState>;
   permissionMode: PermissionMode;
   speed: Speed;
   /** Runtime model id chosen via composer `[模型↑]` (null = runtime default). */
@@ -722,6 +788,13 @@ interface AppState {
   toggleComposer: () => void;
   requestFocus: (target: "composer" | "terminal") => void;
   requestSearch: (target: "terminal" | "editor") => void;
+  /** Ask the editor showing `filePath` to scroll its cursor to line/column. */
+  requestReveal: (filePath: string, line: number, column?: number) => void;
+  /** Merge a patch into a root's content-search state (creates the default on
+   *  first touch). */
+  updateFileSearch: (root: string, patch: Partial<FileSearchState>) => void;
+  /** Drop a root's content-search state (e.g. on root switch). */
+  clearFileSearch: (root: string) => void;
   setPermissionMode: (mode: PermissionMode) => void;
   setSpeed: (speed: Speed) => void;
   setSelectedModel: (model: string | null) => void;
@@ -924,6 +997,8 @@ export const useStore = create<AppState>((set, get) => {
   composerOpen: true,
   focusRequest: null,
   searchRequest: null,
+  revealRequest: null,
+  fileSearchByRoot: {},
   permissionMode: "ask",
   speed: "auto",
   selectedModel: null,
@@ -1399,6 +1474,30 @@ export const useStore = create<AppState>((set, get) => {
     set((s) => ({
       searchRequest: { target, seq: (s.searchRequest?.seq ?? 0) + 1 },
     })),
+
+  requestReveal: (filePath, line, column) =>
+    set((s) => ({
+      revealRequest: { filePath, line, column, seq: (s.revealRequest?.seq ?? 0) + 1 },
+    })),
+
+  updateFileSearch: (root, patch) =>
+    set((s) => ({
+      fileSearchByRoot: {
+        ...s.fileSearchByRoot,
+        [root]: {
+          ...(s.fileSearchByRoot[root] ?? defaultFileSearchState()),
+          ...patch,
+        },
+      },
+    })),
+
+  clearFileSearch: (root) =>
+    set((s) => {
+      if (!(root in s.fileSearchByRoot)) return {};
+      const next = { ...s.fileSearchByRoot };
+      delete next[root];
+      return { fileSearchByRoot: next };
+    }),
 
   setPermissionMode: (mode) => set({ permissionMode: mode }),
 

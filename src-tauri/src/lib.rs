@@ -1,6 +1,7 @@
 pub mod agent_runtime;
 pub mod bridge;
 pub mod daemon;
+mod fs_search;
 mod git_gate;
 pub mod lifecycle_journal;
 pub mod output_hub;
@@ -1922,6 +1923,44 @@ async fn fs_list(dir: String) -> Result<Vec<FsEntryBrief>, String> {
     Ok(entries)
 }
 
+/// Recursively search file *contents* under `root_path`. Path safety mirrors
+/// `fs_list`/`fs_read`: the root must canonicalize to a real directory under
+/// `$HOME`. Engines (ripgrep → `git grep` → pure-Rust walker) and all caps /
+/// truncation live in `fs_search`.
+#[tauri::command]
+async fn fs_search(
+    root_path: String,
+    query: String,
+    case_sensitive: Option<bool>,
+    whole_word: Option<bool>,
+    use_regex: Option<bool>,
+    include_pattern: Option<String>,
+    exclude_pattern: Option<String>,
+    max_results: Option<usize>,
+) -> Result<fs_search::SearchResult, String> {
+    let resolved = std::path::Path::new(&root_path)
+        .canonicalize()
+        .map_err(|e| format!("Invalid path: {}", e))?;
+    if !resolved.is_dir() {
+        return Err("Search root is not a directory".to_string());
+    }
+    let home = std::env::var("HOME").map_err(|e| format!("HOME not set: {}", e))?;
+    if !resolved.starts_with(&home) {
+        return Err("Path escapes allowed directories".to_string());
+    }
+    let opts = fs_search::SearchOptions {
+        query,
+        root: resolved,
+        case_sensitive: case_sensitive.unwrap_or(false),
+        whole_word: whole_word.unwrap_or(false),
+        use_regex: use_regex.unwrap_or(false),
+        include_pattern,
+        exclude_pattern,
+        max_results,
+    };
+    fs_search::search(&opts).await
+}
+
 /// Resolve a to-be-created path against the allowed root: canonicalize the parent
 /// (must exist, must stay under $HOME), re-join the file name, and refuse to
 /// create through a symlink final component. Mirrors `fs_write`'s pre-write
@@ -3814,6 +3853,7 @@ pub fn run() {
             fs_read,
             fs_write,
             fs_list,
+            fs_search,
             fs_create_file,
             fs_create_dir,
             fs_paste,

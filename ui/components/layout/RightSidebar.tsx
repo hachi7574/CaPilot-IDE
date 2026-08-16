@@ -6,7 +6,9 @@ import { EditorView, lineNumbers } from "@codemirror/view";
 import { capilotTheme } from "../editor/capilotTheme";
 import { MergeView } from "@codemirror/merge";
 import { useStore } from "../../state/store";
+import type { ContentSearchFileResult, ContentSearchMatch } from "../../state/store";
 import { spawnBashAt } from "../../state/agentActions";
+import { useFileContentSearch } from "./useFileContentSearch";
 import { TodoPanel } from "./TodoPanel";
 import { CommitGraph, type GitLogEntry } from "./CommitGraph";
 import { Icon } from "../Icon";
@@ -167,6 +169,139 @@ interface GitFileState {
   del: number;
 }
 
+/* ── Content-search result rendering ─────────────────────────── */
+
+type SearchRow =
+  | { kind: "file"; file: ContentSearchFileResult }
+  | { kind: "match"; file: ContentSearchFileResult; match: ContentSearchMatch };
+
+/** Flatten results into a virtual-list row stream; collapsed files skip their
+ *  match rows (the file header stays). */
+function buildSearchRows(
+  files: ContentSearchFileResult[],
+  collapsed: Record<string, boolean>
+): SearchRow[] {
+  const rows: SearchRow[] = [];
+  for (const file of files) {
+    rows.push({ kind: "file", file });
+    if (collapsed[file.filePath]) continue;
+    for (const match of file.matches) rows.push({ kind: "match", file, match });
+  }
+  return rows;
+}
+
+/** Split a match's line into before/hit/after for highlighting, trimming the
+ *  pre/post text to fit the narrow sidebar while keeping the match in view.
+ *  Slices by code points so CJK offsets from the backend line up. */
+function splitMatch(match: ContentSearchMatch): { before: string; hit: string; after: string } {
+  const content = match.lineContent;
+  const col = match.displayColumn ?? match.column;
+  const len = match.displayMatchLength ?? match.matchLength;
+  const chars = Array.from(content);
+  const end = Math.min(chars.length, col + len);
+  const beforeMax = 40;
+  const afterMax = 60;
+  if (col <= beforeMax && chars.length - end <= afterMax) {
+    return {
+      before: chars.slice(0, col).join(""),
+      hit: chars.slice(col, end).join(""),
+      after: chars.slice(end).join(""),
+    };
+  }
+  const start = Math.max(0, Math.min(col - beforeMax, chars.length - (beforeMax + afterMax)));
+  const stop = Math.min(chars.length, start + beforeMax + afterMax);
+  return {
+    before: (start > 0 ? "…" : "") + chars.slice(start, col).join(""),
+    hit: chars.slice(col, end).join(""),
+    after: chars.slice(end, stop).join("") + (stop < chars.length ? "…" : ""),
+  };
+}
+
+const RESULT_ROW_H = 24;
+
+/** Windowed (virtualized) result list — a big match set never renders all rows
+ *  at once on WebKitGTK. Fixed row height keeps index↔offset arithmetic cheap. */
+function SearchResultsList({
+  files,
+  collapsed,
+  onToggleFile,
+  onOpenMatch,
+}: {
+  files: ContentSearchFileResult[];
+  collapsed: Record<string, boolean>;
+  onToggleFile: (path: string) => void;
+  onOpenMatch: (file: ContentSearchFileResult, match: ContentSearchMatch) => void;
+}) {
+  const rows = useMemo(() => buildSearchRows(files, collapsed), [files, collapsed]);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewH, setViewH] = useState(300);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setViewH(el.clientHeight));
+    ro.observe(el);
+    setViewH(el.clientHeight);
+    return () => ro.disconnect();
+  }, []);
+
+  const totalH = rows.length * RESULT_ROW_H;
+  const overscan = 12;
+  const start = Math.max(0, Math.floor(scrollTop / RESULT_ROW_H) - overscan);
+  const end = Math.min(rows.length, Math.ceil((scrollTop + viewH) / RESULT_ROW_H) + overscan);
+  const visible = rows.slice(start, end);
+
+  return (
+    <div
+      className="files-results"
+      ref={scrollRef}
+      onScroll={(e) => setScrollTop((e.target as HTMLDivElement).scrollTop)}
+    >
+      <div style={{ height: totalH, position: "relative" }}>
+        {visible.map((row, i) => {
+          const top = (start + i) * RESULT_ROW_H;
+          return (
+            <div
+              key={row.kind === "file" ? row.file.filePath : `${row.file.filePath}:${row.match.line}:${start + i}`}
+              className={`files-result-row ${row.kind === "file" ? "is-file" : "is-match"}`}
+              style={{ position: "absolute", top, left: 0, right: 0, height: RESULT_ROW_H }}
+              onClick={() =>
+                row.kind === "file" ? onToggleFile(row.file.filePath) : onOpenMatch(row.file, row.match)
+              }
+              title={row.kind === "file" ? row.file.relativePath : `${row.file.relativePath}:${row.match.line}`}
+            >
+              {row.kind === "file" ? (
+                <>
+                  <span className="fres-chev">{collapsed[row.file.filePath] ? "▸" : "▾"}</span>
+                  <span className="fres-path">{row.file.relativePath}</span>
+                  <span className="fres-count">{row.file.matchCount ?? row.file.matches.length}</span>
+                </>
+              ) : (
+                <>
+                  <span className="fres-line">{row.match.line}</span>
+                  <span className="fres-text">
+                    {(() => {
+                      const seg = splitMatch(row.match);
+                      return (
+                        <>
+                          <span className="fres-pre">{seg.before}</span>
+                          <mark className="fres-hit">{seg.hit}</mark>
+                          <span className="fres-post">{seg.after}</span>
+                        </>
+                      );
+                    })()}
+                  </span>
+                </>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 const SKIP_DIRS = new Set([".git", "node_modules", "target", ".claude", "dist", "build"]);
 
 /** web/html files → warn (.file-web), config files → success (.rtx-file-conf). */
@@ -248,6 +383,21 @@ function FilesPanel() {
   const [dirs, setDirs] = useState<Map<string, FsEntry[]>>(new Map());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState("");
+  // The Files search box filters by *name* by default; toggling to 内容 runs a
+  // backend content search (`fs_search`) whose results replace the tree.
+  const [searchMode, setSearchMode] = useState<"name" | "content">("name");
+  const contentSearch = useFileContentSearch(root);
+  const fs = contentSearch.state;
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  // Focusing the input on mode switch keeps the flow keyboard-first; entering
+  // content mode with a persisted query re-runs it so results are fresh.
+  useEffect(() => {
+    if (searchMode === "content") {
+      searchInputRef.current?.focus();
+      if (fs.query.trim() !== "") contentSearch.submit();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchMode]);
   const [creating, setCreating] = useState<{ dir: string; kind: "file" | "dir" } | null>(null);
   const [newName, setNewName] = useState("");
   const [createError, setCreateError] = useState("");
@@ -962,7 +1112,11 @@ function FilesPanel() {
     <div
       className="tab-panel"
       id="tab-files"
-      style={{ padding: "8px 0" }}
+      style={
+        searchMode === "content"
+          ? { padding: "8px 0", display: "flex", flexDirection: "column", minHeight: 0 }
+          : { padding: "8px 0" }
+      }
       onContextMenu={(e) => {
         // Blank-space right-click acts on the root directory: give the menu the
         // root path so the folder-consistent actions (open in terminal, copy
@@ -971,33 +1125,131 @@ function FilesPanel() {
         setSelected(null);
       }}
     >
-      <div className="files-search" style={{ padding: "0 12px 8px" }}>
+      <div className="files-search">
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <Icon name="search" size={14} style={{ flex: "none", opacity: 0.6 }} />
-          <input
-            type="text"
-            placeholder="搜索文件…"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            style={{ flex: 1, minWidth: 0 }}
-          />
+          <div className="files-search-input">
+            <input
+              ref={searchInputRef}
+              type="text"
+              placeholder={searchMode === "content" ? "搜索文件内容…" : "搜索文件名…"}
+              value={searchMode === "content" ? fs.query : filter}
+              onChange={(e) => {
+                const q = e.target.value;
+                if (searchMode === "name") {
+                  setFilter(q);
+                  return;
+                }
+                // Skip the backend run mid-IME-composition; the commit change
+                // (isComposing=false) fires a real search.
+                const composing = (e.nativeEvent as InputEvent).isComposing;
+                if (composing) contentSearch.setQueryQuiet(q);
+                else contentSearch.setQuery(q);
+              }}
+              onKeyDown={(e) => {
+                if (searchMode !== "content" || (e.nativeEvent as KeyboardEvent).isComposing) return;
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  contentSearch.submit();
+                } else if (e.key === "Escape" && fs.query) {
+                  e.preventDefault();
+                  contentSearch.clear();
+                }
+              }}
+            />
+            <Icon name="search" size={14} className="files-search-ic" />
+          </div>
+        </div>
+        <div className="files-search-mode" role="group">
           <button
-            className="files-new-btn"
-            title="新建文件"
-            onClick={() => startCreate(root, "file")}
+            className={searchMode === "name" ? "active" : ""}
+            onClick={() => setSearchMode("name")}
+            title="按文件名过滤（本地）"
           >
-            <Icon name="file-plus" size={14} />
+            名称
           </button>
           <button
-            className="files-new-btn"
-            title="新建文件夹"
-            onClick={() => startCreate(root, "dir")}
+            className={searchMode === "content" ? "active" : ""}
+            onClick={() => setSearchMode("content")}
+            title="搜索文件内容"
           >
-            <Icon name="folder-plus" size={14} />
+            内容
           </button>
         </div>
+        {searchMode === "content" && (
+          <div className="files-search-opts">
+            <div className="files-search-toggles">
+              <button
+                className={`fs-tg${fs.caseSensitive ? " on" : ""}`}
+                onClick={() => contentSearch.setCaseSensitive(!fs.caseSensitive)}
+                title="区分大小写"
+              >
+                Aa
+              </button>
+              <button
+                className={`fs-tg${fs.wholeWord ? " on" : ""}`}
+                onClick={() => contentSearch.setWholeWord(!fs.wholeWord)}
+                title="全词匹配"
+              >
+                W
+              </button>
+              <button
+                className={`fs-tg${fs.useRegex ? " on" : ""}`}
+                onClick={() => contentSearch.setUseRegex(!fs.useRegex)}
+                title="正则表达式"
+              >
+                .*
+              </button>
+            </div>
+            <input
+              className="fs-filter-input"
+              placeholder="包含文件，如 *.ts, src/**"
+              value={fs.includePattern}
+              onChange={(e) => contentSearch.setIncludePattern(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") contentSearch.submit();
+              }}
+            />
+            <input
+              className="fs-filter-input"
+              placeholder="排除文件，如 dist, *.min.js"
+              value={fs.excludePattern}
+              onChange={(e) => contentSearch.setExcludePattern(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") contentSearch.submit();
+              }}
+            />
+          </div>
+        )}
       </div>
-      <div className="files-tree">{renderEntries(root, 0)}</div>
+      {searchMode === "content" ? (
+        <div className="files-content-search">
+          <div className="files-results-summary">
+            {fs.loading
+              ? "搜索中…"
+              : fs.results
+                ? `${fs.results.totalMatches} 处匹配 · ${fs.results.files.length} 个文件${fs.results.truncated ? " · 已截断" : ""}`
+                : fs.query.trim() !== ""
+                  ? "无结果"
+                  : "输入内容以搜索"}
+          </div>
+          {fs.loading && !fs.results ? (
+            <div className="files-results-loading">搜索中…</div>
+          ) : fs.results && fs.results.files.length > 0 ? (
+            <SearchResultsList
+              files={fs.results.files}
+              collapsed={fs.collapsed}
+              onToggleFile={(p) => contentSearch.toggleCollapsed(p)}
+              onOpenMatch={(file, match) =>
+                contentSearch.openMatch(file.filePath, match.line, match.column)
+              }
+            />
+          ) : (
+            !fs.loading && <div className="files-results-loading">{fs.query.trim() ? "无匹配内容" : ""}</div>
+          )}
+        </div>
+      ) : (
+        <div className="files-tree">{renderEntries(root, 0)}</div>
+      )}
       {menu && (
         <div
           className="ctx-menu"
