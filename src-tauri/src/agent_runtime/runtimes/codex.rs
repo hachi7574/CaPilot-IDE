@@ -456,6 +456,12 @@ impl AgentRuntimeAdapter for CodexAdapter {
         Self::check_authenticated()
     }
 
+    fn version(&self) -> Option<String> {
+        // `codex --version` prints "codex-cli 0.147.0" — drop the binary prefix.
+        crate::agent_runtime::adapter::cli_version("codex")
+            .map(|v| v.strip_prefix("codex-cli ").unwrap_or(&v).to_string())
+    }
+
     fn list_models(&self) -> Vec<ModelInfo> {
         Self::discover_models()
     }

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Agent runtime identifier
 pub type RuntimeId = String;
@@ -147,9 +148,24 @@ pub struct RuntimeInfo {
     pub name: String,
     pub available: bool,
     pub authenticated: bool,
+    /// Version string reported by the CLI's `--version`, when detectable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     pub models: Vec<ModelInfo>,
     pub permission_modes: Vec<PermissionModeInfo>,
     pub thinking_options: Vec<ThinkingOptionInfo>,
+}
+
+/// Run `<cmd> --version` and return the trimmed first stdout line. `None` when
+/// the binary is missing, the command fails, or it prints nothing useful.
+pub fn cli_version(cmd: &str) -> Option<String> {
+    let out = Command::new(cmd).arg("--version").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.trim().lines().next()?.trim();
+    (!line.is_empty()).then(|| line.to_string())
 }
 
 /// The core trait that every agent CLI must implement.
@@ -166,6 +182,12 @@ pub trait AgentRuntimeAdapter: Send + Sync {
 
     /// Is the user authenticated with this runtime?
     fn is_authenticated(&self) -> bool;
+
+    /// CLI version string reported by `<binary> --version`, when detectable.
+    /// Feeds `RuntimeInfo.version` for the Settings runtime panel.
+    fn version(&self) -> Option<String> {
+        None
+    }
 
     /// Best-effort pre-flight validation before spawning. Returns a diagnostic
     /// string when the runtime is installed but known to fail immediately on

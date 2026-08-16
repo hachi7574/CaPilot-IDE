@@ -20,8 +20,8 @@ pub fn get_adapter(runtime: &str) -> Box<dyn AgentRuntimeAdapter> {
 }
 
 /// All known runtime ids (for detection lists). The minimal `--norc` "bash"
-/// runtime stays resolvable in `get_adapter` (for resuming older sessions) but
-/// is no longer offered as a new terminal — users get the full 正常 bash.
+/// runtime and opencode stay resolvable in `get_adapter` (for resuming older
+/// sessions) but are no longer offered as a new terminal.
 pub fn known_runtimes() -> &'static [&'static str] {
-    &["claude", "codex", "opencode", "dsh", "bash-rc"]
+    &["claude", "codex", "dsh", "bash-rc"]
 }

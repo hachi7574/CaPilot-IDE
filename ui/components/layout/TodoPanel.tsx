@@ -167,7 +167,9 @@ export function TodoPanel() {
     [todoScope, focusedProject]
   );
   const todoTags = useMemo(
-    () => todos.filter((t) => t.status === "todo" && inScope(t)),
+    // Newest first: creation order is preserved in the array, so reverse it —
+    // the latest tag the user added should sit at the top of 待分配.
+    () => todos.filter((t) => t.status === "todo" && inScope(t)).reverse(),
     [todos, inScope]
   );
   const doneTags = useMemo(
@@ -220,7 +222,13 @@ export function TodoPanel() {
                 }
               : t
           );
-          st.setTodos(fixed);
+          // Merge, don't replace: the user may have added a tag between mount
+          // and this hydration resolving. Keeping those would-be-lost additions
+          // avoids the persisted list silently overwriting a fresh tag.
+          const byId = new Map<string, TodoTag>();
+          for (const t of fixed) byId.set(t.id, t);
+          for (const t of st.todos) byId.set(t.id, t);
+          st.setTodos([...byId.values()]);
         } catch {
           // corrupt payload — leave the store empty
         }

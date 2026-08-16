@@ -1,12 +1,14 @@
 import { useEffect, useState, ReactNode } from "react";
-import { useStore, Tab, SplitNode } from "../../state/store";
+import { useStore, Tab, SplitNode, resolveCtrlTRuntime } from "../../state/store";
 import { splitLeafTabIds } from "../../state/store";
 import { XTermPanel } from "../terminal/XTermPanel";
 import { EditorPanel } from "../editor/EditorPanel";
 import { DiffPanel } from "../editor/DiffPanel";
 import { ImageViewerPanel } from "../editor/ImageViewerPanel";
 import { Icon } from "../Icon";
+import { CaPilotLogo } from "../CaPilotLogo";
 import { spawnAgent } from "../../state/agentActions";
+import { notify } from "../../state/notify";
 
 type DropEdge = "left" | "right" | "top" | "bottom" | null;
 
@@ -210,20 +212,32 @@ export function ContentArea() {
   }, [requestSearch]);
 
   // Global Ctrl+T → start a new agent session (the empty-state hint advertises
-  // it). CodeMirror and the terminal keep Ctrl+T for their own semantics (the
-  // TUI may use it as a tab / next-buffer key), so focus there never triggers.
+  // it). Scoped to the composer input so terminal TUIs keep Ctrl+T for their
+  // own semantics (the TUI may use it as a tab / next-buffer key). The empty
+  // welcome state (no tabs) still spawns from anywhere so the hint works before
+  // the user has focused the input.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === "t")) {
         return;
       }
       const el = document.activeElement as HTMLElement | null;
-      const inCm = !!el?.closest?.(".cm-editor");
-      const inTerm = !!el?.closest?.(".xterm");
-      if (inCm || inTerm) return;
-      e.preventDefault();
+      const inComposer = !!el?.closest?.(".composer-input");
       const st = useStore.getState();
-      spawnAgent(st.focusedProject ?? undefined).catch(console.error);
+      if (!inComposer && st.tabs.length > 0) return;
+      e.preventDefault();
+      // Effective runtime: the configured Ctrl+T preference, else claude, else
+      // bash. With no runtime available at all, show the hint instead of
+      // spawning a dead terminal.
+      const runtime = resolveCtrlTRuntime(st.ctrlTRuntime, st.runtimes);
+      if (!runtime) {
+        notify(
+          "无法新建终端",
+          "未检测到可用的 Agent 运行时。请在设置 → 运行时 中检测安装或登录后重试。"
+        );
+        return;
+      }
+      spawnAgent(st.focusedProject ?? undefined, runtime).catch(console.error);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -283,7 +297,7 @@ export function ContentArea() {
     return (
       <div className="content-area">
         <div className="empty-state">
-          <img src="/logo.png" alt="CaPilot" />
+          <CaPilotLogo className="empty-state-logo" />
           <h3>CaPilot IDE</h3>
           {noProjects ? (
             <>
@@ -293,7 +307,7 @@ export function ContentArea() {
               </button>
             </>
           ) : (
-            <p className="empty-state-hint">Press 'ctrl+t' to start a new agent session</p>
+            <p className="empty-state-hint">按 Ctrl+T 开启一个新的 agent 会话</p>
           )}
         </div>
       </div>

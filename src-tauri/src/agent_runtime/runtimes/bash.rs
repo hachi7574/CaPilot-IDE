@@ -47,6 +47,11 @@ impl AgentRuntimeAdapter for BashAdapter {
         true
     }
 
+    fn version(&self) -> Option<String> {
+        // `bash --version`'s first line is "GNU bash, version 5.2.15(1)-release …".
+        crate::agent_runtime::adapter::cli_version("bash")
+    }
+
     fn list_models(&self) -> Vec<ModelInfo> {
         vec![]
     }

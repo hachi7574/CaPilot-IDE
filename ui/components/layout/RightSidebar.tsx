@@ -29,13 +29,15 @@ export function RightSidebar() {
   // drag (resize) on the divider.
   const resizeStartRef = useRef<{ x: number; y: number } | null>(null);
 
-  // Draggable right sidebar resize (drag right → narrower).
+  // Draggable right sidebar resize. In the current layout this panel is the
+  // leftmost one (rendered before the main area), with the handle on its right
+  // edge: dragging rightward grows it.
   const startRightResize = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
     const startWidth = rightWidth;
     const onMove = (ev: MouseEvent) => {
-      const w = Math.min(520, Math.max(260, startWidth - (ev.clientX - startX)));
+      const w = Math.min(520, Math.max(260, startWidth + (ev.clientX - startX)));
       setRightWidth(w);
     };
     const onUp = () => {
@@ -48,40 +50,6 @@ export function RightSidebar() {
 
   return (
     <>
-      {/* Resize handle: drag to resize; the hover button collapses/expands the
-          sidebar (always rendered so a collapsed sidebar can be reopened). */}
-      <div
-        className="resize-handle"
-        id="resize-right"
-        onMouseDown={(e) => {
-          resizeStartRef.current = { x: e.clientX, y: e.clientY };
-          startRightResize(e);
-        }}
-        onClick={(e) => {
-          // A click (no movement) toggles the sidebar; a drag resizes instead.
-          const start = resizeStartRef.current;
-          resizeStartRef.current = null;
-          if (
-            start &&
-            Math.hypot(e.clientX - start.x, e.clientY - start.y) > 5
-          ) {
-            return;
-          }
-          toggleRightSidebar();
-        }}
-      >
-        <button
-          className="resize-collapse"
-          title={rightSidebarOpen ? "收起右侧栏" : "展开右侧栏"}
-          onMouseDown={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            e.stopPropagation();
-            toggleRightSidebar();
-          }}
-        >
-          <Icon name={rightSidebarOpen ? "chevron-right" : "chevron-left"} size={10} />
-        </button>
-      </div>
       <div
         className={`right-sidebar${!rightSidebarOpen ? " collapsed" : ""}`}
         style={rightSidebarOpen ? { width: rightWidth } : undefined}
@@ -122,6 +90,40 @@ export function RightSidebar() {
           {activeTab === "files" && <FilesPanel />}
           {activeTab === "git" && <GitPanel />}
         </div>
+      </div>
+      {/* Resize handle: drag to resize; the hover button collapses/expands the
+          sidebar (always rendered so a collapsed sidebar can be reopened). */}
+      <div
+        className="resize-handle"
+        id="resize-right"
+        onMouseDown={(e) => {
+          resizeStartRef.current = { x: e.clientX, y: e.clientY };
+          startRightResize(e);
+        }}
+        onClick={(e) => {
+          // A click (no movement) toggles the sidebar; a drag resizes instead.
+          const start = resizeStartRef.current;
+          resizeStartRef.current = null;
+          if (
+            start &&
+            Math.hypot(e.clientX - start.x, e.clientY - start.y) > 5
+          ) {
+            return;
+          }
+          toggleRightSidebar();
+        }}
+      >
+        <button
+          className="resize-collapse"
+          title={rightSidebarOpen ? "收起侧栏" : "展开侧栏"}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleRightSidebar();
+          }}
+        >
+          <Icon name={rightSidebarOpen ? "chevron-left" : "chevron-right"} size={10} />
+        </button>
       </div>
     </>
   );

@@ -35,8 +35,19 @@ export function useUpdateSync() {
       } catch {
         // Backend not ready — keep default.
       }
+
+      // Load the completion-chime preference (default on when unset).
+      let soundOn = true;
+      try {
+        const raw = await invoke<string | null>("setting_get", {
+          key: "sound_enabled",
+        });
+        if (raw !== null) soundOn = raw !== "false";
+      } catch {
+        // Backend not ready — keep default.
+      }
       if (cancelled) return;
-      useStore.setState({ autoCheckUpdate: autoCheck });
+      useStore.setState({ autoCheckUpdate: autoCheck, soundEnabled: soundOn });
       if (!autoCheck) return;
 
       // Background check a few seconds after mount. Never blocks startup; a

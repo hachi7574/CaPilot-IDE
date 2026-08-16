@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type UIEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { useStore, FontScale, RuntimeInfo, UsageConfig } from "../../state/store";
+import { THEMES, getTheme, DEFAULT_THEME_ID } from "../../state/themes";
 import { checkForUpdate, downloadAndInstall } from "../../state/update";
-import { Icon } from "../Icon";
+import { Icon, runtimeIcon } from "../Icon";
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -26,6 +27,70 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const setOnboarded = useStore((s) => s.setOnboarded);
   const fontScale = useStore((s) => s.fontScale);
   const setFontScale = useStore((s) => s.setFontScale);
+  const themeId = useStore((s) => s.themeId);
+  const setThemeId = useStore((s) => s.setThemeId);
+  const soundEnabled = useStore((s) => s.soundEnabled);
+  const setSoundEnabled = useStore((s) => s.setSoundEnabled);
+  const ctrlTRuntime = useStore((s) => s.ctrlTRuntime);
+  const setCtrlTRuntime = useStore((s) => s.setCtrlTRuntime);
+  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
+  const themePickerRef = useRef<HTMLDivElement>(null);
+  const currentTheme = getTheme(themeId) ?? THEMES[0];
+  const [activeSection, setActiveSection] = useState<
+    "runtimes" | "appearance" | "sessions" | "updates"
+  >("runtimes");
+
+  const jumpToSection = (
+    section: "runtimes" | "appearance" | "sessions" | "updates"
+  ) => {
+    setActiveSection(section);
+    document
+      .getElementById(`settings-${section}`)
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const syncSectionFromScroll = (event: UIEvent<HTMLElement>) => {
+    const container = event.currentTarget;
+    const sectionIds = ["runtimes", "appearance", "sessions", "updates"] as const;
+    let visible: (typeof sectionIds)[number] = "runtimes";
+    for (const section of sectionIds) {
+      const element = document.getElementById(`settings-${section}`);
+      if (!element) continue;
+      const sectionTop = element.offsetTop - container.offsetTop;
+      if (sectionTop <= container.scrollTop + 72) visible = section;
+    }
+    // The final panel is shorter than the viewport on some window sizes, so it
+    // can never reach the 72px threshold. Reaching the scroll bottom still
+    // means the firmware/update section is the user's current destination.
+    if (container.scrollTop + container.clientHeight >= container.scrollHeight - 2) {
+      visible = "updates";
+    }
+    setActiveSection(visible);
+  };
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (themeMenuOpen) {
+        setThemeMenuOpen(false);
+        return;
+      }
+      onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose, themeMenuOpen]);
+
+  useEffect(() => {
+    if (!themeMenuOpen) return;
+    const closeThemeMenu = (event: PointerEvent) => {
+      if (!themePickerRef.current?.contains(event.target as Node)) {
+        setThemeMenuOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", closeThemeMenu);
+    return () => document.removeEventListener("pointerdown", closeThemeMenu);
+  }, [themeMenuOpen]);
 
   // App self-update slice (docs/version-update-design.md).
   const currentVersion = useStore((s) => s.currentVersion);
@@ -245,71 +310,109 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   );
 
   return (
-    <div
-      className="modal-overlay"
-      onClick={onClose}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgb(var(--black-rgb) / 0.6)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 2000,
-      }}
-    >
+    <div className="modal-overlay settings-overlay" onClick={onClose}>
       <div
-        className="modal"
+        className="modal settings-modal"
         onClick={(e) => e.stopPropagation()}
-        style={{
-          background: "var(--bg2)",
-          border: "2px solid var(--rule2)",
-          width: 460,
-          maxWidth: "90vw",
-          maxHeight: "80vh",
-          overflowY: "auto",
-          padding: 20,
-        }}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-title"
       >
-        <div className="modal-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-          <h3 style={{ fontFamily: "var(--pixel-body)", fontSize: "var(--fs-xl)", color: "var(--brand)", letterSpacing: 1 }}>
-            <Icon name="settings" size={18} style={{ marginRight: 6 }} /> Settings
-          </h3>
-          <button className="modal-close" onClick={onClose} style={{ background: "none", border: "none", color: "var(--ink2)", fontSize: "var(--fs-lg)", cursor: "pointer" }}>
-            ×
-          </button>
-        </div>
+        <header className="modal-header settings-header">
+          <div className="settings-title-lockup">
+            <span className="settings-kicker">CAPILOT // CONTROL CARTRIDGE</span>
+            <h3 id="settings-title">
+              <Icon name="settings" size={18} /> 系统设置
+            </h3>
+          </div>
+          <div className="settings-header-meta">
+            <span>BUILD {currentVersion ?? "DEV"}</span>
+            <button className="modal-close settings-close" onClick={onClose} aria-label="关闭设置">
+              <Icon name="x" size={15} />
+            </button>
+          </div>
+        </header>
+
+        <div className="settings-layout">
+          <aside className="settings-rail" aria-label="设置分区">
+            <div className="settings-rail-label">DIAGNOSTIC BUS</div>
+            <nav className="settings-nav">
+              <button
+                className={activeSection === "runtimes" ? "active" : ""}
+                onClick={() => jumpToSection("runtimes")}
+              >
+                <Icon name="bot" size={14} />
+                <span><b>运行时</b><small>Agent 与用量</small></span>
+              </button>
+              <button
+                className={activeSection === "appearance" ? "active" : ""}
+                onClick={() => jumpToSection("appearance")}
+              >
+                <Icon name="paintbrush" size={14} />
+                <span><b>外观</b><small>主题与字号</small></span>
+              </button>
+              <button
+                className={activeSection === "sessions" ? "active" : ""}
+                onClick={() => jumpToSection("sessions")}
+              >
+                <Icon name="square-terminal" size={14} />
+                <span><b>会话</b><small>退出与引导</small></span>
+              </button>
+              <button
+                className={activeSection === "updates" ? "active" : ""}
+                onClick={() => jumpToSection("updates")}
+              >
+                <Icon name="download" size={14} />
+                <span><b>更新</b><small>版本与安装</small></span>
+              </button>
+            </nav>
+            <div className="settings-rail-readout">
+              <span>THEME</span>
+              <b>{getTheme(themeId)?.name ?? DEFAULT_THEME_ID}</b>
+              <span>AGENTS</span>
+              <b>{installedAgents.length.toString().padStart(2, "0")} ONLINE</b>
+            </div>
+          </aside>
+
+          <main className="settings-content" onScroll={syncSectionFromScroll}>
 
         {/* Installed agents */}
-        <div className="modal-section" style={{ marginBottom: 24 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-            <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-sm)", color: "var(--ink2)", letterSpacing: 1, textTransform: "uppercase" }}>
-              已安装
+        <section id="settings-runtimes" className="modal-section settings-panel settings-runtime-panel">
+          <div className="settings-section-head">
+            <span>RUNTIME BUS</span>
+            <h4>Agent 运行环境</h4>
+            <p>管理已接入的编码终端、启动命令与剩余用量读取。</p>
+          </div>
+          <div className="settings-toolbar">
+            <div className="modal-title">
+              已安装 <span className="settings-count">{installedAgents.length}</span>
             </div>
-            <button
-              onClick={reDetect}
-              disabled={scanning}
-              style={{
-                fontFamily: "var(--pixel)",
-                fontSize: "var(--fs-2xs)",
-                padding: "4px 12px",
-                border: "1px solid var(--rule2)",
-                color: "var(--ink2)",
-                background: "transparent",
-                borderRadius: 6,
-                cursor: "pointer",
-              }}
-            >
+            <button className="settings-compact-btn" onClick={reDetect} disabled={scanning}>
+              <Icon name="refresh-cw" size={11} />
               {scanning ? "检测中…" : "重新检测"}
             </button>
           </div>
           {installedAgents.length === 0 && (
-            <div style={{ fontSize: "var(--fs-sm)", color: "var(--ink2)" }}>未检测到已安装的 Agent</div>
+            <div className="settings-empty-runtime">
+              <Icon name="plug" size={18} />
+              <span>未检测到已安装的 Agent</span>
+              <small>安装或登录支持的 CLI 后重新检测。</small>
+            </div>
           )}
           {installedAgents.map((rt) => (
-            <div key={rt.id} style={{ borderBottom: "1px solid var(--rule)" }}>
-              <div className="modal-row" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", fontSize: "var(--fs-sm)" }}>
-                <span style={{ color: "var(--ink2)" }}>{rt.name}</span>
+            <div key={rt.id} className={`settings-runtime${editingId === rt.id ? " expanded" : ""}`}>
+              <div className="modal-row settings-runtime-row" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", fontSize: "var(--fs-sm)" }}>
+                <span className="settings-runtime-name">
+                  <Icon name="terminal" size={14} /> {rt.name}
+                  {rt.version && (
+                    <span
+                      className="settings-runtime-version"
+                      title={`${rt.id} ${rt.version}`}
+                    >
+                      {rt.version.replace(/^v/i, "")}
+                    </span>
+                  )}
+                </span>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ color: "var(--success)", fontFamily: "var(--mono)", fontSize: "var(--fs-xs)" }}>
                     <Icon name="check" size={12} style={{ marginRight: 4 }} />
@@ -503,17 +606,85 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               )}
             </div>
           ))}
-        </div>
+        </section>
 
         {/* Preferences */}
-        <div className="modal-section" style={{ marginBottom: 16 }}>
-          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-sm)", color: "var(--ink2)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
-            通用偏好
+        <section id="settings-appearance" className="modal-section settings-panel settings-appearance-panel">
+          <div className="settings-section-head">
+            <span>DISPLAY CARTRIDGES</span>
+            <h4>外观与显示</h4>
+            <p>选择整套终端材质与语法色，并调整界面信息密度。</p>
           </div>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: "var(--fs-sm)" }}>
-            <span style={{ color: "var(--ink2)" }}>界面字体大小</span>
+          <div className="settings-field-label">
+            <span>主题风格</span>
+            <small>即时应用 · 自动保存</small>
           </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <div className="settings-theme-picker" ref={themePickerRef}>
+            <button
+              type="button"
+              className="settings-theme-trigger"
+              aria-label="主题风格"
+              aria-haspopup="listbox"
+              aria-expanded={themeMenuOpen}
+              aria-controls="settings-theme-menu"
+              onClick={() => setThemeMenuOpen((open) => !open)}
+            >
+              <span className="settings-theme-current">
+                <b>{currentTheme.name}</b>
+                <small>{currentTheme.note}</small>
+              </span>
+              <span className="settings-theme-palette" aria-label={`${currentTheme.name}配色`} role="img">
+                {currentTheme.swatches.map((color, index) => (
+                  <i key={`${color}-${index}`} style={{ backgroundColor: color }} title={color} />
+                ))}
+              </span>
+              <span className="settings-theme-chevron" aria-hidden="true" />
+            </button>
+
+            {themeMenuOpen && (
+              <div className="settings-theme-menu" id="settings-theme-menu" role="listbox" aria-label="主题风格">
+                <div className="settings-theme-menu-head">
+                  <span>COLOR CARTRIDGES</span>
+                  <small>{THEMES.length} 套配色</small>
+                </div>
+                {THEMES.map((theme) => {
+                  const selected = theme.id === themeId;
+                  return (
+                    <button
+                      key={theme.id}
+                      type="button"
+                      role="option"
+                      aria-selected={selected}
+                      className={`settings-theme-option${selected ? " active" : ""}`}
+                      onClick={() => {
+                        setThemeId(theme.id);
+                        setThemeMenuOpen(false);
+                      }}
+                    >
+                      <span className="settings-theme-option-palette">
+                        <span className="settings-theme-palette" aria-hidden="true">
+                          {theme.swatches.map((color, index) => (
+                            <i key={`${color}-${index}`} style={{ backgroundColor: color }} />
+                          ))}
+                        </span>
+                        <small>{theme.swatches.join("  ")}</small>
+                      </span>
+                      <span className="settings-theme-option-copy">
+                        <b>{theme.name}</b>
+                        <small>{theme.note}</small>
+                      </span>
+                      <span className="settings-theme-option-state">{selected ? "ACTIVE" : "LOAD"}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          <div className="settings-field-label settings-font-label">
+            <span>界面字体大小</span>
+            <small>终端字号同步调整</small>
+          </div>
+          <div className="settings-segmented" role="radiogroup" aria-label="界面字体大小">
             {(
               [
                 { key: "s", label: "最小" },
@@ -525,6 +696,10 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             ).map((opt) => (
               <button
                 key={opt.key}
+                type="button"
+                role="radio"
+                aria-checked={fontScale === opt.key}
+                className={fontScale === opt.key ? "active" : ""}
                 onClick={() => setFontScale(opt.key)}
                 style={{
                   fontFamily: "var(--pixel)",
@@ -540,18 +715,75 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               </button>
             ))}
           </div>
-        </div>
+          <div className="settings-field-label">
+            <span>提示音</span>
+            <small>Agent 完成一次任务时的提示音</small>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
+            <span style={{ fontSize: "var(--fs-sm)", color: "var(--ink2)" }}>完成提示音</span>
+            <button
+              onClick={() => setSoundEnabled(!soundEnabled)}
+              style={{
+                fontFamily: "var(--pixel)",
+                fontSize: "var(--fs-2xs)",
+                padding: "4px 12px",
+                border: `1px solid ${soundEnabled ? "var(--brand)" : "var(--rule2)"}`,
+                color: soundEnabled ? "var(--brand)" : "var(--ink2)",
+                background: soundEnabled ? "rgb(var(--brand-rgb) / .08)" : "transparent",
+                borderRadius: 6,
+                cursor: "pointer",
+              }}
+            >
+              {soundEnabled ? "已开启" : "已关闭"}
+            </button>
+          </div>
+        </section>
 
         {/* Session end handling */}
-        <div className="modal-section" style={{ marginBottom: 16, borderTop: "1px solid var(--rule)", paddingTop: 10 }}>
-          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-sm)", color: "var(--ink2)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
-            会话
+        <section id="settings-sessions" className="modal-section settings-panel settings-session-panel">
+          <div className="settings-section-head">
+            <span>SESSION LIFECYCLE</span>
+            <h4>会话行为</h4>
+            <p>决定 Agent 自然退出后的保留方式，以及是否重新运行首次引导。</p>
           </div>
-          <div style={{ fontSize: "var(--fs-xs)", color: "var(--ink2)", marginBottom: 8 }}>
+          <div className="settings-field-label">
+            <span>Ctrl+T 新建终端</span>
+            <small>快捷键创建的 Agent 运行时</small>
+          </div>
+          <div className="settings-help-text">
+            默认为 Claude；未安装时自动回退到 Bash，若一个运行时都没有则 Ctrl+T 会给出提示。
+          </div>
+          <div className="settings-choice-grid">
+            {runtimes.filter((rt) => rt.available).map((rt) => (
+              <button
+                key={rt.id}
+                className={ctrlTRuntime === rt.id ? "active" : ""}
+                onClick={() => setCtrlTRuntime(rt.id)}
+                style={{
+                  fontFamily: "var(--pixel)",
+                  fontSize: "var(--fs-2xs)",
+                  padding: "6px 12px",
+                  border: `1px solid ${ctrlTRuntime === rt.id ? "var(--brand)" : "var(--rule2)"}`,
+                  color: ctrlTRuntime === rt.id ? "var(--brand)" : "var(--ink2)",
+                  background: ctrlTRuntime === rt.id ? "rgb(var(--brand-rgb) / .08)" : "transparent",
+                  cursor: "pointer",
+                }}
+              >
+                <Icon name={runtimeIcon(rt.id)} size={14} />
+                <span><b>{rt.name}</b><small>{rt.id}</small></span>
+              </button>
+            ))}
+          </div>
+          <div className="settings-field-label">
+            <span>终端自然退出后</span>
+            <small>适用于 exit、任务完成与 Ctrl+D</small>
+          </div>
+          <div className="settings-help-text">
             进程自然退出后（终端里 exit / 任务跑完 / Ctrl+D，不是点 × 关闭）
           </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <div className="settings-choice-grid">
             <button
+              className={sessionEndMode === "keep" ? "active" : ""}
               onClick={() => changeSessionEndMode("keep")}
               style={{
                 fontFamily: "var(--pixel)",
@@ -563,9 +795,11 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 cursor: "pointer",
               }}
             >
-              保留并标记已结束（侧栏可找回）
+              <Icon name="history" size={14} />
+              <span><b>保留会话</b><small>标记为已结束，仍可从侧栏找回</small></span>
             </button>
             <button
+              className={sessionEndMode === "delete" ? "active danger" : "danger"}
               onClick={() => changeSessionEndMode("delete")}
               style={{
                 fontFamily: "var(--pixel)",
@@ -577,15 +811,19 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 cursor: "pointer",
               }}
             >
-              直接删除
+              <Icon name="trash-2" size={14} />
+              <span><b>直接删除</b><small>退出后立即清理会话记录</small></span>
             </button>
           </div>
-        </div>
+        </section>
 
         {/* First-run onboarding */}
-        <div className="modal-section" style={{ marginBottom: 16, borderTop: "1px solid var(--rule)", paddingTop: 10 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "var(--fs-sm)" }}>
-            <span style={{ color: "var(--ink2)" }}>重新显示引导流程</span>
+        <div className="modal-section settings-panel settings-onboarding-panel">
+          <div className="settings-action-copy">
+            <Icon name="rocket" size={15} />
+            <span><b>首次使用引导</b><small>重新查看运行环境检测与创建会话流程。</small></span>
+          </div>
+          <div>
             <button
               onClick={reShowOnboarding}
               className="modal-btn"
@@ -605,15 +843,19 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
         </div>
 
         {/* About / Updates */}
-        <div className="modal-section" style={{ borderTop: "1px solid var(--rule)", paddingTop: 10 }}>
-          <div className="modal-title" style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-sm)", color: "var(--ink2)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
-            关于与更新
+        <section id="settings-updates" className="modal-section settings-panel settings-update-panel">
+          <div className="settings-section-head">
+            <span>FIRMWARE CHANNEL</span>
+            <h4>关于与更新</h4>
+            <p>检查新版本并管理启动时更新策略。</p>
           </div>
-          <div style={{ fontSize: "var(--fs-sm)", color: "var(--ink2)" }}>
-            CaPilot IDE <span style={{ fontFamily: "var(--mono)", color: "var(--ink2)" }}>v{currentVersion ?? "…"}</span>
-          </div>
-          <div style={{ fontSize: "var(--fs-xs)", color: "var(--ink2)", marginTop: 4, fontFamily: "var(--mono)" }}>
-            Local AI coding workspace
+          <div className="settings-version-plate">
+            <div className="settings-version-mark">C</div>
+            <div>
+              <b>CaPilot IDE</b>
+              <span>VERSION {currentVersion ?? "…"}</span>
+            </div>
+            <small>LOCAL AI CODING WORKSPACE</small>
           </div>
 
           {/* Version check row */}
@@ -728,6 +970,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               {autoCheckUpdate ? "已开启" : "已关闭"}
             </button>
           </div>
+        </section>
+          </main>
         </div>
       </div>
     </div>

@@ -879,6 +879,9 @@ impl AgentRuntimeAdapter for DshAdapter {
         std::env::var_os("DEEPSEEK_API_KEY").is_some()
             || Self::dsh_home().is_some_and(|home| home.join(".credentials.yaml").exists())
     }
+    fn version(&self) -> Option<String> {
+        crate::agent_runtime::adapter::cli_version("dsh")
+    }
     fn preflight(&self) -> Option<String> {
         Self::preflight_diagnostic()
     }

@@ -85,6 +85,10 @@ const TODOS_KEY: &str = "todos";
 /// unset; `setting_set` allow-lists it alongside the other settings keys.
 const AUTO_CHECK_UPDATE_KEY: &str = "auto_check_update";
 
+/// Settings KV key: whether the completion chime plays when an agent leaves
+/// 运行中 (Settings → 外观与显示 → 提示音). Defaults to enabled when unset.
+const SOUND_ENABLED_KEY: &str = "sound_enabled";
+
 /// User-configured launch override for one runtime (the adapter's defaults win
 /// unless a field is set to a non-empty string).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1641,6 +1645,7 @@ fn setting_set(
         USAGE_CONFIG_KEY,
         TODOS_KEY,
         AUTO_CHECK_UPDATE_KEY,
+        SOUND_ENABLED_KEY,
     ];
     if !ALLOWED.contains(&key.as_str()) {
         return Err(format!("unknown setting key: {}", key));
@@ -1759,6 +1764,7 @@ async fn runtime_list_available() -> Vec<agent_runtime::adapter::RuntimeInfo> {
             name: adapter.name().to_string(),
             available: adapter.is_available(),
             authenticated: adapter.is_authenticated(),
+            version: adapter.version(),
             models: adapter.list_models(),
             permission_modes: adapter.list_permission_modes(),
             thinking_options: adapter.list_thinking_options(),

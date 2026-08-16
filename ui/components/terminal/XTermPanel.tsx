@@ -328,9 +328,30 @@ const cssVar = (name: string, fallback: string): string => {
   return (root ? getComputedStyle(root).getPropertyValue(name).trim() : "") || fallback;
 };
 
-/** Terminal search match highlight colors (xterm decorations need `#RRGGBB`). */
-const SEARCH_MATCH_BG = cssVar("--search-match-bg", "#2E2A4A");
-const SEARCH_ACTIVE_BG = cssVar("--brand", "#8B5CF6");
+/** Read the current CSS palette into xterm, whose canvas renderer cannot use
+ *  CSS variables directly. Called both at construction and on theme changes. */
+const readTerminalTheme = () => ({
+  background: cssVar("--term-bg", "#0D1117"),
+  foreground: cssVar("--pl-fg", "#ABB2BF"),
+  cursor: cssVar("--pl-cursor", "#5C6370"),
+  selectionBackground: cssVar("--pl-selection", "#3A3F4B"),
+  black: cssVar("--pl-black", "#1E2127"),
+  red: cssVar("--pl-red", "#E06C75"),
+  green: cssVar("--pl-green", "#98C379"),
+  yellow: cssVar("--pl-yellow", "#D19A66"),
+  blue: cssVar("--pl-blue", "#61AFEF"),
+  magenta: cssVar("--pl-magenta", "#C678DD"),
+  cyan: cssVar("--pl-cyan", "#56B6C2"),
+  white: cssVar("--pl-white", "#ABB2BF"),
+  brightBlack: cssVar("--pl-bright-black", "#5C6370"),
+  brightRed: cssVar("--pl-bright-red", "#E06C75"),
+  brightGreen: cssVar("--pl-bright-green", "#98C379"),
+  brightYellow: cssVar("--pl-bright-yellow", "#D19A66"),
+  brightBlue: cssVar("--pl-bright-blue", "#61AFEF"),
+  brightMagenta: cssVar("--pl-bright-magenta", "#C678DD"),
+  brightCyan: cssVar("--pl-bright-cyan", "#56B6C2"),
+  brightWhite: cssVar("--pl-bright-white", "#FFFFFF"),
+});
 
 /** xterm panel bound to an agent's PTY channel.
  *
@@ -354,6 +375,7 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
   // (e.g. a different agent spawning/resuming elsewhere in the app).
   const channel = useStore((s) => s.agentChannels.get(agentId));
   const fontScale = useStore((s) => s.fontScale);
+  const themeId = useStore((s) => s.themeId);
   const focusRequest = useStore((s) => s.focusRequest);
   const searchRequest = useStore((s) => s.searchRequest);
   // Immutable per agent; a primitive selection re-renders only when THIS agent's
@@ -429,10 +451,10 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     }
     const opts = {
       decorations: {
-        matchBackground: SEARCH_MATCH_BG,
-        matchOverviewRuler: SEARCH_MATCH_BG,
-        activeMatchBackground: SEARCH_ACTIVE_BG,
-        activeMatchColorOverviewRuler: SEARCH_ACTIVE_BG,
+        matchBackground: cssVar("--search-match-bg", "#2E2A4A"),
+        matchOverviewRuler: cssVar("--search-match-bg", "#2E2A4A"),
+        activeMatchBackground: cssVar("--brand", "#8B5CF6"),
+        activeMatchColorOverviewRuler: cssVar("--brand", "#8B5CF6"),
       },
     };
     if (dir === "next") addon.findNext(query, opts);
@@ -484,28 +506,7 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
       cursorBlink: false,
       fontSize: TERMINAL_FONT_SIZES[fontScale] ?? 13,
       fontFamily: "'JetBrainsMono', ui-monospace, monospace",
-      theme: {
-        background: cssVar("--term-bg", "#0D1117"),
-        foreground: cssVar("--pl-fg", "#ABB2BF"),
-        cursor: cssVar("--pl-cursor", "#5C6370"),
-        selectionBackground: cssVar("--pl-selection", "#3A3F4B"),
-        black: cssVar("--pl-black", "#1E2127"),
-        red: cssVar("--pl-red", "#E06C75"),
-        green: cssVar("--pl-green", "#98C379"),
-        yellow: cssVar("--pl-yellow", "#D19A66"),
-        blue: cssVar("--pl-blue", "#61AFEF"),
-        magenta: cssVar("--pl-magenta", "#C678DD"),
-        cyan: cssVar("--pl-cyan", "#56B6C2"),
-        white: cssVar("--pl-white", "#ABB2BF"),
-        brightBlack: cssVar("--pl-bright-black", "#5C6370"),
-        brightRed: cssVar("--pl-bright-red", "#E06C75"),
-        brightGreen: cssVar("--pl-bright-green", "#98C379"),
-        brightYellow: cssVar("--pl-bright-yellow", "#D19A66"),
-        brightBlue: cssVar("--pl-bright-blue", "#61AFEF"),
-        brightMagenta: cssVar("--pl-bright-magenta", "#C678DD"),
-        brightCyan: cssVar("--pl-bright-cyan", "#56B6C2"),
-        brightWhite: cssVar("--pl-bright-white", "#FFFFFF"),
-      },
+      theme: readTerminalTheme(),
       allowProposedApi: true,
     });
 
@@ -970,6 +971,18 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId, channel]);
+
+  // xterm paints to a canvas and therefore cannot follow CSS variables by
+  // itself. Refresh its palette in place so live PTY sessions survive a theme
+  // switch without reconnecting or losing scrollback.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    term.options.theme = readTerminalTheme();
+    if (term.rows > 0) term.refresh(0, term.rows - 1);
+    searchAddonRef.current?.clearDecorations();
+    setSearchResults(null);
+  }, [themeId]);
 
   // Tauri drag-drop event — more reliable in the webview than DOM drop (the
   // Composer uses the same fallback). Scoped to the terminal via position so a

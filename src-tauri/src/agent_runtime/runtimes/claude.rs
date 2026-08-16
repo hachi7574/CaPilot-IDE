@@ -224,6 +224,13 @@ impl AgentRuntimeAdapter for ClaudeAdapter {
         false
     }
 
+    fn version(&self) -> Option<String> {
+        // `claude --version` prints "2.1.233 (Claude Code)" — keep the bare
+        // semver for the settings chip.
+        crate::agent_runtime::adapter::cli_version("claude")
+            .map(|v| v.split('(').next().unwrap_or(&v).trim().to_string())
+    }
+
     fn list_models(&self) -> Vec<ModelInfo> {
         // Claude Code uses the API models; try to query from `claude --help` or hardcode
         vec![

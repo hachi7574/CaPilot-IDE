@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { useStore, TermTemplate } from "../../state/store";
 import { spawnTerminal } from "../../state/agentActions";
 import { Icon, runtimeIcon } from "../Icon";
@@ -6,9 +6,9 @@ import { Icon, runtimeIcon } from "../Icon";
 /**
  * New-terminal template picker for the project "+" / tab-bar "+" buttons.
  *
- * bash (fixed, always first) / Claude / Codex / OpenCode / dsh / user-defined
- * quick-start commands. Right-click a non-fixed template to rename it or edit
- * its launch command; "＋ 添加快速启动" adds a new one (persisted to localStorage).
+ * bash (fixed, always first) / Claude / Codex / dsh / user-defined quick-start
+ * commands. Right-click a non-fixed template to rename it or edit its launch
+ * command; "＋ 添加快速启动" adds a new one (persisted to localStorage).
  */
 export function TerminalTemplatePicker({
   project,
@@ -28,6 +28,30 @@ export function TerminalTemplatePicker({
   const [edit, setEdit] = useState<TermTemplate | null>(null);
   const [adding, setAdding] = useState(false);
 
+  // Keep the menu fully on-screen: the anchor is the "＋" button's bottom-right
+  // corner, which can sit close to the viewport edge. Measure after paint and
+  // flip right→left / bottom→top when the menu would be clipped.
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ left: number; top: number }>({
+    left: anchor.x,
+    top: anchor.y,
+  });
+  useLayoutEffect(() => {
+    const el = menuRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const pad = 8;
+    let left = anchor.x;
+    let top = anchor.y;
+    if (left + rect.width + pad > window.innerWidth) {
+      left = Math.max(pad, window.innerWidth - rect.width - pad);
+    }
+    if (top + rect.height + pad > window.innerHeight) {
+      top = Math.max(pad, window.innerHeight - rect.height - pad);
+    }
+    setPos({ left, top });
+  }, [anchor.x, anchor.y]);
+
   return (
     <>
       <div
@@ -39,8 +63,9 @@ export function TerminalTemplatePicker({
         }}
       />
       <div
+        ref={menuRef}
         className="tt-menu"
-        style={{ left: anchor.x, top: anchor.y }}
+        style={{ left: pos.left, top: pos.top }}
         onClick={(e) => e.stopPropagation()}
         onContextMenu={(e) => e.stopPropagation()}
       >

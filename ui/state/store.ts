@@ -1,5 +1,7 @@
 import { create } from "zustand";
 import { invoke, Channel } from "@tauri-apps/api/core";
+import { THEMES, DEFAULT_THEME_ID } from "./themes";
+import { playConfirmationSound } from "./sound";
 
 // ── Types ───────────────────────────────────────────────────────
 
@@ -16,6 +18,9 @@ export type Speed = string;
 /** UI font size preset. Base `"s"` is the smallest; larger presets scale the
  *  CSS `--fs-*` tokens. */
 export type FontScale = "s" | "m" | "l" | "xl" | "xxl";
+/** Visual theme preset. Every theme keeps the IDE's pixel/terminal structure
+ *  while swapping its material, phosphor and syntax-color system. */
+export type ThemeId = string;
 
 /**
  * Provider's estimate of the CURRENT active-context occupancy for an agent
@@ -188,6 +193,8 @@ export interface RuntimeInfo {
   name: string;
   available: boolean;
   authenticated: boolean;
+  /** CLI version string reported by `<binary> --version`, when detectable. */
+  version?: string | null;
   models?: {
     id: string;
     name: string;
@@ -617,6 +624,10 @@ interface AppState {
    *  idle while the agent's tab is off-screen; cleared on view (`setActiveTab`)
    *  or when the user submits a new prompt. In-memory only. */
   unreadCompletion: Set<string>;
+  /** Per-agent tab-label flash request (agentId → sequence). Each running →
+   *  other transition increments the seq so the tab bar can restart the flash
+   *  animation even when two transitions land in the same frame. */
+  tabFlash: Map<string, number>;
   /** Output buffered before a terminal attached (and between mounts). */
   agentOutputs: Map<string, number[]>;
   /** Whether the initial persisted-session lookup has settled. */
@@ -711,6 +722,16 @@ interface AppState {
   // UI font size preset ("s" | "m" | "l" | "xl" | "xxl"); base = smallest.
   fontScale: FontScale;
 
+  // Visual theme preset, reflected to <html data-theme="…"> by App.
+  themeId: ThemeId;
+
+  /** Whether the running → other transition chime is enabled (default true). */
+  soundEnabled: boolean;
+
+  /** Runtime spawned by Ctrl+T (preference). The effective pick is resolved by
+   *  `resolveCtrlTRuntime` (configured → claude → bash → hint). */
+  ctrlTRuntime: string;
+
   // App self-update (docs/version-update-design.md). State is written by
   // `ui/state/update.ts`; only the auto-check toggle has a dedicated action.
   /** Real app version, read at runtime via getVersion(). */
@@ -754,6 +775,9 @@ interface AppState {
   markAgentSubmitted: (id: string) => void;
   /** Update (or clear with `null`) an agent's hook-reported lifecycle status. */
   setHookStatus: (id: string, hook: HookStatus | null) => void;
+  /** Request the tab bar to flash an agent's tab label twice (a running → other
+   *  transition just happened). */
+  flashTab: (id: string) => void;
   /** Mark/unmark an agent's unviewed-completion flag (已完成). `unread` true
    *  flags a finished turn the user hasn't opened; false clears it. */
   setAgentUnread: (id: string, unread: boolean) => void;
@@ -841,6 +865,9 @@ interface AppState {
   setOnboarded: (onboarded: boolean) => void;
   setNprojOpen: (open: boolean) => void;
   setFontScale: (scale: FontScale) => void;
+  setThemeId: (theme: ThemeId) => void;
+  /** Persist the Ctrl+T runtime preference (localStorage). */
+  setCtrlTRuntime: (runtime: string) => void;
   setTodos: (todos: TodoTag[]) => void;
   addTodo: (text: string) => void;
   updateTodoText: (id: string, text: string) => void;
@@ -853,6 +880,8 @@ interface AppState {
   toggleTodoScope: () => void;
   /** Persist the startup auto-check toggle (Settings → 关于). */
   setAutoCheckUpdate: (enabled: boolean) => void;
+  /** Persist the completion-chime toggle (Settings → 外观与显示). */
+  setSoundEnabled: (enabled: boolean) => void;
 }
 
 /** Persisted preference: has the user completed first-run onboarding? */
@@ -878,10 +907,55 @@ function loadFontScale(): FontScale {
   return "m";
 }
 
+/** Persisted visual theme. The quantum lattice look is the safe migration
+ *  default for installs created before theme switching existed. */
+const THEME_KEY = "capilot.theme";
+function loadThemeId(): ThemeId {
+  try {
+    const value = localStorage.getItem(THEME_KEY);
+    if (value && THEMES.some((t) => t.id === value)) return value;
+  } catch {
+    // storage unavailable — use the default
+  }
+  return DEFAULT_THEME_ID;
+}
+
+/** Persisted Ctrl+T runtime preference (default claude). The effective pick is
+ *  resolved against the installed runtimes by `resolveCtrlTRuntime` (configured
+ *  → claude → bash → hint). */
+const CTRLT_RUNTIME_KEY = "capilot.ctrlTRuntime";
+const DEFAULT_CTRLT_RUNTIME = "claude";
+function loadCtrlTRuntime(): string {
+  try {
+    const value = localStorage.getItem(CTRLT_RUNTIME_KEY);
+    if (value) return value;
+  } catch {
+    // storage unavailable — use the default
+  }
+  return DEFAULT_CTRLT_RUNTIME;
+}
+
+/** Effective runtime for Ctrl+T: the configured pick when it's installed,
+ *  otherwise claude, otherwise bash (`bash-rc`), otherwise null — the caller
+ *  shows the "no runtime" hint instead of spawning. */
+export function resolveCtrlTRuntime(
+  configured: string,
+  runtimes: RuntimeInfo[]
+): string | null {
+  const available = new Set(
+    runtimes.filter((r) => r.available).map((r) => r.id)
+  );
+  if (available.has(configured)) return configured;
+  if (available.has("claude")) return "claude";
+  if (available.has("bash-rc")) return "bash-rc";
+  return null;
+}
+
 // ── New-terminal templates ──────────────────────────────────────
 // The project "+" button opens a picker: bash (fixed, always first) / Claude /
-// Codex / OpenCode / dsh / user-defined quick-start commands. Custom templates
-// persist locally.
+// Codex / dsh / user-defined quick-start commands. Custom templates persist
+// locally. (opencode was removed as a selectable runtime — see
+// `known_runtimes`; persisted templates are dropped on load.)
 
 /** A new-terminal template shown in the project "+" picker. `command` is run
  *  after the shell starts (bash / bash-rc) / ignored for agent runtimes;
@@ -890,7 +964,7 @@ export interface TermTemplate {
   id: string;
   name: string;
   command: string;
-  runtime: "bash" | "bash-rc" | "claude" | "codex" | "opencode" | "dsh";
+  runtime: "bash" | "bash-rc" | "claude" | "codex" | "dsh";
   fixed?: boolean;
 }
 
@@ -899,7 +973,6 @@ const DEFAULT_TEMPLATES: TermTemplate[] = [
   { id: "bash-rc", name: "bash", command: "", runtime: "bash-rc", fixed: true },
   { id: "claude", name: "claude", command: "", runtime: "claude" },
   { id: "codex", name: "codex", command: "", runtime: "codex" },
-  { id: "opencode", name: "opencode", command: "", runtime: "opencode" },
   { id: "dsh", name: "dsh", command: "", runtime: "dsh" },
 ];
 function loadTermTemplates(): TermTemplate[] {
@@ -908,8 +981,10 @@ function loadTermTemplates(): TermTemplate[] {
     const stored: TermTemplate[] = raw ? (JSON.parse(raw) as TermTemplate[]) : [];
     // Drop the old minimal `--norc` "bash" template (superseded by the full
     // bash), re-label the old "正常 bash" default to just "bash", and drop
-    // persisted omp templates (runtime removed).
-    const list = stored.filter((t) => t.id !== "bash" && t.id !== "omp");
+    // persisted omp / opencode templates (runtimes removed as new terminals).
+    const list = stored.filter(
+      (t) => t.id !== "bash" && t.id !== "omp" && t.id !== "opencode"
+    );
     for (const t of list) {
       if (t.id === "bash-rc" && t.name === "正常 bash") t.name = "bash";
     }
@@ -942,7 +1017,9 @@ function saveTermTemplates(list: TermTemplate[]) {
 let todoUidSeq = 0;
 function todoUid(): string {
   todoUidSeq += 1;
-  return `todo-${todoUidSeq.toString(36)}`;
+  // Timestamp prefix keeps ids unique across restarts: the seq alone restarts
+  // at 0 every launch, which would collide with ids re-hydrated from storage.
+  return `todo-${Date.now().toString(36)}-${todoUidSeq.toString(36)}`;
 }
 
 function saveTodos(todos: TodoTag[]) {
@@ -985,6 +1062,7 @@ export const useStore = create<AppState>((set, get) => {
   hookStatus: new Map(),
   agentSubmittedAt: new Map(),
   unreadCompletion: new Set(),
+  tabFlash: new Map(),
   agentOutputs: new Map(),
   sessionsRestored: false,
   resumeOnOpen: new Set(),
@@ -1021,6 +1099,9 @@ export const useStore = create<AppState>((set, get) => {
   nprojOpen: false,
   termTemplates: loadTermTemplates(),
   fontScale: loadFontScale(),
+  themeId: loadThemeId(),
+  ctrlTRuntime: loadCtrlTRuntime(),
+  soundEnabled: true,
   todos: [],
   todoScope: "global",
   currentVersion: null,
@@ -1137,13 +1218,26 @@ export const useStore = create<AppState>((set, get) => {
       };
     }),
 
-  updateAgentStatus: (id, status) =>
-    set((s) => {
+  updateAgentStatus: (id, status) => {
+    // A running session ended naturally (`agent://exited` → done, or a failed
+    // spawn marked failed): also a running → other transition. Guarded on the
+    // prev status so an already-done record (replay + live event for the same
+    // exit) can't re-notify.
+    const prevAgent = useStore.getState().agents.get(id);
+    if (
+      (status === "done" || status === "failed") &&
+      prevAgent &&
+      (prevAgent.status === "running" || prevAgent.status === "busy")
+    ) {
+      notifyAgentTransition(id);
+    }
+    return set((s) => {
       const agents = new Map(s.agents);
       const a = agents.get(id);
       if (a) agents.set(id, { ...a, status });
       return { agents };
-    }),
+    });
+  },
 
   updateAgentUsage: (id, usage) =>
     set((s) => {
@@ -1237,8 +1331,22 @@ export const useStore = create<AppState>((set, get) => {
         : { agentSubmittedAt: submittedAt, agentActiveAt: activeAt };
     }),
 
-  setHookStatus: (id, hook) =>
-    set((s) => {
+  setHookStatus: (id, hook) => {
+    // Running → other transition (the hook went working → idle / waiting_input
+    // / awaiting_choice / dormant): sound the completion chime and flash the
+    // agent's tab label. Checked before `set` so the two callers (the 1s poll
+    // and the `agent://hook-status` event) can't double-fire: the second call
+    // sees prev already on the new status.
+    const prevHook = useStore.getState().hookStatus.get(id);
+    if (
+      prevHook &&
+      hook &&
+      prevHook.status === "working" &&
+      hook.status !== "working"
+    ) {
+      notifyAgentTransition(id);
+    }
+    return set((s) => {
       // Value-preserving: `invoke` parses a fresh object each poll, so compare
       // by value — an unchanged status must not re-render the tab strip (an
       // idle strip doesn't tick).
@@ -1288,6 +1396,14 @@ export const useStore = create<AppState>((set, get) => {
         }
       }
       return { hookStatus, unreadCompletion, todos };
+    });
+  },
+
+  flashTab: (id) =>
+    set((s) => {
+      const tabFlash = new Map(s.tabFlash);
+      tabFlash.set(id, (s.tabFlash.get(id) ?? 0) + 1);
+      return { tabFlash };
     }),
 
   setAgentUnread: (id, unread) =>
@@ -1731,6 +1847,24 @@ export const useStore = create<AppState>((set, get) => {
     set({ fontScale: scale });
   },
 
+  setThemeId: (themeId) => {
+    try {
+      localStorage.setItem(THEME_KEY, themeId);
+    } catch {
+      // ignore storage errors
+    }
+    set({ themeId });
+  },
+
+  setCtrlTRuntime: (runtime) => {
+    try {
+      localStorage.setItem(CTRLT_RUNTIME_KEY, runtime);
+    } catch {
+      // ignore storage errors
+    }
+    set({ ctrlTRuntime: runtime });
+  },
+
   // ── App self-update (docs/version-update-design.md) ───────────
   // Only the auto-check toggle persists through the store; the rest of the
   // slice is written imperatively by `ui/state/update.ts` via setState.
@@ -1739,6 +1873,14 @@ export const useStore = create<AppState>((set, get) => {
     set({ autoCheckUpdate: enabled });
     invoke("setting_set", {
       key: "auto_check_update",
+      value: enabled ? "true" : "false",
+    }).catch(() => {});
+  },
+
+  setSoundEnabled: (enabled) => {
+    set({ soundEnabled: enabled });
+    invoke("setting_set", {
+      key: "sound_enabled",
       value: enabled ? "true" : "false",
     }).catch(() => {});
   },
@@ -1825,4 +1967,12 @@ export function getAgentOutput(id: string): number[] | undefined {
 /** Drop an agent's buffered terminal output. */
 export function clearAgentOutput(id: string): void {
   useStore.getState().clearAgentOutput(id);
+}
+
+/** Fire the running → other transition notification: play the theme-mapped
+ *  confirmation chime and request a two-flash on the agent's tab label. */
+function notifyAgentTransition(id: string): void {
+  const s = useStore.getState();
+  if (s.soundEnabled) playConfirmationSound(s.themeId);
+  s.flashTab(id);
 }

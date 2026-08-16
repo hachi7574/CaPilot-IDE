@@ -108,6 +108,9 @@ export function TabBar() {
   const closeTab = useStore((s) => s.closeTab);
   const dropAgentChannel = useStore((s) => s.dropAgentChannel);
   const reorderTabs = useStore((s) => s.reorderTabs);
+  // Tab-label flash requests: a running → other transition bumps the seq, and
+  // the effect below re-triggers the `.tab-flash` CSS animation on the tab.
+  const tabFlash = useStore((s) => s.tabFlash);
 
   // Drag-reorder state. During a drag we DON'T mutate the store's tabs array
   // (that would re-render ContentArea and its live terminals on every move);
@@ -236,6 +239,35 @@ export function TabBar() {
     }, 1000);
     return () => clearInterval(t);
   }, []);
+
+  // Tab-label flash: when `tabFlash` bumps an agent's seq, re-trigger the
+  // `.tab-flash` CSS animation (two pulses) on that tab's element. Imperative
+  // so the flash never causes a React re-render of the strip.
+  const flashSeenRef = useRef<Map<string, number>>(new Map());
+  const flashTimerRef = useRef<Map<string, number>>(new Map());
+  useEffect(() => {
+    for (const [id, seq] of tabFlash) {
+      const el = tabElsRef.current.get(id);
+      if (!el) continue;
+      if (flashSeenRef.current.get(id) === seq) continue;
+      flashSeenRef.current.set(id, seq);
+      el.classList.remove("tab-flash");
+      // Forcing a reflow lets the class re-add restart the animation cleanly.
+      void el.offsetWidth;
+      el.classList.add("tab-flash");
+      window.clearTimeout(flashTimerRef.current.get(id));
+      flashTimerRef.current.set(
+        id,
+        window.setTimeout(() => el.classList.remove("tab-flash"), 800)
+      );
+    }
+  }, [tabFlash]);
+  useEffect(
+    () => () => {
+      for (const t of flashTimerRef.current.values()) window.clearTimeout(t);
+    },
+    []
+  );
 
   const [termPicker, setTermPicker] = useState<{
     x: number;
@@ -412,6 +444,7 @@ export function TabBar() {
   return (
     <div
       className={`tab-bar${draggedTabId ? " tab-drag-active" : ""}`}
+      data-tauri-drag-region
       onDragOver={handleTabBarDragOver}
       onDrop={handleTabBarDrop}
       onDragLeave={handleTabBarDragLeave}

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { useStore, AgentInfo, AgentStatus, TODO_DRAG_MIME } from "../../state/store";
@@ -144,6 +145,31 @@ export function LeftSidebar() {
   const leftWidth = useStore((s) => s.leftWidth);
   const setLeftWidth = useStore((s) => s.setLeftWidth);
 
+  // Window controls in the sidebar op-bar (design feedback): minimize /
+  // maximize-toggle / close. Track the maximize state so the middle button
+  // shows the restore glyph while the window is maximized.
+  const appWindow = useMemo(() => getCurrentWindow(), []);
+  const [winMaximized, setWinMaximized] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    let unlisten: (() => void) | undefined;
+    const refresh = () => {
+      appWindow.isMaximized().then((m) => alive && setWinMaximized(m)).catch(() => {});
+    };
+    refresh();
+    appWindow
+      .onResized(refresh)
+      .then((u) => {
+        if (alive) unlisten = u;
+        else u();
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
+  }, [appWindow]);
+
   // On mount, pull the on-disk workspace list so empty projects render too.
   // Rust `list_projects` returns `{name, root}` entries — feed both the name
   // list (tree grouping) and the root map (tab-bar editor-file resolution).
@@ -271,16 +297,22 @@ export function LeftSidebar() {
     openProjectTerminal(proj, agentId);
   };
 
-  // Draggable left sidebar resize.
+  // Draggable left sidebar resize. The panel sits on the right of the main
+  // area in the current layout, with this handle on its left edge: dragging
+  // rightward moves the panel's left edge right, shrinking it.
   const startLeftResize = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
     const startWidth = leftWidth;
     const onMove = (ev: MouseEvent) => {
-      const w = Math.min(420, Math.max(180, startWidth + (ev.clientX - startX)));
+      const w = Math.min(420, Math.max(180, startWidth - (ev.clientX - startX)));
       setLeftWidth(w);
     };
     const onUp = () => {
+      // Clear the click-detection ref so a drag that ended off the handle
+      // can't later be mistaken for a click (double-toggle with the collapse
+      // button's own mouseup bubbling through the handle).
+      resizeStartRef.current = null;
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
@@ -339,36 +371,6 @@ export function LeftSidebar() {
   for (const name of agentsByProject.keys()) {
     if (!projectNames.includes(name)) projectNames.push(name);
   }
-  // [☰] collapses / expands ALL project groups (sidebar stays visible).
-  // Empty projects (zero terminals) are never collapsible — they have no
-  // triangle and their header doesn't toggle — so they are excluded here.
-  const expandableProjects = projectNames.filter(
-    (n) => (agentsByProject.get(n)?.agents?.length ?? 0) > 0
-  );
-  const allCollapsed = expandableProjects.every((n) => collapsedProjs.has(n));
-  // Snapshot of the projects that were expanded at the moment the button
-  // collapsed everything. "展开全部项目" restores exactly this set, so projects
-  // that were already collapsed before the collapse-all stay collapsed.
-  const collapseSnapshot = useRef<Set<string> | null>(null);
-  const toggleAllProjects = () => {
-    if (allCollapsed) {
-      // Expand only what was expanded before the collapse-all; everything else
-      // (including manually-collapsed projects) stays collapsed. Falls back to
-      // expanding all when no snapshot exists (e.g. everything was collapsed by
-      // hand via the triangles).
-      const snapshot = collapseSnapshot.current;
-      setCollapsedProjs(
-        new Set(expandableProjects.filter((n) => !snapshot?.has(n)))
-      );
-      collapseSnapshot.current = null;
-    } else {
-      // Collapse all — remember what was expanded so it can be restored.
-      collapseSnapshot.current = new Set(
-        expandableProjects.filter((n) => !collapsedProjs.has(n))
-      );
-      setCollapsedProjs(new Set(expandableProjects));
-    }
-  };
 
   // [📁+] create a new workspace project and surface it in the tree.
   // With `path`, the project is rooted at an existing local folder the user
@@ -499,26 +501,82 @@ export function LeftSidebar() {
 
   return (
     <>
+      {/* Resize handle: drag to resize; the hover button collapses/expands the
+          sidebar (always rendered so a collapsed sidebar can be reopened). */}
+      <div
+        className="resize-handle"
+        id="resize-left"
+        onMouseDown={(e) => {
+          resizeStartRef.current = { x: e.clientX, y: e.clientY };
+          startLeftResize(e);
+        }}
+        onMouseUp={(e) => {
+          // A click (no movement) on the line toggles the sidebar; a drag
+          // resizes instead. Uses mouseup (not click): startLeftResize's
+          // preventDefault() on mousedown suppresses the click event, which
+          // made a plain click on the collapsed line unable to re-expand.
+          // The ref is only set by a mousedown on the handle itself — the
+          // collapse button's stopPropagation leaves it null, so this never
+          // double-toggles with that button's own onClick.
+          const start = resizeStartRef.current;
+          resizeStartRef.current = null;
+          if (
+            !start ||
+            Math.hypot(e.clientX - start.x, e.clientY - start.y) > 5
+          ) {
+            return;
+          }
+          toggleLeftSidebar();
+        }}
+      >
+        <button
+          className="resize-collapse"
+          title={leftSidebarOpen ? "收起侧栏" : "展开侧栏"}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleLeftSidebar();
+          }}
+        >
+          <Icon name={leftSidebarOpen ? "chevron-right" : "chevron-left"} size={10} />
+        </button>
+      </div>
       <div
         className={`left-sidebar${!leftSidebarOpen ? " collapsed" : ""}`}
         style={leftSidebarOpen ? { width: leftWidth } : undefined}
       >
-        {leftSidebarOpen && (
+        {leftSidebarOpen ? (
           <>
             {/* Zone 2: Op bar */}
-            <div className="sidebar-actions">
+            <div className="sidebar-actions" data-tauri-drag-region>
               <span className="sidebar-btn" onClick={() => setSettingsOpen(true)} title="设置">
                 <Icon name="settings" size={16} />
               </span>
-              <span
-                className={`sidebar-btn${allCollapsed ? " active" : ""}`}
-                onClick={toggleAllProjects}
-                title={allCollapsed ? "展开全部项目" : "收起全部项目"}
-              >
-                <Icon name="menu" size={16} />
-              </span>
               <span className="sidebar-btn" onClick={() => setNprojOpen(true)} title="新建项目">
                 +
+              </span>
+              <span className="win-drag" data-tauri-drag-region aria-hidden />
+              <span className="win-sep" aria-hidden />
+              <span
+                className="sidebar-btn win-btn"
+                onClick={() => void appWindow.minimize()}
+                title="最小化"
+              >
+                <Icon name="minus" size={14} />
+              </span>
+              <span
+                className="sidebar-btn win-btn"
+                onClick={() => void appWindow.toggleMaximize()}
+                title={winMaximized ? "还原" : "最大化"}
+              >
+                <Icon name={winMaximized ? "copy" : "square"} size={13} />
+              </span>
+              <span
+                className="sidebar-btn win-btn win-close"
+                onClick={() => void appWindow.close()}
+                title="关闭"
+              >
+                <Icon name="x" size={14} />
               </span>
             </div>
 
@@ -772,6 +830,46 @@ export function LeftSidebar() {
               />
             </div>
           </>
+        ) : (
+          // Collapsed rail: frameless window — keep the window controls
+          // reachable when the project tree is hidden. Clicking the empty
+          // rail (or the resize handle line) re-expands.
+          <div
+            className="sidebar-rail"
+            onClick={toggleLeftSidebar}
+            title="点击空白展开侧栏"
+          >
+            <span
+              className="sidebar-btn rail-btn win-btn"
+              onClick={(e) => {
+                e.stopPropagation();
+                void appWindow.minimize();
+              }}
+              title="最小化"
+            >
+              <Icon name="minus" size={14} />
+            </span>
+            <span
+              className="sidebar-btn rail-btn win-btn"
+              onClick={(e) => {
+                e.stopPropagation();
+                void appWindow.toggleMaximize();
+              }}
+              title={winMaximized ? "还原" : "最大化"}
+            >
+              <Icon name={winMaximized ? "copy" : "square"} size={13} />
+            </span>
+            <span
+              className="sidebar-btn rail-btn win-btn win-close"
+              onClick={(e) => {
+                e.stopPropagation();
+                void appWindow.close();
+              }}
+              title="关闭"
+            >
+              <Icon name="x" size={14} />
+            </span>
+          </div>
         )}
       </div>
 
@@ -828,41 +926,6 @@ export function LeftSidebar() {
           onClose={() => setRenameAgentId(null)}
         />
       )}
-
-      {/* Resize handle: drag to resize; the hover button collapses/expands the
-          sidebar (always rendered so a collapsed sidebar can be reopened). */}
-      <div
-        className="resize-handle"
-        id="resize-left"
-        onMouseDown={(e) => {
-          resizeStartRef.current = { x: e.clientX, y: e.clientY };
-          startLeftResize(e);
-        }}
-        onClick={(e) => {
-          // A click (no movement) toggles the sidebar; a drag resizes instead.
-          const start = resizeStartRef.current;
-          resizeStartRef.current = null;
-          if (
-            start &&
-            Math.hypot(e.clientX - start.x, e.clientY - start.y) > 5
-          ) {
-            return;
-          }
-          toggleLeftSidebar();
-        }}
-      >
-        <button
-          className="resize-collapse"
-          title={leftSidebarOpen ? "收起左侧栏" : "展开左侧栏"}
-          onMouseDown={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            e.stopPropagation();
-            toggleLeftSidebar();
-          }}
-        >
-          <Icon name={leftSidebarOpen ? "chevron-left" : "chevron-right"} size={10} />
-        </button>
-      </div>
     </>
   );
 }

@@ -1945,26 +1945,28 @@ export function Composer() {
               : undefined
           }
         />
-        <span className="composer-target-right">
-          {isBangInput && effectiveTarget?.kind !== "todo" && (
-            <span className="composer-bang">
-              <Icon name="zap" size={12} style={{ marginRight: 4 }} />
-              终端直发
+        {tabs.some((t) => t.type === "agent") && (
+          <span className="composer-target-right">
+            {isBangInput && effectiveTarget?.kind !== "todo" && (
+              <span className="composer-bang">
+                <Icon name="zap" size={12} style={{ marginRight: 4 }} />
+                终端直发
+              </span>
+            )}
+            <span
+              className="composer-f1-hint"
+              title="Tab 在打开的终端与待分配之间切换发送目标"
+            >
+              <kbd>Tab</kbd> 切换目标
             </span>
-          )}
-          <span
-            className="composer-f1-hint"
-            title="Tab 在打开的终端与待分配之间切换发送目标"
-          >
-            <kbd>Tab</kbd> 切换目标
+            <span
+              className="composer-f1-hint"
+              title="F1 在输入框与终端之间切换焦点"
+            >
+              <kbd>F1</kbd> 切换焦点
+            </span>
           </span>
-          <span
-            className="composer-f1-hint"
-            title="F1 在输入框与终端之间切换焦点"
-          >
-            <kbd>F1</kbd> 切换焦点
-          </span>
-        </span>
+        )}
       </div>
 
       {/* Input area */}

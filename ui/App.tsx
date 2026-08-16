@@ -28,15 +28,19 @@ function App() {
   useUpdateSync();
   const onboarded = useStore((s) => s.onboarded);
   const fontScale = useStore((s) => s.fontScale);
+  const themeId = useStore((s) => s.themeId);
   // Reflect the chosen font-size preset on <html> so the CSS `html[data-fs=…]`
   // rules can rescale every `--fs-*` token.
   document.documentElement.dataset.fs = fontScale;
+  // Theme tokens live in CSS; reflecting the persisted preset here updates the
+  // whole shell (and CodeMirror) without changing component structure.
+  document.documentElement.dataset.theme = themeId;
   return (
     <div className="app">
       <div className="app-body">
-        <LeftSidebar />
-        <MainArea />
         <RightSidebar />
+        <MainArea />
+        <LeftSidebar />
       </div>
       <StatusBar />
       <AnnotationLayer />

@@ -1,7 +1,9 @@
-//! TICA-certified cat breed names used to randomly name new terminals.
+//! Cat-inspired names used to randomly name new terminals.
 //!
+//! Mostly TICA-certified breed display names (Chinese), plus a few fun nicknames
+//! (比比拉布 / 刀盾 / 哈基米 / 曼波 / 南北绿豆 / 巴巴博一 / 歪比巴布 / 欧润吉).
 //! Kept in one dedicated file so the list is easy to review / extend. A random
-//! breed is picked per new terminal and marked used; once every breed has been
+//! name is picked per new terminal and marked used; once every name has been
 //! used the pool resets, so duplicates only appear after a full cycle.
 
 use std::collections::HashSet;
@@ -60,6 +62,14 @@ pub const BREEDS: &[&str] = &[
     "托伊格",
     "土耳其安哥拉",
     "土耳其梵",
+    "比比拉布",
+    "刀盾",
+    "哈基米",
+    "曼波",
+    "南北绿豆",
+    "巴巴博一",
+    "歪比巴布",
+    "欧润吉",
 ];
 
 static USED: LazyLock<Mutex<HashSet<usize>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
