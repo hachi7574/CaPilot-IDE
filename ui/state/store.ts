@@ -1029,12 +1029,13 @@ export function resolveCtrlTRuntime(
 
 /** A new-terminal template shown in the project "+" picker. `command` is run
  *  after the shell starts (bash / bash-rc) / ignored for agent runtimes;
- *  `fixed` (bash) can't be renamed or removed. */
+ *  `fixed` (bash) can't be renamed or removed.
+ *  `runtime` is a runtime id (`claude`, `bash-rc`, `acp:opencode`, …). */
 export interface TermTemplate {
   id: string;
   name: string;
   command: string;
-  runtime: "bash" | "bash-rc" | "claude" | "codex" | "dsh" | "pi";
+  runtime: string;
   fixed?: boolean;
 }
 

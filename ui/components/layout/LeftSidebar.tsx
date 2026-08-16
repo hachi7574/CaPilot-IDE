@@ -9,6 +9,7 @@ import {
   closeAgent as closeAgentAction,
   assignTodoAndSend,
 } from "../../state/agentActions";
+import { isAcpRuntime } from "../../state/runtimeTransport";
 import { SettingsModal } from "./SettingsModal";
 import { TerminalTemplatePicker } from "./TerminalTemplatePicker";
 import { RenameAgentModal } from "./RenameAgentModal";
@@ -1498,7 +1499,11 @@ function ContextMenu({
       )}
       {ctx.agentId && <div className="ctx-sep" />}
       <div className="ctx-label">切换 runtime</div>
-      {runtimes.map((rt) => (
+      {/* DEF-006: ACP cannot use agent_switch_runtime (backend rejects).
+          Spawn ACP via TerminalTemplatePicker "+" instead. */}
+      {runtimes
+        .filter((rt) => !isAcpRuntime(rt.id) && rt.transport !== "acp")
+        .map((rt) => (
         <div
           key={rt.id}
           className={`ctx-item${rt.id === agent?.runtime ? " current" : ""}`}

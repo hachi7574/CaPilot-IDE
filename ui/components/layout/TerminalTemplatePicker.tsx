@@ -1,14 +1,19 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useStore, TermTemplate } from "../../state/store";
 import { spawnTerminal } from "../../state/agentActions";
 import { Icon, runtimeIcon } from "../Icon";
+import { isAcpRuntime } from "../../state/runtimeTransport";
 
 /**
  * New-terminal template picker for the project "+" / tab-bar "+" buttons.
  *
- * bash (fixed, always first) / Claude / Codex / dsh / user-defined quick-start
+ * bash (fixed, always first) / Claude / Codex / dsh / pi / **ACP agents**
+ * (from `runtime_list_available`, transport=acp) / user-defined quick-start
  * commands. Right-click a non-fixed template to rename it or edit its launch
  * command; "＋ 添加快速启动" adds a new one (persisted to localStorage).
+ *
+ * DEF-006: ACP entries are first-class here so users can spawn `acp:opencode`
+ * without relying on Ctrl+T settings.
  */
 export function TerminalTemplatePicker({
   project,
@@ -22,11 +27,41 @@ export function TerminalTemplatePicker({
   onClose: () => void;
 }) {
   const termTemplates = useStore((s) => s.termTemplates);
+  const runtimes = useStore((s) => s.runtimes);
   const addTermTemplate = useStore((s) => s.addTermTemplate);
   const updateTermTemplate = useStore((s) => s.updateTermTemplate);
   const removeTermTemplate = useStore((s) => s.removeTermTemplate);
   const [edit, setEdit] = useState<TermTemplate | null>(null);
   const [adding, setAdding] = useState(false);
+
+  // Dynamic ACP rows from the live runtime catalog (not persisted templates).
+  // Prefer `transport === "acp"`; fall back to `acp:` id prefix.
+  const acpEntries = useMemo(() => {
+    return runtimes
+      .filter(
+        (rt) =>
+          rt.available &&
+          (rt.transport === "acp" || isAcpRuntime(rt.id))
+      )
+      .map(
+        (rt): TermTemplate => ({
+          id: `dyn-${rt.id}`,
+          name: rt.name,
+          command: "",
+          runtime: rt.id,
+          fixed: true,
+        })
+      );
+  }, [runtimes]);
+
+  // Deduplicate: if a stored template already uses an ACP runtime id, skip the
+  // dynamic twin so the menu doesn't double-list.
+  const menuItems = useMemo(() => {
+    const storedIds = new Set(termTemplates.map((t) => t.runtime));
+    const acpOnly = acpEntries.filter((e) => !storedIds.has(e.runtime));
+    // PTY templates first (existing order), then ACP section.
+    return { pty: termTemplates, acp: acpOnly };
+  }, [termTemplates, acpEntries]);
 
   // Keep the menu fully on-screen: the anchor is the "＋" button's bottom-right
   // corner, which can sit close to the viewport edge. Measure after paint and
@@ -50,7 +85,38 @@ export function TerminalTemplatePicker({
       top = Math.max(pad, window.innerHeight - rect.height - pad);
     }
     setPos({ left, top });
-  }, [anchor.x, anchor.y]);
+  }, [anchor.x, anchor.y, menuItems.acp.length, menuItems.pty.length]);
+
+  const renderItem = (t: TermTemplate) => (
+    <div
+      key={t.id}
+      className="tt-item"
+      onClick={() => {
+        spawnTerminal(project, t).catch(console.error);
+        onClose();
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        // Dynamic ACP rows and fixed bash can't be edited.
+        if (t.fixed || t.id.startsWith("dyn-")) return;
+        setEdit(t);
+      }}
+      title={
+        isAcpRuntime(t.runtime)
+          ? "ACP 会话（结构化面板，非终端）"
+          : t.fixed
+            ? "固定模板"
+            : "右键编辑 / 重命名"
+      }
+    >
+      <span className="tt-icon">
+        <Icon name={runtimeIcon(t.runtime)} size={16} />
+      </span>
+      <span className="tt-name">{t.name}</span>
+      {isAcpRuntime(t.runtime) && <span className="tt-cmd">ACP</span>}
+      {t.command && <span className="tt-cmd">{t.command}</span>}
+    </div>
+  );
 
   return (
     <>
@@ -70,28 +136,14 @@ export function TerminalTemplatePicker({
         onContextMenu={(e) => e.stopPropagation()}
       >
         <div className="tt-label">新建终端</div>
-        {termTemplates.map((t) => (
-          <div
-            key={t.id}
-            className="tt-item"
-            onClick={() => {
-              spawnTerminal(project, t).catch(console.error);
-              onClose();
-            }}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              if (t.fixed) return;
-              setEdit(t);
-            }}
-            title={t.fixed ? "固定模板" : "右键编辑 / 重命名"}
-          >
-            <span className="tt-icon">
-              <Icon name={runtimeIcon(t.runtime)} size={16} />
-            </span>
-            <span className="tt-name">{t.name}</span>
-            {t.command && <span className="tt-cmd">{t.command}</span>}
-          </div>
-        ))}
+        {menuItems.pty.map(renderItem)}
+        {menuItems.acp.length > 0 && (
+          <>
+            <div className="tt-sep" />
+            <div className="tt-label">ACP Agents</div>
+            {menuItems.acp.map(renderItem)}
+          </>
+        )}
         <div className="tt-sep" />
         <div className="tt-item tt-add" onClick={() => setAdding(true)}>
           <Icon name="plus" size={12} /> 添加快速启动

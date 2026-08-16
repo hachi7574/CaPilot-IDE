@@ -73,6 +73,12 @@ export function Icon({ name, size = 16, className, style }: IconProps) {
 /** Icon name per agent runtime (brand marks, not the robot emoji). */
 export function runtimeIcon(runtime: string): string {
   if (runtime.startsWith('bash')) return 'gnubash';
+  // ACP ids are `acp:<name>` — map known agents to brand icons.
+  if (runtime.startsWith('acp:')) {
+    const name = runtime.slice(4);
+    if (name === 'opencode') return 'opencode';
+    return 'terminal';
+  }
   switch (runtime) {
     case 'claude': return 'claude';
     case 'codex': return 'openai';

@@ -178,8 +178,28 @@ impl AcpBridge {
 
     pub fn prompt(&self, id: &str, text: &str) -> Result<String, AcpHostError> {
         let handle = self.handle(id)?;
+        // DEF-007: emit running as soon as the turn starts so the UI Stop
+        // button does not depend solely on the frontend optimistic busy flag.
+        self.sink().emit(
+            id,
+            AcpEvent::Status {
+                status: "running".into(),
+            },
+        );
         // Long timeout: real models can be slow; mock is instant.
-        handle.prompt(text, Duration::from_secs(300))
+        let result = handle.prompt(text, Duration::from_secs(300));
+        // On hard failure before turn_done, drop back to idle so the strip
+        // does not stick on 运行中. Successful turns already emit idle via
+        // handle_line(stopReason).
+        if result.is_err() {
+            self.sink().emit(
+                id,
+                AcpEvent::Status {
+                    status: "idle".into(),
+                },
+            );
+        }
+        result
     }
 
     /// Fire-and-forget prompt on a background thread (Tauri command path).
