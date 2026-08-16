@@ -35,13 +35,24 @@ export function CacheHitRate({ agentId }: { agentId: string | undefined }) {
     return null;
   }
 
-  const pct = Math.round((hit / total) * 100);
+  // Preserve small, real hit rates instead of rounding (for example) 0.3% to
+  // the misleading 0%. A malformed provider sample is capped at 100%; the raw
+  // token counts remain visible in the tooltip for diagnosis.
+  const pct = Math.min(100, (hit / total) * 100);
+  const pctLabel =
+    pct === 0
+      ? "0%"
+      : pct < 0.1
+        ? "<0.1%"
+        : pct < 10
+          ? `${pct.toFixed(1)}%`
+          : `${Math.round(pct)}%`;
   return (
     <span
       className="cw-cache"
-      title={`缓存命中 ${formatTokens(hit)} / ${formatTokens(total)} tokens (${pct}%)`}
+      title={`缓存命中率：${formatTokens(hit)} / ${formatTokens(total)} 输入 tokens（${pctLabel}）`}
     >
-      缓存命中 {pct}%
+      缓存命中 {pctLabel}
     </span>
   );
 }
