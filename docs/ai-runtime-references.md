@@ -1,7 +1,7 @@
 # AI Runtime Integration References
 
-> **日期:** 2026-08-15
-> **定位:** CaPilot 对接各 AI 编码 CLI（claude / codex / opencode）的**权威链接 + 已落库集成事实**。
+> **日期:** 2026-08-16
+> **定位:** CaPilot 对接各 AI 编码 CLI（claude / codex / opencode / dsh / pi）的**权威链接 + 已落库集成事实**。
 > 原则：仓库里只存「稳定的、属于本项目的事实」；动态的官方细节留在线，用时以官方文档为准。文档站在迭代，以下事实若与官方冲突，**以官方为准**并更新本文件。
 
 ---
@@ -14,6 +14,7 @@
 | **Codex / ChatGPT** | https://learn.chatgpt.com/docs/codex | [CLI 总览](https://learn.chatgpt.com/docs/codex/cli) · [CLI 命令参考（含 flags）](https://learn.chatgpt.com/docs/codex/developer-commands?surface=cli) · [Slash commands（`/model` `/permissions`）](https://learn.chatgpt.com/docs/codex/reference/slash-commands) · [Config file reference](https://learn.chatgpt.com/docs/codex/config-file/config-reference) · [Settings](https://learn.chatgpt.com/docs/codex/reference/settings) · [Permission modes](https://learn.chatgpt.com/docs/codex/permission-modes) · [Sandboxing](https://learn.chatgpt.com/docs/codex/sandboxing) · [Projects & chats](https://learn.chatgpt.com/docs/codex/projects) · [app-server（模型目录）](https://learn.chatgpt.com/docs/codex/app-server) |
 | **OpenCode** | https://opencode.ai/docs | [CLI](https://opencode.ai/docs/cli/) · [TUI](https://opencode.ai/docs/tui/) · [Config](https://opencode.ai/docs/config/) · [Keybinds（`tui.json`）](https://opencode.ai/docs/keybinds/) · [Permissions](https://opencode.ai/docs/permissions/) · [Agents](https://opencode.ai/docs/agents/) · [Models](https://opencode.ai/docs/models/) · [Commands](https://opencode.ai/docs/commands/) |
 | **dsh（DeepSeek Harness）** | https://github.com/deepseek-ai/dsh（CLI 包 `@deepseek-ai/dsh`，TUI 为 `@deepseek-harness-tui/dsh-tui` 插件，随 `dsh plugin --profile dsh-tui add @deepseek-harness-tui/dsh-tui` 安装；集成设计见 `docs/dsh-runtime-integration.md`） | 已落库事实以本文件 §2.4 / §3 为准；上游为 Commander launcher + Cordis app，官方文档在仓库 README 与 `dsh-tui` 插件 README（本地 `~/.dsh/profiles/dsh-tui` 下有安装副本） |
+| **pi（Earendil pi-coding-agent）** | https://www.npmjs.com/package/@earendil-works/pi-coding-agent（CLI `pi`，本机 `~/APP/n/bin/pi`；官方细节在 npm 包 README 与 `dist` 源码注释） | 已落库事实以本文件 §2.5 / §3 为准；`pi --help` / `pi --list-models` / `pi --list-providers` 为本地权威 |
 
 ---
 
@@ -126,8 +127,8 @@ dsh --profile dsh-tui --patch <每会话临时 patch>
 ```
 - 无 argv 注入模型/权限/effort：模型 + effort 经 `--patch` 每会话 overlay（cordis patch 语义**整体替换** dsh-tui 配置行）；权限经 env `DSH_PERMISSION_MODE=read-only|workspace-write|danger-full-access`（`dsh.rs:316-322`）。
 - `NODE_ENV=production` 必须：dsh 的 React dev renderer 会累积 unbounded `performance.measure()` 记录、长会话 OOM（`dsh.rs:580-586`）。
-- patch 写在 `$XDG_CACHE_HOME/capilot-ide/dsh/<safe-id>.patch.yml`（`~/.cache` 回退），仅本次 spawn 生效；用户全局 `~/.dsh/profiles/dsh-tui/cordis.yml`、`~/.dsh-cc/model.json` 不动。会话删除时清理（`dsh.rs:324-382`、`remove_session_patch`）。
-- patch 内容：`- id: dsh-tui` + `config: {provider: <provider>, model: <id>, [effort: off|high|max], sessionId: !!js process.env.DSH_CC_RESUME_SESSION ?? undefined}`。`sessionId` **必须**无条件重写——dsh-tui 只从该 config 键读 resume（由 `DSH_CC_RESUME_SESSION` env 喂入），patch 整体替换配置行会丢 resume 缝（`dsh.rs:347-374`）。
+- patch 写在 `$XDG_CACHE_HOME/capilot-ide/dsh/<safe-id>.patch.yml`（`~/.cache` 回退），仅本次 spawn 生效；用户全局 `~/.dsh/profiles/dsh-tui/cordis.yml`、`~/.dsh-tui/model.json` 不动。会话删除时清理（`dsh.rs:324-382`、`remove_session_patch`）。
+- patch 内容：`- id: dsh-tui` + `config: {provider: <provider>, model: <id>, [effort: off|high|max], sessionId: !!js process.env.DSH_TUI_RESUME_SESSION ?? process.env.DSH_CC_RESUME_SESSION ?? undefined}`。`sessionId` **必须**无条件重写——dsh-tui 只从该 config 键读 resume（由 `DSH_TUI_RESUME_SESSION` env 喂入，0.7.2 起为 canonical、旧 `DSH_CC_RESUME_SESSION` 作 dual-read 兼容），patch 整体替换配置行会丢 resume 缝（`dsh.rs:347-374`）。
 - 模型：**settings.yaml 探测**（provider-qualified，`dsh.rs` `model_catalog_probe`）——`agent-default-model` 标默认，`deepseek-official` 路由内建 flash/pro，另有 `opencode-go/deepseek-v4-flash` 等 pi-ai 提供商标的模型；default = settings.yaml 的 `agent-default-model`（实测 `opencode-go/deepseek-v4-flash`）。
 - 权限映射 `ask→read-only`、`auto→workspace-write`、`yolo→danger-full-access`（yolo `requires_confirmation: true`）（`dsh.rs:498-519`）。
 - 思考档位：`auto→max`（deepseek-official 默认）、`fast→off`、`mid→high`、`high→max`；**pi-ai 路由（opencode-go 等）固定 `effort: off`**——pi-ai 对未声明 reasoning 元数据的模型只支持 off，钉 off 可覆盖机器残留的 effort.json（`dsh.rs:301-311`、`521-544`）。
@@ -138,8 +139,8 @@ dsh --profile dsh-tui --patch <每会话临时 patch>
 - 思考强度：**Shift+Tab**（`ESC[Z`）环 `off → high → max`（dsh-tui 的 effort 循环，deepseek 档位）。CaPilot speed 映射 fast→off / mid→high / high→max，auto=省略（profile 默认 max）；按当前持久化档位到目标档位的环距步数驱动（`Composer.tsx:673-696`）。**仅 deepseek-official 路由可调**：pi-ai 路由（opencode-go 等）只持久化 speed（作为下次 deepseek-official 生成的默认档位）、不驱动 TUI；⚡ 菜单只留 auto/off（`Composer.tsx:327-340`）。
 
 **Resume / 会话**：
-- `DSH_CC_RESUME_SESSION=<session-id>` env（无 argv；`dsh.rs:598-600`，`resume_args` 返回空）。
-- resume key = 10 秒内新会话目录名（`$DSH_HOME/sessions/--<projectKey(cwd)>--/<session-id>/session.jsonl[.zstd]`，mtime 窗口 + header `cwd` 匹配）；回退 `~/.dsh-cc/resume.txt`（用户 `/exit` 时 launcher 写的标记，仅 fallback）（`dsh.rs:388-421`）。
+- `DSH_TUI_RESUME_SESSION=<session-id>` env（无 argv；`dsh.rs:598-600`，`resume_args` 返回空）。0.7.2 起 canonical 名改为 `DSH_TUI_*`，CaPilot 同时设旧 `DSH_CC_RESUME_SESSION` 兼容旧 dsh 二进制。
+- resume key = 10 秒内新会话目录名（`$DSH_HOME/sessions/--<projectKey(cwd)>--/<session-id>/session.jsonl[.zstd]`，mtime 窗口 + header `cwd` 匹配）；回退 `~/.dsh-tui/resume.txt`（0.7.2 launcher 双写 `~/.dsh-tui` + 旧 `~/.dsh-cc`，读取按 canonical→legacy 顺序，用户 `/exit` 时 launcher 写的标记，仅 fallback）（`dsh.rs:388-421`）。
 - projectKey 编码：cwd 的每个非 `[a-zA-Z0-9]` 字符 → `-`（含前导 `/`），去首尾 `-`、空则 `root`、最长 251 字符（`dsh.rs:78-99`）。
 - 会话日志：默认 zstd 压缩（`session.jsonl.zstd`，`ruzstd` 解码；`session.jsonl` 明文变体直接读）（`dsh.rs:177-197`）。
 
@@ -150,6 +151,33 @@ dsh --profile dsh-tui --patch <每会话临时 patch>
 - 缓存：`StatusInferenceCache` 以 `(mtime_ns, len)` 为指纹（mtime 被文件系统取整到整秒也能靠 len 捕获追加的 `turn/end`），不变则轮询零解码。
 
 **上下文占用 + 缓存命中数据源**：`assistant/chunk` usage 事件——used = `inputTokens + cacheReadTokens`（DeepSeek 会计把输入拆成 fresh 与 cache-served 两部分；实测真实日志二者分离、cacheRead 随上下文累积单调增长；结尾 `{inputTokens:0, outputTokens:0}` 重置块跳过）；max = 模型清单 `context_window_max`（flash/pro 均为 1M，未知模型不猜）。**会话累计**命中率分子/分母 = 所有 usage 事件的 `cacheReadTokens` 与 `inputTokens + cacheReadTokens`（`dsh.rs:622-638`、`parse_usage_from_content`、`context_window_max`）。
+
+### 2.5 pi（runtime `pi`，@earendil-works/pi-coding-agent，本机 0.84.x）
+
+> 适配器 `pi.rs`；Composer 对 pi 有专属 TUI 分支：模型经 **Ctrl+L 模型选择器**、思考经 **Shift+Tab 环**原位驱动（见下 **Live 控制**）；**权限 live 切换 = 持久化 + kill + 自动恢复重启**——pi 无 live 批准键，launch flag（`--approve`/`--no-approve`）在进程启动时定死，`/reload` 只重读 trust store、不重新解析 trust。pi 是 npm 分发、`dist` 源码即文档；本地权威 = `pi --help` / `pi --list-models`。
+
+**Launch**（`pi.rs:358-375`）：
+```text
+pi [--provider <p>] [--model <provider/id>] [--thinking off|low|medium|high|xhigh] [--approve|--no-approve]
+```
+- 模型：provider-qualified `<provider>/<model>`，目录来自 `pi --list-models`（`PI_OFFLINE=1` 走本地 bundle catalog，`pi.rs:129-190`）；default = `<config>/settings.json` 的 `defaultProvider`/`defaultModel`（`pi.rs:103-113`）。launch flag 钉死**下一次 spawn 的默认**；**运行中的会话**可经 Ctrl+L 模型选择器原位切换（见下）。
+- 权限映射 `ask→无 flag（TUI 询问）`、`auto→--approve`、`yolo→--approve`（yolo `requires_confirmation: true`）。**pi 无 sandbox**：approve 只决定文件/命令是否免确认，不提供只读/工作区写隔离（`pi.rs:301-327`）。
+- 思考强度：CaPilot speed → `--thinking`：`off→off`、`fast→low`、`mid→medium`、`high→high`、`xhigh→xhigh`、`auto→省略`（`pi.rs:191-203`、`442-448`）。
+
+**Live 控制（PTY 注入）**：
+- **权限 → live 靠重启**（`Composer.tsx:540-556` `applyPermissionMode` pi 分支）：pi 无 live 批准键（无 `/permissions`；`--approve`/`--no-approve` 仅 launch flag；`/trust` 写持久 per-cwd 决定且需重启；`/reload` 重读 trust store 但**不**重新解析 trust——`handleReloadCommand` 的 `session.reload({ beforeSessionStart })` 不传 `resolveProjectTrust`）。因此 live 会话切换权限 = 先 `agent_set_session_config` 持久化新 mode → `agent_kill` → `dropAgentChannel` → XTermPanel channel effect（deps `[agentId, channel]`）见 channel 归 null 自动 `agent_resume`，`AgentNotFound` 落到 `build_and_spawn` 用新 mode 重启（`lib.rs:607-627`）。休眠/已结束会话无 live 进程，只持久化即可（下次打开/恢复生效）。注意 `auto→--approve` 与 `yolo→--approve` 在 pi 下等价（pi 无更高权限档），可见差异只在 ask↔auto 之间。
+- **模型 → live**（`Composer.tsx:671-680` `applyModel` pi 分支）：`ctrl+l`（0x0C）开模型选择器，其搜索框**聚焦即输入**；搜索文本含 `provider/id`（`${provider} ${provider}/${id} ${provider} ${id}${name}`），输入 provider 限定的目录 id 让目标模型排第一，`\r` 选中（无需方向键）。选择器已打开时不会重复开；非 pi 分支先经 `ensureAgentChannel` 恢复（pi 分支保留恢复，切换需 PTY）。
+- **思考 → live**（`Composer.tsx:797-831` `applyThinkingSpeed` pi 分支）：`shift+tab`（`ESC[Z`）环 `off → minimal → low → medium → high → xhigh → max`（模型可跳过不支持的档）。当前档读 `pi_current_thinking_level`（`pi.rs:116-126` `current_thinking_level` → `<config>/settings.json` `defaultThinkingLevel`，pi 在每次 live 变更时下一 tick 写回），每次按键后重读——环距步进到目标即停，clamp 不会过冲。`auto` = 当前档（=默认），无操作。⚡ 菜单用完整档位（pi `list_thinking_options`：auto/fast/mid/high/xhigh）。
+
+**Resume / 会话**：
+- `pi --session <key>`（`pi.rs:376-382`）；key = pi 会话的 uuidv7 id，来自会话 JSONL 文件名 `<UTC时间戳>_<uuidv7>.jsonl`（`pi.rs:190-197`）。
+- 会话目录：`<config>/sessions/--<projectKey(cwd)>--/`；config 默认 `~/.pi/agent`（`$PI_CODING_AGENT_DIR` 覆盖，会话目录另可用 `$PI_CODING_AGENT_SESSION_DIR`）。projectKey = cwd 去前导 `/`、`/ \ : → -`、包在 `--…--`（`pi.rs:47-55`，测试 `project_session_dir_matches_pi_encoding`）。
+- `capture_resume_key`：cwd 对应会话目录里 10 秒内最新的 `.jsonl` 的 id（`pi.rs:388-411`）。`context_usage` 用持久化 `resume_key` 钉死精确文件、无 key 时回退最新文件（`pi.rs:413-426`），与 claude/codex/opencode/dsh 同一身份规则。
+
+**状态上报（无 hook，PTY 活动启发式）**：
+- pi **没有** hook 面（非 claude `--settings` / codex config profile / opencode 插件 / dsh JSONL 推断型）。`agent_status_read` 对 pi 返回 `None`，`HOOK_STATUS_RUNTIMES` 不含 pi（`TabBar.tsx:49`），TabBar 用 PTY 活动启发式（同 bash）。
+
+**上下文占用 + 缓存命中数据源**：`type:"message"` 助手消息的 `message.usage`（camelCase `input`/`output`/`cacheRead`/`cacheWrite`/`totalTokens`）。used = 最后一个非零 usage 的 `input + cacheRead + cacheWrite`；**会话累计**命中率分子/分母 = 所有助手 usage 的 `cacheRead` 与 `input + cacheRead + cacheWrite`（`pi.rs:233-278` `usage_from_content`）；`actual_model` = 最后一条 `message.model`（仅展示）。max = **None**——pi 会话 JSONL 不携带 context window、模型目录也未暴露上下文上限，不猜（`pi.rs:413-426`）。
 
 ---
 
@@ -182,11 +210,19 @@ dsh --profile dsh-tui --patch <每会话临时 patch>
 | 21 | dsh launch 方式 | `dsh --profile dsh-tui --patch <每会话临时文件>`；**无 argv 注入模型/权限/effort**——模型+effort 经 `--patch` overlay（整体替换 dsh-tui 配置行），权限经 env `DSH_PERMISSION_MODE=read-only\|workspace-write\|danger-full-access`；`NODE_ENV=production` 必须（dev renderer OOM）。patch 落 `$XDG_CACHE_HOME/capilot-ide/dsh/<safe-id>.patch.yml`，会话删除时清理 | `dsh.rs` `write_patch`/`spawn_interactive`/`launch_env`/`dsh_permission_mode` | dsh-tui 插件 README（本地 `~/.dsh/profiles/dsh-tui` 副本） |
 | 22 | dsh 思考档位 | **Shift+Tab**（`ESC[Z`）环 `off → high → max`（dsh-tui effort 循环，仅 deepseek-official 路由）；speed 映射 fast→off / mid→high / high→max，auto=省略（profile 默认 max）；**pi-ai 路由固定 `effort: off`**、⚡ 菜单只留 auto/off（防 UNSUPPORTED_REASONING_EFFORT） | `dsh.rs` `effort_for_speed` + `Composer.tsx:673-696`/`327-340`（环距步数驱动） | 实测 dsh-tui 循环 |
 | 23 | dsh 模型换法 | **不支持原位换模型**：`/model` 是会话 fork 续聊（新会话路由新模型、旧会话留 `/resume`），会破坏「tab id = session id」身份。Composer 只持久化配置，下次 spawn / resume 经 `--patch` 钉死生效 | `Composer.tsx:589-604`（dsh 分支空操作）+ `dsh.rs` `write_patch` | dsh-tui README（model 命令语义） |
-| 24 | dsh resume / 会话 | `DSH_CC_RESUME_SESSION=<id>` env（无 argv）；resume key = 10 秒内新会话目录名（`$DSH_HOME/sessions/--<projectKey>--/<id>/session.jsonl[.zstd]`，header `cwd` 匹配），回退 `~/.dsh-cc/resume.txt`。patch `sessionId: !!js process.env.DSH_CC_RESUME_SESSION ?? undefined` 必须**无条件重写**（漏写丢 resume 缝） | `dsh.rs` `capture_resume_key`/`detect_recent_resume_key`/`write_patch` + `lib.rs` `agent_resume` | 实测 dsh 会话目录 |
+| 24 | dsh resume / 会话 | `DSH_TUI_RESUME_SESSION=<id>` env（无 argv；0.7.2 canonical，CaPilot 同时设 `DSH_CC_RESUME_SESSION` 兼容旧 dsh）；resume key = 10 秒内新会话目录名（`$DSH_HOME/sessions/--<projectKey>--/<id>/session.jsonl[.zstd]`，header `cwd` 匹配），回退 `~/.dsh-tui/resume.txt`（launcher 双写，`~/.dsh-cc` 旧文件仅兼容读取）。patch `sessionId: !!js process.env.DSH_TUI_RESUME_SESSION ?? process.env.DSH_CC_RESUME_SESSION ?? undefined` 必须**无条件重写**（漏写丢 resume 缝） | `dsh.rs` `capture_resume_key`/`detect_recent_resume_key`/`write_patch`/`launch_env` + `lib.rs` `agent_resume` | 实测 dsh 会话目录 |
 | 25 | dsh hook 注入方式 | **无 hook 面**（非 claude/codex/opencode 型）。方案 B：Rust 侧 tail JSONL 推断（`turn/start`→working、`turn/end`→idle、`assistant/chunk`→working，**最后一条命中胜出**），`agent_status_read` 对 dsh 走 DB(runtime+cwd)→`newest_session_log_meta`(mtime_ns+len 指纹)→`StatusInferenceCache` 命中复用、未命中 `spawn_blocking` 解码+推断 | `lib.rs` `agent_status_read`/`StatusInferenceCache` + `dsh.rs` `infer_status_from_content`/`infer_status` | 实测 dsh session.jsonl.zstd 结构 |
 | 26 | dsh 上下文占用 + 缓存命中数据源 | 按 `resume_key`（会话子目录名）**钉死精确 session**，无 key 时回退 cwd 下最新会话（防同 cwd 兄弟会话串数据，与 claude/codex/opencode 同一身份规则）。`assistant/chunk` usage 事件：used = `inputTokens + cacheReadTokens`（DeepSeek 把输入拆 fresh/cache 两部分，cacheRead 随上下文单调增长；结尾 `{0,0}` 重置块跳过）；max = 模型清单 `context_window_max`（flash/pro 均 1M，未知不猜）。**会话累计**命中率分子/分母 = 所有 usage 事件的 `cacheReadTokens` 与 `inputTokens + cacheReadTokens`；`request/header` 的 route model 作为 `actual_model` 上报（仅展示） | `dsh.rs` `context_usage`/`parse_usage_from_content`/`context_window_max`/`session_log_for_key` | 实测 dsh session.jsonl.zstd（usage 事件） |
+| 27 | pi launch 方式 | `pi [--provider <p>] [--model <provider/id>] [--thinking <level>] [--approve\|--no-approve]`；模型/思考/权限都走 launch flag，无 `--patch` 式 overlay。default model = `<config>/settings.json` 的 `defaultProvider`/`defaultModel` | `pi.rs` `spawn_interactive`/`default_model` | `pi --help`（本地 npm 包） |
+| 28 | pi 思考档位 | CaPilot speed → `--thinking`：`off/fast/mid/high/xhigh → off/low/medium/high/xhigh`，`auto`=省略 flag；**运行中**经 Shift+Tab 环原位切换（行 33） | `pi.rs` `thinking_for_speed`/`speed_args` | `pi --help` |
+| 29 | pi 权限 flag | `ask→无 flag`、`auto→--approve`、`yolo→--approve`；**无 sandbox**（approve ≠ 沙箱隔离） | `pi.rs` `mode_args`/`list_permission_modes` | `pi --help` |
+| 30 | pi resume / 会话 | `--session <uuidv7>`；会话目录 `<config>/sessions/--<projectKey(cwd)>--/`，文件名 `<UTC时间戳>_<uuidv7>.jsonl`；projectKey = cwd 去前导 `/` + `/ \ : → -`；`$PI_CODING_AGENT_DIR`/`$PI_CODING_AGENT_SESSION_DIR` 可覆盖 config/会话目录 | `pi.rs` `capture_resume_key`/`project_session_dir`/`session_id_from_file_name` | 实测 `~/.pi/agent/sessions` |
+| 31 | pi hook 注入方式 | **无 hook 面**（非 claude/codex/opencode/dsh 型）。`agent_status_read` 对 pi 返回 `None`，状态退回 PTY 活动启发式（同 bash） | `pi.rs`（无 `status_hook_args`）+ `TabBar.tsx:49`（`HOOK_STATUS_RUNTIMES` 不含 pi） | 实测 pi 无 settings/plugin/JSONL 推断缝 |
+| 32 | pi 上下文占用 + 缓存命中数据源 | 按 `resume_key` 钉死精确会话 JSONL，无 key 回退最新文件。`message.usage` camelCase（`input`/`output`/`cacheRead`/`cacheWrite`/`totalTokens`）；used = 最后非零 `input+cacheRead+cacheWrite`；**会话累计**命中率分子/分母 = `cacheRead` 与 `input+cacheRead+cacheWrite`；`actual_model` = 最后一条 `message.model`；max = **None**（会话 JSONL 与模型目录都不暴露 context window，不猜） | `pi.rs` `context_usage`/`usage_from_content` | 实测 pi 会话 JSONL（usage 事件） |
+| 33 | pi live TUI 键位 | **Ctrl+L**（0x0C）= 模型选择器（搜索框聚焦即输入，搜索文本含 `provider/id`，Enter 选中首个过滤结果）；**Shift+Tab**（`ESC[Z`）= 思考档循环 `off→minimal→low→medium→high→xhigh→max`（模型可跳档）；当前思考档读 settings.json `defaultThinkingLevel`（pi 每次变更下一 tick 写回） | `Composer.tsx:653-662`/`779-813` + `pi.rs` `current_thinking_level` | pi dist 源码 keys.js/model-selector.js + `~/.pi/agent/settings.json` |
+| 34 | pi 权限 live 面 | **无 live 批准键**：`--approve`/`--no-approve` 仅 launch flag，`/trust` 写持久 per-cwd 决定且需重启，`/reload` 重读 trust store 但不重新解析 trust。Composer 权限切换 = 持久化 + kill + 自动恢复重启（live 会话），休眠会话仅持久化（`applyPermissionMode` pi 分支） | `Composer.tsx:540-556` | pi dist 源码 keys.js（无 approval 绑定）、interactive-mode.js `handleReloadCommand` |
 
-> 编号 1、5、8、20、22 都是「顺序/键位」型事实，**最容易随版本漂移**。改它们时，确认当前 TUI 实际行为后再动代码，别只凭旧文档。22 是 dsh 侧同样的顺序型事实（Shift+Tab 环）——改前先确认 dsh-tui 实际循环。
+> 编号 1、5、8、20、22、**33** 都是「顺序/键位」型事实，**最容易随版本漂移**。改它们时，确认当前 TUI 实际行为后再动代码，别只凭旧文档。22 是 dsh 侧同样的顺序型事实（Shift+Tab 环）、33 是 pi 侧（Ctrl+L 模型选择器 + Shift+Tab 思考环）——改前先确认对应 TUI 实际循环。pi 是年轻 CLI（0.84.x、周更级迭代）——27-29 的 launch flag 面与 33 的键位面最容易漂移，改前以 `pi --help` / `pi --list-models` 实测为准。
 
 **OpenCode 首轮低命中基线（1.18.18 / Zen DeepSeek V4 Flash Free，2026-08-15 实测）**：两个全新会话的首轮分别为 `input=8886, cache_read=1792`（16.78%）和 `input=8370, cache_read=1792`（17.63%）。固定的 1792 说明首轮大概率只复用了 provider 可识别的公共前缀；OpenCode/Zen 只返回 token 数量，不返回命中的具体文本区间，因此不能进一步断言是哪一段。Build agent 首轮还会带上 system prompt、工具 schema、权限、环境和项目规则；CaPilot-Ide 会额外加载 2,216 字节的 `CLAUDE.md`，两个项目的非缓存 input 相差 516 tokens（路径与环境差异也可能占一部分）。同一台机器上的长工具循环会话累计命中率可达到 92.05%，所以首轮低值不能通过改公式“修高”，应保留 provider 原始会计语义并把它视为冷启动基线。
 
@@ -198,8 +234,8 @@ dsh --profile dsh-tui --patch <每会话临时 patch>
 
 ## 4. 保持新鲜
 
-- 本文件事实核对日期 **2026-08-15**。
-- 四个 runtime 官方文档都在周更级迭代。改 adapter 前：
+- 本文件事实核对日期 **2026-08-16**（新增 pi 集成 + dsh-tui 0.7.2 复核：env 名/数据目录 rename、resume 双读、sessions 根不变；claude/codex/opencode 条目保持 08-15 核对）。
+- 五个 runtime 官方文档都在周更级迭代。改 adapter 前：
   1. 先在 §1 的对应子页确认最新 flag/键位/顺序；
   2. 更新 §3 表格与对应代码锚点；
   3. 若 `claude`/`codex`/`opencode` CLI 已安装到本机，可 `--help` / 实测 TUI 行为做最终校验（本机 UI 自动化受限，见运行手册）。dsh 同理：`dsh --help` 只见 launcher 面，TUI 行为以 `dsh-tui` 插件 README（`~/.dsh/profiles/dsh-tui`）与实测会话日志为准。
