@@ -109,6 +109,12 @@ export function EditorPanel({ filePath, active = true }: EditorPanelProps) {
   const viewRef = useRef<EditorView | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const searchRequest = useStore((s) => s.searchRequest);
+  const revealRequest = useStore((s) => s.revealRequest);
+  // One-shot reveal (from a content-search result click): the request may arrive
+  // while the document is still loading, so it's stashed in a ref and applied
+  // either immediately or right after the view is created in `loadFile`.
+  const pendingRevealRef = useRef<{ line: number; column?: number } | null>(null);
+  const lastRevealSeqRef = useRef(0);
 
   // Editor Ctrl+F search bar state (mirrors XTermPanel). The query lives on the
   // React side; it is pushed into CodeMirror via `setSearchQuery` only when the
@@ -268,6 +274,34 @@ export function EditorPanel({ filePath, active = true }: EditorPanelProps) {
     return () => window.removeEventListener("keydown", onKey);
   }, [searchOpen, searchQuery, runFind]);
 
+  /** Scroll the cursor to a stashed content-search reveal (line + optional
+   *  column), if one is pending. Clamps to the document. */
+  const applyPendingReveal = useCallback((view: EditorView) => {
+    const pr = pendingRevealRef.current;
+    if (!pr) return;
+    pendingRevealRef.current = null;
+    const line = Math.max(1, Math.min(pr.line, view.state.doc.lines));
+    const lineObj = view.state.doc.line(line);
+    const col = pr.column ? Math.min(pr.column, lineObj.length) : 0;
+    const pos = lineObj.from + col;
+    view.dispatch({
+      selection: { anchor: pos },
+      effects: EditorView.scrollIntoView(pos, { y: "center" }),
+    });
+  }, []);
+
+  // Content-search reveal routed from a result click: stash the target and apply
+  // once this file's document is (or becomes) available.
+  useEffect(() => {
+    if (!active || !revealRequest) return;
+    if (revealRequest.filePath !== filePath) return;
+    if (revealRequest.seq <= lastRevealSeqRef.current) return;
+    lastRevealSeqRef.current = revealRequest.seq;
+    pendingRevealRef.current = { line: revealRequest.line, column: revealRequest.column };
+    const view = viewRef.current;
+    if (view) applyPendingReveal(view);
+  }, [revealRequest, active, filePath, applyPendingReveal]);
+
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -387,6 +421,8 @@ export function EditorPanel({ filePath, active = true }: EditorPanelProps) {
       });
 
       viewRef.current = view;
+      // A content-search reveal may have arrived while this file was loading.
+      applyPendingReveal(view);
     };
 
     loadFile();
@@ -408,7 +444,7 @@ export function EditorPanel({ filePath, active = true }: EditorPanelProps) {
       viewRef.current?.destroy();
       viewRef.current = null;
     };
-  }, [filePath, runFind, closeSearch]);
+  }, [filePath, runFind, closeSearch, applyPendingReveal]);
 
   // Ctrl+F routed from the window (when the editor itself does not have focus).
   // Opens the floating search bar on the active tab's editor.

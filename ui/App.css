@@ -837,10 +837,25 @@ body::after {
 }
 
 /* Files tab */
+.files-search {
+  padding: 0 12px 10px; border-bottom: 1px solid var(--rule2);
+}
 .files-search input {
   width: 100%; background: var(--bg3); border: 1px solid var(--rule2);
   color: var(--ink); font-family: var(--mono); font-size: var(--fs-sm);
   padding: 8px 10px; outline: none;
+}
+/* Search icon sits inside the input's right edge, acting like the placeholder:
+   only visible while the input is empty. */
+.files-search-input {
+  position: relative; flex: 1; min-width: 0;
+}
+.files-search-input .files-search-ic {
+  position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+  pointer-events: none; opacity: 0.6;
+}
+.files-search-input input:not(:placeholder-shown) ~ .files-search-ic {
+  display: none;
 }
 .files-tree {
   font-family: var(--mono); font-size: var(--fs-sm); color: var(--ink2);
@@ -865,6 +880,84 @@ body::after {
 }
 .files-tree .fs-stats .fs-add { color: var(--success); }
 .files-tree .fs-stats .fs-del { color: var(--danger); margin-left: 2px; }
+
+/* ── Files tab · content search ───────────────────────────────── */
+
+/* Mode toggle (名称 / 内容) on its own row under the search box, same width. */
+.files-search-mode {
+  display: flex; width: 100%; margin-top: 6px;
+  border: 1px solid var(--rule2); border-radius: 4px; overflow: hidden;
+}
+.files-search-mode button {
+  flex: 1;
+  background: var(--bg3); color: var(--ink2); border: none; cursor: pointer;
+  font-family: var(--mono); font-size: var(--fs-2xs); padding: 6px 8px;
+  line-height: 1;
+}
+.files-search-mode button + button { border-left: 1px solid var(--rule2); }
+.files-search-mode button.active {
+  background: rgb(var(--brand-rgb) / 0.18); color: var(--brand);
+}
+
+/* Options row under the input in content mode: toggles + include/exclude. */
+.files-search-opts { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+.files-search-toggles { display: flex; gap: 4px; }
+.fs-tg {
+  background: var(--bg3); color: var(--ink2); border: 1px solid var(--rule2);
+  border-radius: 4px; cursor: pointer; font-family: var(--mono);
+  font-size: var(--fs-2xs); padding: 3px 7px; line-height: 1;
+}
+.fs-tg:hover { color: var(--ink); }
+.fs-tg.on { color: var(--brand); border-color: var(--brand); background: rgb(var(--brand-rgb) / 0.18); }
+.fs-filter-input {
+  width: 100%; background: var(--bg3); border: 1px solid var(--rule2);
+  color: var(--ink); font-family: var(--mono); font-size: var(--fs-2xs);
+  padding: 4px 8px; outline: none;
+}
+
+/* Content-search results view fills the panel and scrolls internally. */
+.files-content-search {
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
+}
+.files-results-summary {
+  font-family: var(--mono); font-size: var(--fs-2xs); color: var(--ink2);
+  padding: 2px 12px 6px;
+}
+.files-results-loading {
+  font-family: var(--mono); font-size: var(--fs-sm); color: var(--ink2);
+  padding: 12px; text-align: center;
+}
+.files-results {
+  flex: 1; min-height: 0; overflow-y: auto; padding: 0 12px 8px;
+}
+.files-result-row {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  font-family: var(--mono); font-size: var(--fs-2xs); cursor: pointer;
+  white-space: nowrap; overflow: hidden; box-sizing: border-box;
+  padding: 0 4px;
+}
+.files-result-row.is-file { color: var(--primary); }
+.files-result-row.is-file:hover, .files-result-row.is-match:hover {
+  background: var(--bg3); color: var(--ink);
+}
+.fres-chev { flex: none; width: 10px; color: var(--ink2); font-size: var(--fs-2xs); }
+.fres-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.fres-count { flex: none; color: var(--ink2); font-size: var(--fs-2xs); }
+.fres-line {
+  flex: none; min-width: 28px; text-align: right; color: var(--ink2);
+  font-size: var(--fs-2xs);
+}
+.fres-text {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; direction: ltr;
+}
+.fres-pre { color: var(--ink2); }
+.fres-hit {
+  background: rgb(var(--brand-rgb) / 0.35); color: var(--ink);
+  border-radius: 2px;
+}
+.fres-post { color: var(--ink2); }
+
 
 /* Git tab */
 .git-title {
