@@ -154,6 +154,15 @@ pub struct RuntimeInfo {
     pub models: Vec<ModelInfo>,
     pub permission_modes: Vec<PermissionModeInfo>,
     pub thinking_options: Vec<ThinkingOptionInfo>,
+    /// Transport used to host this runtime: `"pty"` (default) or `"acp"`.
+    /// Frontend branches UI on this field / `acp:` id prefix — never on a
+    /// hard-coded agent name alone.
+    #[serde(default = "default_transport")]
+    pub transport: String,
+}
+
+fn default_transport() -> String {
+    "pty".to_string()
 }
 
 /// Run `<cmd> --version` and return the trimmed first stdout line. `None` when

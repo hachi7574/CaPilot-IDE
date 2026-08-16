@@ -165,8 +165,21 @@ def main() -> None:
                 }
             )
         elif method == "session/cancel":
-            # notification typically — if request, ack nothing required for notif
-            pass
+            # OpenCode: cancel is a **notification** (no id). If a client wrongly
+            # sends a request (with id), reject like OpenCode (-32601) so Host
+            # tests catch DEF-002 regressions. Notification → silent OK.
+            if mid is not None:
+                send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": mid,
+                        "error": {
+                            "code": -32601,
+                            "message": "Method not found: session/cancel (use notification)",
+                        },
+                    }
+                )
+            # else: notification — no response (and no in-flight prompt to cancel in simple mock)
         elif method == "authenticate":
             send({"jsonrpc": "2.0", "id": mid, "result": {}})
         else:

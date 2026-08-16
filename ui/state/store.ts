@@ -212,6 +212,8 @@ export interface RuntimeInfo {
    * permission policy control (for example Bash). */
   permission_modes?: PermissionModeInfo[];
   thinking_options?: ThinkingOptionInfo[];
+  /** `"pty"` (default) or `"acp"`. Prefer this / `id.startsWith("acp:")` over name hard-codes. */
+  transport?: "pty" | "acp" | string;
 }
 
 export interface ThinkingOptionInfo {

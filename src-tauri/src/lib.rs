@@ -14,6 +14,7 @@ mod usage;
 mod worktree;
 
 use agent_runtime::adapter::{AgentError, AgentInfo, AgentRuntimeAdapter, AgentSession, AgentUsage};
+use agent_runtime::acp::{self, AcpBridge};
 use agent_runtime::pty_core::OnExit;
 use agent_runtime::runtimes::{dsh::DshAdapter, get_adapter, known_runtimes};
 use persistence::{
@@ -221,6 +222,9 @@ fn build_on_exit(
 }
 
 /// Shared spawn path used by `agent_spawn` (new) and `agent_resume` (restored).
+///
+/// **ACP runtimes must not enter here** — call [`build_and_spawn_acp`] first via
+/// `is_acp_runtime` (DEF-001). `get_adapter` would otherwise map `acp:*` to Claude.
 #[allow(clippy::too_many_arguments)]
 fn build_and_spawn(
     bridge: &Arc<bridge::PtyBridge>,
@@ -239,6 +243,11 @@ fn build_and_spawn(
     cwd: PathBuf,
     on_data: Channel<Vec<u8>>,
 ) -> Result<AgentInfo, String> {
+    if acp::is_acp_runtime(runtime) {
+        return Err(format!(
+            "internal error: ACP runtime '{runtime}' must not use PTY build_and_spawn"
+        ));
+    }
     let workspace_id =
         workspace_id.unwrap_or_else(|| format!("wks_{}", uuid::Uuid::new_v4().simple()));
     let adapter = get_adapter(runtime);
@@ -421,6 +430,119 @@ fn build_and_spawn(
     Ok(info)
 }
 
+/// ACP spawn path — ordinary process pipes, not portable-pty.
+#[allow(clippy::too_many_arguments)]
+fn build_and_spawn_acp(
+    acp_bridge: &Arc<AcpBridge>,
+    persistence: &Arc<Persistence>,
+    id: &str,
+    project: &str,
+    workspace_id: Option<String>,
+    runtime: &str,
+    resume_key: Option<String>,
+    preserved_title: Option<String>,
+    model: Option<String>,
+    speed: &str,
+    mode: &str,
+    cwd: PathBuf,
+) -> Result<AgentInfo, String> {
+    if !acp::is_acp_runtime(runtime) {
+        return Err(format!("not an ACP runtime: {runtime}"));
+    }
+    let workspace_id =
+        workspace_id.unwrap_or_else(|| format!("wks_{}", uuid::Uuid::new_v4().simple()));
+
+    let normalized_mode = match mode {
+        "ask" | "auto" | "yolo" => mode.to_string(),
+        _ => "ask".to_string(),
+    };
+    let normalized_speed = if speed.is_empty() {
+        "auto".to_string()
+    } else {
+        speed.to_string()
+    };
+
+    let title = preserved_title.unwrap_or_else(|| {
+        let existing_titles = persistence
+            .db()
+            .lock()
+            .ok()
+            .and_then(|db| db.list_all().ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|record| record.title)
+            .collect();
+        agent_runtime::cat_breeds::next_breed_excluding(&existing_titles).to_string()
+    });
+
+    let mut info = acp_bridge
+        .start(
+            id,
+            runtime,
+            &cwd,
+            &title,
+            &normalized_mode,
+            &normalized_speed,
+            model.clone(),
+            Some(workspace_id.clone()),
+            Some(project.to_string()),
+            resume_key.as_deref(),
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+
+    // Prefer the ACP session id as resume_key once bootstrap completes.
+    let acp_sid = acp_bridge.acp_session_id(id);
+    let persisted_key = acp_sid.or(resume_key);
+
+    info.runtime = runtime.to_string();
+    info.workspace_id = Some(workspace_id.clone());
+    info.project = Some(project.to_string());
+    info.mode = normalized_mode.clone();
+    info.speed = normalized_speed.clone();
+    info.model = model.clone();
+    info.title = title.clone();
+
+    let now = now_ms();
+    let meta = AgentMeta {
+        id: id.to_string(),
+        workspace_id: Some(workspace_id.clone()),
+        runtime: runtime.to_string(),
+        resume_key: persisted_key.clone(),
+        status: "running".to_string(),
+        cwd: cwd.clone(),
+        title: title.clone(),
+        mode: normalized_mode.clone(),
+        speed: normalized_speed.clone(),
+        model: model.clone(),
+        updated_at: now,
+    };
+    if let Err(e) = write_agent_meta(project, &meta) {
+        log::warn!("failed to write .agent-meta.json for {id}: {e}");
+    }
+    let record = AgentSessionRecord {
+        id: id.to_string(),
+        workspace_id: Some(workspace_id),
+        project: project.to_string(),
+        runtime: runtime.to_string(),
+        resume_key: persisted_key,
+        cwd: cwd.clone(),
+        title,
+        status: "running".to_string(),
+        mode: normalized_mode,
+        speed: normalized_speed,
+        model,
+        created_at: now,
+        updated_at: now,
+    };
+    if let Ok(db) = persistence.db().lock() {
+        if let Err(e) = db.insert(&record) {
+            log::warn!("failed to persist session {id}: {e}");
+        }
+    }
+    Ok(info)
+}
+
 /// Apply user-configured launch overrides (Settings → 已安装 → ⚙) to the
 /// adapter's spawn argv. A non-empty command replaces the adapter's executable;
 /// a non-empty args string replaces the adapter's argument list wholesale.
@@ -453,6 +575,7 @@ fn apply_launch_overrides(
 #[tauri::command]
 async fn agent_spawn(
     bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
+    acp_bridge: tauri::State<'_, Arc<AcpBridge>>,
     persistence: tauri::State<'_, Arc<Persistence>>,
     app: tauri::AppHandle,
     runtime: String,
@@ -510,6 +633,29 @@ async fn agent_spawn(
         }
     };
 
+    let speed = speed.unwrap_or_else(|| "auto".to_string());
+    let mode = mode.unwrap_or_else(|| "ask".to_string());
+
+    // DEF-001: ACP must fork BEFORE get_adapter (which defaults unknowns to Claude).
+    if acp::is_acp_runtime(&runtime) {
+        // ACP does not use the PTY on_data channel; frontend will subscribe to acp://event.
+        let _ = on_data;
+        return build_and_spawn_acp(
+            acp_bridge.inner(),
+            persistence.inner(),
+            &agent_id,
+            &project,
+            None,
+            &runtime,
+            resume_key,
+            None,
+            model,
+            &speed,
+            &mode,
+            cwd,
+        );
+    }
+
     // A fresh spawn only resumes when the caller passed an explicit key;
     // otherwise it stays brand-new (no auto-detect) so it can't hijack the
     // newest session in a shared cwd.
@@ -527,8 +673,8 @@ async fn agent_spawn(
         resume_key,
         None, // genuinely new IDE session: assign a new display title
         model,
-        &speed.unwrap_or_else(|| "auto".to_string()),
-        &mode.unwrap_or_else(|| "ask".to_string()),
+        &speed,
+        &mode,
         cwd,
         on_data,
     )?;
@@ -580,6 +726,7 @@ async fn agent_spawn(
 #[tauri::command]
 async fn agent_resume(
     bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
+    acp_bridge: tauri::State<'_, Arc<AcpBridge>>,
     persistence: tauri::State<'_, Arc<Persistence>>,
     app: tauri::AppHandle,
     id: String,
@@ -594,6 +741,39 @@ async fn agent_resume(
     let Some(rec) = record else {
         return Err(format!("Session not found: {}", id));
     };
+
+    // ACP sessions never live in the PTY daemon — respawn via AcpBridge.
+    if acp::is_acp_runtime(&rec.runtime) {
+        let _ = on_data;
+        if acp_bridge.contains(&id) {
+            if let Some(mut info) = acp_bridge.info(&id) {
+                info.runtime = rec.runtime.clone();
+                info.workspace_id = rec.workspace_id.clone();
+                info.project = Some(rec.project.clone());
+                info.mode = rec.mode.clone();
+                info.speed = rec.speed.clone();
+                info.model = rec.model.clone();
+                info.title = rec.title.clone();
+                info.cwd = rec.cwd.clone();
+                return Ok(info);
+            }
+        }
+        let _ = acp_bridge.kill(&id);
+        return build_and_spawn_acp(
+            acp_bridge.inner(),
+            persistence.inner(),
+            &id,
+            &rec.project,
+            rec.workspace_id.clone(),
+            &rec.runtime,
+            rec.resume_key.clone(),
+            Some(rec.title.clone()),
+            rec.model.clone(),
+            &rec.speed,
+            &rec.mode,
+            rec.cwd.clone(),
+        );
+    }
 
     // Attach-first (§6.3): when the daemon still owns the live session, re-attach
     // and stream the checkpoint instead of respawning. Only a session the daemon
@@ -677,6 +857,11 @@ async fn agent_context_usage(
     let Some(rec) = record else {
         return Ok(None);
     };
+    // ACP usage arrives via session/update events (Phase 4 wires the meter).
+    // Do not call get_adapter on acp:* (DEF-001).
+    if acp::is_acp_runtime(&rec.runtime) {
+        return Ok(None);
+    }
 
     // Reuse a recent sample. The frontend's immediate on-open poll and its 3s
     // scheduled tick can both fire inside the same window; recomputing (file
@@ -765,10 +950,25 @@ async fn agent_context_usage(
 /// decode itself runs on the blocking pool so it never stalls the UI.
 #[tauri::command]
 async fn agent_status_read(
+    acp_bridge: tauri::State<'_, Arc<AcpBridge>>,
     persistence: tauri::State<'_, Arc<Persistence>>,
     cache: tauri::State<'_, StatusInferenceCache>,
     id: String,
 ) -> Result<Option<HookStatus>, String> {
+    // ACP: status lives in AcpBridge memory (no hook sidecar).
+    if let Some(st) = acp_bridge.status(&id) {
+        return Ok(Some(HookStatus {
+            status: match st {
+                acp::host::AcpSessionStatus::Connecting
+                | acp::host::AcpSessionStatus::Running => "working".into(),
+                acp::host::AcpSessionStatus::WaitingPermission => "waiting_input".into(),
+                acp::host::AcpSessionStatus::Ready => "idle".into(),
+                acp::host::AcpSessionStatus::Failed => "dormant".into(),
+                acp::host::AcpSessionStatus::Done => "dormant".into(),
+            },
+            ts: now_ms() / 1000,
+        }));
+    }
     // The hook sidecar is authoritative where present (claude/codex/opencode).
     if let Some(hook) = std::fs::read_to_string(persistence::status_file(&id))
         .ok()
@@ -784,6 +984,9 @@ async fn agent_status_read(
             .map(|r| (r.runtime, r.cwd))
             .unwrap_or_default()
     };
+    if acp::is_acp_runtime(&runtime) {
+        return Ok(None);
+    }
     if runtime != "dsh" {
         return Ok(None);
     }
@@ -842,10 +1045,28 @@ fn agent_sync_events(
 #[tauri::command]
 async fn agent_write(
     bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
+    acp_bridge: tauri::State<'_, Arc<AcpBridge>>,
+    persistence: tauri::State<'_, Arc<Persistence>>,
     id: String,
     data: String,
     raw: Option<bool>,
 ) -> Result<(), String> {
+    // ACP sessions must never receive PTY writes — frontend should call acp_prompt.
+    if acp_bridge.contains(&id) {
+        return Err(
+            "ACP session does not accept PTY writes; use acp_prompt instead".to_string(),
+        );
+    }
+    if let Ok(db) = persistence.db().lock() {
+        if let Ok(Some(rec)) = db.get(&id) {
+            if acp::is_acp_runtime(&rec.runtime) {
+                return Err(
+                    "ACP session does not accept PTY writes; use acp_prompt instead"
+                        .to_string(),
+                );
+            }
+        }
+    }
     // DevPlan §4.2: composer send = pty_write(文本 + \r) — Enter submits the TUI
     // input line. `raw: true` is used by the xterm panel for keystroke passthrough.
     let payload = if raw.unwrap_or(false) {
@@ -861,10 +1082,17 @@ async fn agent_write(
 #[tauri::command]
 async fn agent_kill(
     bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
+    acp_bridge: tauri::State<'_, Arc<AcpBridge>>,
     persistence: tauri::State<'_, Arc<Persistence>>,
     id: String,
 ) -> Result<(), String> {
-    bridge.kill(&id).map_err(|e| e.to_string())?;
+    if acp_bridge.contains(&id) {
+        acp_bridge.kill(&id).map_err(|e| e.to_string())?;
+    } else {
+        // Best-effort PTY kill; also try ACP in case of race.
+        let _ = bridge.kill(&id);
+        let _ = acp_bridge.kill(&id);
+    }
     // Only flip an active session to `idle` (reopenable). A session that already
     // ended naturally is `done` — flipping it back to `idle` would make a
     // finished conversation resurrect as an active tab after a restart (sleep on
@@ -914,6 +1142,12 @@ async fn agent_switch_runtime(
 
     // Validate the target runtime BEFORE killing the old PTY so a failed
     // switch can't brick the session (DevPlan §4.8).
+    // ACP ↔ PTY switch is not supported in Phase 1 (would need AcpBridge path).
+    if acp::is_acp_runtime(&runtime) || acp::is_acp_runtime(&rec.runtime) {
+        return Err(
+            "Cannot switch to/from ACP runtime yet; open a new ACP tab instead".to_string(),
+        );
+    }
     let adapter = get_adapter(&runtime);
     if !adapter.is_available() {
         return Err(format!(
@@ -974,18 +1208,30 @@ async fn agent_set_session_config(
             .get(&id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Session not found: {id}"))?;
-        let adapter = get_adapter(&rec.runtime);
-        let permission_modes = adapter.list_permission_modes();
-        let mode = match mode {
-            Some(m) if permission_modes.iter().any(|choice| choice.id == m) => m,
-            _ => rec.mode.clone(),
+        // ACP: only ask/auto/yolo; do not call get_adapter (DEF-001).
+        let (mode, speed, model) = if acp::is_acp_runtime(&rec.runtime) {
+            let mode = match mode.as_deref() {
+                Some("ask") | Some("auto") | Some("yolo") => mode.unwrap(),
+                _ => rec.mode.clone(),
+            };
+            let speed = speed.unwrap_or_else(|| rec.speed.clone());
+            let model = model.or_else(|| rec.model.clone());
+            (mode, speed, model)
+        } else {
+            let adapter = get_adapter(&rec.runtime);
+            let permission_modes = adapter.list_permission_modes();
+            let mode = match mode {
+                Some(m) if permission_modes.iter().any(|choice| choice.id == m) => m,
+                _ => rec.mode.clone(),
+            };
+            let thinking_options = adapter.list_thinking_options();
+            let speed = match speed {
+                Some(s) if thinking_options.iter().any(|choice| choice.id == s) => s,
+                _ => rec.speed.clone(),
+            };
+            let model = model.or_else(|| rec.model.clone());
+            (mode, speed, model)
         };
-        let thinking_options = adapter.list_thinking_options();
-        let speed = match speed {
-            Some(s) if thinking_options.iter().any(|choice| choice.id == s) => s,
-            _ => rec.speed.clone(),
-        };
-        let model = model.or_else(|| rec.model.clone());
         let now = now_ms();
         db.update_config(&id, &mode, &speed, model.as_deref(), now)
             .map_err(|e| e.to_string())?;
@@ -1567,6 +1813,7 @@ fn rename_project_inner(persistence: &Persistence, old: &str, new: &str) -> Resu
 #[tauri::command]
 async fn sessions_delete(
     bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
+    acp_bridge: tauri::State<'_, Arc<AcpBridge>>,
     persistence: tauri::State<'_, Arc<Persistence>>,
     id: String,
 ) -> Result<(), String> {
@@ -1574,6 +1821,7 @@ async fn sessions_delete(
     // the reader task) must not skip session cleanup, or the DB row survives and
     // the terminal resurrects on the next restart.
     let _ = bridge.kill(&id);
+    let _ = acp_bridge.kill(&id);
     // The agent's own project (from its DB row) — its metadata dir lives under
     // `workspaces/<project>/agents/<id>`, so remove exactly that. The session
     // MUST exist: `id` is caller-supplied, and `agent_dir` joins it into a path
@@ -1783,9 +2031,64 @@ async fn runtime_list_available() -> Vec<agent_runtime::adapter::RuntimeInfo> {
             models: adapter.list_models(),
             permission_modes: adapter.list_permission_modes(),
             thinking_options: adapter.list_thinking_options(),
+            transport: "pty".to_string(),
         });
     }
+    // ACP descriptors (acp:opencode, …) — config-driven, no PTY adapter.
+    out.extend(acp::registry::list_runtime_infos());
     out
+}
+
+// ── ACP commands ────────────────────────────────────────────────
+
+/// Send a user turn to an ACP session (structured prompt, not PTY bytes).
+#[tauri::command]
+async fn acp_prompt(
+    acp_bridge: tauri::State<'_, Arc<AcpBridge>>,
+    id: String,
+    text: String,
+) -> Result<(), String> {
+    if !acp_bridge.contains(&id) {
+        return Err(format!("ACP session not found: {id}"));
+    }
+    // Run on a worker thread so the async runtime is not blocked for long models.
+    acp_bridge.prompt_async(id, text);
+    Ok(())
+}
+
+/// Cancel the in-flight ACP turn.
+///
+/// **DEF-002:** Host sends `session/cancel` as a JSON-RPC **notification**
+/// (no `id`). OpenCode rejects request-shaped cancel with -32601.
+#[tauri::command]
+async fn acp_cancel(
+    acp_bridge: tauri::State<'_, Arc<AcpBridge>>,
+    id: String,
+) -> Result<(), String> {
+    acp_bridge.cancel(&id).map_err(|e| e.to_string())
+}
+
+/// Answer a pending `session/request_permission` from the agent.
+/// `outcome` is one of: `allow` | `reject` | `cancelled`.
+#[tauri::command]
+async fn acp_respond_permission(
+    acp_bridge: tauri::State<'_, Arc<AcpBridge>>,
+    id: String,
+    request_id: String,
+    outcome: String,
+    option_id: Option<String>,
+) -> Result<(), String> {
+    use acp::permission::PermissionOutcome;
+    let outcome = match outcome.as_str() {
+        "allow" => PermissionOutcome::Allow {
+            option_id: option_id.unwrap_or_else(|| "allow-once".into()),
+        },
+        "reject" => PermissionOutcome::Reject { option_id },
+        _ => PermissionOutcome::Cancelled,
+    };
+    acp_bridge
+        .respond_permission(&id, &request_id, outcome)
+        .map_err(|e| e.to_string())
 }
 
 /// Current thinking variant for an opencode model, read from OpenCode's own
@@ -3847,6 +4150,7 @@ pub fn run() {
         .manage(resource)
         .manage(ContextUsageCache::new())
         .manage(StatusInferenceCache::new())
+        .manage(AcpBridge::new())
         .invoke_handler(tauri::generate_handler![
             agent_spawn,
             agent_resume,
@@ -3876,6 +4180,9 @@ pub fn run() {
             worktree_list_all,
             worktree_remove,
             runtime_list_available,
+            acp_prompt,
+            acp_cancel,
+            acp_respond_permission,
             opencode_current_variant,
             pi_current_thinking_level,
             usage_fetch,
@@ -3934,6 +4241,10 @@ pub fn run() {
             bridge.start_event_loop();
             app.manage(bridge.clone());
             log::info!("PTY bridge mode: {}", bridge.mode());
+            // ACP bridge: bind AppHandle so session events can emit on acp://event.
+            if let Some(acp_bridge) = app.try_state::<Arc<AcpBridge>>() {
+                acp_bridge.bind_app(handle.clone());
+            }
             // Resource sampler: every 3 s, sample each agent's process tree and
             // emit `resource://sample` (DevPlan §10). Runs against the bridge so
             // it reads live PIDs whether they live in-process or in the daemon.

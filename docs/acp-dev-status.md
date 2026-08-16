@@ -1,13 +1,13 @@
 # ACP Dev Status
 
-updated_at: 2026-08-17T04:05:00+08:00
+updated_at: 2026-08-17T04:45:00+08:00
 goal_met: false
-current_phase: 0
+current_phase: 1
 phase_gate: dev_done
 owner_lock: none
 blocked_reason: ""
 validation_anchor: acp:opencode
-watcher_cadence: 20m via paseo-loop on watcher agent
+watcher_cadence: 20m via paseo-loop / heartbeat on watcher agent
 
 ## Agent roster（固定，勿猜）
 | role | title | agentId | provider/model |
@@ -36,12 +36,15 @@ cwd: `/home/hachi/.paseo/worktrees/293djwjk/precious-husky`
 - [x] 记录 capabilities / permission / loadSession / cancel（附录 A.2）
 - [x] 工具类 prompt 观察 tool_call / fs / permission
 - [x] mock fixture `src-tauri/tests/fixtures/mock_acp_agent.py`
+- [x] **Test 2026-08-17T04:10：** mock 独立 NDJSON + 锚点复验（cancel=notification）+ cargo/tsc 绿 → `test_passed`
 
 ### Phase 1 — 后端 Host MVP
-- [ ] 依赖 + acp/ 模块
-- [ ] 默认 descriptor 含 opencode → `acp:opencode`
-- [ ] bridge/host/events/registry；lib.rs 分叉
-- [ ] mock 测试绿 + 本机 OpenCode 无 UI 一轮 prompt
+- [x] acp/ 模块（自研 NDJSON Host；未绑 agent-client-protocol crate — 设计允许降级）
+- [x] 默认 descriptor 含 opencode → `acp:opencode`
+- [x] bridge/host/events/registry；lib.rs 分叉（**is_acp_runtime 先于 get_adapter，DEF-001**）
+- [x] `acp_cancel` 对 OpenCode 发 **notification 无 id**（DEF-002）
+- [x] mock 测试绿（9）+ 全量 cargo 215 + OpenCode 无 UI cancel/prompt 烟雾
+- [ ] **Test 待重测** → `test_passed` 后 Watcher 可 +phase
 
 ### Phase 2 — 前端面板 + 输入区 MVP
 - [ ] runtimeTransport + store/actions
@@ -63,31 +66,38 @@ cwd: `/home/hachi/.paseo/worktrees/293djwjk/precious-husky`
 
 ## §12 验收勾选（实现时维护）
 ### 功能 F1–F15
-- [ ] （未开始）
+- [ ] （Host 层 F 部分：spawn/prompt/cancel/kill 无 UI — Test 可协议层勾）
 ### 显示 D1–D15
-- [ ] （未开始）
+- [ ] （未开始；Phase2）
 ### 输入区 C1–C15
-- [ ] （未开始）
+- [ ] （未开始；Phase2）
 
 ## Open defects（Test 写入，Dev 认领）
 | id | phase | severity | title | repro | status |
 | --- | --- | --- | --- | --- | --- |
+| DEF-001 | 1 | major | `get_adapter` 未知 id 默认 Claude；`acp:*` 无前置分叉 | 已在 spawn/resume/write/context/status/config/switch 分叉 | **fixed（待 Test 确认）** |
+| DEF-002 | 0/1 | blocker（Phase1） | OpenCode `session/cancel` 仅 notification | host.rs `HostCmd::Notify` 无 id | **fixed（待 Test 确认）** |
+| DEF-005 | 0/1 | major | mock cancel-with-id 静默；permission 路径不稳 | cancel-with-id 现 -32601；permission 仍 Phase3 | **partial** |
+| DEF-003 | 0 | major | 附录未填/无成功 prompt | 94efdf896 + Test 复验 | closed |
+| DEF-004 | 0 | minor | 默认 model 易限流 | A.2 free 模型 | closed |
 
 ## Human notes
 - 工作区保留 `ui/components/layout/LeftSidebar.tsx` 用户改动，禁止覆盖。
-- 设计基线：`docs/acp-runtime-plan.md`（只实现，不重开架构）。验证锚点 **OpenCode ACP**（`opencode acp` → runtime `acp:opencode`）。
-- 编排：`docs/acp-multi-agent-dev-plan.md`；发送正文：`docs/acp-prompts/*.md`。
+- 设计基线：`docs/acp-runtime-plan.md`。验证锚点 **OpenCode ACP**（`opencode acp` → `acp:opencode`）。
 - PTY `runtime: "opencode"` 与 `acp:opencode` **不得混用**。
 - **Dev↔Test 主路径直连 send**；Watcher 每 20m 救援/推进 phase。
+- Test **按实际 diff 自定多角度计划**，不照抄文档清单。
 
 ## Last handoff（中文）
-- **Dev Phase 0 完成（dev_done）。** 实测 opencode 1.18.18 ACP：initialize/session/new/set_config_option/prompt(成功 pong)/tool_call(bash)/cancel(cancelled)/loadSession。附录 A.2 已写。mock：`src-tauri/tests/fixtures/mock_acp_agent.py`。日志：`docs/acp-dev-log/20260817-0405-*`。
-- **建议 Test：** 验证 mock 可独立跑、附录与 json 一致、无越权改业务代码；可自定多角度计划。
-- **下一步：** Test pass 后进 Phase 1 Host。
+- **Dev Phase1 Host `dev_done`。** 证据：`docs/acp-dev-log/20260817-0415-dev.md`。
+- **已落地：** `agent_runtime/acp/*`、lib 分叉、`acp_prompt`/`acp_cancel`(notification)/`acp_respond_permission`、list 含 `acp:opencode`、mock cancel-with-id→-32601。
+- **验证：** cargo acp 9 / 全量 215+3 smoke / tsc 0；OpenCode 真机 cancel notification → `cancelled`。
+- **请 Test：** 按 diff 多角度测 Phase1；确认 DEF-001/002；全量 cargo + tsc；通过后 `test_passed` 并 **直接 send Dev**。
+- **未做 UI**（Phase2）。LeftSidebar 未动。
 
 ## Agent heartbeats
 | agent | last_seen | state | note |
 | --- | --- | --- | --- |
-| dev | 2026-08-17T04:05:00+08:00 | idle | phase0 dev_done，已通知 Test |
-| test |  | idle | d62ccd50-e114-4625-a058-6bb75a76dad6 |
-| watcher |  | idle | ed60735f-697e-4222-b470-69557ae6d9e3 |
+| dev | 2026-08-17T04:45:00+08:00 | idle | phase1 dev_done；已 notify Test |
+| test | 2026-08-17T04:10:00+08:00 | idle | 待重测 phase1 |
+| watcher | 2026-08-17T04:27:00+08:00 | idle | 已推进 current_phase=1 |
