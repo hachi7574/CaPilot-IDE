@@ -78,6 +78,7 @@ export function runtimeIcon(runtime: string): string {
     case 'codex': return 'openai';
     case 'dsh': return 'deepseek';
     case 'opencode': return 'opencode';
+    case 'pi': return 'pi';
     default: return 'terminal';
   }
 }

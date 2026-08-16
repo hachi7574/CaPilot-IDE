@@ -21,12 +21,14 @@ export async function spawnAgent(
   // Model pinning: only pass a model id that actually exists in the target
   // runtime's catalog. claude spawns pin the chosen Claude model; dsh spawns
   // pin the chosen DeepSeek model via the per-session `--patch` overlay (its
-  // model cannot be changed live — `/model` would fork the session). A stale
+  // model cannot be changed live — `/model` would fork the session); pi spawns
+  // pin the chosen provider-qualified model id so the session boots on the
+  // user's selection (live Ctrl+L switching still works after boot). A stale
   // selection from another runtime falls back to the target's own default
   // rather than leaking a provider-specific id across runtimes.
   const targetRuntime = s.runtimes.find((r) => r.id === runtime);
   const pinnedModel =
-    runtime === DEFAULT_RUNTIME || runtime === "dsh"
+    runtime === DEFAULT_RUNTIME || runtime === "dsh" || runtime === "pi"
       ? targetRuntime?.models?.some((m) => m.id === s.selectedModel)
         ? s.selectedModel
         : null

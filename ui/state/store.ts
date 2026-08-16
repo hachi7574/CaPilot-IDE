@@ -999,7 +999,7 @@ export interface TermTemplate {
   id: string;
   name: string;
   command: string;
-  runtime: "bash" | "bash-rc" | "claude" | "codex" | "dsh";
+  runtime: "bash" | "bash-rc" | "claude" | "codex" | "dsh" | "pi";
   fixed?: boolean;
 }
 
@@ -1009,6 +1009,7 @@ const DEFAULT_TEMPLATES: TermTemplate[] = [
   { id: "claude", name: "claude", command: "", runtime: "claude" },
   { id: "codex", name: "codex", command: "", runtime: "codex" },
   { id: "dsh", name: "dsh", command: "", runtime: "dsh" },
+  { id: "pi", name: "Pi", command: "", runtime: "pi" },
 ];
 function loadTermTemplates(): TermTemplate[] {
   try {

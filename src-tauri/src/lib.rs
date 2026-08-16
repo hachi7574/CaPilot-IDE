@@ -1791,6 +1791,15 @@ fn opencode_current_variant(model: String) -> Option<String> {
     agent_runtime::runtimes::opencode::OpenCodeAdapter::current_variant(&model)
 }
 
+/// Current pi thinking level from `~/.pi/agent/settings.json`
+/// `defaultThinkingLevel`. Pi rewrites it on the next tick after every live
+/// Shift+Tab cycle, so the Composer reads it to compute the cycle distance and
+/// re-reads after each press (clamping can't overshoot).
+#[tauri::command]
+fn pi_current_thinking_level() -> Option<String> {
+    agent_runtime::runtimes::pi::PiAdapter::current_thinking_level()
+}
+
 // ── Rate-limit usage commands ───────────────────────────────────
 
 /// Fetch the current remaining usage for a runtime. The status bar polls this
@@ -3862,6 +3871,7 @@ pub fn run() {
             worktree_remove,
             runtime_list_available,
             opencode_current_variant,
+            pi_current_thinking_level,
             usage_fetch,
             usage_check,
             slash::agent_list_slash_items,

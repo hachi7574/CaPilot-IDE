@@ -3,6 +3,7 @@ pub mod claude;
 pub mod codex;
 pub mod dsh;
 pub mod opencode;
+pub mod pi;
 
 use crate::agent_runtime::adapter::AgentRuntimeAdapter;
 
@@ -14,6 +15,7 @@ pub fn get_adapter(runtime: &str) -> Box<dyn AgentRuntimeAdapter> {
         "codex" => Box::new(codex::CodexAdapter::new()),
         "opencode" => Box::new(opencode::OpenCodeAdapter::new()),
         "dsh" => Box::new(dsh::DshAdapter::new()),
+        "pi" => Box::new(pi::PiAdapter::new()),
         // Default to claude for any other/unknown id.
         _ => Box::new(claude::ClaudeAdapter::new()),
     }
@@ -23,5 +25,5 @@ pub fn get_adapter(runtime: &str) -> Box<dyn AgentRuntimeAdapter> {
 /// runtime and opencode stay resolvable in `get_adapter` (for resuming older
 /// sessions) but are no longer offered as a new terminal.
 pub fn known_runtimes() -> &'static [&'static str] {
-    &["claude", "codex", "dsh", "bash-rc"]
+    &["claude", "codex", "dsh", "pi", "bash-rc"]
 }

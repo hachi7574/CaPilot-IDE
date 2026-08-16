@@ -19,6 +19,8 @@ const DEFAULT_LAUNCH: Record<string, { command: string; args: string }> = {
   // dsh 走 dsh-tui profile；每会话的 model/effort/恢复经 `--patch <临时文件>`
   // 注入（spawn 时由适配器追加），编辑器只展示静态前缀。
   dsh: { command: "dsh", args: "--profile dsh-tui" },
+  // pi 每会话的 model/thinking/mode 由适配器在 spawn 时按 flag 追加。
+  pi: { command: "pi", args: "" },
 };
 
 export function SettingsModal({ onClose }: SettingsModalProps) {

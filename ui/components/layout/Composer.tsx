@@ -436,10 +436,13 @@ export function Composer() {
         // A restored session may not have its PTY until its terminal is first
         // shown. Resume it before applying a live mode change — dsh included:
         // its branch below types `/permission` into the running TUI, so the
-        // PTY must be up first.
-        const resumed = !s.agentChannels.has(id)
-          ? await ensureAgentChannel(id)
-          : false;
+        // PTY must be up first. pi's branch restarts the session (below), so
+        // there is nothing to pre-resume here either.
+        const resumed =
+          agent.runtime !== "pi" && !s.agentChannels.has(id)
+            ? await ensureAgentChannel(id)
+            : false;
+        let persistedInBranch = false;
         if (resumed) {
           // dsh's TUI boots the Cordis app in-process and is slower to reach
           // its input line than the other CLIs; give it a longer settle window
@@ -534,13 +537,30 @@ export function Composer() {
           });
           await new Promise((r) => setTimeout(r, 80));
           await invoke("agent_write", { id, data: "\r", raw: true });
+        } else if (agent.runtime === "pi") {
+          // pi has no live permission/trust toggle: the launch flags
+          // (--approve / --no-approve / none) are fixed at process start,
+          // /reload re-reads the trust store without re-resolving trust, and
+          // no /permissions command exists. Apply the switch by restarting a
+          // live session with the new flag: persist the mode, kill the PTY,
+          // then drop the channel — the terminal's channel effect auto-resumes
+          // and agent_resume respawns (AgentNotFound) with the freshly
+          // persisted mode. A dormant/ended session has no live process, so
+          // persisting is all that's needed (the next open/resume picks it up).
+          if (s.agentChannels.has(id) && agent.status !== "done") {
+            await invoke("agent_set_session_config", { id, mode });
+            await invoke("agent_kill", { id });
+            useStore.getState().dropAgentChannel(id);
+            persistedInBranch = true;
+          }
         }
 
         // Persist the selected mode so a later spawn/resume injects the same
-        // DSH_PERMISSION_MODE env default. Live-switch runtimes keep their PTY
-        // (dsh's /permission already appended the durable session-log events;
-        // this persist only sets the next-spawn default).
-        await invoke("agent_set_session_config", { id, mode });
+        // mode default. Live-switch runtimes keep their PTY (dsh's /permission
+        // already appended the durable session-log events; this persist only
+        // sets the next-spawn default). pi's branch above already persisted
+        // before restarting, so skip the duplicate write.
+        if (!persistedInBranch) await invoke("agent_set_session_config", { id, mode });
         const latest = useStore.getState().agents.get(id);
         if (latest) useStore.getState().addAgent({ ...latest, mode }, null);
         useStore.getState().setPermissionMode(mode);
@@ -566,8 +586,10 @@ export function Composer() {
 
       modelSwitchingRef.current = true;
       try {
-        // dsh 的模型只在 spawn 时钉死，live 切换会 fork 会话——所以恢复会话
-        // 只需持久化配置，无需启动 PTY（见下方 dsh 分支）。
+        // dsh 的模型只在 spawn 时钉死：`/model` 会 fork 会话（历史保留、新
+        // 会话路由新模型），破坏「tab id = session id」身份。恢复会话只需
+        // 持久化配置，无需启动 PTY（见下方 dsh 分支）。pi 走 live selector，
+        // 需要 PTY 在跑。
         const resumed =
           agent.runtime !== "dsh" && !s.agentChannels.has(id)
             ? await ensureAgentChannel(id)
@@ -646,6 +668,15 @@ export function Composer() {
           // 会话路由新模型、旧会话留在 /resume），破坏 "tab id = session id"
           // 身份。只持久化配置，由下一次 spawn / resume 经 --patch 钉死生效；
           // 不驱动运行中的 TUI。
+        } else if (agent.runtime === "pi") {
+          // pi 的模型选择器（Ctrl+L）自带搜索框，聚焦即输入；模型搜索文本
+          // 含 `provider/id`，输入 provider 限定的目录 id 让目标模型排第一，
+          // Enter 选中（无需方向键）。
+          await invoke("agent_write", { id, data: "\u000c", raw: true });
+          await new Promise((resolve) => setTimeout(resolve, 160));
+          await invoke("agent_write", { id, data: modelId, raw: true });
+          await new Promise((resolve) => setTimeout(resolve, 220));
+          await invoke("agent_write", { id, data: "\r", raw: true });
         }
 
         await invoke("agent_set_session_config", {
@@ -761,6 +792,40 @@ export function Composer() {
                 if (step + 1 < steps) {
                   await new Promise((resolve) => setTimeout(resolve, 60));
                 }
+              }
+            }
+          } else if (agent.runtime === "pi") {
+            // pi Shift+Tab cycles the current model's thinking levels
+            // (off → minimal → low → medium → high → xhigh → max; models may
+            // skip unsupported tiers). The live level is read from pi's
+            // settings.json `defaultThinkingLevel`, which pi rewrites on the
+            // next tick after every change — re-read after each press so a
+            // clamped cycle can't overshoot past the target. `auto` resolves to
+            // the default (= current level), so nothing to do.
+            const cycle = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+            const nativeFor: Record<string, string> = {
+              off: "off",
+              fast: "low",
+              mid: "medium",
+              high: "high",
+              xhigh: "xhigh",
+            };
+            let current = (await invoke("pi_current_thinking_level")) as
+              | string
+              | null;
+            const target =
+              nextSpeed === "auto" ? current : (nativeFor[nextSpeed] ?? null);
+            if (current && target && target !== current) {
+              // One full cycle + a spare press; the read-back stops the moment
+              // the level lands (or wraps without ever matching, e.g. an
+              // unsupported tier).
+              for (let step = 0; step < cycle.length + 1; step++) {
+                if (current === target) break;
+                await invoke("agent_write", { id, data: "\u001b[Z", raw: true });
+                await new Promise((resolve) => setTimeout(resolve, 90));
+                current = (await invoke("pi_current_thinking_level")) as
+                  | string
+                  | null;
               }
             }
           }
