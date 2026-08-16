@@ -94,6 +94,13 @@ export function AcpSessionPanel({
         if (!cancelled && resumeOnOpen) consumeResume(agentId);
       } catch (e) {
         console.error("ACP resume failed", e);
+        if (!cancelled) {
+          useStore.getState().applyAcpEvent({
+            agentId,
+            type: "error",
+            message: `无法恢复 ACP 会话：${typeof e === "string" ? e : String(e)}`,
+          });
+        }
       }
     })();
     return () => {

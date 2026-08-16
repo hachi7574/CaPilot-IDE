@@ -157,16 +157,44 @@ export async function ensureAgentChannel(agentId: string): Promise<boolean> {
   const s = useStore.getState();
   const agent = s.agents.get(agentId);
   if (isAcpRuntime(agent?.runtime)) {
-    if (s.acpSessions.get(agentId)?.live) return false;
-    // Resume via agent_resume (backend forks to AcpBridge). onData is ignored.
+    // DEF-011b: never trust FE `live` alone. Ask the host whether the child
+    // process is still in AcpBridge; if not, force resume (session/load or new).
+    let hostAlive = false;
+    try {
+      hostAlive = await invoke<boolean>("acp_session_alive", { id: agentId });
+    } catch {
+      hostAlive = false;
+    }
+    if (hostAlive) {
+      if (!s.acpSessions.get(agentId)?.live) s.markAcpLive(agentId);
+      return false;
+    }
+    // Host has no process — clear stale live flag then resume.
+    const prev = s.acpSessions.get(agentId);
+    if (prev?.live) {
+      const acpSessions = new Map(s.acpSessions);
+      acpSessions.set(agentId, { ...prev, live: false, turnActive: false });
+      useStore.setState({ acpSessions });
+    }
     const { channel } = createBufferedChannel();
-    const info = (await invoke("agent_resume", {
-      id: agentId,
-      onData: channel,
-    })) as AgentInfo;
-    s.addAgent(info, null);
-    s.markAcpLive(info.id);
-    return true;
+    try {
+      const info = (await invoke("agent_resume", {
+        id: agentId,
+        onData: channel,
+      })) as AgentInfo;
+      s.addAgent(info, null);
+      s.markAcpLive(info.id);
+      return true;
+    } catch (e) {
+      const msg = typeof e === "string" ? e : String(e);
+      s.applyAcpEvent({
+        agentId,
+        type: "error",
+        message: `无法恢复 ACP 会话：${msg}`,
+      });
+      notify("ACP 会话恢复失败", msg);
+      throw e;
+    }
   }
   if (s.agentChannels.has(agentId)) return false;
   const { channel, flush } = createBufferedChannel();
@@ -198,9 +226,28 @@ export async function sendPromptToAgent(
   const s = useStore.getState();
   const runtime = s.agents.get(agentId)?.runtime;
   if (isAcpRuntime(runtime)) {
-    const resumed = await ensureAgentChannel(agentId);
-    void resumed;
-    // Optimistically show the user turn in the panel.
+    // DEF-011a: ensure host first; only paint the optimistic user bubble after
+    // the bridge accepts the prompt. Sync failures go to the panel + notify.
+    try {
+      await ensureAgentChannel(agentId);
+    } catch (e) {
+      // ensureAgentChannel already painted an error row + notify.
+      throw e;
+    }
+    try {
+      await invoke("acp_prompt", { id: agentId, text });
+    } catch (e) {
+      const msg = typeof e === "string" ? e : String(e);
+      s.applyAcpEvent({
+        agentId,
+        type: "error",
+        message: msg,
+      });
+      s.applyAcpEvent({ agentId, type: "status", status: "idle" });
+      notify("发送失败", msg);
+      throw e;
+    }
+    // Host accepted (async turn may still fail later via acp://event Error).
     s.applyAcpEvent({
       agentId,
       type: "message_chunk",
@@ -208,15 +255,9 @@ export async function sendPromptToAgent(
       text,
       messageId: `user-${Date.now()}`,
     });
-    // Mark turn active before the async host responds.
-    const acp = s.acpSessions.get(agentId);
-    if (acp) {
-      // applyAcpEvent above already set; flip turn via status event shape
-      s.applyAcpEvent({ agentId, type: "status", status: "busy" });
-    }
+    s.applyAcpEvent({ agentId, type: "status", status: "busy" });
     s.markAgentSubmitted(agentId);
     s.setAgentUnread(agentId, false);
-    await invoke("acp_prompt", { id: agentId, text });
     return;
   }
 

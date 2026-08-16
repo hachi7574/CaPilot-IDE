@@ -45,7 +45,10 @@ export interface AcpSessionState {
 
 export function emptyAcpSession(): AcpSessionState {
   return {
-    live: true,
+    // DEF-011b: restored / never-connected sessions are NOT live. Only
+    // markAcpLive / session_started flip this true. Default true made
+    // ensureAgentChannel skip resume while AcpBridge had no process.
+    live: false,
     turnActive: false,
     items: [],
     pendingPermission: null,

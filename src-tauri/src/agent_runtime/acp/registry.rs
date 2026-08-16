@@ -32,16 +32,22 @@ fn acp_permission_modes() -> Vec<PermissionModeInfo> {
 }
 
 /// Static OpenCode ACP model catalog for Composer (session/new returns the live
-/// list; this seeds the picker before the first session). Zen free models are
-/// listed first; default is deepseek-v4-flash-free.
+/// list; this seeds the picker before the first session). Default is Go flash
+/// (reliable under Console rate limits); Zen free remain selectable.
 fn opencode_acp_models() -> Vec<ModelInfo> {
     // (id, display name, provider group, is_default)
     const ENTRIES: &[(&str, &str, &str, bool)] = &[
         (
+            "opencode-go/deepseek-v4-flash",
+            "DeepSeek V4 Flash (Go)",
+            "OpenCode Go",
+            true,
+        ),
+        (
             "opencode/deepseek-v4-flash-free",
             "DeepSeek V4 Flash Free",
             "OpenCode Zen",
-            true,
+            false,
         ),
         (
             "opencode/nemotron-3.5-lightning-free",
@@ -77,12 +83,6 @@ fn opencode_acp_models() -> Vec<ModelInfo> {
             "opencode/big-pickle",
             "Big Pickle",
             "OpenCode Zen",
-            false,
-        ),
-        (
-            "opencode-go/deepseek-v4-flash",
-            "DeepSeek V4 Flash",
-            "OpenCode Go",
             false,
         ),
         (
@@ -197,15 +197,15 @@ mod tests {
         assert!(
             oc.models
                 .iter()
-                .any(|m| m.id == "opencode/deepseek-v4-flash-free" && m.is_default),
-            "zen free deepseek must be default: {:?}",
+                .any(|m| m.id == "opencode-go/deepseek-v4-flash" && m.is_default),
+            "go flash must be default (zen free rate-limits): {:?}",
             oc.models
         );
         assert!(!oc.thinking_options.is_empty());
     }
 
     #[test]
-    fn pick_bootstrap_prefers_zen_free() {
+    fn pick_bootstrap_prefers_go_flash() {
         use crate::agent_runtime::acp::host::pick_bootstrap_model;
         let catalog = vec![
             "opencode/big-pickle".into(),
@@ -214,17 +214,17 @@ mod tests {
         ];
         assert_eq!(
             pick_bootstrap_model(&catalog, None).as_deref(),
-            Some("opencode/deepseek-v4-flash-free")
+            Some("opencode-go/deepseek-v4-flash")
         );
-        // preferred missing from catalog → fall through to zen free
+        // preferred missing from catalog → fall through to go flash
         assert_eq!(
             pick_bootstrap_model(&catalog, Some("opencode-go/deepseek-v4-pro")).as_deref(),
-            Some("opencode/deepseek-v4-flash-free"),
+            Some("opencode-go/deepseek-v4-flash"),
         );
         // When preferred is in catalog, honor it.
         assert_eq!(
-            pick_bootstrap_model(&catalog, Some("opencode-go/deepseek-v4-flash")).as_deref(),
-            Some("opencode-go/deepseek-v4-flash")
+            pick_bootstrap_model(&catalog, Some("opencode/deepseek-v4-flash-free")).as_deref(),
+            Some("opencode/deepseek-v4-flash-free")
         );
     }
 }

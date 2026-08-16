@@ -1373,6 +1373,18 @@ export const useStore = create<AppState>((set, get) => {
         case "error":
           push({ kind: "error", role: "system", text: payload.message });
           next.turnActive = false;
+          // DEF-011b: host reported process exit / not found → not live.
+          {
+            const m = (payload.message || "").toLowerCase();
+            if (
+              m.includes("进程已退出") ||
+              m.includes("process exited") ||
+              m.includes("session not found") ||
+              m.includes("not found")
+            ) {
+              next.live = false;
+            }
+          }
           break;
         case "stderr":
           push({ kind: "stderr", role: "system", text: payload.line });

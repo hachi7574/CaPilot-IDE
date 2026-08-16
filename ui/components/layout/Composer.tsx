@@ -24,6 +24,7 @@ import {
   sendPromptToAgent,
   cancelAcpTurn,
 } from "../../state/agentActions";
+import { notify } from "../../state/notify";
 import { PermissionConfirmationDialog } from "./PermissionConfirmationDialog";
 import { ContextWindowMeter } from "./ContextWindowMeter";
 import { CacheHitRate } from "./CacheHitRate";
@@ -1740,7 +1741,18 @@ export function Composer() {
       // flag — both out of scope here. So the fixed heuristic stays.
       await sendPromptToAgent(agentId, agentInput, { waitForTui: justSpawned });
     } catch (err) {
+      // DEF-011a: never swallow send failures (ACP already paints a row;
+      // notify covers PTY / pre-panel failures too).
+      const msg = typeof err === "string" ? err : String(err);
       console.error("Failed to send to agent:", err);
+      notify("发送失败", msg);
+      if (agentId) {
+        useStore.getState().applyAcpEvent({
+          agentId,
+          type: "error",
+          message: msg,
+        });
+      }
     } finally {
       // Release the in-flight guard so the next Enter can send again.
       sendingRef.current = false;

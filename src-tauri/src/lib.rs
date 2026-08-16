@@ -2075,15 +2075,59 @@ async fn runtime_list_available() -> Vec<agent_runtime::adapter::RuntimeInfo> {
 
 // ── ACP commands ────────────────────────────────────────────────
 
+/// True when AcpBridge owns a still-living child for this agent id.
+/// DEF-011b: FE must not trust local `acpSessions.live` alone.
+#[tauri::command]
+fn acp_session_alive(acp_bridge: tauri::State<'_, Arc<AcpBridge>>, id: String) -> bool {
+    acp_bridge.is_alive(&id)
+}
+
 /// Send a user turn to an ACP session (structured prompt, not PTY bytes).
+/// If the bridge has no living process, auto-resume from the DB record first
+/// so a restored tab does not fail with a silent "session not found".
 #[tauri::command]
 async fn acp_prompt(
     acp_bridge: tauri::State<'_, Arc<AcpBridge>>,
+    persistence: tauri::State<'_, Arc<Persistence>>,
     id: String,
     text: String,
 ) -> Result<(), String> {
-    if !acp_bridge.contains(&id) {
-        return Err(format!("ACP session not found: {id}"));
+    if !acp_bridge.is_alive(&id) {
+        // Auto-resume from sessions.db so FE race / stale live flags recover.
+        let record = {
+            let db = persistence.db().lock().map_err(|e| e.to_string())?;
+            db.get(&id).map_err(|e| e.to_string())?
+        };
+        if let Some(rec) = record {
+            if acp::is_acp_runtime(&rec.runtime) {
+                let _ = acp_bridge.kill(&id);
+                build_and_spawn_acp(
+                    acp_bridge.inner(),
+                    persistence.inner(),
+                    &id,
+                    &rec.project,
+                    rec.workspace_id.clone(),
+                    &rec.runtime,
+                    rec.resume_key.clone(),
+                    Some(rec.title.clone()),
+                    // Prefer go flash when the saved model is the known-limited
+                    // zen free id (DEF-010/011) — still honor other choices.
+                    match rec.model.as_deref() {
+                        Some("opencode/deepseek-v4-flash-free") | None => {
+                            Some("opencode-go/deepseek-v4-flash".into())
+                        }
+                        other => other.map(|s| s.to_string()),
+                    },
+                    &rec.speed,
+                    &rec.mode,
+                    rec.cwd.clone(),
+                )?;
+            } else {
+                return Err(format!("ACP session not found: {id}"));
+            }
+        } else {
+            return Err(format!("ACP session not found: {id}"));
+        }
     }
     // Run on a worker thread so the async runtime is not blocked for long models.
     acp_bridge.prompt_async(id, text);
@@ -4239,6 +4283,7 @@ pub fn run() {
             acp_prompt,
             acp_cancel,
             acp_respond_permission,
+            acp_session_alive,
             acp_list_agents,
             acp_upsert_agent,
             acp_remove_agent,

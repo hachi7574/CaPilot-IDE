@@ -223,17 +223,33 @@ impl AcpBridge {
             .name(format!("acp-prompt-{id}"))
             .spawn(move || {
                 if let Err(e) = bridge.prompt(&id, &text) {
-                    // Error already emitted as turn failure inside host when possible.
-                    log::warn!("acp_prompt {id}: {e}");
-                    if let Ok(g) = bridge.app.lock() {
-                        if let Some(app) = g.as_ref() {
-                            let env = super::events::AcpEventEnvelope {
-                                agent_id: id,
-                                event: AcpEvent::Error {
-                                    message: e.to_string(),
-                                },
-                            };
-                            let _ = app.emit(ACP_EVENT, &env);
+                    // Surface humanized error on the panel (DEF-011: never silent).
+                    let message = host::humanize_acp_error(&e.to_string());
+                    log::warn!("acp_prompt {id}: {message}");
+                    bridge.sink().emit(
+                        &id,
+                        AcpEvent::Error {
+                            message: message.clone(),
+                        },
+                    );
+                    bridge.sink().emit(
+                        &id,
+                        AcpEvent::Status {
+                            status: "idle".into(),
+                        },
+                    );
+                } else if let Some(m) = {
+                    bridge
+                        .sessions
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.get(&id).and_then(|e| e.handle.last_model()))
+                } {
+                    if let Ok(mut g) = bridge.sessions.lock() {
+                        if let Some(entry) = g.get_mut(&id) {
+                            if entry.info.model.as_deref() != Some(m.as_str()) {
+                                entry.info.model = Some(m);
+                            }
                         }
                     }
                 }
@@ -323,10 +339,40 @@ impl AcpBridge {
     }
 
     pub fn contains(&self, id: &str) -> bool {
-        self.sessions
-            .lock()
-            .map(|g| g.contains_key(id))
-            .unwrap_or(false)
+        self.is_alive(id)
+    }
+
+    /// True only when the bridge owns a still-living ACP child for `id`.
+    /// Dead children are dropped so a later resume can respawn cleanly.
+    pub fn is_alive(&self, id: &str) -> bool {
+        let mut g = match self.sessions.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        match g.get(id) {
+            Some(entry) if entry.handle.is_alive() => true,
+            Some(_) => {
+                // Process exited — drop so FE resume / acp_prompt can respawn.
+                if let Some(entry) = g.remove(id) {
+                    let _ = entry.handle.kill();
+                    self.permissions.clear_agent(id);
+                    self.sink().emit(
+                        id,
+                        AcpEvent::Error {
+                            message: "ACP agent 进程已退出，请重新发送以恢复会话".into(),
+                        },
+                    );
+                    self.sink().emit(
+                        id,
+                        AcpEvent::Status {
+                            status: "idle".into(),
+                        },
+                    );
+                }
+                false
+            }
+            None => false,
+        }
     }
 
     pub fn status(&self, id: &str) -> Option<AcpSessionStatus> {

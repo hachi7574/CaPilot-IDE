@@ -127,11 +127,14 @@ impl AcpSessionHandle {
 
     /// Send `session/prompt` and wait for the final result (`stopReason`).
     ///
-    /// On OpenCode provider rate-limit, one automatic fallback is attempted:
-    /// switch to `opencode-go/deepseek-v4-flash` (or the next zen-free id) and
-    /// retry the same prompt once so the first user message is not a hard fail
+    /// On OpenCode provider rate-limit, automatic fallbacks are attempted:
+    /// switch to `opencode-go/deepseek-v4-flash` (then other free/go ids) and
+    /// retry the same prompt so the first user message is not a hard fail
     /// when Console/Zen quota is exhausted.
     pub fn prompt(&self, text: &str, timeout: Duration) -> Result<String, AcpHostError> {
+        if !self.is_alive() {
+            return Err(AcpHostError::ProcessExited);
+        }
         let sid = self
             .acp_session_id()
             .ok_or(AcpHostError::NotReady)?;
@@ -148,7 +151,13 @@ impl AcpSessionHandle {
             Err(e) => {
                 let msg = e.to_string();
                 let lower = msg.to_ascii_lowercase();
-                if lower.contains("rate limit") {
+                // OpenCode / providers phrase quota failures differently.
+                let is_rate = lower.contains("rate limit")
+                    || lower.contains("rate_limit")
+                    || lower.contains("too many requests")
+                    || lower.contains("quota")
+                    || lower.contains("429");
+                if is_rate {
                     // One-shot fallback chain for product usability.
                     const FALLBACKS: &[&str] = &[
                         "opencode-go/deepseek-v4-flash",
@@ -190,10 +199,12 @@ impl AcpSessionHandle {
                                     }
                                     Err(e2) => {
                                         last_err = e2;
-                                        if !last_err
-                                            .to_string()
-                                            .to_ascii_lowercase()
-                                            .contains("rate limit")
+                                        let l2 = last_err.to_string().to_ascii_lowercase();
+                                        if !(l2.contains("rate limit")
+                                            || l2.contains("rate_limit")
+                                            || l2.contains("too many requests")
+                                            || l2.contains("quota")
+                                            || l2.contains("429"))
                                         {
                                             break;
                                         }
@@ -366,8 +377,8 @@ fn rpc_id_key(id: &Value) -> String {
     }
 }
 
-/// Prefer OpenCode Zen free models (especially deepseek-v4-flash-free) so
-/// product smoke does not die on the paid/Console default (`big-pickle`).
+/// Prefer models that work under Console rate limits.
+/// Order: explicit preferred (if in catalog) → go flash → zen free chain → any free → first.
 pub fn pick_bootstrap_model(
     available: &[String],
     preferred: Option<&str>,
@@ -381,25 +392,25 @@ pub fn pick_bootstrap_model(
             return Some(p.to_string());
         }
     }
-    const PREFERRED_FREE: &[&str] = &[
+    // Product reliability: go flash first (zen free is frequently rate-limited
+    // on Console; DEF-010/011). Still list zen free as catalog defaults for UX.
+    const RELIABLE: &[&str] = &[
+        "opencode-go/deepseek-v4-flash",
         "opencode/deepseek-v4-flash-free",
         "opencode/nemotron-3.5-lightning-free",
         "opencode/hy3-free",
         "opencode/mimo-v2.5-free",
         "opencode/laguna-s-2.1-free",
         "opencode/nemotron-3-ultra-free",
+        "opencode-go/deepseek-v4-pro",
     ];
-    for id in PREFERRED_FREE {
+    for id in RELIABLE {
         if has(id) {
             return Some((*id).to_string());
         }
     }
-    // Any remaining free zen id, then go/deepseek flash, else first catalog entry.
     if let Some(id) = available.iter().find(|a| a.contains("-free") || a.ends_with("/free")) {
         return Some(id.clone());
-    }
-    if has("opencode-go/deepseek-v4-flash") {
-        return Some("opencode-go/deepseek-v4-flash".into());
     }
     available.first().cloned()
 }
@@ -432,13 +443,24 @@ fn model_values_from_config_options(opts: &Value) -> (Vec<String>, Option<String
 /// Human-facing message for JSON-RPC / provider failures (rate limit, etc.).
 pub fn humanize_acp_error(raw: &str) -> String {
     let lower = raw.to_ascii_lowercase();
-    if lower.contains("rate limit") {
+    if lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        || lower.contains("too many requests")
+        || (lower.contains("quota") && !lower.contains("disk"))
+        || lower.contains("429")
+    {
         return format!(
-            "模型额度已用尽或触发限流。请在 Composer 切换到 OpenCode Zen 免费模型（优先 deepseek-v4-flash-free）或 OpenCode Go。原始错误：{raw}"
+            "模型额度已用尽或触发限流，已尝试自动切换备用模型。请在 Composer 手动选 OpenCode Go · deepseek-v4-flash 后重试。原始错误：{raw}"
         );
     }
     if lower.contains("insufficient") && (lower.contains("quota") || lower.contains("credit")) {
         return format!("账户额度不足。请切换模型或检查 OpenCode 账单。原始错误：{raw}");
+    }
+    if lower.contains("session not found") || lower.contains("not ready") {
+        return format!("ACP 会话未就绪或已断开，正在等待恢复后请重发。原始错误：{raw}");
+    }
+    if lower.contains("process exited") || lower.contains("agent process") {
+        return format!("ACP agent 进程已退出。请重新发送消息以恢复会话。原始错误：{raw}");
     }
     raw.to_string()
 }
