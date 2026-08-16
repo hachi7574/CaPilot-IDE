@@ -83,7 +83,7 @@ jobs:
         run: |
           for deb in src-tauri/target/release/bundle/deb/*.deb; do
             echo "signing $deb"
-            pnpm tauri signer sign --file "$deb"
+            pnpm tauri signer sign "$deb"
           done
 
       - name: Upload bundles to the release
