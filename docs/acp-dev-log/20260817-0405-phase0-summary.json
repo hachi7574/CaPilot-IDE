@@ -1,0 +1,95 @@
+{
+  "date": "2026-08-17",
+  "opencode_version": "1.18.18",
+  "launch": [
+    "opencode",
+    "acp"
+  ],
+  "cwd_flag": "--cwd <abs>",
+  "protocolVersion": 1,
+  "agentCapabilities": {
+    "loadSession": true,
+    "mcpCapabilities": {
+      "http": true,
+      "sse": true
+    },
+    "promptCapabilities": {
+      "embeddedContext": true,
+      "image": true
+    },
+    "sessionCapabilities": {
+      "close": {},
+      "fork": {},
+      "list": {},
+      "resume": {}
+    }
+  },
+  "authMethods": [
+    {
+      "id": "opencode-login",
+      "name": "Login with opencode",
+      "description": "Run `opencode auth login` in the terminal"
+    }
+  ],
+  "agentInfo": {
+    "name": "OpenCode",
+    "version": "1.18.18"
+  },
+  "session_new": {
+    "params": {
+      "cwd": "/tmp",
+      "mcpServers": []
+    },
+    "result_keys": [
+      "sessionId",
+      "configOptions"
+    ],
+    "sessionId_example": "ses_*",
+    "configOptions_ids": [
+      "model",
+      "effort",
+      "mode"
+    ]
+  },
+  "session_set_config_option": {
+    "method": "session/set_config_option",
+    "params": {
+      "sessionId": "...",
+      "configId": "model",
+      "value": "opencode/nemotron-3.5-lightning-free"
+    },
+    "works": true
+  },
+  "prompt_success": {
+    "model": "opencode/nemotron-3.5-lightning-free",
+    "text": "pong",
+    "stopReason": "end_turn",
+    "updates_seen": [
+      "available_commands_update",
+      "usage_update",
+      "agent_thought_chunk",
+      "agent_message_chunk",
+      "user_message_chunk",
+      "tool_call",
+      "tool_call_update"
+    ]
+  },
+  "tools": {
+    "client_fs_called": false,
+    "agent_builtin_tools": true,
+    "request_permission_observed": false,
+    "note": "bash/ls tool_call completed without session/request_permission in this probe; client must still implement permission handler"
+  },
+  "cancel": {
+    "stopReason": "cancelled",
+    "works": true
+  },
+  "session_load": {
+    "works": true,
+    "result_keys": [
+      "configOptions"
+    ]
+  },
+  "rate_limit": "Default/some free models may return JSON-RPC -32603 Rate limit exceeded; UI must surface error",
+  "mock_fixture": "src-tauri/tests/fixtures/mock_acp_agent.py"
+}

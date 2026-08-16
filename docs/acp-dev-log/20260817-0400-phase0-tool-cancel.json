@@ -1,0 +1,43 @@
+{
+  "tool_prompt": {
+    "jsonrpc": "2.0",
+    "id": 12,
+    "result": {
+      "stopReason": "end_turn",
+      "usage": {
+        "inputTokens": 2379,
+        "outputTokens": 84,
+        "totalTokens": 11217,
+        "thoughtTokens": 50,
+        "cachedReadTokens": 8704
+      },
+      "_meta": {}
+    }
+  },
+  "tool_update_types": [
+    "agent_message_chunk",
+    "agent_thought_chunk",
+    "available_commands_update",
+    "tool_call",
+    "tool_call_update",
+    "usage_update",
+    "user_message_chunk"
+  ],
+  "perm_count": 0,
+  "perm_sample": [],
+  "cancel": {
+    "jsonrpc": "2.0",
+    "id": 13,
+    "result": {
+      "stopReason": "cancelled",
+      "usage": {
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "totalTokens": 0
+      },
+      "_meta": {}
+    }
+  },
+  "load_ok": true,
+  "stderr_tail": []
+}

@@ -1,0 +1,197 @@
+{
+  "set_model_attempts": "see stdout",
+  "prompt": {
+    "jsonrpc": "2.0",
+    "id": 10,
+    "error": {
+      "code": -32603,
+      "message": "Internal error: Error from provider (Console): Rate limit exceeded. Please try again later.",
+      "data": {
+        "service": "session",
+        "errorName": "APIError"
+      }
+    }
+  },
+  "load": {
+    "jsonrpc": "2.0",
+    "id": 20,
+    "result": {
+      "configOptions": [
+        {
+          "id": "model",
+          "name": "Model",
+          "category": "model",
+          "type": "select",
+          "currentValue": "opencode/deepseek-v4-flash-free",
+          "options": [
+            {
+              "value": "opencode-go/deepseek-v4-flash",
+              "name": "OpenCode Go/DeepSeek V4 Flash"
+            },
+            {
+              "value": "opencode-go/deepseek-v4-pro",
+              "name": "OpenCode Go/DeepSeek V4 Pro (New)"
+            },
+            {
+              "value": "opencode-go/glm-5.1",
+              "name": "OpenCode Go/GLM-5.1"
+            },
+            {
+              "value": "opencode-go/glm-5.2",
+              "name": "OpenCode Go/GLM-5.2"
+            },
+            {
+              "value": "opencode-go/glm-5.3",
+              "name": "OpenCode Go/GLM-5.3"
+            },
+            {
+              "value": "opencode-go/gpt-5.6-luna",
+              "name": "OpenCode Go/GPT-5.6 Luna (2x usage)"
+            },
+            {
+              "value": "opencode-go/grok-4.5",
+              "name": "OpenCode Go/Grok 4.5"
+            },
+            {
+              "value": "opencode-go/hy3",
+              "name": "OpenCode Go/Hy3"
+            },
+            {
+              "value": "opencode-go/kimi-k2.6",
+              "name": "OpenCode Go/Kimi K2.6"
+            },
+            {
+              "value": "opencode-go/kimi-k2.7-code",
+              "name": "OpenCode Go/Kimi K2.7 Code"
+            },
+            {
+              "value": "opencode-go/kimi-k3",
+              "name": "OpenCode Go/Kimi K3"
+            },
+            {
+              "value": "opencode-go/mimo-v2.5",
+              "name": "OpenCode Go/MiMo V2.5"
+            },
+            {
+              "value": "opencode-go/mimo-v2.5-pro",
+              "name": "OpenCode Go/MiMo V2.5 Pro"
+            },
+            {
+              "value": "opencode-go/minimax-m2.7",
+              "name": "OpenCode Go/MiniMax-M2.7"
+            },
+            {
+              "value": "opencode-go/minimax-m3",
+              "name": "OpenCode Go/MiniMax-M3"
+            },
+            {
+              "value": "opencode-go/qwen3.6-plus",
+              "name": "OpenCode Go/Qwen3.6 Plus"
+            },
+            {
+              "value": "opencode-go/qwen3.7-max",
+              "name": "OpenCode Go/Qwen3.7 Max"
+            },
+            {
+              "value": "opencode-go/qwen3.7-plus",
+              "name": "OpenCode Go/Qwen3.7 Plus"
+            },
+            {
+              "value": "opencode-go/qwen3.8-max",
+              "name": "OpenCode Go/Qwen3.8 Max"
+            },
+            {
+              "value": "opencode/big-pickle",
+              "name": "OpenCode Zen/Big Pickle"
+            },
+            {
+              "value": "opencode/deepseek-v4-flash-free",
+              "name": "OpenCode Zen/DeepSeek V4 Flash Free"
+            },
+            {
+              "value": "opencode/hy3-free",
+              "name": "OpenCode Zen/Hy3 Free"
+            },
+            {
+              "value": "opencode/laguna-s-2.1-free",
+              "name": "OpenCode Zen/Laguna S 2.1 Free"
+            },
+            {
+              "value": "opencode/mimo-v2.5-free",
+              "name": "OpenCode Zen/MiMo V2.5 Free"
+            },
+            {
+              "value": "opencode/nemotron-3-ultra-free",
+              "name": "OpenCode Zen/Nemotron 3 Ultra Free"
+            },
+            {
+              "value": "opencode/nemotron-3.5-lightning-free",
+              "name": "OpenCode Zen/Nemotron 3.5 Lightning Free"
+            }
+          ]
+        },
+        {
+          "id": "effort",
+          "name": "Effort",
+          "description": "Available effort levels for this model",
+          "category": "thought_level",
+          "type": "select",
+          "currentValue": "low",
+          "options": [
+            {
+              "value": "low",
+              "name": "Low"
+            },
+            {
+              "value": "high",
+              "name": "High"
+            },
+            {
+              "value": "max",
+              "name": "Max"
+            }
+          ]
+        },
+        {
+          "id": "mode",
+          "name": "Session Mode",
+          "category": "mode",
+          "type": "select",
+          "currentValue": "build",
+          "options": [
+            {
+              "value": "build",
+              "name": "build",
+              "description": "The default agent. Executes tools based on configured permissions."
+            },
+            {
+              "value": "plan",
+              "name": "plan",
+              "description": "Plan mode. Disallows all edit tools."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "stderr": [
+    "Error handling request {",
+    "  jsonrpc: \"2.0\",",
+    "  id: 10,",
+    "  method: \"session/prompt\",",
+    "  params: {",
+    "    sessionId: \"ses_ff3dc73e1ffe1fqb8esjHweHFL\",",
+    "    prompt: [",
+    "      [Object ...]",
+    "    ],",
+    "  },",
+    "} {",
+    "  code: -32603,",
+    "  message: \"Internal error: Error from provider (Console): Rate limit exceeded. Please try again later.\",",
+    "  data: {",
+    "    service: \"session\",",
+    "    errorName: \"APIError\",",
+    "  },",
+    "}"
+  ]
+}

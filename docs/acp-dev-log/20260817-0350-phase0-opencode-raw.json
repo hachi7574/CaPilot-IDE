@@ -1,0 +1,71 @@
+{
+  "init": {
+    "protocolVersion": 1,
+    "agentCapabilities": {
+      "loadSession": true,
+      "mcpCapabilities": {
+        "http": true,
+        "sse": true
+      },
+      "promptCapabilities": {
+        "embeddedContext": true,
+        "image": true
+      },
+      "sessionCapabilities": {
+        "close": {},
+        "fork": {},
+        "list": {},
+        "resume": {}
+      }
+    },
+    "authMethods": [
+      {
+        "description": "Run `opencode auth login` in the terminal",
+        "name": "Login with opencode",
+        "id": "opencode-login"
+      }
+    ],
+    "agentInfo": {
+      "name": "OpenCode",
+      "version": "1.18.18"
+    }
+  },
+  "sessionId": "ses_ff3de1f4effem0V33TrnlapJTW",
+  "update_types": [
+    "available_commands_update",
+    "usage_update"
+  ],
+  "text": "",
+  "prompt_result": {
+    "jsonrpc": "2.0",
+    "id": 10,
+    "error": {
+      "code": -32603,
+      "message": "Internal error: Error from provider (Console): Rate limit exceeded. Please try again later.",
+      "data": {
+        "service": "session",
+        "errorName": "APIError"
+      }
+    }
+  },
+  "stderr_tail": [
+    "Error handling request {",
+    "  jsonrpc: \"2.0\",",
+    "  id: 10,",
+    "  method: \"session/prompt\",",
+    "  params: {",
+    "    sessionId: \"ses_ff3de1f4effem0V33TrnlapJTW\",",
+    "    prompt: [",
+    "      [Object ...]",
+    "    ],",
+    "  },",
+    "} {",
+    "  code: -32603,",
+    "  message: \"Internal error: Error from provider (Console): Rate limit exceeded. Please try again later.\",",
+    "  data: {",
+    "    service: \"session\",",
+    "    errorName: \"APIError\",",
+    "  },",
+    "}"
+  ]
+}
