@@ -1437,7 +1437,8 @@ body::after {
 .onboarding-header {
   display: flex;
   align-items: center;
-  gap: 14px;
+  justify-content: center;
+  gap: 16px;
   padding-bottom: 16px;
   border-bottom: 2px solid var(--rule);
   margin-bottom: 18px;
@@ -1465,13 +1466,13 @@ body::after {
 }
 
 .onboarding-logo {
-  width: 44px;
-  height: 44px;
+  width: 72px;
+  height: 72px;
 }
 
 .onboarding-header h2 {
   font-family: var(--pixel-body);
-  font-size: var(--fs-xl);
+  font-size: calc(var(--fs-xl) * 1.4);
   font-weight: 700;
   color: var(--brand);
   letter-spacing: 1px;
