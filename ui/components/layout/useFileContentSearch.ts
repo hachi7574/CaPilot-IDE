@@ -6,6 +6,7 @@ import {
   type ContentSearchResult,
   type FileSearchState,
 } from "../../state/store";
+import { fileTab } from "../../state/openFile";
 
 /** Debounce between keystrokes and the backend scan (Enter bypasses it). */
 const SEARCH_DEBOUNCE_MS = 300;
@@ -157,7 +158,7 @@ export function useFileContentSearch(root: string) {
   const openMatch = useCallback(
     (filePath: string, line: number, column?: number) => {
       const name = filePath.split("/").pop() || filePath;
-      addTab({ id: `file:${filePath}`, type: "editor", filePath, title: name });
+      addTab(fileTab(filePath, name));
       requestReveal(filePath, line, column);
     },
     [addTab, requestReveal]

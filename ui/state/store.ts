@@ -275,10 +275,10 @@ export interface UpdateStatus {
 
 export interface Tab {
   id: string;
-  type: "agent" | "editor" | "diff";
+  type: "agent" | "editor" | "diff" | "image";
   agentId?: string;
-  /** Editor: absolute file path. Diff: the "new" (worktree/index) side path,
-   *  used for project grouping in the tab bar. */
+  /** Editor / image: absolute file path. Diff: the "new" (worktree/index) side
+   *  path, used for project grouping in the tab bar. */
   filePath?: string;
   /** Diff tabs carry a snapshot of the two sides at open time. */
   diffOld?: string;

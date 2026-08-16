@@ -82,7 +82,7 @@ function tabProject(
     }
     return undefined;
   }
-  if ((tab.type === "editor" || tab.type === "diff") && tab.filePath) {
+  if ((tab.type === "editor" || tab.type === "diff" || tab.type === "image") && tab.filePath) {
     const byRoot = projectRootOfPath(tab.filePath, projectRoots);
     if (byRoot) return byRoot;
     const dir = tab.filePath.split("/").slice(0, -1).join("/");
@@ -173,10 +173,10 @@ export function TabBar() {
     setActiveTab(keepId);
   };
 
-  // "关闭所有文件": close editor/diff tabs only — terminals stay running.
+  // "关闭所有文件": close editor/image/diff tabs only — terminals stay running.
   const closeAllFiles = () => {
     visibleTabs.forEach((t) => {
-      if (t.type === "editor" || t.type === "diff") closeTab(t.id);
+      if (t.type === "editor" || t.type === "diff" || t.type === "image") closeTab(t.id);
     });
   };
 
@@ -516,7 +516,13 @@ export function TabBar() {
           >
             <span>
               <Icon
-                name={tab.type === "agent" ? runtimeIcon(agent?.runtime ?? "") : "file-text"}
+                name={
+                  tab.type === "agent"
+                    ? runtimeIcon(agent?.runtime ?? "")
+                    : tab.type === "image"
+                      ? "image"
+                      : "file-text"
+                }
                 size={12}
                 style={{ marginRight: 5 }}
               />

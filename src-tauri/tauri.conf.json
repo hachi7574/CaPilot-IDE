@@ -22,7 +22,11 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: asset: https://asset.localhost; script-src 'self' 'unsafe-eval'"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: asset: http://asset.localhost https://asset.localhost; script-src 'self' 'unsafe-eval'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$HOME/**"]
+      }
     }
   },
   "bundle": {

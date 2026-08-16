@@ -102,6 +102,7 @@ import { Settings, Search, GitBranch } from "lucide-react";
 | ＋📁 新建文件夹 | `folder-plus.svg` | folder-plus | `FolderPlus` |
 | 📄 文件 | `file.svg` | file | `File` |
 | 📝 文本文件 | `file-text.svg` | file-text | `FileText` |
+| 🖼 图片 | `image.svg` | image | `Image` |
 | ＋📄 新建文件 | `file-plus.svg` | file-plus | `FilePlus` |
 | 📋 复制/剪贴板 | `copy.svg` · `clipboard.svg` | copy / clipboard | `Copy` / `Clipboard` |
 | 🗑 删除 | `trash-2.svg` | trash-2 | `Trash2` |
@@ -165,6 +166,8 @@ import { Settings, Search, GitBranch } from "lucide-react";
 | ↗ 右上 | `arrow-up-right.svg` | arrow-up-right | `ArrowUpRight` |
 | ⇄ 交换 | `arrow-left-right.svg` | arrow-left-right | `ArrowLeftRight` |
 | ↔ 横向移动 | `move-horizontal.svg` | move-horizontal | `MoveHorizontal` |
+| 🔍 放大 | `zoom-in.svg` | zoom-in | `ZoomIn` |
+| 🔎 缩小 | `zoom-out.svg` | zoom-out | `ZoomOut` |
 | ⌄ 展开 | `chevron-down.svg` | chevron-down | `ChevronDown` |
 | › 收起/右 | `chevron-right.svg` | chevron-right | `ChevronRight` |
 | ‹ 左 | `chevron-left.svg` | chevron-left | `ChevronLeft` |
