@@ -1,6 +1,6 @@
 # ACP Dev Status
 
-updated_at: 2026-08-17T05:35:00+08:00
+updated_at: 2026-08-17T06:35:00+08:00
 goal_met: false
 current_phase: 2
 phase_gate: dev_done
@@ -26,33 +26,27 @@ cwd: `/home/hachi/.paseo/worktrees/293djwjk/precious-husky`
 - [ ] 输入区：Composer 走 `acp_prompt`；无 `agent_write` 泄漏；停止/多 tab 不串台
 - [x] 双轨无损：既有 PTY `cargo test` 全绿（Phase1 复验 215+3；Phase2 复验 acp 9）
 - [ ] 安全：默认不写盘、出界读拒绝、permission 默认 ask
-- [x] `pnpm tsc --noEmit` 通过（Phase2 复验）
+- [x] `pnpm tsc --noEmit` 通过（Phase2 复验 + DEF-006 修复复验）
 - [ ] 文档：附录 A（OpenCode 摸底 + 验收记录）；ai-runtime-references / RUNBOOK 有链接
 - [ ] （延伸）第二个 ACP agent 仅加 descriptor 可冒烟
 
 ## Phase checklist
 ### Phase 0 — OpenCode ACP 协议摸底
-- [x] `opencode acp` initialize → session/new → prompt 日志
-- [x] 记录 capabilities / permission / loadSession / cancel（附录 A.2）
-- [x] 工具类 prompt 观察 tool_call / fs / permission
-- [x] mock fixture `src-tauri/tests/fixtures/mock_acp_agent.py`
-- [x] **Test 2026-08-17T04:10：** mock 独立 NDJSON + 锚点复验（cancel=notification）+ cargo/tsc 绿 → `test_passed`
+- [x] **Test 2026-08-17T04:10：** → `test_passed`
 
 ### Phase 1 — 后端 Host MVP
-- [x] acp/ 模块（自研 NDJSON Host；未绑 agent-client-protocol crate — 设计允许降级）
-- [x] 默认 descriptor 含 opencode → `acp:opencode`
-- [x] bridge/host/events/registry；lib.rs 分叉（**is_acp_runtime 先于 get_adapter，DEF-001**）
-- [x] `acp_cancel` 对 OpenCode 发 **notification 无 id**（DEF-002）
-- [x] mock 测试绿（9）+ 全量 cargo 215 + OpenCode 无 UI cancel/prompt 烟雾
-- [x] **Test 2026-08-17T04:55：** 多角度复测 commit `145072f9a` → `test_passed`（见 log）
+- [x] **Test 2026-08-17T04:55：** commit `145072f9a` → `test_passed`；DEF-001/002 closed
 
 ### Phase 2 — 前端面板 + 输入区 MVP
 - [x] runtimeTransport + store/actions（`acpSessions` / `applyAcpEvent` / `markAcpLive`）
-- [x] AcpSessionPanel + ContentArea（`isAcpRuntime`，勿用 === opencode）
-- [x] Composer ACP 控件集 + cancel；隐藏 PTY OpenCode ⚡/Build/F12 路径
-- [x] `acp://event` 全局订阅，按 agentId 入 store（多 tab 隔离）
-- [x] tsc 绿
-- [ ] **Test 待复测** → UI 烟雾 + §12 D*/C*/F1–F4/F10/F13–F15
+- [x] AcpSessionPanel + ContentArea（`isAcpRuntime`）
+- [x] Composer ACP 控件集 + cancel；隐藏 PTY OpenCode 方言
+- [x] `acp://event` 全局订阅按 agentId
+- [x] tsc 绿 / cargo acp 9
+- [x] **F1 主路径可 spawn `acp:opencode`** ← DEF-006 fixed（TerminalTemplatePicker 动态 ACP 段）
+- [x] DEF-007 Host prompt 开始 emit `status:running`
+- [x] 侧栏 switch 列表过滤 ACP（不走 `agent_switch_runtime`）
+- [ ] **Test 复测中** — commit 见 Last handoff
 
 ### Phase 3 — 权限与安全
 - [ ] permission 闭环 + 卡 UI（面板已有 MVP 卡；Host 策略/沙箱 Phase3）
@@ -67,37 +61,47 @@ cwd: `/home/hachi/.paseo/worktrees/293djwjk/precious-husky`
 
 ## §12 验收勾选（实现时维护）
 ### 功能 F1–F15
-- [x] Host 层：spawn/prompt/cancel/kill 协议层（mock + OpenCode cancel notification）
-- [x] F1–F4/F10/F13 前端路径：spawn/prompt/cancel/kill 经 UI actions（待 Test UI 实跑）
-- [ ] F 其余（permission/fs/多 tab UI 实跑）未签字
+- [x] Host 层 spawn/prompt/cancel/kill（Phase1）
+- [x] **F1 代码路径** — Picker 动态 ACP → `spawnAgent(proj,"acp:…")`（待 Test UI 实跑）
+- [x] F2–F4/F10/F13 **代码路径**（send/cancel/panel/tab isolation）；**UI 实跑**待复测
+- [x] F14 后端拒 `agent_write`（Phase1）
 ### 显示 D1–D15
-- [x] 代码路径：AcpSessionPanel 分发 + 隐藏 PTY OpenCode 方言（待 Test UI）
+- [x] D1/D14/D15 **代码路径** PASS；UI 实跑待复测
 ### 输入区 C1–C15
-- [x] 代码路径：`acp_prompt` / Stop→`acp_cancel` / 禁 ACP `agent_write`（待 Test UI）
+- [x] C1–C6 **代码路径** PASS（acp_prompt/cancel；方言隐藏；perm 只持久化）；UI 实跑待复测
 
 ## Open defects（Test 写入，Dev 认领）
 | id | phase | severity | title | repro | status |
 | --- | --- | --- | --- | --- | --- |
-| DEF-001 | 1 | major | `get_adapter` 未知 id 默认 Claude；`acp:*` 无前置分叉 | 本轮确认 lib 全路径守卫 | **closed** |
-| DEF-002 | 0/1 | blocker（Phase1） | OpenCode `session/cancel` 仅 notification | host Notify 无 id + 真机 cancelled | **closed** |
-| DEF-005 | 0/1 | major | mock cancel-with-id；permission 路径不稳 | cancel-with-id→-32601 已确认；permission 仍 Phase3 | **partial**（cancel 支 closed；permission → Phase3） |
-| DEF-003 | 0 | major | 附录未填/无成功 prompt | 94efdf896 + Test 复验 | closed |
-| DEF-004 | 0 | minor | 默认 model 易限流 | A.2 free 模型 | closed |
+| DEF-006 | 2 | **blocker** | 无主 UX spawn `acp:opencode` | 项目+无 ACP | **fixed**（待 Test 确认） |
+| DEF-007 | 2 | minor | Host prompt 开始不 emit running | host status emit | **fixed**（待 Test 确认） |
+| DEF-001 | 1 | major | get_adapter / is_acp 分叉 | — | **closed** |
+| DEF-002 | 0/1 | blocker | cancel notification | — | **closed** |
+| DEF-005 | 0/1 | major | mock permission 不稳 | Phase3 | **partial** |
+| DEF-003/004 | 0 | — | — | — | closed |
 
 ## Human notes
-- 工作区保留 `ui/components/layout/LeftSidebar.tsx` 用户改动，禁止覆盖。
+- 工作区保留 `ui/components/layout/LeftSidebar.tsx` 用户改动，禁止覆盖。本轮仅在 staged 副本上加 ACP switch 过滤；工作区仍保留用户脏改。
 - 设计基线：`docs/acp-runtime-plan.md`。验证锚点 **OpenCode ACP**（`opencode acp` → `acp:opencode`）。
 - PTY `runtime: "opencode"` 与 `acp:opencode` **不得混用**。
 - **Dev↔Test 主路径直连 send**；Watcher 每 20m 救援/推进 phase。
 - Test **按实际 diff 自定多角度计划**，不照抄文档清单。
+- Wayland：UI 自动化受限；本轮以代码走读+CLI 回归为主。
 
 ## Last handoff（中文）
-- **05:35 Dev：** Phase 2 前端 MVP `dev_done`。新增 `runtimeTransport` / `acpTypes` / `acpEvents` / `AcpSessionPanel`；`agentActions` 走 `acp_prompt`/`acp_cancel`；Composer 隐藏 PTY OpenCode 方言 + Stop；ContentArea `isAcpRuntime` 分叉；TabBar connected=`agentChannels|acpSessions.live`。`pnpm tsc --noEmit` 0；`cargo test acp` 9 绿。未改 LeftSidebar。请 Test 直连复测 UI 路径与 §12 D*/C*。
-- Phase 3 仍：permission Host 策略 + fs 沙箱 + 真工具。
+- **06:35 Dev → Test：** DEF-006/007 已修，`phase_gate=dev_done`，请复测 Phase 2。
+- **commit：** 见 git log（`fix(acp): phase 2 — DEF-006 primary spawn UX + DEF-007 running status`）。
+- **改动要点：**
+  1. `TerminalTemplatePicker`：从 `runtimes` 动态列出 `transport==="acp"` / `acp:*` 且 available → `spawnTerminal` → `spawnAgent(proj, "acp:opencode")`；独立「ACP Agents」分区。
+  2. `TermTemplate.runtime` 放宽为 `string`；`runtimeIcon('acp:opencode')→opencode`。
+  3. 侧栏 switch 列表 **过滤 ACP**（不调用 `agent_switch_runtime`）；用户 LeftSidebar 其它脏改未提交。
+  4. `AcpBridge::prompt` 开始 emit `Status{running}`，失败回 `idle`（DEF-007）。
+- **验证：** `pnpm tsc --noEmit` 0；`cargo test acp` 9 passed。
+- **请 Test：** 代码走读 F1 主路径 + 回归 panel/composer；确认 DEF-006/007 closed 或重开。
 
 ## Agent heartbeats
 | agent | last_seen | state | note |
 | --- | --- | --- | --- |
-| dev | 2026-08-17T05:35 | idle | ad172813；Phase 2 dev_done，已 notify Test |
-| test | 2026-08-17T04:55 | idle | d62ccd50；待收 Phase2 |
-| watcher | 2026-08-17T05:07 | idle | ed60735f |
+| dev | 2026-08-17T06:35 | idle | ad172813；DEF-006/007 修完 dev_done，已直连 Test |
+| test | 2026-08-17T06:05 | idle | d62ccd50；待复测 |
+| watcher | 2026-08-17T06:10 | idle | ed60735f |
