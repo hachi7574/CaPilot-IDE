@@ -897,6 +897,8 @@ body::after {
 .files-tree .file.file-new { color: var(--brand); }
 .files-tree .file.file-mod { color: var(--warn); }
 .files-tree .file-web { color: var(--warn); }
+/* Image files → soft violet so they read as viewable in the tree. */
+.files-tree .file-image { color: var(--primary); }
 /* Tree entry ±N badge (new/modified files), like the old tab-bar badge. */
 .files-tree .fs-stats {
   font-family: var(--mono); font-size: var(--fs-2xs);
@@ -1278,6 +1280,70 @@ body::after {
 .panel-placeholder {
   flex: 1; display: flex; align-items: center; justify-content: center;
   color: var(--ink2); font-family: var(--mono); font-size: var(--fs-sm);
+}
+
+/* ── Image viewer (file tree → image tab) ─────────────────────── */
+
+.image-viewer {
+  flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  background: var(--bg);
+}
+.image-viewer-toolbar {
+  flex: none; display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px; border-bottom: 1px solid var(--rule);
+  background: var(--bg2);
+  font-family: var(--panel-ui-font); font-size: var(--fs-xs); color: var(--ink2);
+}
+.image-viewer-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: none; border: 1px solid var(--rule); color: var(--ink2);
+  border-radius: 4px; cursor: pointer; line-height: 1;
+  font-family: var(--panel-ui-font); font-size: var(--fs-xs);
+  padding: 3px 7px;
+}
+.image-viewer-btn:hover:not(:disabled) { border-color: var(--brand); color: var(--brand); }
+.image-viewer-btn:disabled { opacity: .4; cursor: default; }
+.image-viewer-btn.active {
+  border-color: var(--brand); color: var(--brand);
+  background: rgb(var(--brand-rgb) / .08);
+}
+.image-viewer-zoom {
+  min-width: 52px; text-align: center;
+  font-family: var(--mono); font-size: var(--fs-xs); color: var(--ink);
+}
+.image-viewer-dims {
+  margin-left: auto; font-family: var(--mono); font-size: var(--fs-2xs); color: var(--muted);
+}
+.image-viewer-sep {
+  width: 1px; height: 16px; background: var(--rule2); margin: 0 2px;
+}
+.image-viewer-viewport {
+  flex: 1; position: relative; overflow: hidden; min-height: 0;
+  touch-action: none; user-select: none;
+  /* Subtle checkerboard so transparent images (icons, PNGs) read as such. */
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(45deg, var(--bg3) 25%, transparent 25%, transparent 75%, var(--bg3) 75%),
+    linear-gradient(45deg, var(--bg3) 25%, transparent 25%, transparent 75%, var(--bg3) 75%);
+  background-size: 24px 24px;
+  background-position: 0 0, 12px 12px;
+}
+.image-viewer-viewport img {
+  position: absolute; left: 50%; top: 50%;
+  max-width: none; max-height: none;
+  user-select: none; -webkit-user-drag: none;
+  pointer-events: none;
+}
+.image-viewer-error {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; color: var(--muted);
+  font-family: var(--panel-ui-font); font-size: var(--fs-sm);
+}
+.image-viewer-error p { color: var(--ink2); }
+.image-viewer-error code {
+  font-family: var(--mono); font-size: var(--fs-xs); color: var(--muted);
+  max-width: 70%; overflow-wrap: anywhere; text-align: center;
 }
 
 .split-container { flex: 1; display: flex; overflow: hidden; min-width: 0; min-height: 0; }

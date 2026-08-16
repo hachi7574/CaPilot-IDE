@@ -4,6 +4,7 @@ import { splitLeafTabIds } from "../../state/store";
 import { XTermPanel } from "../terminal/XTermPanel";
 import { EditorPanel } from "../editor/EditorPanel";
 import { DiffPanel } from "../editor/DiffPanel";
+import { ImageViewerPanel } from "../editor/ImageViewerPanel";
 import { Icon } from "../Icon";
 import { spawnAgent } from "../../state/agentActions";
 
@@ -28,6 +29,9 @@ function Panel({
       )}
       {tab.type === "editor" && tab.filePath && (
         <EditorPanel filePath={tab.filePath} active={active} />
+      )}
+      {tab.type === "image" && tab.filePath && (
+        <ImageViewerPanel filePath={tab.filePath} />
       )}
       {tab.type === "diff" && (
         <DiffPanel oldText={tab.diffOld ?? ""} newText={tab.diffNew ?? ""} />

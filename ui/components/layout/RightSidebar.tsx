@@ -7,6 +7,7 @@ import { capilotTheme } from "../editor/capilotTheme";
 import { MergeView } from "@codemirror/merge";
 import { useStore } from "../../state/store";
 import type { ContentSearchFileResult, ContentSearchMatch } from "../../state/store";
+import { fileTab, isImagePath } from "../../state/openFile";
 import { spawnBashAt } from "../../state/agentActions";
 import { useFileContentSearch } from "./useFileContentSearch";
 import { TodoPanel } from "./TodoPanel";
@@ -304,12 +305,14 @@ function SearchResultsList({
 
 const SKIP_DIRS = new Set([".git", "node_modules", "target", ".claude", "dist", "build"]);
 
-/** web/html files → warn (.file-web), config files → success (.rtx-file-conf). */
+/** web/html files → warn (.file-web), config files → success (.rtx-file-conf),
+ *  images → image icon (.file-image). */
 function fileClass(name: string): { cls: string; icon: string } {
   const isWeb = name === "index.html" || /\.html?$/.test(name);
   const isConf = name === "tauri.conf.json" || /\.(conf|config)\.json$/.test(name);
   if (isWeb) return { cls: "file file-web", icon: "globe" };
   if (isConf) return { cls: "file rtx-file-conf", icon: "file-text" };
+  if (isImagePath(name)) return { cls: "file file-image", icon: "image" };
   return { cls: "file", icon: "file-text" };
 }
 
@@ -628,7 +631,7 @@ function FilesPanel() {
   };
 
   const openFile = (path: string, name: string) => {
-    addTab({ id: `file:${path}`, type: "editor", filePath: path, title: name });
+    addTab(fileTab(path, name));
   };
 
   const clickFile = (path: string, name: string) => {
@@ -864,7 +867,7 @@ function FilesPanel() {
       // If the renamed file is open in an editor tab, point it at the new path.
       if (useStore.getState().tabs.some((t) => t.id === `file:${renaming}`)) {
         closeTab(`file:${renaming}`);
-        addTab({ id: `file:${newPath}`, type: "editor", filePath: newPath, title: name });
+        addTab(fileTab(newPath, name));
       }
       setRenaming(null);
       setRenameValue("");
@@ -967,7 +970,7 @@ function FilesPanel() {
             return (
               <div key={path}>
                 <div className="files-new" style={{ paddingLeft: depth * 14 }}>
-                  <span>{e.is_dir ? <Icon name="folder" size={14} /> : <Icon name="file-text" size={14} />}</span>
+                  <span>{e.is_dir ? <Icon name="folder" size={14} /> : <Icon name={fileClass(e.name).icon} size={14} />}</span>
                   <input
                     autoFocus
                     value={renameValue}
@@ -1845,7 +1848,7 @@ function GitPanel() {
   const openInEditor = (path: string) => {
     const abs = root.endsWith("/") ? `${root}${path}` : `${root}/${path}`;
     const name = path.split("/").pop() || path;
-    addTab({ id: `file:${abs}`, type: "editor", filePath: abs, title: name });
+    addTab(fileTab(abs, name));
     setActiveTab(`file:${abs}`);
   };
 
