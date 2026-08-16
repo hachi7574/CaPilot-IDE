@@ -1,0 +1,32 @@
+name: Windows check
+
+# Fast Windows compile gate for development branches (docs/version-update-design.md §8).
+# The tag-triggered release.yml builds Windows bundles; this job catches
+# `cargo check`-level portability breaks (cfg(unix) leaks, std::os::windows
+# mismatches) in a fraction of the full `tauri build` time, on every push/PR.
+
+on:
+  pull_request:
+  push:
+    branches: ["**"]
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+      - uses: dtolnay/rust-toolchain@stable
+
+      # tauri::generate_context! embeds the frontend dist at compile time.
+      - name: Build frontend
+        run: pnpm install && pnpm build
+
+      - name: cargo check (all targets)
+        working-directory: src-tauri
+        run: cargo check --all-targets

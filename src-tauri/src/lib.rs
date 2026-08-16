@@ -1998,7 +1998,23 @@ fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io:
         let ft = entry.file_type()?;
         if ft.is_symlink() {
             let target = std::fs::read_link(&s)?;
-            std::os::unix::fs::symlink(target, d)?;
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(target, d)?;
+            }
+            #[cfg(windows)]
+            {
+                // Windows has no generic `symlink`; pick dir vs file from the
+                // link target's type. Creating links may require Developer Mode
+                // or admin privileges — a failure surfaces as an io error to
+                // the caller.
+                use std::os::windows::fs::{symlink_dir, symlink_file};
+                if std::fs::metadata(&target).map(|m| m.is_dir()).unwrap_or(false) {
+                    symlink_dir(target, d)?;
+                } else {
+                    symlink_file(target, d)?;
+                }
+            }
         } else if ft.is_dir() {
             copy_dir_recursive(&s, &d)?;
         } else {

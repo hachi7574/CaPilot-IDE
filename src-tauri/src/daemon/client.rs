@@ -17,7 +17,10 @@ use crate::daemon::runtime::{read_token, socket_path};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(windows)]
+use std::os::windows::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -409,7 +412,7 @@ fn reader_loop(mut reader: UnixStream, state: Arc<ConnState>) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::daemon::server::{DaemonConfig, DaemonServer};

@@ -66,7 +66,10 @@ function firstAsset(...patterns) {
 const candidates = {
   "linux-x86_64": [/\.AppImage\.tar\.gz$/, /\.AppImage$/],
   "windows-x86_64": [/-setup\.exe$/, /\.msi$/],
-  "darwin-aarch64": [/aarch64\.app\.tar\.gz$/],
+  // Tauri names single-arch macOS updater artifacts without an arch suffix
+  // (`CaPilot.app.tar.gz`), so prefer an explicit aarch64 suffix when present,
+  // then fall back to the bare name.
+  "darwin-aarch64": [/aarch64\.app\.tar\.gz$/, /\.app\.tar\.gz$/],
   "darwin-x86_64": [/x86_64\.app\.tar\.gz$/],
   "linux-aarch64": [/aarch64\.AppImage\.tar\.gz$/, /aarch64\.AppImage$/],
 };

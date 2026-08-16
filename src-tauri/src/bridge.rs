@@ -196,7 +196,6 @@ impl PtyBridge {
     /// a closed terminal (SIGTTOU/EPIPE on eprintln) or die with the GUI's
     /// session.
     fn spawn_daemon_process() -> std::io::Result<()> {
-        use std::os::unix::process::CommandExt;
         let exe = std::env::current_exe()?;
         let log = std::env::temp_dir().join("capilot-daemon.log");
         let log_file = std::fs::OpenOptions::new()
@@ -207,10 +206,22 @@ impl PtyBridge {
         cmd.arg("--daemon")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(log_file)
-            // New process group: the daemon survives Ctrl-C / SIGHUP to the GUI
-            // process group, and the GUI's exit never waits on it.
-            .process_group(0);
+            .stderr(log_file);
+        // New process group: the daemon survives Ctrl-C / SIGHUP to the GUI
+        // process group, and the GUI's exit never waits on it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS: the daemon gets its
+            // own process group and no console, so it survives the GUI's exit
+            // and Ctrl-C and never inherits the GUI's console.
+            cmd.creation_flags(0x0000_0200 | 0x0000_0008);
+        }
         let child = cmd.spawn()?;
         // Detached child — dropping Child doesn't wait or kill.
         drop(child);

@@ -34,7 +34,10 @@ use crate::output_hub::{AgentOutputHub, HubSubscriber, OutputChunk};
 use crate::session_store::SessionStore;
 use std::collections::HashMap;
 use std::io;
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(windows)]
+use std::os::windows::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -886,7 +889,15 @@ fn set_socket_perms(path: &std::path::Path) -> io::Result<()> {
     std::fs::set_permissions(path, perms)
 }
 
-#[cfg(test)]
+#[cfg(windows)]
+fn set_socket_perms(_path: &std::path::Path) -> io::Result<()> {
+    // Windows AF_UNIX socket access is governed by the socket's security
+    // descriptor at bind time, not a chmod-style mode; the socket path lives
+    // under the instance run dir, which is private to the user. Nothing to do.
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::daemon::protocol::{
