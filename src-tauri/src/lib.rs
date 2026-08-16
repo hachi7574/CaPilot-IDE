@@ -1,5 +1,6 @@
 pub mod agent_runtime;
 pub mod bridge;
+mod ci;
 pub mod daemon;
 mod fs_search;
 mod git_gate;
@@ -1703,6 +1704,14 @@ async fn update_check(app: tauri::AppHandle) -> Result<UpdateStatus, String> {
         }),
         Err(e) => Err(format!("无法连接更新服务器: {e}")),
     }
+}
+
+/// Developer tool: poll the current tag's CI build progress (GitHub Actions).
+/// `tag` defaults to the running app version (prefixed with `v`).
+#[tauri::command]
+async fn ci_status(tag: Option<String>) -> Result<ci::CiStatus, String> {
+    let fallback = format!("v{}", env!("CARGO_PKG_VERSION"));
+    ci::fetch_ci_status(&tag.unwrap_or(fallback)).await
 }
 
 /// Download and install the pending update, streaming 0..1 progress through
@@ -3841,6 +3850,7 @@ pub fn run() {
             setting_set,
             update_check,
             update_download_and_install,
+            ci_status,
             workspace_root,
             create_project,
             list_projects,

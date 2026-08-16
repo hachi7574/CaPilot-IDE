@@ -1918,6 +1918,183 @@ body::after {
 }
 .nproj-btn.primary:disabled { opacity: 0.5; cursor: default; }
 
+/* ── CI build progress (developer tool, StatusBar → CI 构建进度) ── */
+
+.ci-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgb(var(--black-rgb) / 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ci-card {
+  width: 420px;
+  max-width: 92vw;
+  max-height: 80vh;
+  overflow-y: auto;
+  background: var(--bg2);
+  border: 2px solid var(--rule2);
+  box-shadow: var(--shadow-hard), 0 8px 30px rgb(var(--black-rgb) / 0.45);
+  padding: 16px 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ci-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ci-title {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--pixel-body);
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  color: var(--brand);
+  letter-spacing: 1px;
+}
+
+.ci-close {
+  background: none;
+  border: none;
+  color: var(--ink2);
+  cursor: pointer;
+  padding: 2px;
+  line-height: 1;
+}
+.ci-close:hover { color: var(--danger); }
+
+.ci-error {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--danger);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ci-retry {
+  font-family: var(--pixel);
+  font-size: var(--fs-2xs);
+  letter-spacing: 1px;
+  padding: 3px 10px;
+  color: var(--brand);
+  border: 1px solid var(--rule2);
+  background: var(--bg3);
+  cursor: pointer;
+}
+.ci-retry:hover { border-color: var(--brand); }
+.ci-retry:disabled { opacity: 0.5; cursor: default; }
+
+.ci-empty {
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  color: var(--ink2);
+  text-align: center;
+  padding: 16px 0;
+}
+
+.ci-tag {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+}
+
+.ci-tag-name {
+  font-family: var(--pixel);
+  font-size: var(--fs-xs);
+  letter-spacing: 1px;
+  color: var(--ink);
+  padding: 2px 8px;
+  border: 1px solid var(--rule2);
+  background: var(--bg3);
+}
+
+.ci-run-state {
+  font-size: var(--fs-sm);
+}
+
+.ci-progress-pct {
+  margin-left: auto;
+  font-family: var(--pixel);
+  font-size: var(--fs-xs);
+  color: var(--ink2);
+}
+
+.ci-progress {
+  height: 8px;
+  background: var(--bg3);
+  border: 1px solid var(--rule2);
+  overflow: hidden;
+}
+
+.ci-progress-fill {
+  height: 100%;
+  transition: width .3s var(--ease-apple);
+}
+
+.ci-jobs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--rule);
+  padding-top: 10px;
+}
+
+.ci-job {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-sm);
+  color: var(--ink2);
+}
+
+.ci-job-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ci-job-state {
+  font-size: var(--fs-2xs);
+  font-family: var(--pixel);
+  letter-spacing: 1px;
+}
+
+.ci-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-top: 1px solid var(--rule);
+  padding-top: 8px;
+  font-size: var(--fs-2xs);
+  color: var(--muted);
+  font-family: var(--mono);
+}
+
+.ci-foot-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ci-foot-since {
+  flex-shrink: 0;
+}
+
+
 /* No-projects row: actionable "添加新项目" that opens the new-project modal. */
 .nproj-empty-row {
   padding: 8px 10px 8px 26px;

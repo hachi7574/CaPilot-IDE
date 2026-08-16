@@ -280,6 +280,33 @@ export interface UpdateStatus {
   installable: boolean;
 }
 
+/** One job inside a CI workflow run (developer tool). */
+export interface CiJob {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+}
+
+/** One workflow run (a Release pipeline execution for the current tag). */
+export interface CiRun {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  /** 0..1 overall progress across the run's jobs. */
+  progress: number;
+  jobs: CiJob[];
+  title: string;
+}
+
+/** Wire shape of the Rust `ci_status` command. */
+export interface CiStatus {
+  tag: string;
+  run: CiRun | null;
+  error: string | null;
+}
+
 export interface Tab {
   id: string;
   type: "agent" | "editor" | "diff" | "image";
@@ -752,6 +779,12 @@ interface AppState {
   /** Whether the app auto-checks for updates on startup (default true). */
   autoCheckUpdate: boolean;
 
+  // Developer tool: CI build status for the current version (GitHub Actions).
+  /** Latest polled CI status; `null` before the first poll. */
+  ciStatus: CiStatus | null;
+  /** True while a `ci_status` request is in flight. */
+  ciPolling: boolean;
+
   // Actions
   addAgent: (info: AgentInfo, channel: Channel<number[]> | null, createdAtTs?: number) => void;
   removeAgent: (id: string) => void;
@@ -882,6 +915,8 @@ interface AppState {
   setAutoCheckUpdate: (enabled: boolean) => void;
   /** Persist the completion-chime toggle (Settings → 外观与显示). */
   setSoundEnabled: (enabled: boolean) => void;
+  /** Poll the current version's CI build status (developer tool). */
+  pollCiStatus: () => void;
 }
 
 /** Persisted preference: has the user completed first-run onboarding? */
@@ -1114,6 +1149,8 @@ export const useStore = create<AppState>((set, get) => {
   updateInstallable: false,
   updateNotifiedVersion: null,
   autoCheckUpdate: true,
+  ciStatus: null,
+  ciPolling: false,
 
   addAgent: (info, channel, createdAtTs) =>
     set((s) => {
@@ -1883,6 +1920,16 @@ export const useStore = create<AppState>((set, get) => {
       key: "sound_enabled",
       value: enabled ? "true" : "false",
     }).catch(() => {});
+  },
+
+  pollCiStatus: () => {
+    const s = useStore.getState();
+    if (s.ciPolling) return;
+    set({ ciPolling: true });
+    invoke<CiStatus>("ci_status")
+      .then((status) => set({ ciStatus: status }))
+      .catch((e) => set({ ciStatus: { tag: "", run: null, error: String(e) } }))
+      .finally(() => set({ ciPolling: false }));
   },
 
   // ── Todo tags ─────────────────────────────────────────────────
