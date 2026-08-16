@@ -19,8 +19,10 @@ use std::collections::HashMap;
 use std::io;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
+// std::os::windows::net::{UnixStream,UnixListener} are unstable (E0658,
+// `windows_unix_domain_sockets`), so use the std-compatible uds_windows crate.
 #[cfg(windows)]
-use std::os::windows::net::UnixStream;
+use uds_windows::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
