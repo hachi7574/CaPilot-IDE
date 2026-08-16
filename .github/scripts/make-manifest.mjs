@@ -38,7 +38,9 @@ try {
   console.error(`make-manifest: gh release view failed: ${e.message}`);
   process.exit(1);
 }
-const assetUrl = new Map(info.assets.map((a) => [a.name, a.browser_download_url]));
+// `gh release view --json assets` renamed `browser_download_url` → `url` in
+// newer gh versions; accept both so the script works on any runner.
+const assetUrl = new Map(info.assets.map((a) => [a.name, a.browser_download_url ?? a.url]));
 
 // Notes: the GitHub release body, falling back to the tag's commit body/subject
 // (handy when the release was created by the workflow with no body).
