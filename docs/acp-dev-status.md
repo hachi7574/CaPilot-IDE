@@ -1,8 +1,8 @@
 # ACP Dev Status
 
-updated_at: 2026-08-17T06:35:00+08:00
+updated_at: 2026-08-17T07:55:00+08:00
 goal_met: false
-current_phase: 2
+current_phase: 3
 phase_gate: dev_done
 owner_lock: none
 blocked_reason: ""
@@ -24,11 +24,11 @@ cwd: `/home/hachi/.paseo/worktrees/293djwjk/precious-husky`
 - [ ] **§12 验收表**（功能 F* / 显示 D* / 输入区 C*）无未豁免失败项
 - [ ] 显示：AcpSessionPanel 正确；无 PTY OpenCode 方言控件误显；Tab 状态不乱
 - [ ] 输入区：Composer 走 `acp_prompt`；无 `agent_write` 泄漏；停止/多 tab 不串台
-- [x] 双轨无损：既有 PTY `cargo test` 全绿（Phase1 复验 215+3；Phase2 复验 acp 9）
-- [ ] 安全：默认不写盘、出界读拒绝、permission 默认 ask
-- [x] `pnpm tsc --noEmit` 通过（Phase2 复验 + DEF-006 修复复验）
+- [x] 双轨无损：既有 PTY `cargo test` 全绿（Phase1 215+3；Phase2 acp 9；Phase3 acp **18**）
+- [x] 安全：默认不写盘、出界读拒绝、permission 默认 ask（代码+单测；OpenCode 进程内工具仍受 OS 用户边界）
+- [x] `pnpm tsc --noEmit` 通过
 - [ ] 文档：附录 A（OpenCode 摸底 + 验收记录）；ai-runtime-references / RUNBOOK 有链接
-- [ ] （延伸）第二个 ACP agent 仅加 descriptor 可冒烟
+- [ ] （延伸）第二个 ACP agent 仅加 descriptor 可冒烟（Picker 已动态列 transport=acp）
 
 ## Phase checklist
 ### Phase 0 — OpenCode ACP 协议摸底
@@ -38,21 +38,16 @@ cwd: `/home/hachi/.paseo/worktrees/293djwjk/precious-husky`
 - [x] **Test 2026-08-17T04:55：** commit `145072f9a` → `test_passed`；DEF-001/002 closed
 
 ### Phase 2 — 前端面板 + 输入区 MVP
-- [x] runtimeTransport + store/actions（`acpSessions` / `applyAcpEvent` / `markAcpLive`）
-- [x] AcpSessionPanel + ContentArea（`isAcpRuntime`）
-- [x] Composer ACP 控件集 + cancel；隐藏 PTY OpenCode 方言
-- [x] `acp://event` 全局订阅按 agentId
-- [x] tsc 绿 / cargo acp 9
-- [x] **F1 主路径可 spawn `acp:opencode`** ← DEF-006 fixed（TerminalTemplatePicker 动态 ACP 段）
-- [x] DEF-007 Host prompt 开始 emit `status:running`
-- [x] 侧栏 switch 列表过滤 ACP（不走 `agent_switch_runtime`）
-- [ ] **Test 复测中** — commit 见 Last handoff
+- [x] **Test 2026-08-17T06:50：** → `test_passed`；DEF-006/007 closed
 
 ### Phase 3 — 权限与安全
-- [ ] permission 闭环 + 卡 UI（面板已有 MVP 卡；Host 策略/沙箱 Phase3）
-- [ ] OpenCode 真工具触发 F5–F9
-- [ ] fs/read 沙箱
-- [ ] security-review 补丁段落
+- [x] permission Host 策略闭环（ask 默认；emit PermissionRequest；`acp_respond_permission` allow/reject；status waiting→running）
+- [x] fs/read 出界沙箱（`fs_sandbox` + Host `fs/read_text_file` / write 硬拒）
+- [x] mock 加固 DEF-005（单调 agent req id；allow/reject 集成测）
+- [x] security-review §6 ACP 威胁面补丁
+- [x] OpenCode ACP bootstrap 真机冒烟（initialize+session/new，无付费 prompt）
+- [ ] **F5–F9 UI 真机点验** — Wayland 受限；代码路径 + mock 集成测覆盖；OpenCode 进程内工具可能不回调 client permission（Phase0 已知）
+- [ ] **Test 复测中**
 
 ### Phase 4 — 产品化
 - [ ] Settings CRUD / resume（若能力允许）/ usage
@@ -62,46 +57,48 @@ cwd: `/home/hachi/.paseo/worktrees/293djwjk/precious-husky`
 ## §12 验收勾选（实现时维护）
 ### 功能 F1–F15
 - [x] Host 层 spawn/prompt/cancel/kill（Phase1）
-- [x] **F1 代码路径** — Picker 动态 ACP → `spawnAgent(proj,"acp:…")`（待 Test UI 实跑）
-- [x] F2–F4/F10/F13 **代码路径**（send/cancel/panel/tab isolation）；**UI 实跑**待复测
-- [x] F14 后端拒 `agent_write`（Phase1）
+- [x] F1 代码路径 PASS（Phase2）
+- [x] F2–F4/F10/F13/F14 **代码路径** PASS
+- [x] F5–F8 **mock 集成路径** PASS（permission allow/reject + tool status；fs read）
+- [ ] F5–F9 **OpenCode 真 UI** — 待 Test/手工；Host 已具备
 ### 显示 D1–D15
-- [x] D1/D14/D15 **代码路径** PASS；UI 实跑待复测
+- [x] D1/D14/D15 **代码路径** PASS
 ### 输入区 C1–C15
-- [x] C1–C6 **代码路径** PASS（acp_prompt/cancel；方言隐藏；perm 只持久化）；UI 实跑待复测
+- [x] C1–C6 **代码路径** PASS
 
 ## Open defects（Test 写入，Dev 认领）
-| id | phase | severity | title | repro | status |
-| --- | --- | --- | --- | --- | --- |
-| DEF-006 | 2 | **blocker** | 无主 UX spawn `acp:opencode` | 项目+无 ACP | **fixed**（待 Test 确认） |
-| DEF-007 | 2 | minor | Host prompt 开始不 emit running | host status emit | **fixed**（待 Test 确认） |
-| DEF-001 | 1 | major | get_adapter / is_acp 分叉 | — | **closed** |
-| DEF-002 | 0/1 | blocker | cancel notification | — | **closed** |
-| DEF-005 | 0/1 | major | mock permission 不稳 | Phase3 | **partial** |
-| DEF-003/004 | 0 | — | — | — | closed |
+| id | phase | severity | title | status |
+| --- | --- | --- | --- | --- |
+| DEF-006 | 2 | blocker | 无主 UX spawn acp:opencode | **closed** |
+| DEF-007 | 2 | minor | Host prompt 不 emit running | **closed** |
+| DEF-001 | 1 | major | is_acp 分叉 | **closed** |
+| DEF-002 | 0/1 | blocker | cancel notification | **closed** |
+| DEF-005 | 0/1 | major | mock permission 不稳 | **closed**（单调 req id + allow/reject 测绿） |
+| DEF-003/004 | 0 | — | — | closed |
 
 ## Human notes
-- 工作区保留 `ui/components/layout/LeftSidebar.tsx` 用户改动，禁止覆盖。本轮仅在 staged 副本上加 ACP switch 过滤；工作区仍保留用户脏改。
-- 设计基线：`docs/acp-runtime-plan.md`。验证锚点 **OpenCode ACP**（`opencode acp` → `acp:opencode`）。
-- PTY `runtime: "opencode"` 与 `acp:opencode` **不得混用**。
+- 工作区保留 `ui/components/layout/LeftSidebar.tsx` 用户改动；本 phase **未改** LeftSidebar。
+- 设计基线：`docs/acp-runtime-plan.md`。锚点 **acp:opencode**。
+- PTY `opencode` 与 `acp:opencode` 不得混用。
 - **Dev↔Test 主路径直连 send**；Watcher 每 20m 救援/推进 phase。
-- Test **按实际 diff 自定多角度计划**，不照抄文档清单。
-- Wayland：UI 自动化受限；本轮以代码走读+CLI 回归为主。
+- Wayland：UI 自动化受限；Phase3 以代码走读+mock 集成+OpenCode bootstrap 为准。
+- OpenCode 可能在 agent 进程内跑工具而不调 client `fs/*` / `request_permission`（Phase0）；Host 策略在 agent **确实**回调时生效。
 
 ## Last handoff（中文）
-- **06:35 Dev → Test：** DEF-006/007 已修，`phase_gate=dev_done`，请复测 Phase 2。
-- **commit：** 见 git log（`fix(acp): phase 2 — DEF-006 primary spawn UX + DEF-007 running status`）。
-- **改动要点：**
-  1. `TerminalTemplatePicker`：从 `runtimes` 动态列出 `transport==="acp"` / `acp:*` 且 available → `spawnTerminal` → `spawnAgent(proj, "acp:opencode")`；独立「ACP Agents」分区。
-  2. `TermTemplate.runtime` 放宽为 `string`；`runtimeIcon('acp:opencode')→opencode`。
-  3. 侧栏 switch 列表 **过滤 ACP**（不调用 `agent_switch_runtime`）；用户 LeftSidebar 其它脏改未提交。
-  4. `AcpBridge::prompt` 开始 emit `Status{running}`，失败回 `idle`（DEF-007）。
-- **验证：** `pnpm tsc --noEmit` 0；`cargo test acp` 9 passed。
-- **请 Test：** 代码走读 F1 主路径 + 回归 panel/composer；确认 DEF-006/007 closed 或重开。
+- **07:55 Dev → Test：** Phase 3 实现完成，`phase_gate=dev_done`。请复测。
+- **交付：**
+  1. `acp/fs_sandbox.rs` — 绝对路径 + canonicalize 落在 session cwd；symlink 逃逸拒；写盘禁用；2MiB 帽；单测 6。
+  2. `host.rs` — `fs/read_text_file` 沙箱应答；`fs/write_text_file` 硬拒；未知 agent 请求 `-32601`；permission 仍 ask-only。
+  3. `bridge.rs` — respond_permission 后 emit `status:running`；集成测 permission allow/reject + fs in/out。
+  4. `mock_acp_agent.py` — 单调 req id；`fsread:<path>`；permission outcome 映射 tool status。
+  5. `docs/security-review.md` §6 ACP 威胁面。
+- **自测：** `cargo test acp` → **18 passed**；`pnpm tsc --noEmit` 0；OpenCode `initialize+session/new` bootstrap OK。
+- **请 Test：** 按 diff 自定多角度（permission 状态机、fs 出界、mock 回归、前端卡仍接 `acp_respond_permission`）；OpenCode 真工具 F5–F9 若无法 UI 点验可标豁免/代码路径。
+- **勿推进 Phase 4** 除非你判 Phase 3 test_passed。
 
 ## Agent heartbeats
 | agent | last_seen | state | note |
 | --- | --- | --- | --- |
-| dev | 2026-08-17T06:35 | idle | ad172813；DEF-006/007 修完 dev_done，已直连 Test |
-| test | 2026-08-17T06:05 | idle | d62ccd50；待复测 |
-| watcher | 2026-08-17T06:10 | idle | ed60735f |
+| dev | 2026-08-17T07:55 | idle | ad172813；Phase3 dev_done，已直连 Test |
+| test | 2026-08-17T06:50 | idle | d62ccd50；待 Phase3 复测 |
+| watcher | 2026-08-17T07:00 | idle | ed60735f；已 +phase→3 |

@@ -5,6 +5,7 @@
 
 use super::descriptor::AcpAgentDescriptor;
 use super::events::{AcpEvent, AcpEventSink};
+use super::fs_sandbox::{self, FsSandboxError};
 use super::permission::{PermissionBoard, PermissionOutcome, PendingPermission};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -476,6 +477,7 @@ fn io_loop(
         &next_id,
         &init_rx,
         Duration::from_secs(20),
+        &cwd,
     );
     let init_val = match init_result {
         Ok(v) => v,
@@ -548,6 +550,7 @@ fn io_loop(
         &next_id,
         &sess_rx,
         Duration::from_secs(20),
+        &cwd,
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -607,6 +610,7 @@ fn io_loop(
                         &permissions,
                         &status,
                         &mut stdin,
+                        &cwd,
                     ) {
                         log::warn!("acp handle_line: {e}");
                     }
@@ -702,6 +706,7 @@ fn pump_until(
     _next_id: &AtomicU64,
     reply_rx: &Receiver<Result<Value, AcpHostError>>,
     timeout: Duration,
+    cwd: &Path,
 ) -> Result<Value, AcpHostError> {
     let start = std::time::Instant::now();
     loop {
@@ -741,6 +746,7 @@ fn pump_until(
                     permissions,
                     status,
                     stdin,
+                    cwd,
                 )?;
                 if let Ok(r) = reply_rx.try_recv() {
                     return r;
@@ -766,7 +772,8 @@ fn handle_line(
     sink: &Arc<dyn AcpEventSink>,
     permissions: &PermissionBoard,
     status: &Arc<Mutex<AcpSessionStatus>>,
-    _stdin: &mut ChildStdin,
+    stdin: &mut ChildStdin,
+    cwd: &Path,
 ) -> Result<(), AcpHostError> {
     let line = line.trim();
     if line.is_empty() {
@@ -826,6 +833,8 @@ fn handle_line(
             dispatch_update(agent_id, &params, sink);
         }
         "session/request_permission" => {
+            // MVP policy = ask: never auto-allow; surface to UI and wait for
+            // acp_respond_permission (HostCmd::Respond).
             let req_id = msg
                 .get("id")
                 .map(rpc_id_key)
@@ -838,6 +847,7 @@ fn handle_line(
             let title = tool
                 .get("title")
                 .and_then(|v| v.as_str())
+                .or_else(|| params.get("title").and_then(|v| v.as_str()))
                 .unwrap_or("Permission required")
                 .to_string();
             permissions.insert(PendingPermission {
@@ -866,24 +876,111 @@ fn handle_line(
             );
         }
         "fs/read_text_file" => {
-            // Phase 3: full sandbox. MVP: reject with error if we get a request.
-            if let Some(id) = msg.get("id") {
-                // Leave actual response to Phase 3 host path; for now error.
-                // We can't easily write here without restructuring — bridge will
-                // grow fs handlers. Log and ignore (agent may hang) — Phase 3.
-                log::warn!(
-                    "acp fs/read_text_file not implemented in MVP (id={id}); Phase 3"
-                );
-            }
+            respond_fs_read(stdin, &msg, cwd)?;
+        }
+        "fs/write_text_file" => {
+            respond_fs_write(stdin, &msg)?;
         }
         "" => {
             // stray response already handled
         }
         other => {
-            log::debug!("acp ignoring method {other}");
+            // Unknown agent→client request with id: reject so the agent does not hang.
+            if let Some(id) = msg.get("id") {
+                if !method.is_empty() {
+                    let resp = json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": -32601,
+                            "message": format!("Method not found: {other}")
+                        }
+                    });
+                    write_line(stdin, &resp)?;
+                }
+            } else {
+                log::debug!("acp ignoring method {other}");
+            }
         }
     }
     Ok(())
+}
+
+/// Handle agent→client `fs/read_text_file` under session cwd sandbox.
+fn respond_fs_read(
+    stdin: &mut ChildStdin,
+    msg: &Value,
+    cwd: &Path,
+) -> Result<(), AcpHostError> {
+    let id = match msg.get("id") {
+        Some(id) => id.clone(),
+        None => return Ok(()), // notification — ignore
+    };
+    let params = msg.get("params").cloned().unwrap_or(Value::Null);
+    let path = params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let line = params
+        .get("line")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+
+    if cwd.as_os_str().is_empty() {
+        let resp = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -32000, "message": "fs/read_text_file: session cwd not ready" }
+        });
+        return write_line(stdin, &resp);
+    }
+
+    match fs_sandbox::read_text_file(cwd, path, line, limit) {
+        Ok(content) => {
+            let resp = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "content": content }
+            });
+            write_line(stdin, &resp)
+        }
+        Err(e) => {
+            let code = match &e {
+                FsSandboxError::OutsideRoot(_) | FsSandboxError::NotAbsolute(_) => -32001,
+                FsSandboxError::NotFound(_) => -32002,
+                FsSandboxError::WriteDisabled => -32003,
+                FsSandboxError::TooLarge(_) => -32004,
+                _ => -32000,
+            };
+            let resp = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": code, "message": e.to_string() }
+            });
+            write_line(stdin, &resp)
+        }
+    }
+}
+
+/// MVP: always reject writes (clientCapabilities.writeTextFile=false, belt+suspenders).
+fn respond_fs_write(stdin: &mut ChildStdin, msg: &Value) -> Result<(), AcpHostError> {
+    let id = match msg.get("id") {
+        Some(id) => id.clone(),
+        None => return Ok(()),
+    };
+    let resp = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": -32003,
+            "message": FsSandboxError::WriteDisabled.to_string()
+        }
+    });
+    write_line(stdin, &resp)
 }
 
 fn dispatch_update(agent_id: &str, params: &Value, sink: &Arc<dyn AcpEventSink>) {

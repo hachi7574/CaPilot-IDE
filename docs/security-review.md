@@ -124,3 +124,30 @@ scoping:
    length/schema checks for `agent_spawn`; restrict `git_*` repos to known
    workspace roots.
 8. Keep `dangerousDisableAssetCspModification` unset (CSP stays enforced on assets).
+
+---
+
+## 6. ACP transport threat surface (Phase 3, 2026-08-17)
+
+Dual-track Agent Client Protocol sessions (`runtime` id `acp:<name>`, e.g. `acp:opencode`)
+do **not** use portable-pty. They spawn an ordinary child process and speak JSON-RPC 2.0
+NDJSON on stdio. New IPC / host surfaces:
+
+| Surface | Risk | Mitigation (implemented) |
+| --- | --- | --- |
+| `acp_prompt` / `acp_cancel` / `acp_respond_permission` | Medium — drive agent turns and permission outcomes | Same trust model as other app commands (bundled FE trusted). Backend rejects `agent_write` / resize on ACP ids. Cancel is a **notification** (no JSON-RPC `id`) per OpenCode. |
+| Agent→client `session/request_permission` | High if auto-allowed | **Default ask:** Host never auto-allows; emits `PermissionRequest` UI event; turn waits until `acp_respond_permission` (`allow` / `reject` / `cancelled`). auto/yolo deferred. |
+| Agent→client `fs/read_text_file` | High (path escape) | `fs_sandbox::resolve_under_root`: absolute path required; `canonicalize` + must stay under session `cwd`; symlink escape rejected; 2 MiB size cap; optional line/limit slice. Out-of-root → JSON-RPC error `-32001`. |
+| Agent→client `fs/write_text_file` | Critical if enabled | **Disabled:** `clientCapabilities.fs.writeTextFile=false` at `initialize`; Host still answers any write request with error `-32003` (`WriteDisabled`). |
+| `terminal/*` | Critical | Not advertised (`terminal: false`); unknown agent→client methods with `id` get `-32601`. |
+| Child env / config pollution | Medium | ACP spawn does **not** inject `OPENCODE_TUI_CONFIG` / status-plugin dirs; descriptor env is explicit only. |
+| PTY / ACP mix-up | Medium (UX + security confusion) | Runtime ids `acp:*` forked **before** `get_adapter`; UI `isAcpRuntime`; Composer must not `agent_write` on ACP tabs. |
+
+### Tests covering sandbox / permission
+- Unit: `agent_runtime::acp::fs_sandbox::*` (relative reject, outside reject, symlink escape, write disabled, line slice).
+- Integration (mock agent): permission allow/reject roundtrip; `fsread:<path>` under cwd OK / outside denied.
+
+### Residual / follow-ups
+- OpenCode may execute tools **inside the agent process** without client `fs/*` or `request_permission` (observed in Phase 0 probe). Host policy still applies when the agent *does* call client methods; in-process agent tools are bounded by the OS user of the CaPilot process (same as PTY CLIs).
+- auto/yolo permission modes not implemented — keep ask until product policy is reviewed.
+- Consider per-session audit log of permission outcomes and fs denials.

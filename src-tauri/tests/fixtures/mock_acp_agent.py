@@ -34,6 +34,7 @@ def notify_update(session_id: str, update: dict[str, Any]) -> None:
 
 def main() -> None:
     session_id = "sess_mock_1"
+    next_agent_req = 9000
     while True:
         msg = recv()
         if msg is None:
@@ -93,6 +94,8 @@ def main() -> None:
             for block in params.get("prompt") or []:
                 if block.get("type") == "text":
                     text += block.get("text") or ""
+            lower = text.lower()
+
             # stream two chunks
             notify_update(
                 session_id,
@@ -110,11 +113,61 @@ def main() -> None:
                     "content": {"type": "text", "text": text[:200] or "ok"},
                 },
             )
-            if "permission" in text.lower():
-                # ask client for permission (request)
-                # Use a nested request id via separate channel - agent sends request
-                # For mock: send request with id 9000+ 
-                req_id = 9000 + (mid or 0)
+
+            # Optional: agent→client fs/read_text_file (host must sandbox).
+            # Prompt containing "fsread:<abs-path>" triggers a client fs read.
+            if "fsread:" in lower:
+                idx = lower.index("fsread:")
+                raw_path = text[idx + len("fsread:") :].strip().split()[0]
+                next_agent_req += 1
+                req_id = next_agent_req
+                send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "method": "fs/read_text_file",
+                        "params": {"path": raw_path},
+                    }
+                )
+                fs_content = ""
+                fs_err = None
+                while True:
+                    resp = recv()
+                    if resp is None:
+                        break
+                    if resp.get("id") == req_id:
+                        if "error" in resp:
+                            fs_err = resp["error"].get("message", "fs error")
+                        else:
+                            fs_content = (resp.get("result") or {}).get("content") or ""
+                        break
+                if fs_err:
+                    notify_update(
+                        session_id,
+                        {
+                            "sessionUpdate": "agent_message_chunk",
+                            "messageId": "msg_fs",
+                            "content": {"type": "text", "text": f"fs_err:{fs_err}"},
+                        },
+                    )
+                else:
+                    notify_update(
+                        session_id,
+                        {
+                            "sessionUpdate": "agent_message_chunk",
+                            "messageId": "msg_fs",
+                            "content": {
+                                "type": "text",
+                                "text": f"fs_ok:{fs_content[:80]}",
+                            },
+                        },
+                    )
+
+            if "permission" in lower:
+                # ask client for permission (request). Monotonic agent-side ids
+                # so concurrent/repeated prompts do not collide (DEF-005).
+                next_agent_req += 1
+                req_id = next_agent_req
                 send(
                     {
                         "jsonrpc": "2.0",
@@ -129,30 +182,46 @@ def main() -> None:
                                 "status": "pending",
                             },
                             "options": [
-                                {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
-                                {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"},
+                                {
+                                    "optionId": "allow-once",
+                                    "name": "Allow once",
+                                    "kind": "allow_once",
+                                },
+                                {
+                                    "optionId": "reject-once",
+                                    "name": "Reject",
+                                    "kind": "reject_once",
+                                },
                             ],
                         },
                     }
                 )
-                # wait for response
+                outcome = "cancelled"
                 while True:
                     resp = recv()
                     if resp is None:
                         break
                     if resp.get("id") == req_id:
+                        result = resp.get("result") or {}
+                        oc = (result.get("outcome") or {}).get("outcome")
+                        if oc == "selected":
+                            oid = (result.get("outcome") or {}).get("optionId") or ""
+                            outcome = "allowed" if "allow" in oid else "rejected"
+                        else:
+                            outcome = "cancelled"
                         break
-                    # ignore other
+                status = "completed" if outcome == "allowed" else "failed"
                 notify_update(
                     session_id,
                     {
                         "sessionUpdate": "tool_call",
                         "toolCallId": "call_mock_1",
-                        "title": "Mock dangerous tool",
+                        "title": f"Mock dangerous tool ({outcome})",
                         "kind": "execute",
-                        "status": "completed",
+                        "status": status,
                     },
                 )
+
             notify_update(
                 session_id,
                 {"sessionUpdate": "usage_update", "used": 100, "size": 100000},
@@ -179,7 +248,6 @@ def main() -> None:
                         },
                     }
                 )
-            # else: notification — no response (and no in-flight prompt to cancel in simple mock)
         elif method == "authenticate":
             send({"jsonrpc": "2.0", "id": mid, "result": {}})
         else:
@@ -188,7 +256,10 @@ def main() -> None:
                     {
                         "jsonrpc": "2.0",
                         "id": mid,
-                        "error": {"code": -32601, "message": f"Method not found: {method}"},
+                        "error": {
+                            "code": -32601,
+                            "message": f"Method not found: {method}",
+                        },
                     }
                 )
 

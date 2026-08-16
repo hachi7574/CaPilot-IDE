@@ -7,6 +7,7 @@
 pub mod bridge;
 pub mod descriptor;
 pub mod events;
+pub mod fs_sandbox;
 pub mod host;
 pub mod permission;
 pub mod registry;

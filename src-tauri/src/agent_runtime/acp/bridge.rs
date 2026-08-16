@@ -240,7 +240,15 @@ impl AcpBridge {
     ) -> Result<(), AcpHostError> {
         // Drop from board (best-effort).
         let _ = self.permissions.take(id, request_id);
-        self.handle(id)?.respond_permission(request_id, outcome)
+        self.handle(id)?.respond_permission(request_id, outcome)?;
+        // Resume turn UX: leave waiting_input → running until turn_done.
+        self.sink().emit(
+            id,
+            AcpEvent::Status {
+                status: "running".into(),
+            },
+        );
+        Ok(())
     }
 
     pub fn kill(&self, id: &str) -> Result<(), AcpHostError> {
@@ -417,5 +425,198 @@ mod tests {
         bridge.kill("br-1").expect("kill");
         assert!(!bridge.contains("br-1"));
         let _ = info;
+    }
+
+    #[test]
+    fn permission_request_allow_roundtrip() {
+        use crate::agent_runtime::acp::permission::PermissionOutcome;
+        let sink = Arc::new(VecEventSink::default());
+        let perms = PermissionBoard::new();
+        let cwd = std::env::temp_dir();
+        let handle = Arc::new(
+            host::start_session(
+                "test-perm-allow",
+                "acp:mock",
+                &mock_descriptor(),
+                &cwd,
+                None,
+                sink.clone() as Arc<dyn AcpEventSink>,
+                perms,
+            )
+            .expect("start"),
+        );
+
+        let h2 = Arc::clone(&handle);
+        let s2 = sink.clone();
+        let joiner = std::thread::spawn(move || {
+            // Wait for permission event, then allow.
+            let ev = s2.wait_for(
+                |e| matches!(e, AcpEvent::PermissionRequest { .. }),
+                Duration::from_secs(5),
+            );
+            assert!(ev.is_some(), "expected PermissionRequest event");
+            if let Some(AcpEvent::PermissionRequest { request_id, .. }) = ev {
+                h2.respond_permission(
+                    &request_id,
+                    PermissionOutcome::Allow {
+                        option_id: "allow-once".into(),
+                    },
+                )
+                .expect("respond allow");
+            }
+        });
+
+        let stop = handle
+            .prompt("please need permission now", Duration::from_secs(10))
+            .expect("prompt");
+        assert_eq!(stop, "end_turn");
+        joiner.join().expect("joiner");
+
+        let events = sink.snapshot();
+        assert!(
+            events
+                .iter()
+                .any(|(_, e)| matches!(e, AcpEvent::PermissionRequest { .. })),
+            "permission event missing: {events:?}"
+        );
+        assert!(
+            events.iter().any(|(_, e)| matches!(
+                e,
+                AcpEvent::ToolCall { status, .. } if status == "completed"
+            )),
+            "expected completed tool after allow: {events:?}"
+        );
+        handle.kill().ok();
+    }
+
+    #[test]
+    fn permission_request_reject_roundtrip() {
+        use crate::agent_runtime::acp::permission::PermissionOutcome;
+        let sink = Arc::new(VecEventSink::default());
+        let perms = PermissionBoard::new();
+        let cwd = std::env::temp_dir();
+        let handle = Arc::new(
+            host::start_session(
+                "test-perm-reject",
+                "acp:mock",
+                &mock_descriptor(),
+                &cwd,
+                None,
+                sink.clone() as Arc<dyn AcpEventSink>,
+                perms,
+            )
+            .expect("start"),
+        );
+
+        let h2 = Arc::clone(&handle);
+        let s2 = sink.clone();
+        let joiner = std::thread::spawn(move || {
+            let ev = s2.wait_for(
+                |e| matches!(e, AcpEvent::PermissionRequest { .. }),
+                Duration::from_secs(5),
+            );
+            assert!(ev.is_some(), "expected PermissionRequest");
+            if let Some(AcpEvent::PermissionRequest { request_id, .. }) = ev {
+                h2.respond_permission(
+                    &request_id,
+                    PermissionOutcome::Reject {
+                        option_id: Some("reject-once".into()),
+                    },
+                )
+                .expect("respond reject");
+            }
+        });
+
+        let stop = handle
+            .prompt("permission please reject", Duration::from_secs(10))
+            .expect("prompt");
+        assert_eq!(stop, "end_turn");
+        joiner.join().expect("joiner");
+
+        let events = sink.snapshot();
+        assert!(
+            events.iter().any(|(_, e)| matches!(
+                e,
+                AcpEvent::ToolCall { status, .. } if status == "failed"
+            )),
+            "expected failed tool after reject: {events:?}"
+        );
+        handle.kill().ok();
+    }
+
+    #[test]
+    fn fs_read_under_cwd_ok_and_outside_denied() {
+        let sink = Arc::new(VecEventSink::default());
+        let perms = PermissionBoard::new();
+        // Dedicated root so outside path is unambiguous.
+        let root = std::env::temp_dir().join(format!(
+            "acp-fs-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let inside = root.join("note.txt");
+        std::fs::write(&inside, "sandbox-ok").unwrap();
+        let outside = std::env::temp_dir().join(format!(
+            "acp-fs-out-{}",
+            std::process::id()
+        ));
+        std::fs::write(&outside, "secret").unwrap();
+
+        let handle = host::start_session(
+            "test-fs",
+            "acp:mock",
+            &mock_descriptor(),
+            &root,
+            None,
+            sink.clone() as Arc<dyn AcpEventSink>,
+            perms,
+        )
+        .expect("start");
+
+        let inside_s = inside.to_string_lossy().to_string();
+        let stop = handle
+            .prompt(&format!("fsread:{inside_s}"), Duration::from_secs(10))
+            .expect("prompt inside");
+        assert_eq!(stop, "end_turn");
+
+        let events = sink.snapshot();
+        let chunks: Vec<_> = events
+            .iter()
+            .filter_map(|(_, e)| match e {
+                AcpEvent::MessageChunk { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            chunks.iter().any(|t| t.contains("fs_ok:") && t.contains("sandbox-ok")),
+            "expected fs_ok with content, got {chunks:?}"
+        );
+
+        // Outside path must be denied by sandbox.
+        let outside_s = outside.to_string_lossy().to_string();
+        let stop2 = handle
+            .prompt(&format!("fsread:{outside_s}"), Duration::from_secs(10))
+            .expect("prompt outside");
+        assert_eq!(stop2, "end_turn");
+        let events2 = sink.snapshot();
+        let chunks2: Vec<_> = events2
+            .iter()
+            .filter_map(|(_, e)| match e {
+                AcpEvent::MessageChunk { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            chunks2.iter().any(|t| t.contains("fs_err:") && t.contains("escapes")),
+            "expected fs_err escapes, got {chunks2:?}"
+        );
+
+        handle.kill().ok();
+        let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
