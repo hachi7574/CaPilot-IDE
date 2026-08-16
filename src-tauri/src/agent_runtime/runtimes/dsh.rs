@@ -25,11 +25,12 @@ use std::time::{Duration, SystemTime};
 /// the persisted `/model` choice), the reasoning `effort`, and the
 /// resume binding `sessionId`. dsh-tui has NO `--resume` argv parsing
 /// (verified — resume attaches via the config row's `sessionId`), so resume is
-/// driven purely by `DSH_CC_RESUME_SESSION` env (the new package keeps the
-/// legacy `DSH_CC_*` variable names), which the patch's `!!js` expression
-/// reads. Permission mode likewise has no argv seam — the bundle patch
-/// (`cordis.patch.yml`) reads `DSH_PERMISSION_MODE` env — so the adapter maps
-/// CaPilot modes to that env instead of args.
+/// driven purely by env: the 0.7.2 rename made `DSH_TUI_RESUME_SESSION` the
+/// canonical name while the legacy `DSH_CC_` spelling is still read, and the
+/// patch's `!!js` expression binds to `DSH_TUI_ ?? DSH_CC_`. Permission mode
+/// likewise has no argv seam — the bundle patch (`cordis.patch.yml`) reads
+/// `DSH_PERMISSION_MODE` env — so the adapter maps CaPilot modes to that env
+/// instead of args.
 pub struct DshAdapter;
 
 /// Result of one pass over a dsh session log: the last request's context
@@ -102,6 +103,22 @@ impl DshAdapter {
     /// `dsh plugin --profile dsh-tui add @deepseek-harness-tui/dsh-tui`.
     fn dsh_tui_profile_dir() -> Option<PathBuf> {
         Self::dsh_home().map(|home| home.join("profiles").join("dsh-tui"))
+    }
+
+    /// The dsh-tui preferences/data dir (`~/.dsh-tui`). 0.7.2 renamed this
+    /// from `~/.dsh-cc`: on first launch the TUI copies the legacy dir over
+    /// and afterwards only reads/writes the new one (the one exception —
+    /// `resume.txt` — is dual-written for old launchers). CaPilot reads the
+    /// new location first and falls back to the legacy one so pre-migration
+    /// state (effort preference) still applies.
+    fn data_dir() -> Option<PathBuf> {
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".dsh-tui"))
+    }
+
+    /// The pre-rename data dir (`~/.dsh-cc`), still consulted by CaPilot as a
+    /// fallback until a 0.7.2 dsh session has migrated it.
+    fn legacy_data_dir() -> Option<PathBuf> {
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".dsh-cc"))
     }
 
     /// DeepSeek's project-directory key for a cwd (mirrors
@@ -362,8 +379,8 @@ impl DshAdapter {
     /// `REASONING_EFFORTS`). The composer now persists those ids directly for
     /// dsh sessions. Legacy CaPilot speed ids (`fast`/`mid`/`high`) are still
     /// accepted so sessions created before the rename keep working. `auto` and
-    /// unknown tiers omit the key so the profile / `~/.dsh-cc/effort.json`
-    /// default applies.
+    /// unknown tiers omit the key so the profile / preference-dir
+    /// `effort.json` (0.7.2: `~/.dsh-tui`, legacy `~/.dsh-cc`) default applies.
     fn effort_for_speed(speed: &str) -> Option<&'static str> {
         match speed {
             // Native dsh effort ids (current).
@@ -398,29 +415,37 @@ impl DshAdapter {
     }
 
     /// The TUI's default reasoning effort for an un-pinned (`auto`) session.
-    /// dsh boots with `state.reasoningEffort = options.effort ?? readEffortPref()`,
-    /// where `readEffortPref` reads `~/.dsh-cc/effort.json`; a missing/invalid
-    /// file falls back to the connection default (`deepseek-official` → `high`).
+    /// dsh boots with `state.reasoningEffort = options.effort ?? readEffortPref()`
+    /// (dsh-tui `readEffortPref`), where `readEffortPref` reads the preference
+    /// dir's `effort.json`; a missing/invalid file falls back to the
+    /// connection default (`deepseek-official` → `high`). The preference dir
+    /// was renamed `~/.dsh-cc` → `~/.dsh-tui` in dsh-tui 0.7.2, so the new
+    /// path is read first, then the legacy one for pre-migration state.
     /// The composer's Shift+Tab cycle math assumes this position, so it is
     /// surfaced here both for the `auto` option's description and so the two
     /// stay in sync.
     fn dsh_default_effort() -> &'static str {
-        let Some(home) = std::env::var_os("HOME") else {
-            return "high";
-        };
-        let path = PathBuf::from(home).join(".dsh-cc").join("effort.json");
-        let Ok(content) = std::fs::read_to_string(path) else {
-            return "high";
-        };
-        let parsed = serde_json::from_str::<Value>(&content).ok();
-        let effort = parsed
-            .as_ref()
-            .and_then(|v| v.get("effort").and_then(Value::as_str));
-        match effort {
-            Some("off") => "off",
-            Some("max") => "max",
-            _ => "high",
+        for dir in [Self::data_dir(), Self::legacy_data_dir()] {
+            let Some(dir) = dir else {
+                continue;
+            };
+            let path = dir.join("effort.json");
+            let Ok(content) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let parsed = serde_json::from_str::<Value>(&content).ok();
+            let effort = parsed
+                .as_ref()
+                .and_then(|v| v.get("effort").and_then(Value::as_str));
+            match effort {
+                Some("off") => return "off",
+                Some("max") => return "max",
+                // Unset / unknown value in the newest file → try the next path,
+                // finally the default below.
+                _ => continue,
+            }
         }
+        "high"
     }
 
     /// Split a CaPilot model id into `(provider, model)` for the patch overlay.
@@ -440,7 +465,7 @@ impl DshAdapter {
     /// Per-session `--patch` overlay path (`$XDG_CACHE_HOME/capilot-ide/dsh/
     /// <safe-id>.patch.yml`, `~/.cache` fallback). The overlay replaces the
     /// `dsh-tui` config row for THIS spawn only — the user's global
-    /// `~/.dsh/profiles/dsh-tui/cordis.yml` and `~/.dsh-cc/model.json` are never
+    /// `~/.dsh/profiles/dsh-tui/cordis.yml` and `~/.dsh-tui/model.json` are never
     /// touched.
     fn patch_path(agent_id: &str) -> Option<PathBuf> {
         let cache_root = std::env::var_os("XDG_CACHE_HOME")
@@ -496,7 +521,14 @@ impl DshAdapter {
         } else {
             config.push_str("    effort: off\n");
         }
-        config.push_str("    sessionId: !!js process.env.DSH_CC_RESUME_SESSION ?? undefined\n");
+        // Resume seam: dsh-tui reads the session to attach from the config row's
+        // `sessionId` binding. 0.7.2 renamed the env to DSH_TUI_ (the legacy
+        // DSH_CC_ spelling is still honored), so mirror the bundle's own
+        // `DSH_TUI_RESUME_SESSION ?? DSH_CC_RESUME_SESSION` expression — a
+        // stale `DSH_CC_`-only binding would drop resume after a future rename.
+        config.push_str(
+            "    sessionId: !!js process.env.DSH_TUI_RESUME_SESSION ?? process.env.DSH_CC_RESUME_SESSION ?? undefined\n",
+        );
         std::fs::write(&path, config)
             .map_err(|error| format!("Failed to write dsh patch: {error}"))?;
         Ok(path)
@@ -533,20 +565,27 @@ impl DshAdapter {
             })
     }
 
-    /// The launcher resume marker (`~/.dsh-cc/resume.txt`). The TUI writes it
-    /// when the USER exits via `/exit` — a convenience for manual `dsh-cc
-    /// --resume` runs, NOT the session a fresh IDE spawn creates, so it is only
-    /// a fallback.
+    /// The launcher resume marker. 0.7.2 dual-writes it to the new canonical
+    /// `~/.dsh-tui/resume.txt` AND the legacy `~/.dsh-cc/resume.txt` (old
+    /// launchers read only the legacy path), so the new path is read first,
+    /// then the legacy one. The TUI writes it when the USER exits via `/exit`
+    /// — a convenience for manual resume runs, NOT the session a fresh IDE
+    /// spawn creates, so it is only a fallback.
     fn read_resume_txt() -> Option<String> {
-        let home = std::env::var_os("HOME")?;
-        let path = PathBuf::from(home).join(".dsh-cc").join("resume.txt");
-        let content = std::fs::read_to_string(path).ok()?;
-        let trimmed = content.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
+        for dir in [Self::data_dir(), Self::legacy_data_dir()] {
+            let Some(dir) = dir else {
+                continue;
+            };
+            let path = dir.join("resume.txt");
+            let Ok(content) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let trimmed = content.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
         }
+        None
     }
 
     fn check_available() -> bool {
@@ -750,9 +789,9 @@ console.log(JSON.stringify(out));
     /// per route the same way it does for codex.
     ///
     /// `is_default` follows the machine's current un-pinned boot effort
-    /// (`~/.dsh-cc/effort.json`, falling back to `high`) so the composer's
-    /// Shift+Tab step math for `auto` lands on the same tier the TUI actually
-    /// boots with.
+    /// (`~/.dsh-tui/effort.json`, falling back to `~/.dsh-cc` and finally
+    /// `high`) so the composer's Shift+Tab step math for `auto` lands on the
+    /// same tier the TUI actually boots with.
     fn deepseek_official_efforts() -> Vec<EffortInfo> {
         let default = Self::dsh_default_effort();
         vec![
@@ -937,7 +976,8 @@ impl AgentRuntimeAdapter for DshAdapter {
         // Shift+Tab cycle and the deepseek-official adapter. The composer
         // persists these ids directly as `session.speed` for dsh (no more
         // CaPilot fast/mid/high remapping). `auto` means "don't pin" so the
-        // profile / ~/.dsh-cc/effort.json default applies.
+        // profile / preference-dir effort.json default applies (0.7.2:
+        // `~/.dsh-tui`, legacy `~/.dsh-cc`).
         let default = Self::dsh_default_effort();
         let default_label = match default {
             "off" => "Off",
@@ -949,7 +989,7 @@ impl AgentRuntimeAdapter for DshAdapter {
                 id: "auto".into(),
                 label: "Auto".into(),
                 description: format!(
-                    "使用 dsh 当前默认思考强度（{default_label}，读 ~/.dsh-cc/effort.json）"
+                    "使用 dsh 当前默认思考强度（{default_label}，读 ~/.dsh-tui/effort.json）"
                 ),
             },
             ThinkingOptionInfo {
@@ -1023,6 +1063,11 @@ impl AgentRuntimeAdapter for DshAdapter {
             ),
         ];
         if let Some(key) = &session.resume_key {
+            // 0.7.2 renamed the resume env to DSH_TUI_RESUME_SESSION; the
+            // legacy DSH_CC_ spelling is still read alongside it, so set both
+            // (the sessionId binding prefers DSH_TUI_, the old name covers any
+            // older bundle path that only looks at DSH_CC_).
+            env.push(("DSH_TUI_RESUME_SESSION".to_string(), key.clone()));
             env.push(("DSH_CC_RESUME_SESSION".to_string(), key.clone()));
         }
         Ok(env)
@@ -1191,23 +1236,28 @@ mod tests {
             let content = std::fs::read_to_string(&patch).unwrap();
             assert!(content.contains("model: deepseek-v4-flash"));
             assert!(content.contains("effort: max"));
-            // The resume seam must survive the whole-row replacement.
+            // The resume seam must survive the whole-row replacement and bind
+            // to the 0.7.2 canonical env (with the legacy name as fallback).
             assert!(
-                content.contains("sessionId: !!js process.env.DSH_CC_RESUME_SESSION ?? undefined")
+                content.contains(
+                    "sessionId: !!js process.env.DSH_TUI_RESUME_SESSION ?? process.env.DSH_CC_RESUME_SESSION ?? undefined"
+                )
             );
             // Launch env: mandatory production node + permission mapping +
-            // resume key + status hook env.
+            // resume key (new + legacy names) + status hook env.
             let env = adapter
                 .launch_env(&session("ask", Some("session-abc")))
                 .unwrap();
             let get = |name: &str| env.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
             assert_eq!(get("NODE_ENV").as_deref(), Some("production"));
             assert_eq!(get("DSH_PERMISSION_MODE").as_deref(), Some("read-only"));
+            assert_eq!(get("DSH_TUI_RESUME_SESSION").as_deref(), Some("session-abc"));
             assert_eq!(get("DSH_CC_RESUME_SESSION").as_deref(), Some("session-abc"));
             assert_eq!(get("CAPILOT_AGENT_ID").as_deref(), Some("test"));
             assert!(get("CAPILOT_STATUS_DIR").is_some());
-            // A fresh spawn (no resume key) omits the resume env.
+            // A fresh spawn (no resume key) omits both resume env names.
             let fresh_env = adapter.launch_env(&session("auto", None)).unwrap();
+            assert!(!fresh_env.iter().any(|(k, _)| k == "DSH_TUI_RESUME_SESSION"));
             assert!(!fresh_env.iter().any(|(k, _)| k == "DSH_CC_RESUME_SESSION"));
             // Cleanup removes the patch.
             DshAdapter::remove_session_patch("test");
@@ -1251,7 +1301,7 @@ mod tests {
             // pi-ai providers may declare no `reasoning` metadata for a model —
             // dsh then offers only "off" and resolveReasoningLevel throws
             // UNSUPPORTED_REASONING_EFFORT for anything else. Pin `effort: off`
-            // (valid on every route) so the machine's ~/.dsh-cc/effort.json
+            // (valid on every route) so the machine's ~/.dsh-tui/effort.json
             // (often high) can't leak in and mislabel the status line.
             let mut pi = session("auto", None);
             pi.speed = "max".into();
@@ -1496,16 +1546,25 @@ mod tests {
     #[test]
     fn dsh_default_effort_reads_effort_json_and_falls_back_to_high() {
         with_isolated_env(|| {
-            // No effort.json → the deepseek connection default (high).
+            // No effort.json anywhere → the deepseek connection default (high).
             assert_eq!(DshAdapter::dsh_default_effort(), "high");
             let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+            // Legacy pre-rename location still works until a 0.7.2 dsh session
+            // has migrated the preference dir.
             let cc_dir = home.join(".dsh-cc");
             std::fs::create_dir_all(&cc_dir).unwrap();
-            std::fs::write(cc_dir.join("effort.json"), "{\"effort\":\"max\"}").unwrap();
-            assert_eq!(DshAdapter::dsh_default_effort(), "max");
             std::fs::write(cc_dir.join("effort.json"), "{\"effort\":\"off\"}").unwrap();
             assert_eq!(DshAdapter::dsh_default_effort(), "off");
-            // Invalid JSON → fall back.
+            // The canonical 0.7.2 location wins over the legacy copy (post
+            // migration the legacy file goes stale).
+            let tui_dir = home.join(".dsh-tui");
+            std::fs::create_dir_all(&tui_dir).unwrap();
+            std::fs::write(tui_dir.join("effort.json"), "{\"effort\":\"max\"}").unwrap();
+            assert_eq!(DshAdapter::dsh_default_effort(), "max");
+            // Invalid JSON in the canonical file → fall back to the legacy dir,
+            // then to the default.
+            std::fs::write(tui_dir.join("effort.json"), "not json").unwrap();
+            assert_eq!(DshAdapter::dsh_default_effort(), "off");
             std::fs::write(cc_dir.join("effort.json"), "not json").unwrap();
             assert_eq!(DshAdapter::dsh_default_effort(), "high");
         });
@@ -1677,9 +1736,17 @@ mod tests {
             // Missing marker → None.
             assert_eq!(DshAdapter::read_resume_txt(), None);
             let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+            // Legacy pre-rename marker location still honored (0.7.2 dsh writes
+            // both, but reading the old one covers sessions launched by older
+            // dsh binaries).
             let cc_dir = home.join(".dsh-cc");
             std::fs::create_dir_all(&cc_dir).unwrap();
-            std::fs::write(cc_dir.join("resume.txt"), "  ses_marker  \n").unwrap();
+            std::fs::write(cc_dir.join("resume.txt"), "  ses_legacy  \n").unwrap();
+            assert_eq!(DshAdapter::read_resume_txt().as_deref(), Some("ses_legacy"));
+            // The canonical 0.7.2 marker wins over the legacy copy.
+            let tui_dir = home.join(".dsh-tui");
+            std::fs::create_dir_all(&tui_dir).unwrap();
+            std::fs::write(tui_dir.join("resume.txt"), "  ses_marker  \n").unwrap();
             assert_eq!(DshAdapter::read_resume_txt().as_deref(), Some("ses_marker"));
 
             // A freshly written session log under the cwd's project dir wins

@@ -3,6 +3,19 @@
 > 分支：`respond-to-greeting`（未合并到其他分支）。日期：2026-08-15。
 > 本次同时完成：① dsh-TUI 升级适配（`dsh-cc-tui` / profile `cc-tui` → `@deepseek-harness-tui/dsh-tui` 0.6.1 / profile `dsh-tui`）；② 三 个 Composer 链接终端 bug（思考强度、权限、模型列表）在新包上的修复。当前事实以 `docs/ai-runtime-references.md` §2.4 / §3 为准。
 
+---
+
+## 0. 2026-08-16 追加：dsh-tui 0.6.1 → 0.7.2
+
+**下面 §1-4 的「0.6.1 数据目录/环境变量未变」结论到 0.7.2 已过时**——本报告 §1 里「官方文档声称 DSH_TUI_* 不实」只对 0.6.1 成立，0.7.2 **真的**换了名字。本次升级（`dsh.rs` 适配 + profile 安装到 0.7.2）事实：
+
+- **数据目录** `~/.dsh-cc` → `~/.dsh-tui`（首次启动 TUI 自动 copy 迁移）：`effort.json` / `resume.txt` 主位置随之迁移。
+- **env rename 成真**：`CC_TUI_*`/`DSH_CC_*` → `DSH_TUI_*`。resume canonical 名变 `DSH_TUI_RESUME_SESSION`，但 0.7.2 `sessionId` 绑定为 `process.env.DSH_TUI_RESUME_SESSION ?? process.env.DSH_CC_RESUME_SESSION ?? undefined`（dual-read 兼容）。CaPilot `launch_env` 同时设两个，`write_patch` 的 `sessionId` 表达式同步双读。
+- **resume.txt 双写**：`~/.dsh-tui/resume.txt`（canonical）+ 旧 `~/.dsh-cc/resume.txt`（兼容）。`read_resume_txt` 按 canonical → legacy 顺序读，首个非空胜。
+- **effort.json 双读**：`dsh_default_effort` 按 `~/.dsh-tui` → `~/.dsh-cc` 顺序读，canonical 命中即返回，invalid JSON 继续下读，最终回退 `"high"`。
+- **不变项**（0.7.2 实测）：sessions 根仍 `$DSH_HOME/sessions`（dsh-base `session-persistence-jsonl` 行胜出，`~/.dsh` 未动）；`DSH_PERMISSION_MODE` env 与 `/permission read-only|workspace-write|danger-full-access` 命令 intact；`@deepseek-ai/*` 依赖版本与 0.6.1 相同 → session-log 事件形状（`turn/start`/`turn/end`/`assistant/chunk`/usage `inputTokens`/`cacheReadTokens`）不变；`NODE_ENV=production` 仍必须。
+- **profile 安装**：依赖为本地 `file:/home/hachi/桌面/deepseek-harness-tui-dsh-tui-0.7.2.tgz`，pnpm install 后 preflight 88 个插件名全解析。
+
 ## 1. 做了什么
 
 ### dsh-tui 0.6.1 迁移（`src-tauri/src/agent_runtime/runtimes/dsh.rs` 为主）
