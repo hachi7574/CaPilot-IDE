@@ -191,6 +191,21 @@ impl DshAdapter {
         Self::newest_session_log_meta(cwd).map(|(log, _, _)| log)
     }
 
+    /// The session log for an exact resume key — the session subdir name under
+    /// the cwd's project dir (see `detect_recent_resume_key`: the subdir is the
+    /// `DSH_CC_RESUME_SESSION` value). Pinning by key keeps usage scoped to the
+    /// exact provider session even when a newer session shares the same cwd.
+    fn session_log_for_key(cwd: &Path, key: &str) -> Option<PathBuf> {
+        let dir = Self::project_sessions_dir(cwd)?.join(key);
+        let plain = dir.join("session.jsonl");
+        if plain.exists() {
+            Some(plain)
+        } else {
+            let zstd = dir.join("session.jsonl.zstd");
+            zstd.exists().then_some(zstd)
+        }
+    }
+
     /// Like `newest_session_log`, but also returns the log's mtime and size —
     /// the change fingerprint the status poll uses to decide whether an already
     /// decoded inference is still fresh (mtime + length catch an appended
@@ -1031,8 +1046,19 @@ impl AgentRuntimeAdapter for DshAdapter {
         Self::detect_recent_resume_key(cwd).or_else(Self::read_resume_txt)
     }
 
-    fn context_usage(&self, cwd: &Path, model: Option<&str>) -> Option<AgentUsage> {
-        let log = Self::newest_session_log(cwd)?;
+    fn context_usage(
+        &self,
+        cwd: &Path,
+        model: Option<&str>,
+        resume_key: Option<&str>,
+    ) -> Option<AgentUsage> {
+        // Pin to the exact provider session when the caller has a resume key
+        // (same identity rule as the claude/codex/opencode adapters — never let
+        // a same-cwd sibling conversation supply the numbers); fall back to the
+        // newest cwd session for legacy agents that never captured a key.
+        let log = resume_key
+            .and_then(|key| Self::session_log_for_key(cwd, key))
+            .or_else(|| Self::newest_session_log(cwd))?;
         let content = Self::read_session_log(&log)?;
         let parsed = Self::parse_usage_from_content(&content);
         // The route the log actually records wins over the caller's model.
@@ -1046,6 +1072,7 @@ impl AgentRuntimeAdapter for DshAdapter {
             context_window_max_tokens: max,
             cache_hit_tokens: (parsed.cache_hit > 0).then_some(parsed.cache_hit),
             cache_total_input_tokens: (parsed.cache_total > 0).then_some(parsed.cache_total),
+            actual_model: parsed.observed_model,
         })
     }
 
@@ -1298,6 +1325,50 @@ mod tests {
         assert_eq!(usage.cache_hit, 1000 + 1500);
         assert_eq!(usage.cache_total, 100 + 1000 + 50 + 1500);
         assert_eq!(usage.observed_model.as_deref(), Some("deepseek-v4-flash"));
+    }
+
+    #[test]
+    fn context_usage_pins_resume_key_over_newest_session() {
+        with_isolated_env(|| {
+            let home = std::env::var_os("HOME").unwrap();
+            let project_dir = PathBuf::from(home)
+                .join(".dsh")
+                .join("sessions")
+                .join(DshAdapter::project_key(Path::new("/tmp/project")));
+            // An older session with a distinct usage sample, plus a NEWER
+            // sibling session whose numbers would shadow it if the adapter fell
+            // back to "newest by cwd". The resume key must pin the exact one.
+            let old_dir = project_dir.join("ses_old");
+            let new_dir = project_dir.join("ses_new");
+            std::fs::create_dir_all(&old_dir).unwrap();
+            std::fs::create_dir_all(&new_dir).unwrap();
+            std::fs::write(
+                old_dir.join("session.jsonl"),
+                concat!(
+                    "{\"type\":\"session\",\"id\":\"ses_old\",\"cwd\":\"/tmp/project\"}\n",
+                    "{\"type\":\"request/header\",\"data\":{\"header\":{\"config\":{\"provider\":\"deepseek-official\",\"model\":\"deepseek-v4-flash\"}}}}\n",
+                    "{\"type\":\"assistant/chunk\",\"data\":{\"chunk\":{\"type\":\"usage\",\"usage\":{\"inputTokens\":10,\"outputTokens\":5,\"cacheReadTokens\":40}}}}\n",
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                new_dir.join("session.jsonl"),
+                concat!(
+                    "{\"type\":\"session\",\"id\":\"ses_new\",\"cwd\":\"/tmp/project\"}\n",
+                    "{\"type\":\"assistant/chunk\",\"data\":{\"chunk\":{\"type\":\"usage\",\"usage\":{\"inputTokens\":999,\"outputTokens\":5,\"cacheReadTokens\":1}}}}\n",
+                ),
+            )
+            .unwrap();
+            let usage = DshAdapter::new()
+                .context_usage(Path::new("/tmp/project"), None, Some("ses_old"))
+                .unwrap();
+            // The pinned (older) session's numbers — not the newer sibling's.
+            assert_eq!(usage.context_window_used_tokens, Some(50));
+            assert_eq!(usage.cache_hit_tokens, Some(40));
+            assert_eq!(usage.cache_total_input_tokens, Some(50));
+            // Provider-observed route model is surfaced as display telemetry.
+            assert_eq!(usage.actual_model.as_deref(), Some("deepseek-v4-flash"));
+        });
     }
 
     #[test]
