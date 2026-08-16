@@ -36,14 +36,8 @@ target/
 .env.local
 .env.*.local
 
-# Generated Tauri icons
-# (keep default icons committed)
-
-# Generated icon component (regenerate: python3 scripts/gen_icon_component.py)
-ui/components/Icon.tsx
-
-# Local dev tooling (root-level only; .github/scripts must stay tracked)
-/scripts/
+# App icons live in ui/assets/app-icon and are committed (do not ignore).
+# Icon SVGs in ui/assets/icons are loaded at build time by Icon.tsx.
 
 # Claude Code local config (machine-specific paths / run caches / transient worktrees)
 reasonix.toml

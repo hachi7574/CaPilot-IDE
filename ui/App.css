@@ -26,8 +26,8 @@
   --pl-bright-blue: #61AFEF; --pl-bright-magenta: #C678DD;
   --pl-bright-cyan: #56B6C2; --pl-bright-white: #FFFFFF;
   --pl-cursor: #5C6370; --pl-selection: #3A3F4B;
-  --pixel: 'Silkscreen', monospace;
-  --pixel-body: 'PixelifySans', sans-serif;
+  --pixel: 'FusionPixel-Mono', monospace;
+  --pixel-body: 'FusionPixel-Prop', sans-serif;
   --body: 'Tektur', system-ui, sans-serif;
   --mono: 'JetBrainsMono', ui-monospace, monospace;
   --panel-ui-font: 'JetBrainsMono', ui-monospace, monospace;
@@ -35,7 +35,7 @@
   --shadow-hard: 4px 4px 0 rgb(var(--black-rgb) / 0.4);
   --left-width: 248px;
   --right-width: 340px;
-  /* Theme color for the SVG icon set (docs/Assets/Icons). Icons default to
+  /* Theme color for the SVG icon set (ui/assets/icons). Icons default to
      currentColor so they inherit an element's `color` (e.g. a danger item);
      set `--icon-color: <color>` on any scope to recolor the whole set. */
   --icon-color: currentColor;
@@ -57,8 +57,8 @@ html[data-fs="l"] { --fs-2xs: 12px; --fs-xs: 13px; --fs-sm: 14px; --fs-base: 15p
 html[data-fs="xl"] { --fs-2xs: 13px; --fs-xs: 14px; --fs-sm: 15px; --fs-base: 16px; --fs-md: 17px; --fs-lg: 19px; --fs-xl: 21px; }
 html[data-fs="xxl"] { --fs-2xs: 14px; --fs-xs: 15px; --fs-sm: 16px; --fs-base: 17px; --fs-md: 18px; --fs-lg: 20px; --fs-xl: 22px; }
 
-@font-face { font-family: 'Silkscreen'; src: url('/fonts/Silkscreen-Regular.ttf') format('truetype'); }
-@font-face { font-family: 'PixelifySans'; src: url('/fonts/PixelifySans-Medium.ttf') format('truetype'); }
+@font-face { font-family: 'FusionPixel-Mono'; src: url('/fonts/FusionPixel-Mono-zh_hans.ttf') format('truetype'); }
+@font-face { font-family: 'FusionPixel-Prop'; src: url('/fonts/FusionPixel-Prop-zh_hans.ttf') format('truetype'); }
 @font-face { font-family: 'Tektur'; src: url('/fonts/Tektur-Regular.ttf') format('truetype'); font-weight: 400; }
 @font-face { font-family: 'Tektur'; src: url('/fonts/Tektur-Medium.ttf') format('truetype'); font-weight: 500; }
 @font-face { font-family: 'JetBrainsMono'; src: url('/fonts/JetBrainsMono-Regular.ttf') format('truetype'); }
@@ -788,7 +788,7 @@ body::after {
 .sb-item + .sb-item { border-left: 1px solid var(--rule); padding-left: 14px; }
 /* Item name vs. its value: name keeps the pixel/uppercase look, value uses the
    panel mono face at a slightly larger size, lowercase with no tracking. */
-.sb-name { font-family: 'Silkscreen', monospace; font-size: var(--fs-2xs); letter-spacing: 1px; text-transform: uppercase; }
+.sb-name { font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 1px; text-transform: uppercase; }
 .sb-val { font-family: 'JetBrainsMono', ui-monospace, monospace; font-size: var(--fs-xs); letter-spacing: 0; text-transform: none; }
 .sb-sep { width: 1px; height: 12px; background: var(--rule); }
 .sb-spacer { flex: 1; }

@@ -10,7 +10,7 @@
 
 ## 1. 一句话风格定义
 
-**近黑蓝底的暗色科技风**：`#07090F` 类深底，**单一紫色强调系**（主 `#8B5CF6`，辅 `#A78BFA`/`#C4B5FD`，同属紫系，**无橙色、无青色**）；状态色只保留绿/黄/红三色；所有边框用 `2px` 实线、交互带 `4px 4px 0` 硬阴影；像素字体（Silkscreen）负责小标签和编号、科技感字体（Tektur / PixelifySans）负责标题、等宽字体（JetBrainsMono）负责技术信息；页面叠加极淡的 CRT 扫描线和暗角，但整体干净克制，不堆砌霓虹。
+**近黑蓝底的暗色科技风**：`#07090F` 类深底，**单一紫色强调系**（主 `#8B5CF6`，辅 `#A78BFA`/`#C4B5FD`，同属紫系，**无橙色、无青色**）；状态色只保留绿/黄/红三色；所有边框用 `2px` 实线、交互带 `4px 4px 0` 硬阴影；像素字体（FusionPixel-Mono）负责小标签和编号、科技感字体（Tektur / FusionPixel-Prop）负责标题、等宽字体（JetBrainsMono）负责技术信息；页面叠加极淡的 CRT 扫描线和暗角，但整体干净克制，不堆砌霓虹。
 
 它的气质：**复古硬件终端 × 现代桌面应用**。像一台自带显示屏的调试终端，但动效是丝滑的 Apple 曲线。
 
@@ -21,7 +21,7 @@
 1. **深底为主，颜色只做强调**。大面积是 `--bg`/`--bg2`，彩色只出现在边框、小标签、关键数据上。切忌彩色铺满。
 2. **2px 实线边框 > 圆角**。几乎不用 `border-radius`（最多 2px）；卡片靠"边框 + 内部加深背景"分层，不靠阴影分层。
 3. **硬阴影只在交互时出现**。常态无阴影；hover 时 `translateY(-2px)` + `4px 4px 0 rgba(0,0,0,0.4)` 硬阴影（不模糊、不扩散），这是"像素感"的关键。
-4. **信息分级靠三档文字色 + 大写像素标签**。正文 `--ink`，次级 `--muted`；小标签一律 `Silkscreen` + `letter-spacing: 1-3px` + `UPPERCASE`。
+4. **信息分级靠三档文字色 + 大写像素标签**。正文 `--ink`，次级 `--muted`；小标签一律 `FusionPixel-Mono` + `letter-spacing: 1-3px` + `UPPERCASE`。
 5. **一切动效用 Apple 曲线**：`--ease-apple: cubic-bezier(0.25,0.1,0.25,1)`。不跳、不弹，除非特意做"像素弹跳"（`--ease-bounce`）。
 6. **CRT 扫描线必须极淡**（透明度 ≤ 0.15），否则油腻。它是质感，不是主题。
 7. **留白克制**：区块间距 24-48px，内容行高 1.7，容器最大宽 960-1080px 居中。
@@ -85,21 +85,21 @@
 
 | 变量 | 字体 | 角色 |
 |---|---|---|
-| `--pixel` | Silkscreen | 像素小标签：版本号、区号、徽标、stamp、状态、小按钮字 |
-| `--pixel-body` | PixelifySans | 显示级标题：`.title`、`.sec-title`、Hero logo |
+| `--pixel` | FusionPixel-Mono（fusion-pixel 8px 等宽，zh_hans） | 像素小标签：版本号、区号、徽标、stamp、状态、小按钮字 |
+| `--pixel-body` | FusionPixel-Prop（fusion-pixel 12px 比例，zh_hans） | 显示级标题：`.title`、`.sec-title`、Hero logo |
 | `--body` | Tektur | 正文字体：正文、卡片描述、h3/h4 |
 | `--mono` | JetBrainsMono | 技术信息：代码、表格数值、文件树、元数据、spec 值 |
 
 ```css
-@font-face { font-family:'Silkscreen';   src:url('./_shared/fonts/Silkscreen-Regular.ttf') format('truetype'); }
-@font-face { font-family:'PixelifySans'; src:url('./_shared/fonts/PixelifySans-Medium.ttf') format('truetype'); }
+@font-face { font-family:'FusionPixel-Mono'; src:url('./_shared/fonts/FusionPixel-Mono-zh_hans.ttf') format('truetype'); }
+@font-face { font-family:'FusionPixel-Prop'; src:url('./_shared/fonts/FusionPixel-Prop-zh_hans.ttf') format('truetype'); }
 @font-face { font-family:'Tektur';       src:url('./_shared/fonts/Tektur-Regular.ttf') format('truetype'); font-weight:400; }
 @font-face { font-family:'Tektur';       src:url('./_shared/fonts/Tektur-Medium.ttf')  format('truetype'); font-weight:500; }
 @font-face { font-family:'JetBrainsMono';src:url('./_shared/fonts/JetBrainsMono-Regular.ttf') format('truetype'); }
 @font-face { font-family:'JetBrainsMono';src:url('./_shared/fonts/JetBrainsMono-Bold.ttf')   format('truetype'); font-weight:700; }
 ```
 
-> 若无法随包字体，回退栈：`Silkscreen, monospace` / `Tektur, system-ui, sans-serif` / `JetBrainsMono, ui-monospace, monospace`。**正文回退**：`-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`。
+> 若无法随包字体，回退栈：`FusionPixel-Mono, monospace` / `Tektur, system-ui, sans-serif` / `JetBrainsMono, ui-monospace, monospace`。**正文回退**：`-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`。
 
 ### 4.2 字号阶梯
 
@@ -514,16 +514,16 @@ mark.brand{color:var(--brand);border-bottom-color:var(--brand);}
   --primary:#A78BFA;--primary-dim:#6D28D9;
   --ai:#C4B5FD;--ai-dim:#6D28D9;
   --success:#4ADE80;--warn:#FACC15;--danger:#F87171;
-  --pixel:'Silkscreen',monospace;
-  --pixel-body:'PixelifySans',sans-serif;
+  --pixel:'FusionPixel-Mono',monospace;
+  --pixel-body:'FusionPixel-Prop',sans-serif;
   --body:'Tektur',system-ui,sans-serif;
   --mono:'JetBrainsMono',ui-monospace,monospace;
   --ease-apple:cubic-bezier(0.25,0.1,0.25,1);
   --ease-bounce:cubic-bezier(0.34,1.56,0.64,1);
   --shadow-hard:4px 4px 0 rgba(0,0,0,.4);
 }
-@font-face{font-family:'Silkscreen';src:url('./_shared/fonts/Silkscreen-Regular.ttf') format('truetype');}
-@font-face{font-family:'PixelifySans';src:url('./_shared/fonts/PixelifySans-Medium.ttf') format('truetype');}
+@font-face{font-family:'FusionPixel-Mono';src:url('./_shared/fonts/FusionPixel-Mono-zh_hans.ttf') format('truetype');}
+@font-face{font-family:'FusionPixel-Prop';src:url('./_shared/fonts/FusionPixel-Prop-zh_hans.ttf') format('truetype');}
 @font-face{font-family:'Tektur';src:url('./_shared/fonts/Tektur-Regular.ttf') format('truetype');font-weight:400;}
 @font-face{font-family:'Tektur';src:url('./_shared/fonts/Tektur-Medium.ttf') format('truetype');font-weight:500;}
 @font-face{font-family:'JetBrainsMono';src:url('./_shared/fonts/JetBrainsMono-Regular.ttf') format('truetype');}

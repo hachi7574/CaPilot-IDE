@@ -33,18 +33,18 @@ IDE 遵循 CaPilot 主仓库的 **LUCY styleguide**（8-bit Pixel × Apple Smoot
 要点速查：
 
 - **色彩**：`--bg #07090F`、`--brand #8B5CF6`（紫），状态色仅绿/黄/红
-- **字体**：Silkscreen（像素标签）/ PixelifySans（标题）/ Tektur（正文）/ JetBrainsMono（技术）
+- **字体**：FusionPixel-Mono（像素标签）/ FusionPixel-Prop（标题）/ Tektur（正文）/ JetBrainsMono（技术）
 - **边框**：2px 实线 + 硬阴影 `4px 4px 0`，几乎无圆角
 - **动效**：Apple 曲线 `cubic-bezier(0.25, 0.1, 0.25, 1)`
 
 **运行时资源位置：**
 
-- 字体内嵌于 `public/fonts/`：`JetBrainsMono-{Regular,Bold}.ttf`、`PixelifySans-Medium.ttf`、`Silkscreen-Regular.ttf`、`Tektur-{Regular,Medium}.ttf`
-- logo 在 `public/logo.png`（源文件见 `docs/Assets/`，UI 经 `public/` 引用）
+- 字体内嵌于 `public/fonts/`：`JetBrainsMono-{Regular,Bold}.ttf`、`FusionPixel-Mono-zh_hans.ttf`（8px 等宽）、`FusionPixel-Prop-zh_hans.ttf`（12px 比例）、`Tektur-{Regular,Medium}.ttf`
+- logo 在 `public/logo.png`（源文件见 `ui/assets/logo/`，UI 经 `public/` 引用）
 - 颜色令牌定义在 `ui/App.css :root`（`@font-face` 引用 `/fonts/*.ttf`，全本地、无 Google Fonts）
-- 应用图标由主仓库 logo 生成于 `src-tauri/icons/`
+- 应用图标统一放在 `ui/assets/app-icon/`（由 `tauri.conf.json` `bundle.icon` 以 `../ui/assets/app-icon/*` 引用）
 
-**同步规则：** `docs/styleguide/` 与 `docs/Assets/` 是主仓库 `Doc/styleguide/`、`Doc/Assets/` 的复制品，**改设计需两边同步**。
+**同步规则：** `docs/styleguide/` 与 `ui/assets/`（原 `docs/Assets/`）是主仓库 `Doc/styleguide/`、`Doc/Assets/` 的复制品，**改设计需两边同步**。
 
 ## 3. 已知问题与技术债
 

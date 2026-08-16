@@ -35,11 +35,11 @@
     "copyright": "© 2026 hachi7574",
     "publisher": "hachi7574",
     "icon": [
-      "icons/32x32.png",
-      "icons/128x128.png",
-      "icons/128x128@2x.png",
-      "icons/icon.icns",
-      "icons/icon.ico"
+      "../ui/assets/app-icon/32x32.png",
+      "../ui/assets/app-icon/128x128.png",
+      "../ui/assets/app-icon/128x128@2x.png",
+      "../ui/assets/app-icon/icon.icns",
+      "../ui/assets/app-icon/icon.ico"
     ],
     "linux": {
       "deb": {
