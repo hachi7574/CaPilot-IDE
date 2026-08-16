@@ -24,6 +24,24 @@ sudo apt install libwebkit2gtk-4.1-dev librsvg2-dev libgtk-3-dev libsoup-3.0-dev
 | `cargo test` | `src-tauri/` | Rust 单元测试（24 个）|
 | `pnpm tsc --noEmit` | 仓库根目录 | TS 类型检查 |
 
+### ACP 验证：勿用旧系统包
+
+验证 **ACP 聊天 / DEF-011** 时 **不要** 用 `/usr/bin/capilot-ide`（本机常见 mtime **04:56** 旧包，无 phase5 / DEF-011 修复）。
+
+请任选其一加载 **本 worktree** 构建：
+
+```bash
+# 推荐：热更新前端 + 本 worktree 后端
+cd /home/hachi/.paseo/worktrees/293djwjk/precious-husky
+pnpm tauri dev
+
+# 或：先 pnpm build，再跑已编好的 debug 二进制（须含当日 DEF-011 符号）
+pnpm build
+./src-tauri/target/debug/capilot-ide
+```
+
+手点路径：新建或打开 `acp:opencode` 会话 → Composer 发短消息 → 面板应出现助手回复或**人话错误**（不再静默）。默认模型优先 `opencode-go/deepseek-v4-flash`。
+
 > 根目录 `README.md` 也含一份快速上手（Quick Start + 前置条件），可作为入口。
 
 ## 2. 设计规范（LUCY）与资源
