@@ -3906,6 +3906,12 @@ html[data-theme="quantum"] .app::before {
 .settings-empty-runtime span { font-family: var(--pixel); font-size: var(--fs-xs); color: var(--ink2); }
 .settings-empty-runtime small { font-family: var(--mono); font-size: var(--fs-2xs); }
 
+.settings-runtime.is-missing {
+  opacity: 0.72;
+}
+.settings-runtime.is-missing .settings-runtime-name {
+  color: var(--ink2);
+}
 .settings-runtime {
   border: 1px solid var(--rule);
   background: var(--bg);

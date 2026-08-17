@@ -23,7 +23,7 @@ impl CodexAdapter {
         if let Some(home) = std::env::var_os("CODEX_HOME") {
             return Some(PathBuf::from(home));
         }
-        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex"))
+        crate::persistence::user_home().ok().map(|home| home.join(".codex"))
     }
 
     /// Per-session codex config profile (`$CODEX_HOME/capilot-<agent_id>.config.toml`).
@@ -80,19 +80,17 @@ impl CodexAdapter {
     }
 
     fn check_available() -> bool {
-        Command::new("codex")
-            .arg("--version")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
+        crate::agent_runtime::adapter::cli_available("codex")
     }
 
     fn check_authenticated() -> bool {
-        Command::new("codex")
-            .args(["login", "status"])
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
+        let mut cmd = Command::new("codex");
+        cmd.args(["login", "status"]);
+        crate::agent_runtime::adapter::run_cmd_timeout(
+            cmd,
+            crate::agent_runtime::adapter::CLI_PROBE_TIMEOUT,
+        )
+        .is_some_and(|output| output.status.success())
     }
 
     /// Query the installed Codex app-server catalog. This is the same catalog
@@ -246,7 +244,7 @@ impl CodexAdapter {
         if let Some(home) = std::env::var_os("CODEX_HOME") {
             return Some(PathBuf::from(home).join("sessions"));
         }
-        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex/sessions"))
+        crate::persistence::user_home().ok().map(|home| home.join(".codex/sessions"))
     }
 
     fn visit_jsonl(dir: &Path, files: &mut Vec<PathBuf>) {

@@ -1264,7 +1264,7 @@ fn scan_command_root(
 fn project_ancestors(cwd: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut current = cwd.to_path_buf();
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::persistence::user_home().ok();
     loop {
         out.push(current.clone());
         if current.join(".git").exists() || home.as_ref() == Some(&current) {
@@ -1279,7 +1279,7 @@ fn project_ancestors(cwd: &Path) -> Vec<PathBuf> {
 }
 
 fn discover(runtime: &str, cwd: &Path) -> Vec<SlashItem> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::persistence::user_home().ok();
     let ancestors = project_ancestors(cwd);
     let mut items = Vec::new();
     let mut seen = HashSet::new();

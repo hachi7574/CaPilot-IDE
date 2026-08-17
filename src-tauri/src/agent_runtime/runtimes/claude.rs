@@ -7,7 +7,6 @@ use crate::persistence::status_dir;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 pub struct ClaudeAdapter;
 
@@ -39,18 +38,13 @@ impl ClaudeAdapter {
 
     /// Run `claude --version` and check if it succeeds
     fn check_available() -> bool {
-        Command::new("claude")
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        crate::agent_runtime::adapter::cli_available("claude")
     }
 
     fn project_dir(cwd: &Path) -> Option<PathBuf> {
-        let home = std::env::var("HOME").ok()?;
+        let home = crate::persistence::user_home().ok()?;
         Some(
-            PathBuf::from(&home)
-                .join(".claude")
+            home.join(".claude")
                 .join("projects")
                 .join(Self::claude_project_key(cwd)),
         )

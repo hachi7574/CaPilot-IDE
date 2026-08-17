@@ -122,10 +122,8 @@ pub fn clone_into(url: &str, target: &Path) -> Result<Output, String> {
     let parent = parent
         .canonicalize()
         .map_err(|error| format!("invalid clone parent: {error}"))?;
-    let home = std::env::var("HOME")
-        .map(PathBuf::from)
-        .map_err(|_| "HOME not set".to_string())?;
-    if !parent.is_dir() || !parent.starts_with(home) {
+    let home = crate::persistence::user_home()?;
+    if !parent.is_dir() || !parent.starts_with(&home) {
         return Err("clone target is outside the user home".to_string());
     }
     let name = target

@@ -23,10 +23,7 @@ pub fn daemon_base() -> PathBuf {
     crate::persistence::workspace_root()
         .parent()
         .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            PathBuf::from(home).join("CaPilot")
-        })
+        .unwrap_or_else(|| crate::persistence::user_home_or_tmp().join("CaPilot"))
 }
 
 /// Run the daemon until shutdown. Never returns normally except via exit.

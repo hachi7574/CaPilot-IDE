@@ -1,7 +1,6 @@
 use crate::agent_runtime::adapter::{
     AgentRuntimeAdapter, AgentSession, ModelInfo, PermissionModeInfo, ThinkingOptionInfo,
 };
-use std::process::Command;
 
 /// Shell runtime in two flavours:
 /// - `"bash"` (norc: true) — minimal shell, skips `~/.bashrc` (clean, fast).
@@ -18,11 +17,7 @@ impl BashAdapter {
     }
 
     fn check_available() -> bool {
-        Command::new("bash")
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        crate::agent_runtime::adapter::cli_available("bash")
     }
 }
 

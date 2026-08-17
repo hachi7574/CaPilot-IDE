@@ -241,6 +241,7 @@ fn build_and_spawn(
 ) -> Result<AgentInfo, String> {
     let workspace_id =
         workspace_id.unwrap_or_else(|| format!("wks_{}", uuid::Uuid::new_v4().simple()));
+    agent_runtime::adapter::ensure_cli_path();
     let adapter = get_adapter(runtime);
     if !adapter.is_available() {
         return Err(format!("Runtime '{}' is not available", runtime));
@@ -491,10 +492,9 @@ async fn agent_spawn(
             // A caller-supplied project root feeds both `create_dir_all` and the
             // spawned shell's cwd — constrain it to $HOME so an arbitrary path
             // can't be created / used as a shell working dir.
-            let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-            let home_path = std::path::Path::new(&home);
+            let home_path = crate::persistence::user_home()?;
             let p = std::path::PathBuf::from(pr);
-            if !p.starts_with(home_path) {
+            if !p.starts_with(&home_path) {
                 return Err("project root escapes allowed directories".to_string());
             }
             std::fs::create_dir_all(&p)
@@ -914,6 +914,7 @@ async fn agent_switch_runtime(
 
     // Validate the target runtime BEFORE killing the old PTY so a failed
     // switch can't brick the session (DevPlan §4.8).
+    agent_runtime::adapter::ensure_cli_path();
     let adapter = get_adapter(&runtime);
     if !adapter.is_available() {
         return Err(format!(
@@ -1858,21 +1859,56 @@ async fn update_download_and_install(
 
 #[tauri::command]
 async fn runtime_list_available() -> Vec<agent_runtime::adapter::RuntimeInfo> {
-    let mut out = Vec::new();
-    for id in known_runtimes() {
-        let adapter = get_adapter(id);
-        out.push(agent_runtime::adapter::RuntimeInfo {
-            id: adapter.id().to_string(),
-            name: adapter.name().to_string(),
-            available: adapter.is_available(),
-            authenticated: adapter.is_authenticated(),
-            version: adapter.version(),
-            models: adapter.list_models(),
-            permission_modes: adapter.list_permission_modes(),
-            thinking_options: adapter.list_thinking_options(),
-        });
-    }
-    out
+    // Detection shells out to each CLI (`--version`, auth, model catalogs).
+    // Keep it off the async runtime so a slow/wedged binary can't stall IPC,
+    // and isolate each runtime so one hang still returns the others.
+    tauri::async_runtime::spawn_blocking(|| {
+        agent_runtime::adapter::ensure_cli_path();
+        let mut out = Vec::new();
+        for id in known_runtimes() {
+            // Per-runtime budget: availability + auth + models. A single
+            // runtime that exceeds this is reported as unavailable rather than
+            // freezing Settings → 已安装 forever.
+            let id_owned = id.to_string();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let adapter = get_adapter(&id_owned);
+                let info = agent_runtime::adapter::RuntimeInfo {
+                    id: adapter.id().to_string(),
+                    name: adapter.name().to_string(),
+                    available: adapter.is_available(),
+                    authenticated: adapter.is_authenticated(),
+                    version: adapter.version(),
+                    models: adapter.list_models(),
+                    permission_modes: adapter.list_permission_modes(),
+                    thinking_options: adapter.list_thinking_options(),
+                };
+                let _ = tx.send(info);
+            });
+            match rx.recv_timeout(std::time::Duration::from_secs(12)) {
+                Ok(info) => out.push(info),
+                Err(_) => {
+                    log::warn!("runtime probe timed out for {id}");
+                    // Still surface a row so Settings isn't blank; available=false
+                    // matches the "not detected" state the user can re-scan.
+                    let adapter = get_adapter(id);
+                    out.push(agent_runtime::adapter::RuntimeInfo {
+                        id: adapter.id().to_string(),
+                        name: adapter.name().to_string(),
+                        available: false,
+                        authenticated: false,
+                        version: None,
+                        models: vec![],
+                        permission_modes: adapter.list_permission_modes(),
+                        thinking_options: adapter.list_thinking_options(),
+                    });
+                }
+            }
+        }
+        out
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// Current thinking variant for an opencode model, read from OpenCode's own
@@ -1930,7 +1966,7 @@ async fn fs_read(path: String) -> Result<String, String> {
     let resolved = std::path::Path::new(&path)
         .canonicalize()
         .map_err(|e| format!("Invalid path: {}", e))?;
-    let home = std::env::var("HOME").map_err(|e| format!("HOME not set: {}", e))?;
+    let home = crate::persistence::user_home()?;
     if !resolved.starts_with(&home) {
         return Err("Path escapes allowed directories".to_string());
     }
@@ -1939,7 +1975,7 @@ async fn fs_read(path: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn fs_write(path: String, content: String) -> Result<(), String> {
-    let home = std::env::var("HOME").map_err(|e| format!("HOME not set: {}", e))?;
+    let home = crate::persistence::user_home()?;
     let home_path = std::path::Path::new(&home);
 
     let raw = std::path::Path::new(&path);
@@ -2003,7 +2039,7 @@ async fn fs_list(dir: String) -> Result<Vec<FsEntryBrief>, String> {
     let resolved = std::path::Path::new(&dir)
         .canonicalize()
         .map_err(|e| format!("Invalid path: {}", e))?;
-    let home = std::env::var("HOME").map_err(|e| format!("HOME not set: {}", e))?;
+    let home = crate::persistence::user_home()?;
     if !resolved.starts_with(&home) {
         return Err("Path escapes allowed directories".to_string());
     }
@@ -2061,7 +2097,7 @@ async fn fs_search(
     if !resolved.is_dir() {
         return Err("Search root is not a directory".to_string());
     }
-    let home = std::env::var("HOME").map_err(|e| format!("HOME not set: {}", e))?;
+    let home = crate::persistence::user_home()?;
     if !resolved.starts_with(&home) {
         return Err("Path escapes allowed directories".to_string());
     }
@@ -2083,7 +2119,7 @@ async fn fs_search(
 /// create through a symlink final component. Mirrors `fs_write`'s pre-write
 /// resolution so new paths get the same traversal defense.
 fn resolve_in_home(raw: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    let home = std::env::var("HOME").map_err(|e| format!("HOME not set: {}", e))?;
+    let home = crate::persistence::user_home()?;
     let home_path = std::path::Path::new(&home);
 
     let parent = raw
@@ -2132,7 +2168,7 @@ async fn fs_create_dir(path: String) -> Result<(), String> {
 /// source (and the paste destination, which must exist) of `fs_paste`, where
 /// following a symlink final component to a HOME-internal target is legitimate.
 fn resolve_existing_in_home(raw: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    let home = std::env::var("HOME").map_err(|e| format!("HOME not set: {}", e))?;
+    let home = crate::persistence::user_home()?;
     let resolved = raw
         .canonicalize()
         .map_err(|e| format!("Invalid path: {}", e))?;
@@ -2258,7 +2294,7 @@ async fn fs_paste(src: String, dest_dir: String, is_move: bool) -> Result<String
 /// otherwise wipe the whole user directory).
 #[tauri::command]
 async fn fs_delete(path: String) -> Result<(), String> {
-    let home = std::env::var("HOME").map_err(|e| format!("HOME not set: {}", e))?;
+    let home = crate::persistence::user_home()?;
     let home_canon = std::path::Path::new(&home)
         .canonicalize()
         .unwrap_or_else(|_| std::path::Path::new(&home).to_path_buf());
@@ -2285,7 +2321,7 @@ async fn fs_rename(src: String, new_name: String) -> Result<String, String> {
     if name.is_empty() || name.contains('/') || name == "." || name == ".." {
         return Err("名称不能为空、包含 / 或为 . / ..".to_string());
     }
-    let home = std::env::var("HOME").map_err(|e| format!("HOME not set: {}", e))?;
+    let home = crate::persistence::user_home()?;
     let home_path = std::path::Path::new(&home);
     let raw = std::path::Path::new(&src);
     let parent = raw
@@ -4004,6 +4040,10 @@ pub fn run() {
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
+            // Desktop launches often miss user-local CLI dirs on PATH. Fold them
+            // in once so Settings detection and PTY spawns see the same bins as
+            // an interactive terminal.
+            agent_runtime::adapter::ensure_cli_path();
             // Startup reconciliation of isolation workspaces vs live git state
             // (plan §5): drop DB orphans, adopt hand-created worktrees. Runs
             // off the main thread so a slow `git worktree list` can't block the

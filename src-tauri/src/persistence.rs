@@ -93,9 +93,57 @@ pub fn worktree_id(repo: &str, path: &std::path::Path) -> String {
 
 // ── Workspace layout helpers ────────────────────────────────────
 
+/// Resolve the current user's home directory cross-platform.
+///
+/// Order:
+/// 1. `HOME` — Unix default; also honored when tests / Git Bash set it on Windows
+/// 2. `USERPROFILE` — Windows default
+/// 3. `HOMEDRIVE` + `HOMEPATH` — Windows fallback
+///
+/// Production code must use this instead of bare `std::env::var("HOME")`.
+/// Windows GUI processes typically have no `HOME`, only `USERPROFILE`.
+pub fn user_home() -> Result<PathBuf, String> {
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return Ok(PathBuf::from(home));
+        }
+    }
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        if !profile.is_empty() {
+            return Ok(PathBuf::from(profile));
+        }
+    }
+    if let (Ok(drive), Ok(path)) = (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
+        let combined = format!("{drive}{path}");
+        if !combined.is_empty() {
+            return Ok(PathBuf::from(combined));
+        }
+    }
+    Err("user home directory is not set (HOME/USERPROFILE)".into())
+}
+
+/// Like [`user_home`], but falls back to a writable temp dir instead of erroring.
+/// Used for layout helpers that historically defaulted to `/tmp` on Unix.
+pub fn user_home_or_tmp() -> PathBuf {
+    user_home().unwrap_or_else(|_| {
+        if let Ok(tmp) = std::env::var("TEMP").or_else(|_| std::env::var("TMP")) {
+            if !tmp.is_empty() {
+                return PathBuf::from(tmp);
+            }
+        }
+        #[cfg(windows)]
+        {
+            return PathBuf::from(r"C:\Temp");
+        }
+        #[cfg(not(windows))]
+        {
+            PathBuf::from("/tmp")
+        }
+    })
+}
+
 pub fn workspace_root() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join("CaPilot").join("workspaces")
+    user_home_or_tmp().join("CaPilot").join("workspaces")
 }
 
 pub fn project_dir(project: &str) -> PathBuf {
@@ -149,8 +197,7 @@ pub fn agent_dir(project: &str, agent_id: &str) -> PathBuf {
 /// adapter) write one JSON file per agent here; the frontend polls it to drive
 /// the accurate 运行中/空闲 split. App-owned, never inside a project workspace.
 pub fn status_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join("CaPilot").join("status")
+    user_home_or_tmp().join("CaPilot").join("status")
 }
 
 /// The per-agent status sidecar path (`~/CaPilot/status/<agent_id>.json`).

@@ -89,7 +89,7 @@ impl DshAdapter {
         if let Some(home) = std::env::var_os("DSH_HOME") {
             return Some(PathBuf::from(home));
         }
-        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".dsh"))
+        crate::persistence::user_home().ok().map(|home| home.join(".dsh"))
     }
 
     /// Session logs root: `$DSH_HOME/sessions/`. dsh writes its JSONL session
@@ -130,13 +130,13 @@ impl DshAdapter {
     /// new location first and falls back to the legacy one so pre-migration
     /// state (effort preference) still applies.
     fn data_dir() -> Option<PathBuf> {
-        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".dsh-tui"))
+        crate::persistence::user_home().ok().map(|home| home.join(".dsh-tui"))
     }
 
     /// The pre-rename data dir (`~/.dsh-cc`), still consulted by CaPilot as a
     /// fallback until a 0.7.2 dsh session has migrated it.
     fn legacy_data_dir() -> Option<PathBuf> {
-        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".dsh-cc"))
+        crate::persistence::user_home().ok().map(|home| home.join(".dsh-cc"))
     }
 
     /// DeepSeek's project-directory key for a cwd (mirrors
@@ -498,7 +498,7 @@ impl DshAdapter {
     fn patch_path(agent_id: &str) -> Option<PathBuf> {
         let cache_root = std::env::var_os("XDG_CACHE_HOME")
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+            .or_else(|| crate::persistence::user_home().ok().map(|home| home.join(".cache")))?;
         let safe_id: String = agent_id
             .chars()
             .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
@@ -619,11 +619,7 @@ impl DshAdapter {
     }
 
     fn check_available() -> bool {
-        Command::new("dsh")
-            .arg("--version")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
+        crate::agent_runtime::adapter::cli_available("dsh")
     }
 
     /// Pre-flight probe: run `dsh --dump-config --profile dsh-tui` and resolve
@@ -668,10 +664,12 @@ impl DshAdapter {
     /// (~0.1s, no plugin mounting). Disabled entries are omitted by the
     /// composer, so this is exactly what the TUI boot will try to load.
     fn profile_dump() -> Option<String> {
-        let output = Command::new("dsh")
-            .args(["--dump-config", "--profile", "dsh-tui"])
-            .output()
-            .ok()?;
+        let mut cmd = Command::new("dsh");
+        cmd.args(["--dump-config", "--profile", "dsh-tui"]);
+        let output = crate::agent_runtime::adapter::run_cmd_timeout(
+            cmd,
+            std::time::Duration::from_secs(5),
+        )?;
         if !output.status.success() {
             return None;
         }
@@ -741,13 +739,12 @@ for (const n of names) {
 console.log(JSON.stringify(missing));
 "#;
         let names_json = serde_json::to_string(names).ok()?;
-        let output = Command::new("node")
-            .arg("-e")
-            .arg(script)
-            .arg(&names_json)
-            .arg(profile)
-            .output()
-            .ok()?;
+        let mut cmd = Command::new("node");
+        cmd.arg("-e").arg(script).arg(&names_json).arg(profile);
+        let output = crate::agent_runtime::adapter::run_cmd_timeout(
+            cmd,
+            std::time::Duration::from_secs(5),
+        )?;
         if !output.status.success() {
             return None;
         }
@@ -800,13 +797,12 @@ if (adm && adm.provider && adm.model) {
 }
 console.log(JSON.stringify(out));
 "#;
-        let output = Command::new("node")
-            .arg("-e")
-            .arg(script)
-            .arg(&profile)
-            .arg(&settings_path)
-            .output()
-            .ok()?;
+        let mut cmd = Command::new("node");
+        cmd.arg("-e").arg(script).arg(&profile).arg(&settings_path);
+        let output = crate::agent_runtime::adapter::run_cmd_timeout(
+            cmd,
+            std::time::Duration::from_secs(5),
+        )?;
         if !output.status.success() {
             return None;
         }

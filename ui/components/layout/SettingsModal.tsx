@@ -134,13 +134,17 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   }, [currentVersion]);
 
   const [scanning, setScanning] = useState(false);
+  const [detectError, setDetectError] = useState<string | null>(null);
   const reDetect = () => {
     setScanning(true);
+    setDetectError(null);
     invoke<RuntimeInfo[]>("runtime_list_available")
       .then((runtimes) => {
         setRuntimes(Array.isArray(runtimes) ? runtimes : []);
       })
-      .catch(() => {})
+      .catch((e) => {
+        setDetectError(typeof e === "string" ? e : String(e));
+      })
       .finally(() => setScanning(false));
   };
 
@@ -323,11 +327,11 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     }
   };
 
-  // The "已安装" list shows only installed agent runtimes — plain shells
-  // (bash) are excluded.
-  const installedAgents = runtimes.filter(
-    (rt) => rt.available && !rt.id.startsWith("bash")
-  );
+  // Agent runtimes only — plain shells (bash) stay out of this panel. Show
+  // unavailable rows too so a failed/slow probe isn't mistaken for "none
+  // installed" when the new-terminal picker still lists every template.
+  const agentRuntimes = runtimes.filter((rt) => !rt.id.startsWith("bash"));
+  const installedAgents = agentRuntimes.filter((rt) => rt.available);
 
   return (
     <div className="modal-overlay settings-overlay" onClick={onClose}>
@@ -405,22 +409,38 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           </div>
           <div className="settings-toolbar">
             <div className="modal-title">
-              已安装 <span className="settings-count">{installedAgents.length}</span>
+              已安装{" "}
+              <span className="settings-count">
+                {installedAgents.length}
+                {agentRuntimes.length > 0 ? ` / ${agentRuntimes.length}` : ""}
+              </span>
             </div>
             <button className="settings-compact-btn" onClick={reDetect} disabled={scanning}>
               <Icon name="refresh-cw" size={11} />
               {scanning ? "检测中…" : "重新检测"}
             </button>
           </div>
-          {installedAgents.length === 0 && (
-            <div className="settings-empty-runtime">
-              <Icon name="plug" size={18} />
-              <span>未检测到已安装的 Agent</span>
-              <small>安装或登录支持的 CLI 后重新检测。</small>
+          {detectError && (
+            <div className="settings-empty-runtime" role="alert">
+              <Icon name="triangle-alert" size={18} />
+              <span>检测失败</span>
+              <small>{detectError}</small>
             </div>
           )}
-          {installedAgents.map((rt) => (
-            <div key={rt.id} className={`settings-runtime${editingId === rt.id ? " expanded" : ""}`}>
+          {!scanning && !detectError && agentRuntimes.length === 0 && (
+            <div className="settings-empty-runtime">
+              <Icon name="plug" size={18} />
+              <span>未检测到 Agent 运行时</span>
+              <small>安装 CLI 后点「重新检测」。新终端模板列表不依赖此处探测。</small>
+            </div>
+          )}
+          {agentRuntimes.map((rt) => (
+            <div
+              key={rt.id}
+              className={`settings-runtime${editingId === rt.id ? " expanded" : ""}${
+                rt.available ? "" : " is-missing"
+              }`}
+            >
               <div className="modal-row settings-runtime-row" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", fontSize: "var(--fs-sm)" }}>
                 <span className="settings-runtime-name">
                   <Icon name="terminal" size={14} /> {rt.name}
@@ -434,9 +454,21 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                   )}
                 </span>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ color: "var(--success)", fontFamily: "var(--mono)", fontSize: "var(--fs-xs)" }}>
-                    <Icon name="check" size={12} style={{ marginRight: 4 }} />
-                    {rt.authenticated ? "已登录" : "已安装"}
+                  <span
+                    style={{
+                      color: rt.available ? "var(--success)" : "var(--ink3)",
+                      fontFamily: "var(--mono)",
+                      fontSize: "var(--fs-xs)",
+                    }}
+                  >
+                    {rt.available ? (
+                      <>
+                        <Icon name="check" size={12} style={{ marginRight: 4 }} />
+                        {rt.authenticated ? "已登录" : "已安装"}
+                      </>
+                    ) : (
+                      "未检测到"
+                    )}
                   </span>
                   <button
                     onClick={() => toggleEditor(rt.id)}

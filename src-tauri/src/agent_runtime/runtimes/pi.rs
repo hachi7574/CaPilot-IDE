@@ -30,7 +30,7 @@ impl PiAdapter {
         if let Some(dir) = std::env::var_os("PI_CODING_AGENT_DIR") {
             return Some(PathBuf::from(dir));
         }
-        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".pi").join("agent"))
+        crate::persistence::user_home().ok().map(|home| home.join(".pi").join("agent"))
     }
 
     /// Session storage root: `$PI_CODING_AGENT_SESSION_DIR` when set (or
@@ -55,11 +55,7 @@ impl PiAdapter {
     }
 
     fn check_available() -> bool {
-        Command::new("pi")
-            .arg("--version")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
+        crate::agent_runtime::adapter::cli_available("pi")
     }
 
     /// Pi stores one credential per provider in `~/.pi/agent/auth.json`
@@ -127,11 +123,14 @@ impl PiAdapter {
     /// of each row (provider/model ids never contain spaces). Runs offline so
     /// the bundled/cached catalog is used instead of a startup network fetch.
     fn list_models() -> Vec<ModelInfo> {
-        let Ok(output) = Command::new("pi")
-            .env("PI_OFFLINE", "1")
-            .arg("--list-models")
-            .output()
-        else {
+        // Offline catalog only — never hang Settings detection on a network
+        // provider probe. Hard-capped so a wedged `pi` can't freeze the list.
+        let mut cmd = Command::new("pi");
+        cmd.env("PI_OFFLINE", "1").arg("--list-models");
+        let Some(output) = crate::agent_runtime::adapter::run_cmd_timeout(
+            cmd,
+            std::time::Duration::from_secs(5),
+        ) else {
             return vec![];
         };
         if !output.status.success() {

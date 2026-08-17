@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::Once;
+use std::time::Duration;
 
 /// Agent runtime identifier
 pub type RuntimeId = String;
@@ -156,10 +158,151 @@ pub struct RuntimeInfo {
     pub thinking_options: Vec<ThinkingOptionInfo>,
 }
 
+/// Default budget for CLI probes used during Settings detection (`--version`,
+/// auth status). Longer than a healthy CLI needs; short enough that a wedged
+/// binary can't freeze the runtime list forever.
+pub const CLI_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Ensure user-local CLI install dirs are on `PATH` for the whole process.
+///
+/// Desktop launches (`.desktop` / dock) often inherit a stripped environment
+/// that lacks `~/.local/bin`, `~/.cargo/bin`, and Node version-manager bins
+/// (`~/APP/n/bin`, `~/.n/bin`, …) where agent CLIs typically live. Interactive
+/// terminals source the user's shell rc and see them; CaPilot must match so
+/// Settings detection and PTY spawns agree. Idempotent — safe to call often.
+pub fn ensure_cli_path() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let Ok(home) = crate::persistence::user_home() else {
+            return;
+        };
+        let candidates = [
+            home.join(".local/bin"),
+            home.join(".cargo/bin"),
+            home.join("APP/n/bin"),
+            home.join(".n/bin"),
+            home.join("n/bin"),
+            home.join(".volta/bin"),
+            home.join(".asdf/shims"),
+            home.join(".local/share/pnpm"),
+            #[cfg(target_os = "macos")]
+            PathBuf::from("/opt/homebrew/bin"),
+            #[cfg(target_os = "macos")]
+            PathBuf::from("/usr/local/bin"),
+        ];
+
+        #[cfg(windows)]
+        let sep = ";";
+        #[cfg(not(windows))]
+        let sep = ":";
+
+        let current = std::env::var_os("PATH").unwrap_or_default();
+        let current_str = current.to_string_lossy();
+        let existing: Vec<&str> = current_str
+            .split(sep)
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let mut prepend = Vec::new();
+        for dir in candidates {
+            if !dir.is_dir() {
+                continue;
+            }
+            let s = dir.to_string_lossy().into_owned();
+            if existing.iter().any(|p| *p == s) {
+                continue;
+            }
+            if !prepend.iter().any(|p: &String| p == &s) {
+                prepend.push(s);
+            }
+        }
+        if prepend.is_empty() {
+            return;
+        }
+        let mut parts = prepend;
+        parts.extend(existing.into_iter().map(str::to_string));
+        // SAFETY: called once at process startup before worker threads race on
+        // PATH; subsequent reads (Command::new) see the augmented value.
+        unsafe {
+            std::env::set_var("PATH", parts.join(sep));
+        }
+    });
+}
+
+/// Run a short CLI probe with a hard timeout. Returns `None` when the binary
+/// is missing, exits non-zero, times out, or can't be spawned. On timeout the
+/// child is killed so a hung `codex login status` can't pin a worker forever.
+pub fn run_cmd_timeout(mut cmd: Command, timeout: Duration) -> Option<std::process::Output> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // On Unix, put the child in its own process group so we can kill the whole
+    // tree (node wrappers that re-exec, etc.) on timeout.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: pre_exec runs in the child between fork and exec; setsid is
+        // async-signal-safe and isolates the probe from the parent group.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+    let mut child = cmd.spawn().ok()?;
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                // Process has exited — drain the already-piped stdio.
+                return child.wait_with_output().ok();
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    kill_probe_tree(&mut child);
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => {
+                kill_probe_tree(&mut child);
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+fn kill_probe_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        // Negative pid = process group (setsid above made pgid == pid).
+        let pid = child.id() as i32;
+        if pid > 0 {
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
+    }
+    let _ = child.kill();
+}
+
+/// `true` when `<cmd> --version` exits 0 within [`CLI_PROBE_TIMEOUT`].
+pub fn cli_available(cmd: &str) -> bool {
+    let mut c = Command::new(cmd);
+    c.arg("--version");
+    run_cmd_timeout(c, CLI_PROBE_TIMEOUT).is_some_and(|o| o.status.success())
+}
+
 /// Run `<cmd> --version` and return the trimmed first stdout line. `None` when
-/// the binary is missing, the command fails, or it prints nothing useful.
+/// the binary is missing, the command fails, times out, or it prints nothing
+/// useful.
 pub fn cli_version(cmd: &str) -> Option<String> {
-    let out = Command::new(cmd).arg("--version").output().ok()?;
+    let mut c = Command::new(cmd);
+    c.arg("--version");
+    let out = run_cmd_timeout(c, CLI_PROBE_TIMEOUT)?;
     if !out.status.success() {
         return None;
     }
@@ -304,5 +447,42 @@ impl Serialize for AgentError {
         S: serde::Serializer,
     {
         serializer.serialize_str(&self.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn cli_available_finds_bash() {
+        assert!(cli_available("bash"));
+        assert!(!cli_available("capilot-definitely-missing-binary-xyz"));
+    }
+
+    #[test]
+    fn run_cmd_timeout_kills_sleep() {
+        #[cfg(unix)]
+        {
+            let mut cmd = Command::new("sleep");
+            cmd.arg("30");
+            let start = Instant::now();
+            let out = run_cmd_timeout(cmd, Duration::from_millis(200));
+            assert!(out.is_none(), "sleep should time out");
+            assert!(
+                start.elapsed() < Duration::from_secs(3),
+                "timeout path must return promptly, took {:?}",
+                start.elapsed()
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_cli_path_is_idempotent() {
+        ensure_cli_path();
+        ensure_cli_path();
+        // Smoke: PATH is still a non-empty string after the call.
+        assert!(!std::env::var_os("PATH").unwrap_or_default().is_empty());
     }
 }

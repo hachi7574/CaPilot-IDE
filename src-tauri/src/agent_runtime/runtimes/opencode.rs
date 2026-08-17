@@ -116,7 +116,7 @@ impl OpenCodeAdapter {
     fn tui_config_path(session: &AgentSession) -> Result<PathBuf, String> {
         let cache_root = std::env::var_os("XDG_CACHE_HOME")
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+            .or_else(|| crate::persistence::user_home().ok().map(|home| home.join(".cache")))
             .ok_or_else(|| {
                 "Cannot resolve a cache directory for OpenCode TUI config".to_string()
             })?;
@@ -158,7 +158,7 @@ impl OpenCodeAdapter {
     fn status_config_dir(agent_id: &str) -> Option<PathBuf> {
         let cache_root = std::env::var_os("XDG_CACHE_HOME")
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+            .or_else(|| crate::persistence::user_home().ok().map(|home| home.join(".cache")))?;
         let safe_id: String = agent_id
             .chars()
             .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
@@ -189,19 +189,16 @@ impl OpenCodeAdapter {
     }
 
     fn check_available() -> bool {
-        Command::new("opencode")
-            .arg("--version")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
+        crate::agent_runtime::adapter::cli_available("opencode")
     }
 
     fn model_state_path() -> Option<std::path::PathBuf> {
         if let Some(state_home) = std::env::var_os("XDG_STATE_HOME") {
             return Some(std::path::PathBuf::from(state_home).join("opencode/model.json"));
         }
-        std::env::var_os("HOME")
-            .map(|home| std::path::PathBuf::from(home).join(".local/state/opencode/model.json"))
+        crate::persistence::user_home()
+            .ok()
+            .map(|home| home.join(".local/state/opencode/model.json"))
     }
 
     /// OpenCode records the model selected in its native picker. This makes
@@ -390,7 +387,7 @@ impl OpenCodeAdapter {
         if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
             return Some(PathBuf::from(data_home).join("opencode"));
         }
-        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share/opencode"))
+        crate::persistence::user_home().ok().map(|home| home.join(".local/share/opencode"))
     }
 
     fn db_path() -> Option<PathBuf> {
@@ -543,7 +540,7 @@ impl OpenCodeAdapter {
     fn catalog_cache_path() -> Option<PathBuf> {
         let cache_root = std::env::var_os("XDG_CACHE_HOME")
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+            .or_else(|| crate::persistence::user_home().ok().map(|home| home.join(".cache")))?;
         Some(cache_root.join("capilot-ide/opencode-model-limits.json"))
     }
 
