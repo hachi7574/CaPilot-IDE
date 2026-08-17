@@ -60,13 +60,9 @@ impl SessionStore {
         })
     }
 
-    /// Open the store at the standard `~/CaPilot` location.
+    /// Open the store at the standard data root (`data_root()`).
     pub fn open() -> std::io::Result<Self> {
-        let base = workspace_root()
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("CaPilot"));
-        Self::from_base(base)
+        Self::from_base(crate::persistence::data_root())
     }
 
     pub fn db(&self) -> &Mutex<SessionsDb> {

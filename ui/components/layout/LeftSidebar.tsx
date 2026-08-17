@@ -436,6 +436,11 @@ export function LeftSidebar() {
   // auto-opening a terminal on success, dropping the project on failure. We only
   // check the fields are present here so validation errors surface through
   // `nprojError` and keep the modal open.
+  //
+  // Clone id is minted HERE and registered via `beginClone` *before* `invoke`,
+  // so a fast (or already-cached) clone can't deliver `git://cloned` before the
+  // pending entry exists — that race used to leave the sidebar stuck on
+  // "正在克隆中" forever.
   const handleGitClone = async (
     url: string,
     name: string,
@@ -455,28 +460,42 @@ export function LeftSidebar() {
       setNprojError("请选择父目录");
       return "请选择父目录";
     }
+    const cloneId =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID().replace(/-/g, "")
+        : `clone-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    // Optimistic placeholder: show in the tree as cloning before the backend
+    // round-trip. On invoke failure we roll these back.
+    beginClone(cloneId, trimmedName);
+    addProject(trimmedName);
+    setCollapsedProjs((prev) => {
+      const next = new Set(prev);
+      next.delete(trimmedName);
+      return next;
+    });
+    setFocusedProject(trimmedName);
     try {
-      const [cloneId, root] = await invoke<[string, string]>("git_clone", {
+      const [, root] = await invoke<[string, string]>("git_clone", {
         url: trimmedUrl,
         name: trimmedName,
         parentDir,
+        id: cloneId,
       });
       // Record the clone dir as the project root so the tab bar can resolve
-      // editor files opened inside it to this project.
-      addProject(trimmedName, root);
-      // Newly cloned projects are expanded.
-      setCollapsedProjs((prev) => {
-        const next = new Set(prev);
-        next.delete(trimmedName);
-        return next;
-      });
-      setFocusedProject(trimmedName);
+      // editor files opened inside it to this project. Completion may already
+      // have written the same root via git://cloned — setProjectRoots is a merge.
+      useStore.getState().setProjectRoots({ [trimmedName]: root });
       setNprojError(null);
-      // Mark the placeholder as cloning — the sidebar shows 【name】【正在克隆中】
-      // until git://cloned / git://clone-error arrives (state/clone.ts).
-      beginClone(cloneId, trimmedName);
       return null;
     } catch (e) {
+      useStore.getState().finishClone(cloneId);
+      useStore.getState().finishCloneByName(trimmedName);
+      // Only drop the optimistic project if it has no real root yet (clone never
+      // started). If a previous success event already landed, leave it alone.
+      const root = useStore.getState().projectRoots[trimmedName];
+      if (!root) {
+        useStore.getState().removeProject(trimmedName);
+      }
       setNprojError(String(e));
       return String(e);
     }

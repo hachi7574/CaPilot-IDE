@@ -116,28 +116,116 @@ pub fn run_raw(path: &Path, args: &[&str]) -> Result<Output, String> {
         .map_err(|error| format!("git failed: {error}"))
 }
 
+/// How long a background `git clone` may run before we kill it and surface a
+/// timeout. Private-repo auth via Git Credential Manager is interactive and can
+/// stall forever when the helper cannot show a prompt (GUI app, no TTY); the
+/// timeout turns that into a clear error instead of a permanent "正在克隆中".
+pub const CLONE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// Clone `url` into `target` (which must not already exist). Disables the TTY
+/// password prompt (`GIT_TERMINAL_PROMPT=0`), closes stdin, hides the Windows
+/// console, and enforces [`CLONE_TIMEOUT`]. Credential Manager may still open a
+/// GUI prompt when it can; if auth never completes the timeout fires. The
+/// caller is responsible for removing a partial target on failure.
 pub fn clone_into(url: &str, target: &Path) -> Result<Output, String> {
+    use std::io::Read;
+    use std::process::Stdio;
+
     let parent = target
         .parent()
         .ok_or_else(|| "clone target has no parent".to_string())?;
     let parent = parent
         .canonicalize()
         .map_err(|error| format!("invalid clone parent: {error}"))?;
-    if !parent.is_dir() || !crate::persistence::path_is_within_home(&parent)? {
-        return Err("clone target is outside the user home".to_string());
+    if !parent.is_dir() || !crate::persistence::path_is_allowed(&parent)? {
+        return Err("clone target is not an allowed directory".to_string());
     }
     let name = target
         .file_name()
         .ok_or_else(|| "invalid clone target".to_string())?;
+    // Windows canonicalize() yields `\\?\B:\...`. Git for Windows rejects that
+    // prefix when creating the work tree ("Invalid argument"). Strip it so the
+    // path we hand to `git clone` is a plain drive path.
+    let dest = crate::persistence::strip_verbatim_prefix(&parent).join(name);
     let _permit = acquire();
     wait_for_rate_slot();
-    Command::new("git")
+
+    let mut cmd = Command::new("git");
+    // Never block on a hidden terminal password prompt. GCM may still pop a
+    // GUI when credentials are missing; the timeout below is the backstop.
+    cmd.env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .arg("clone")
         .arg("--")
         .arg(url)
-        .arg(parent.join(name))
-        .output()
-        .map_err(|error| format!("git failed: {error}"))
+        .arg(&dest);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|error| format!("git failed: {error}"))?;
+
+    // Drain pipes on side threads so a chatty git/helper can't fill the OS
+    // pipe buffer and deadlock while we poll for exit / timeout.
+    let mut stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| "git stdout closed".to_string())?;
+    let mut stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| "git stderr closed".to_string())?;
+    let stdout_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        buf
+    });
+
+    let deadline = Instant::now() + CLONE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                // Best-effort kill. Pipe readers unblock once git dies; any
+                // credential-helper grandchild may linger briefly.
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                return Err(format!(
+                    "git clone 超时（超过 {} 秒）。若仓库为私有，请先在终端完成 GitHub 登录（gh auth login / git credential），再重试",
+                    CLONE_TIMEOUT.as_secs()
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                return Err(format!("git failed: {error}"));
+            }
+        }
+    };
+
+    let stdout = stdout_handle.join().unwrap_or_default();
+    let stderr = stderr_handle.join().unwrap_or_default();
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 #[cfg(test)]
@@ -148,5 +236,45 @@ mod tests {
     fn gate_limits_are_frozen() {
         assert_eq!(MAX_CONCURRENT, 8);
         assert_eq!(MAX_STARTS_PER_SECOND, 64);
+    }
+
+    #[test]
+    fn clone_timeout_is_generous_but_finite() {
+        // 10 minutes: long enough for a large repo over a slow link, short
+        // enough that a hung credential prompt doesn't look like "forever".
+        assert_eq!(CLONE_TIMEOUT, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn clone_into_rejects_forbidden_system_path() {
+        // System dirs stay off-limits on every platform we ship.
+        let target = std::path::Path::new(if cfg!(windows) {
+            r"C:\Windows\Temp\capilot-clone-should-fail\repo"
+        } else {
+            "/etc/capilot-clone-should-fail/repo"
+        });
+        let err = clone_into("https://example.com/repo.git", target).unwrap_err();
+        assert!(
+            err.contains("not an allowed") || err.contains("invalid clone parent"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn strip_verbatim_prefix_turns_extended_path_into_drive_path() {
+        // Regression: git clone failed with
+        //   fatal: could not create work tree dir '\\?\B:\...': Invalid argument
+        // because canonicalize() on Windows emits the \\?\ prefix.
+        let stripped = crate::persistence::strip_verbatim_prefix(std::path::Path::new(
+            r"\\?\B:\capilot_ide_git_test",
+        ));
+        assert_eq!(stripped, std::path::Path::new(r"B:\capilot_ide_git_test"));
+        let stripped_unc = crate::persistence::strip_verbatim_prefix(std::path::Path::new(
+            r"\\?\UNC\server\share\repo",
+        ));
+        assert_eq!(
+            stripped_unc,
+            std::path::Path::new(r"\\server\share\repo")
+        );
     }
 }

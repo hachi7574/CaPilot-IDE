@@ -27,7 +27,8 @@
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "$HOME/**"
+          "$HOME/**",
+          "**"
         ]
       }
     }
@@ -57,6 +58,12 @@
       "../ui/assets/app-icon/128x128@2x.png",
       "../ui/assets/app-icon/icon.ico"
     ],
+    "windows": {
+      "nsis": {
+        "installMode": "both",
+        "displayLanguageSelector": false
+      }
+    },
     "linux": {
       "deb": {
         "depends": [

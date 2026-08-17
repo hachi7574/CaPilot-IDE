@@ -881,9 +881,13 @@ interface AppState {
   addProject: (name: string, root?: string) => void;
   removeProject: (name: string) => void;
   /** Track a background `git_clone`; `name` shows as "正在克隆中" until
-   *  `finishClone` (from `git://cloned` / `git://clone-error`). */
+   *  `finishClone` / `finishCloneByName` (from `git://cloned` /
+   *  `git://clone-error`). Call `beginClone` *before* invoking `git_clone` so a
+   *  fast completion event can't race past the pending entry. */
   beginClone: (id: string, name: string) => void;
   finishClone: (id: string) => void;
+  /** Drop every pending clone entry for `name` (id-agnostic safety net). */
+  finishCloneByName: (name: string) => void;
   /** Move `name` to `targetName`'s position in the sidebar project list. */
   moveProject: (name: string, targetName: string) => void;
   /** Replace the whole worktree registry (from `worktree_list_all` on mount). */
@@ -1832,6 +1836,20 @@ export const useStore = create<AppState>((set, get) => {
       const pendingClones = { ...s.pendingClones };
       delete pendingClones[id];
       return { pendingClones };
+    }),
+
+  finishCloneByName: (name) =>
+    set((s) => {
+      let changed = false;
+      const pendingClones: Record<string, string> = {};
+      for (const [id, n] of Object.entries(s.pendingClones)) {
+        if (n === name) {
+          changed = true;
+          continue;
+        }
+        pendingClones[id] = n;
+      }
+      return changed ? { pendingClones } : {};
     }),
 
   removeProject: (name) => {

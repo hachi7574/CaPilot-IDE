@@ -1,13 +1,24 @@
 //! Contexts workspace model + persistence.
 //!
-//! Workspace layout:
+//! Data root layout (`data_root()`):
 //! ```text
-//! ~/CaPilot/workspaces/<project>/
-//! ├─ context/               # shared context
-//! ├─ agents/<agent-id>/     # per-agent workspace (PTY cwd)
-//! │  └─ .agent-meta.json    # runtime / resume_key / status
-//! └─ sessions.db            # sqlite
+//! <data_root>/
+//! ├─ sessions.db            # global session sqlite
+//! ├─ workspaces/<project>/  # project shells (meta, not necessarily source code)
+//! │  ├─ context/
+//! │  ├─ agents/<agent-id>/  # per-agent workspace (PTY cwd for managed projects)
+//! │  │  └─ .agent-meta.json
+//! │  └─ project.json        # optional custom root (cloned / picked folder)
+//! ├─ status/                # agent status sidecars + hooks
+//! └─ run/                   # daemon lock / socket / token
 //! ```
+//!
+//! **Where is `data_root`?**
+//! 1. `$CAPILOT_HOME` if set (always wins — portable / CI / tests).
+//! 2. Packaged install: `<install_dir>/data` next to the exe (user only picks the
+//!    install directory once; data lives underneath it).
+//! 3. Dev / unpackaged: `~/CaPilot` (keeps `cargo test` / `tauri dev` off the
+//!    source tree and matches historical layouts).
 
 use crate::lifecycle_journal::{LifecycleEventKind, LifecycleJournal};
 use crate::session_store::{NaturalExit, SessionStore};
@@ -225,11 +236,97 @@ pub fn path_is_within(path: &Path, root: &Path) -> bool {
 }
 
 /// Best-effort: canonicalize `user_home()` when it exists, then
-/// [`path_is_within`]. Used by every IPC surface that scopes paths to $HOME.
+/// [`path_is_within`]. Kept for call sites / tests that still reason about the
+/// OS home specifically (agent CLI config lives under `$HOME`, not data_root).
 pub fn path_is_within_home(path: &Path) -> Result<bool, String> {
     let home = user_home()?;
     let home = home.canonicalize().unwrap_or(home);
     Ok(path_is_within(path, &home))
+}
+
+/// Whether `path` is allowed for high-privilege IPC (`fs_*`, `git_clone`, custom
+/// project roots). Desktop IDE users keep code on any local drive, so this is
+/// **not** locked to `$HOME` — it only rejects known system locations.
+///
+/// Always allows paths under [`data_root`] and [`user_home`]. Callers should
+/// `canonicalize` first when the path must exist.
+pub fn path_is_allowed(path: &Path) -> Result<bool, String> {
+    let path = strip_verbatim_prefix(path);
+    if !path.is_absolute() {
+        return Ok(false);
+    }
+    // data_root / home are always fine (install dir may sit outside home).
+    {
+        let root = data_root();
+        let root = root.canonicalize().unwrap_or(root);
+        if path_is_within(&path, &root) {
+            return Ok(true);
+        }
+    }
+    if let Ok(home) = user_home() {
+        let home = home.canonicalize().unwrap_or(home);
+        if path_is_within(&path, &home) {
+            return Ok(true);
+        }
+    }
+    Ok(!is_forbidden_system_path(&path))
+}
+
+/// Paths the IDE must never treat as a project root / write target, even when
+/// the user can browse there in the file dialog. Drive-letter aware on Windows
+/// (`D:\Windows` is just as off-limits as `C:\Windows`).
+fn is_forbidden_system_path(path: &Path) -> bool {
+    let path = strip_verbatim_prefix(path);
+    #[cfg(windows)]
+    {
+        fn lower(s: &std::ffi::OsStr) -> String {
+            s.to_string_lossy().to_ascii_lowercase()
+        }
+        let comps: Vec<String> = path
+            .components()
+            .filter_map(|c| match c {
+                std::path::Component::Normal(s) => Some(lower(s)),
+                _ => None,
+            })
+            .collect();
+        if comps.is_empty() {
+            // Bare drive root like `D:\` — allow as a parent only if the caller
+            // still requires a named child (git_clone joins `name`). Not a
+            // system folder by itself.
+            return false;
+        }
+        let first = comps[0].as_str();
+        const DENY_TOP: &[&str] = &[
+            "windows",
+            "program files",
+            "program files (x86)",
+            "programdata",
+            "$recycle.bin",
+            "system volume information",
+            "recovery",
+            "boot",
+            "perflogs",
+        ];
+        DENY_TOP.contains(&first)
+    }
+    #[cfg(not(windows))]
+    {
+        // Absolute Unix path: deny well-known system roots. Allow /home, /opt,
+        // /var, /srv, /Users, and anything else not on the list.
+        const DENY_EXACT: &[&str] = &["/", "/root"];
+        if DENY_EXACT.iter().any(|d| path == Path::new(d)) {
+            return true;
+        }
+        const DENY_PREFIX: &[&str] = &[
+            "/bin", "/sbin", "/usr", "/etc", "/boot", "/dev", "/proc", "/sys", "/run", "/lib",
+            "/lib64", "/snap", "/System", "/private/etc", "/private/var/db",
+        ];
+        // /usr/local is commonly used for user software — allow it by carving out.
+        if path_is_within(path, Path::new("/usr/local")) {
+            return false;
+        }
+        DENY_PREFIX.iter().any(|d| path_is_within(path, Path::new(d)))
+    }
 }
 
 /// Like [`user_home`], but falls back to a writable temp dir instead of erroring.
@@ -252,8 +349,126 @@ pub fn user_home_or_tmp() -> PathBuf {
     })
 }
 
+/// `true` when `exe` looks like a Cargo/Tauri build artifact
+/// (`…/target/debug/capilot-ide` or `…/target/release/…`), i.e. **not** a
+/// user-installed binary. Packaged installs put the exe under the chosen
+/// install directory with no `target/{debug,release}` parent.
+fn exe_is_dev_build(exe: &Path) -> bool {
+    let mut comps = exe
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().to_ascii_lowercase()),
+            _ => None,
+        })
+        .peekable();
+    while let Some(c) = comps.next() {
+        if c == "target" {
+            if let Some(next) = comps.peek() {
+                if next == "debug" || next == "release" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// CaPilot application data root.
+///
+/// Priority:
+/// 1. `$CAPILOT_HOME` — explicit override (portable sticks, CI, tests).
+/// 2. Packaged install — `<dir of exe>/data` so the user only chooses the
+///    install directory once; sessions/workspaces/status/run all live under it.
+/// 3. Dev / unpackaged — `~/CaPilot` (historical default; keeps cargo/tauri
+///    artifacts out of the source tree).
+///
+/// On first launch of a packaged build, [`ensure_data_root`] one-shot migrates
+/// a legacy `~/CaPilot` tree into `<install>/data` when the latter is empty.
+pub fn data_root() -> PathBuf {
+    if let Ok(home) = std::env::var("CAPILOT_HOME") {
+        let t = home.trim();
+        if !t.is_empty() {
+            return PathBuf::from(t);
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if !exe_is_dev_build(&exe) {
+            if let Some(dir) = exe.parent() {
+                return dir.join("data");
+            }
+        }
+    }
+
+    user_home_or_tmp().join("CaPilot")
+}
+
+/// Ensure [`data_root`] exists on disk. On a packaged install whose `data/` is
+/// still empty, one-shot copy a legacy `~/CaPilot` tree (sessions + workspaces
+/// + status) so upgrading from a home-based install does not orphan history.
+pub fn ensure_data_root() -> std::io::Result<PathBuf> {
+    let root = data_root();
+    std::fs::create_dir_all(&root)?;
+    maybe_migrate_legacy_home(&root);
+    Ok(root)
+}
+
+/// If `root` has no `sessions.db` yet but `~/CaPilot/sessions.db` does, copy the
+/// legacy tree across. Never deletes the legacy dir (user may still have it open
+/// in another tool); never overwrites an already-initialized root.
+fn maybe_migrate_legacy_home(root: &Path) {
+    if root.join("sessions.db").exists() {
+        return;
+    }
+    // Don't recurse into ourselves when data_root IS the legacy home
+    // (dev mode / CAPILOT_HOME pointing at ~/CaPilot).
+    let legacy = user_home_or_tmp().join("CaPilot");
+    if paths_equalish(root, &legacy) {
+        return;
+    }
+    if !legacy.join("sessions.db").exists() {
+        return;
+    }
+    // sessions.db (+ WAL companions if present)
+    for name in ["sessions.db", "sessions.db-wal", "sessions.db-shm"] {
+        let src = legacy.join(name);
+        if src.exists() {
+            let _ = std::fs::copy(&src, root.join(name));
+        }
+    }
+    // workspaces/ and status/ — best-effort recursive copy of top-level entries.
+    for sub in ["workspaces", "status"] {
+        let src = legacy.join(sub);
+        let dst = root.join(sub);
+        if src.is_dir() && !dst.exists() {
+            let _ = copy_dir_recursive(&src, &dst);
+        }
+    }
+}
+
+fn paths_equalish(a: &Path, b: &Path) -> bool {
+    let a = a.canonicalize().unwrap_or_else(|_| strip_verbatim_prefix(a));
+    let b = b.canonicalize().unwrap_or_else(|_| strip_verbatim_prefix(b));
+    path_is_within(&a, &b) && path_is_within(&b, &a)
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let to = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &to)?;
+        } else if ty.is_file() {
+            let _ = std::fs::copy(entry.path(), &to);
+        }
+    }
+    Ok(())
+}
+
 pub fn workspace_root() -> PathBuf {
-    user_home_or_tmp().join("CaPilot").join("workspaces")
+    data_root().join("workspaces")
 }
 
 pub fn project_dir(project: &str) -> PathBuf {
@@ -302,12 +517,12 @@ pub fn agent_dir(project: &str, agent_id: &str) -> PathBuf {
     project_dir(project).join("agents").join(agent_id)
 }
 
-/// Sidecar dir for hook-reported agent status (`~/CaPilot/status/`). Claude Code
+/// Sidecar dir for hook-reported agent status (`<data_root>/status/`). Claude Code
 /// lifecycle hooks (injected per-session via `--settings`, see the claude
 /// adapter) write one JSON file per agent here; the frontend polls it to drive
 /// the accurate 运行中/空闲 split. App-owned, never inside a project workspace.
 pub fn status_dir() -> PathBuf {
-    user_home_or_tmp().join("CaPilot").join("status")
+    data_root().join("status")
 }
 
 /// The per-agent status sidecar path (`~/CaPilot/status/<agent_id>.json`).
@@ -931,16 +1146,12 @@ pub struct Persistence {
 
 impl Persistence {
     /// Open the sessions store. Sessions live in a SINGLE top-level database
-    /// (`~/CaPilot/sessions.db`) — not inside a per-project (or "default")
+    /// (`<data_root>/sessions.db`) — not inside a per-project (or "default")
     /// workspace dir — so no scaffold project is created just for persistence.
     /// A legacy `workspaces/default/sessions.db` (the old global store) is
     /// migrated up once, then its empty scaffold dir is removed.
     pub fn open() -> std::io::Result<Self> {
-        let ca_pilot = workspace_root()
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("CaPilot"));
-        std::fs::create_dir_all(&ca_pilot)?;
+        let ca_pilot = ensure_data_root()?;
         let db_path = ca_pilot.join("sessions.db");
         // Migrate the old global sessions DB out of the "default" project dir.
         let legacy = workspace_root().join(DEFAULT_PROJECT).join("sessions.db");
@@ -1610,7 +1821,9 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
+        // Windows prefers USERPROFILE; set both so the test is portable.
         std::env::set_var("HOME", &home);
+        std::env::set_var("USERPROFILE", &home);
         let child = home.join("Documents").join("repo");
         std::fs::create_dir_all(&child).unwrap();
         assert!(path_is_within_home(&child).unwrap());
@@ -1624,5 +1837,93 @@ mod tests {
         assert!(!path_is_within_home(&outside).unwrap());
         let _ = std::fs::remove_dir_all(&home);
         let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn path_is_allowed_accepts_any_local_drive_folder() {
+        let _guard = crate::agent_runtime::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        // Point data_root at a temp dir so the allow-list doesn't depend on the
+        // developer's real home / install layout.
+        let root = std::env::temp_dir().join(format!(
+            "capilot-allowed-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("CAPILOT_HOME", &root);
+        std::env::set_var("HOME", &root);
+        std::env::set_var("USERPROFILE", &root);
+
+        assert!(path_is_allowed(&root.join("workspaces")).unwrap_or(false) || {
+            // workspaces may not exist yet — allow the root itself.
+            path_is_allowed(&root).unwrap()
+        });
+        assert!(path_is_allowed(&root).unwrap());
+
+        #[cfg(windows)]
+        {
+            assert!(
+                path_is_allowed(Path::new(r"D:\code\my-repo")).unwrap(),
+                "D:\\ should be allowed for project roots"
+            );
+            assert!(
+                path_is_allowed(Path::new(r"B:\repos")).unwrap(),
+                "B:\\ should be allowed for project roots"
+            );
+            assert!(
+                !path_is_allowed(Path::new(r"C:\Windows\System32")).unwrap(),
+                "C:\\Windows must stay forbidden"
+            );
+            assert!(
+                !path_is_allowed(Path::new(r"C:\Program Files\Git")).unwrap(),
+                "Program Files must stay forbidden"
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(path_is_allowed(Path::new("/opt/projects/foo")).unwrap());
+            assert!(!path_is_allowed(Path::new("/etc/passwd")).unwrap());
+            assert!(!path_is_allowed(Path::new("/usr/bin")).unwrap());
+        }
+
+        std::env::remove_var("CAPILOT_HOME");
+        // Restore home-ish vars so later tests under ENV_LOCK don't inherit the
+        // temp path (they re-set what they need).
+        std::env::remove_var("HOME");
+        std::env::remove_var("USERPROFILE");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn data_root_honors_capilot_home_env() {
+        let _guard = crate::agent_runtime::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let root = std::env::temp_dir().join(format!(
+            "capilot-home-env-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("CAPILOT_HOME", &root);
+        assert_eq!(data_root(), root);
+        std::env::remove_var("CAPILOT_HOME");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn exe_is_dev_build_detects_cargo_target() {
+        assert!(exe_is_dev_build(Path::new(
+            r"C:\src\hamlet\src-tauri\target\debug\capilot-ide.exe"
+        )));
+        assert!(exe_is_dev_build(Path::new(
+            "/home/hachi/hamlet/src-tauri/target/release/capilot-ide"
+        )));
+        assert!(!exe_is_dev_build(Path::new(r"D:\Apps\CaPilot\capilot-ide.exe")));
+        assert!(!exe_is_dev_build(Path::new(
+            "/opt/CaPilot/capilot-ide"
+        )));
     }
 }

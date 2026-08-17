@@ -24,7 +24,7 @@ Linux requires `libwebkit2gtk-4.1-dev`, `librsvg2-dev`, `libgtk-3-dev`, `libsoup
 - `src-tauri/src/agent_runtime/` contains runtime adapters and the shared PTY lifecycle manager.
 - `docs/ai-runtime-references.md` maps each agent CLI's official docs and the integration facts CaPilot hard-codes (keybindings, flags, permission cycles, session layout). Consult it before changing runtime adapters.
 - `ui/` contains the React 19 frontend. Zustand state lives in `ui/state/store.ts`, and Tauri channels stream PTY bytes to `XTermPanel`.
-- Session state is stored in `~/CaPilot/sessions.db` and per-session `.agent-meta.json` files. Opening a restored tab resumes its saved runtime session lazily.
+- Session state is stored under the app data root (`data_root()`): packaged installs use `<install_dir>/data`, dev builds use `~/CaPilot`, override with `CAPILOT_HOME`. Layout: `sessions.db`, `workspaces/<name>/`, `status/`, `run/`. Per-session `.agent-meta.json` files live under each project shell. Opening a restored tab resumes its saved runtime session lazily.
 
 ## Constraints
 

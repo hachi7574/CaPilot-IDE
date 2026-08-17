@@ -492,16 +492,16 @@ async fn agent_spawn(
     let cwd = match &project_root {
         Some(pr) => {
             // A caller-supplied project root feeds both `create_dir_all` and the
-            // spawned shell's cwd — constrain it to $HOME so an arbitrary path
-            // can't be created / used as a shell working dir.
+            // spawned shell's cwd — constrain it via `path_is_allowed` so an
+            // arbitrary system path can't be created / used as a shell working dir.
             //
             // Check both the raw path and the canonical form: Windows
             // canonicalize() yields `\\?\C:\...` which does not byte-prefix-
-            // match a plain USERPROFILE, and Git Bash HOME can be `/c/Users/...`
-            // while the dialog returns `C:\Users\...`. `path_is_within_home`
+            // match a plain path, and Git Bash HOME can be `/c/Users/...`
+            // while the dialog returns `C:\Users\...`. `path_is_allowed`
             // normalizes both sides.
             let p = std::path::PathBuf::from(pr);
-            if !crate::persistence::path_is_within_home(&p)? {
+            if !crate::persistence::path_is_allowed(&p)? {
                 return Err("project root escapes allowed directories".to_string());
             }
             std::fs::create_dir_all(&p)
@@ -509,7 +509,7 @@ async fn agent_spawn(
             let canon = p
                 .canonicalize()
                 .map_err(|e| format!("Invalid project root: {}", e))?;
-            if !crate::persistence::path_is_within_home(&canon)? {
+            if !crate::persistence::path_is_allowed(&canon)? {
                 return Err("project root escapes allowed directories".to_string());
             }
             canon
@@ -2036,7 +2036,7 @@ async fn fs_read(path: String) -> Result<String, String> {
     let resolved = std::path::Path::new(&path)
         .canonicalize()
         .map_err(|e| format!("Invalid path: {}", e))?;
-    if !crate::persistence::path_is_within_home(&resolved)? {
+    if !crate::persistence::path_is_allowed(&resolved)? {
         return Err("Path escapes allowed directories".to_string());
     }
     std::fs::read_to_string(&resolved).map_err(|e| format!("Failed to read file: {}", e))
@@ -2055,7 +2055,7 @@ async fn fs_write(path: String, content: String) -> Result<(), String> {
     let canonical_parent = parent
         .canonicalize()
         .map_err(|e| format!("Invalid path: {}", e))?;
-    if !crate::persistence::path_is_within_home(&canonical_parent)? {
+    if !crate::persistence::path_is_allowed(&canonical_parent)? {
         return Err("Path escapes allowed directories".to_string());
     }
     let file_name = raw
@@ -2081,7 +2081,7 @@ async fn fs_write(path: String, content: String) -> Result<(), String> {
             };
             let canonical_target = std::fs::canonicalize(&real)
                 .map_err(|_| "Symlink target could not be resolved".to_string())?;
-            if !crate::persistence::path_is_within_home(&canonical_target)? {
+            if !crate::persistence::path_is_allowed(&canonical_target)? {
                 return Err("Path escapes allowed directories".to_string());
             }
             return std::fs::write(&canonical_target, &content)
@@ -2092,7 +2092,7 @@ async fn fs_write(path: String, content: String) -> Result<(), String> {
     // If the target already exists and is a regular file, double-check the
     // canonical path stays in HOME.
     if let Ok(canon) = resolved.canonicalize() {
-        if !crate::persistence::path_is_within_home(&canon)? {
+        if !crate::persistence::path_is_allowed(&canon)? {
             return Err("Path escapes allowed directories".to_string());
         }
     }
@@ -2105,7 +2105,7 @@ async fn fs_list(dir: String) -> Result<Vec<FsEntryBrief>, String> {
     let resolved = std::path::Path::new(&dir)
         .canonicalize()
         .map_err(|e| format!("Invalid path: {}", e))?;
-    if !crate::persistence::path_is_within_home(&resolved)? {
+    if !crate::persistence::path_is_allowed(&resolved)? {
         return Err("Path escapes allowed directories".to_string());
     }
     let mut entries = Vec::new();
@@ -2162,7 +2162,7 @@ async fn fs_search(
     if !resolved.is_dir() {
         return Err("Search root is not a directory".to_string());
     }
-    if !crate::persistence::path_is_within_home(&resolved)? {
+    if !crate::persistence::path_is_allowed(&resolved)? {
         return Err("Path escapes allowed directories".to_string());
     }
     let opts = fs_search::SearchOptions {
@@ -2189,7 +2189,7 @@ fn resolve_in_home(raw: &std::path::Path) -> Result<std::path::PathBuf, String> 
     let canonical_parent = parent
         .canonicalize()
         .map_err(|e| format!("Invalid path: {}", e))?;
-    if !crate::persistence::path_is_within_home(&canonical_parent)? {
+    if !crate::persistence::path_is_allowed(&canonical_parent)? {
         return Err("Path escapes allowed directories".to_string());
     }
     let file_name = raw
@@ -2232,7 +2232,7 @@ fn resolve_existing_in_home(raw: &std::path::Path) -> Result<std::path::PathBuf,
     let resolved = raw
         .canonicalize()
         .map_err(|e| format!("Invalid path: {}", e))?;
-    if !crate::persistence::path_is_within_home(&resolved)? {
+    if !crate::persistence::path_is_allowed(&resolved)? {
         return Err("Path escapes allowed directories".to_string());
     }
     Ok(resolved)
@@ -2393,7 +2393,7 @@ async fn fs_rename(src: String, new_name: String) -> Result<String, String> {
     let canonical_parent = parent
         .canonicalize()
         .map_err(|e| format!("无效路径: {}", e))?;
-    if !crate::persistence::path_is_within_home(&canonical_parent)? {
+    if !crate::persistence::path_is_allowed(&canonical_parent)? {
         return Err("路径越界".to_string());
     }
     let file_name = raw
@@ -3215,7 +3215,12 @@ struct GitCloneError {
 /// background runtime; completion is reported on `git://cloned` (with the real
 /// root) or `git://clone-error` (with the git error). The parent dir must
 /// already exist; the URL is validated and passed via `Command::arg` (no shell)
-/// after `--`, so a `-`-prefixed URL is never treated as a flag. Returns
+/// after `--`, so a `-`-prefixed URL is never treated as a flag.
+///
+/// `id` is optional: when the frontend supplies one (and registers it in
+/// `pendingClones` *before* invoking), a fast local clone cannot race the
+/// completion event past `beginClone`. When omitted the backend mints a UUID
+/// (legacy / callers that don't care about the race). Returns
 /// `(clone_id, target_dir)` — the target dir may not exist yet.
 #[tauri::command]
 async fn git_clone(
@@ -3223,6 +3228,7 @@ async fn git_clone(
     url: String,
     name: String,
     parent_dir: String,
+    id: Option<String>,
 ) -> Result<(String, String), String> {
     validate_git_url(&url)?;
     sanitize_project(&name)?;
@@ -3232,13 +3238,33 @@ async fn git_clone(
     if !parent.is_dir() {
         return Err("父目录不存在或不是目录".to_string());
     }
+    // Clone target must be an allowed local path (any drive except system dirs;
+    // same gate as git_gate::clone_into).
+    if !persistence::path_is_allowed(&parent)? {
+        return Err("父目录不在允许范围内（系统目录不可用，请换一个普通文件夹）".to_string());
+    }
+    // Drop the Windows `\\?\` verbatim prefix before joining / returning the
+    // root. Git rejects `\\?\B:\...` ("Invalid argument"), and the UI / project
+    // roots should also show a normal drive path.
+    let parent = persistence::strip_verbatim_prefix(&parent);
     let target = parent.join(&name);
     if target.exists() {
         return Err(format!("目标目录已存在: {}", target.display()));
     }
-    // Unique id lets the frontend match the completion event back to the exact
-    // placeholder project it put in the sidebar.
-    let id = uuid::Uuid::new_v4().simple().to_string();
+    // Prefer the frontend-supplied id so `beginClone(id)` can run *before* the
+    // invoke and still match the completion event. Reject empty / oversized
+    // values so a buggy caller can't flood the event bus with junk keys.
+    let id = match id {
+        Some(s) => {
+            let t = s.trim();
+            if t.is_empty() || t.len() > 64 || !t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return Err("无效的 clone id".to_string());
+            }
+            t.to_string()
+        }
+        None => uuid::Uuid::new_v4().simple().to_string(),
+    };
     let id_for_task = id.clone();
     let name_for_task = name.clone();
     let target_for_task = target.clone();
@@ -3254,10 +3280,18 @@ async fn git_clone(
             Ok(Ok(o)) if o.status.success() => Ok(()),
             Ok(Ok(o)) => {
                 let err = String::from_utf8_lossy(&o.stderr);
-                Err(format!("git clone 失败: {}", err.trim()))
+                let msg = err.trim();
+                // Empty stderr usually means a helper died silently or the
+                // process was killed; give the user something actionable.
+                if msg.is_empty() {
+                    Err("git clone 失败（无输出）。若仓库为私有，请先在终端执行 gh auth login".to_string())
+                } else {
+                    Err(format!("git clone 失败: {msg}"))
+                }
             }
-            Ok(Err(e)) => Err(format!("git 启动失败: {}", e)),
-            Err(e) => Err(format!("git clone 任务失败: {}", e)),
+            // clone_into already returns a user-facing string (timeout / spawn).
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(format!("git clone 任务失败: {e}")),
         };
         match result {
             Ok(()) => {
@@ -3274,6 +3308,12 @@ async fn git_clone(
                 );
             }
             Err(error) => {
+                // Drop a half-written clone dir so a retry with the same name
+                // doesn't hit "目标目录已存在". Only remove if it looks like the
+                // incomplete target we just created (exists + under parent).
+                if target_for_task.exists() {
+                    let _ = std::fs::remove_dir_all(&target_for_task);
+                }
                 let _ = app_for_task.emit(
                     "git://clone-error",
                     GitCloneError {

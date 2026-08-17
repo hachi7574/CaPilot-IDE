@@ -16,14 +16,12 @@ use std::process;
 /// uses the same Cargo package version via `env!("CARGO_PKG_VERSION")`.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Standard `~/CaPilot` base dir — parent of `sessions.db`, `workspaces/` and
-/// `run/`. Mirrors `SessionStore::open()` so daemon and GUI cannot drift, but
-/// without opening the DB (the GUI bridge calls this at every startup).
+/// Standard CaPilot data root — parent of `sessions.db`, `workspaces/` and
+/// `run/`. Mirrors `Persistence::open()` / `SessionStore::open()` so daemon and
+/// GUI cannot drift, but without opening the DB (the GUI bridge calls this at
+/// every startup). See [`crate::persistence::data_root`].
 pub fn daemon_base() -> PathBuf {
-    crate::persistence::workspace_root()
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| crate::persistence::user_home_or_tmp().join("CaPilot"))
+    crate::persistence::data_root()
 }
 
 /// Run the daemon until shutdown. Never returns normally except via exit.
