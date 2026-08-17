@@ -101,11 +101,12 @@ pub fn run(repo: &str, args: &[&str]) -> Result<Output, String> {
     let repo = validate_repo(repo)?;
     let _permit = acquire();
     wait_for_rate_slot();
-    Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(repo).args(args);
+    // Git panel / status polls fire often; without CREATE_NO_WINDOW a GUI host
+    // flashes an empty console for every `git status` / `git log`.
+    crate::agent_runtime::executable::hide_windows_console(&mut cmd);
+    cmd.output()
         .map_err(|error| format!("git failed: {error}"))
 }
 
@@ -118,11 +119,10 @@ pub fn run(repo: &str, args: &[&str]) -> Result<Output, String> {
 pub fn run_raw(path: &Path, args: &[&str]) -> Result<Output, String> {
     let _permit = acquire();
     wait_for_rate_slot();
-    Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(args)
-        .output()
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(path).args(args);
+    crate::agent_runtime::executable::hide_windows_console(&mut cmd);
+    cmd.output()
         .map_err(|error| format!("git failed: {error}"))
 }
 

@@ -533,10 +533,10 @@ pub fn ensure_project(project: &str) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir.join("agents"))?;
     // git init if not already a repo (best-effort; the git panel depends on it)
     if !dir.join(".git").exists() {
-        let _ = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&dir)
-            .output();
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["init", "-q"]).current_dir(&dir);
+        crate::agent_runtime::executable::hide_windows_console(&mut cmd);
+        let _ = cmd.output();
     }
     Ok(dir)
 }

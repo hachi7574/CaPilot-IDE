@@ -753,6 +753,7 @@ console.log(JSON.stringify(missing));
         let names_json = serde_json::to_string(names).ok()?;
         let mut cmd = Command::new("node");
         cmd.arg("-e").arg(script).arg(&names_json).arg(profile);
+        crate::agent_runtime::executable::hide_windows_console(&mut cmd);
         let output = crate::agent_runtime::adapter::run_cmd_timeout(
             cmd,
             std::time::Duration::from_secs(5),
@@ -811,6 +812,7 @@ console.log(JSON.stringify(out));
 "#;
         let mut cmd = Command::new("node");
         cmd.arg("-e").arg(script).arg(&profile).arg(&settings_path);
+        crate::agent_runtime::executable::hide_windows_console(&mut cmd);
         let output = crate::agent_runtime::adapter::run_cmd_timeout(
             cmd,
             std::time::Duration::from_secs(5),

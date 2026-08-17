@@ -289,6 +289,7 @@ fn bare_runs(path: &Path) -> bool {
     {
         c.arg("--version");
     }
+    crate::agent_runtime::executable::hide_windows_console(&mut c);
     crate::agent_runtime::adapter::run_cmd_timeout(
         c,
         crate::agent_runtime::adapter::CLI_PROBE_TIMEOUT,

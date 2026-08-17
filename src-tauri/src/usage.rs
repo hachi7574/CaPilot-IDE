@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -212,11 +212,18 @@ async fn fetch_with_config(runtime: &str, config: UsageConfig) -> RuntimeUsage {
 /// `runtimes/codex.rs::discover_models`: write `initialize` then `method`,
 /// read lines until the `"id":2` response, then kill the child.
 fn codex_rpc(method: &str) -> Result<Value, String> {
-    let mut child = Command::new("codex")
-        .args(["app-server", "--listen", "stdio://"])
+    // Prefer Windows-safe resolution (npm `codex.cmd` → cmd wrap + CREATE_NO_WINDOW).
+    // A bare `Command::new("codex")` flashes a console on every usage poll.
+    let mut child = crate::agent_runtime::executable::command_for(
+        "codex",
+        &["app-server", "--listen", "stdio://"],
+    )
+    .ok_or_else(|| "无法找到 codex CLI".to_string())?;
+    child
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = child
         .spawn()
         .map_err(|e| format!("无法启动 codex app-server: {e}"))?;
 

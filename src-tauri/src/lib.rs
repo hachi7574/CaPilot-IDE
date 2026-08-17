@@ -1131,10 +1131,10 @@ fn create_project(name: String, path: Option<String>) -> Result<String, String> 
         // Per-agent metadata lives under the workspace layout (created by
         // agent_spawn), never inside the picked folder. git init is best-effort
         // (the Git panel depends on a repo).
-        let _ = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&canonical)
-            .status();
+        let mut git = std::process::Command::new("git");
+        git.args(["init", "-q"]).current_dir(&canonical);
+        crate::agent_runtime::executable::hide_windows_console(&mut git);
+        let _ = git.status();
         // Persist the root so terminals keep opening there even before any agent
         // exists (agent-meta recovery needs one).
         let _ = persistence::write_project_root(&name, &canonical);

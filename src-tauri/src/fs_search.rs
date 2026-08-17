@@ -90,11 +90,12 @@ static ACTIVE_RG: LazyLock<Mutex<HashMap<String, tokio::process::Child>>> =
 
 fn rg_available() -> bool {
     static AVAILABLE: LazyLock<bool> = LazyLock::new(|| {
-        std::process::Command::new("rg")
-            .arg("--version")
+        let mut cmd = std::process::Command::new("rg");
+        cmd.arg("--version")
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
+            .stderr(Stdio::null());
+        crate::agent_runtime::executable::hide_windows_console(&mut cmd);
+        cmd.status()
             .map(|s| s.success())
             .unwrap_or(false)
     });
@@ -102,14 +103,15 @@ fn rg_available() -> bool {
 }
 
 fn is_git_repo(root: &Path) -> bool {
-    std::process::Command::new("git")
-        .arg("-C")
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
         .arg(root)
         .arg("rev-parse")
         .arg("--is-inside-work-tree")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .stderr(Stdio::null());
+    crate::agent_runtime::executable::hide_windows_console(&mut cmd);
+    cmd.status()
         .map(|s| s.success())
         .unwrap_or(false)
 }
@@ -323,6 +325,13 @@ async fn search_rg(opts: &SearchOptions, key: &str) -> Result<SearchResult, Stri
         .clamp(1, DEFAULT_MAX_RESULTS);
 
     let mut cmd = tokio::process::Command::new("rg");
+    // Windows GUI hosts flash a console for every short-lived child unless
+    // CREATE_NO_WINDOW is set. Tokio's Command supports the same flag.
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
     cmd.args([
         "--json",
         "--hidden",
@@ -500,6 +509,11 @@ async fn search_git_grep(opts: &SearchOptions) -> Result<SearchResult, String> {
         .clamp(1, DEFAULT_MAX_RESULTS);
 
     let mut cmd = tokio::process::Command::new("git");
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
     cmd.args([
         "-c",
         "submodule.recurse=false",
