@@ -9,7 +9,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -339,10 +338,11 @@ impl OpenCodeAdapter {
         // name OpenCode's TUI shows in its model dialog. CaPilot selects a model
         // by typing that exact name into the dialog, so the catalog name (not
         // the id-derived one) must be used.
-        if let Ok(output) = Command::new("opencode")
-            .args(["models", "--verbose"])
-            .output()
-        {
+        if let Some(output) = crate::agent_runtime::executable::run_cli(
+            "opencode",
+            &["models", "--verbose"],
+            std::time::Duration::from_secs(8),
+        ) {
             if output.status.success() {
                 let models = Self::parse_verbose_models(
                     &String::from_utf8_lossy(&output.stdout),
@@ -354,7 +354,11 @@ impl OpenCodeAdapter {
             }
         }
         // Fall back to the plain listing (older OpenCode without --verbose).
-        let Ok(output) = Command::new("opencode").arg("models").output() else {
+        let Some(output) = crate::agent_runtime::executable::run_cli(
+            "opencode",
+            &["models"],
+            std::time::Duration::from_secs(8),
+        ) else {
             return vec![];
         };
         if !output.status.success() {
@@ -608,7 +612,11 @@ impl OpenCodeAdapter {
 
     fn fetch_model_limits() -> HashMap<String, u64> {
         let mut map = HashMap::new();
-        let Ok(output) = Command::new("opencode").args(["models", "--verbose"]).output() else {
+        let Some(output) = crate::agent_runtime::executable::run_cli(
+            "opencode",
+            &["models", "--verbose"],
+            std::time::Duration::from_secs(8),
+        ) else {
             return map;
         };
         if !output.status.success() {

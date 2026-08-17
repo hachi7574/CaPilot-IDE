@@ -674,8 +674,10 @@ impl DshAdapter {
     /// (~0.1s, no plugin mounting). Disabled entries are omitted by the
     /// composer, so this is exactly what the TUI boot will try to load.
     fn profile_dump() -> Option<String> {
-        let mut cmd = Command::new("dsh");
-        cmd.args(["--dump-config", "--profile", "dsh-tui"]);
+        let cmd = crate::agent_runtime::executable::command_for(
+            "dsh",
+            &["--dump-config", "--profile", "dsh-tui"],
+        )?;
         let output = crate::agent_runtime::adapter::run_cmd_timeout(
             cmd,
             std::time::Duration::from_secs(5),

@@ -348,25 +348,18 @@ fn kill_probe_tree(child: &mut std::process::Child) {
 }
 
 /// `true` when `<cmd> --version` exits 0 within [`CLI_PROBE_TIMEOUT`].
+///
+/// On Windows this walks `PATH`+`PATHEXT` and wraps npm `.cmd` shims via
+/// `cmd.exe` — see [`crate::agent_runtime::executable`].
 pub fn cli_available(cmd: &str) -> bool {
-    let mut c = Command::new(cmd);
-    c.arg("--version");
-    run_cmd_timeout(c, CLI_PROBE_TIMEOUT).is_some_and(|o| o.status.success())
+    crate::agent_runtime::executable::cli_available(cmd)
 }
 
 /// Run `<cmd> --version` and return the trimmed first stdout line. `None` when
 /// the binary is missing, the command fails, times out, or it prints nothing
 /// useful.
 pub fn cli_version(cmd: &str) -> Option<String> {
-    let mut c = Command::new(cmd);
-    c.arg("--version");
-    let out = run_cmd_timeout(c, CLI_PROBE_TIMEOUT)?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let line = text.trim().lines().next()?.trim();
-    (!line.is_empty()).then(|| line.to_string())
+    crate::agent_runtime::executable::cli_version(cmd)
 }
 
 /// The core trait that every agent CLI must implement.

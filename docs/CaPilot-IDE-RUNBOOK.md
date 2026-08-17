@@ -60,6 +60,8 @@ IDE 遵循 CaPilot 主仓库的 **LUCY styleguide**（8-bit Pixel × Apple Smoot
 
 > 已决定（2026-08-17）：**取消 macOS 官方支持与发布**。Release CI 只构建 Linux/Windows；bundle targets 为 `deb` / `appimage` / `nsis`；updater `latest.json` 不再包含 `darwin-*`。源码里少量 `#[cfg(target_os = "macos")]` 路径保留无害，但无预编译包、无签名流程。
 
+> 已落地（2026-08-17）：**Windows agent CLI 解析**（参考 Paseo）。`agent_runtime/executable.rs` 对 bare name 做 `PATH`+`PATHEXT` 解析，`.cmd`/`.bat`（npm 全局 shim）经 `cmd.exe /d /s /c` 包装后再进探测与 PTY（ConPTY 不应用 PATHEXT、也不能直接 CreateProcess 脚本）。`cli_available` / `cli_version` / 各 runtime 的非 PTY `Command` 与 `pty_core::spawn` 共用此路径。bash/Git Bash 仍是可选用户 shell，不再是 agent 启动前提。
+
 ### 待开发项
 
 - **编辑器外部改动监视**（notify → 前端刷新）：Git 面板已用 2.5s 前端轮询兜底，编辑器标签页本身仍未监听磁盘改动

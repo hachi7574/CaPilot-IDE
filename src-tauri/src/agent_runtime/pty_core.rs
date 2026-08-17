@@ -303,9 +303,15 @@ impl PtyCore {
         // Keep the master handle for resize
         let master = pair.master;
 
+        // Resolve bare CLI names and wrap Windows `.cmd`/`.bat` shims so
+        // ConPTY/CreateProcess can actually start npm-global agents (claude.cmd
+        // etc.). See `executable::prepare_pty_launch`.
+        let (launch_cmd, launch_args) =
+            crate::agent_runtime::executable::prepare_pty_launch(cmd, args);
+
         // Build command
-        let mut command = CommandBuilder::new(cmd);
-        for arg in args {
+        let mut command = CommandBuilder::new(&launch_cmd);
+        for arg in &launch_args {
             command.arg(arg);
         }
         command.cwd(cwd);

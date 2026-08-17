@@ -4,7 +4,6 @@ use crate::agent_runtime::adapter::{
 };
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 /// Adapter for the Pi coding agent CLI (`pi`, npm `@earendil-works/pi-coding-agent`).
@@ -125,8 +124,11 @@ impl PiAdapter {
     fn list_models() -> Vec<ModelInfo> {
         // Offline catalog only — never hang Settings detection on a network
         // provider probe. Hard-capped so a wedged `pi` can't freeze the list.
-        let mut cmd = Command::new("pi");
-        cmd.env("PI_OFFLINE", "1").arg("--list-models");
+        let Some(mut cmd) = crate::agent_runtime::executable::command_for("pi", &["--list-models"])
+        else {
+            return vec![];
+        };
+        cmd.env("PI_OFFLINE", "1");
         let Some(output) = crate::agent_runtime::adapter::run_cmd_timeout(
             cmd,
             std::time::Duration::from_secs(5),

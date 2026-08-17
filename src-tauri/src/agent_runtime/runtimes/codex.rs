@@ -7,7 +7,7 @@ use crate::persistence::status_dir;
 use serde_json::Value;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime};
 
@@ -84,10 +84,9 @@ impl CodexAdapter {
     }
 
     fn check_authenticated() -> bool {
-        let mut cmd = Command::new("codex");
-        cmd.args(["login", "status"]);
-        crate::agent_runtime::adapter::run_cmd_timeout(
-            cmd,
+        crate::agent_runtime::executable::run_cli(
+            "codex",
+            &["login", "status"],
             crate::agent_runtime::adapter::CLI_PROBE_TIMEOUT,
         )
         .is_some_and(|output| output.status.success())
@@ -97,13 +96,16 @@ impl CodexAdapter {
     /// the native Codex model picker uses, so it reflects the installed CLI,
     /// current authentication, account availability, and hidden-model policy.
     fn discover_models() -> Vec<ModelInfo> {
-        let Ok(mut child) = Command::new("codex")
-            .args(["app-server", "--listen", "stdio://"])
-            .stdin(Stdio::piped())
+        let Some(mut cmd) = crate::agent_runtime::executable::command_for(
+            "codex",
+            &["app-server", "--listen", "stdio://"],
+        ) else {
+            return vec![];
+        };
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-        else {
+            .stderr(Stdio::null());
+        let Ok(mut child) = cmd.spawn() else {
             return vec![];
         };
 
