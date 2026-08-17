@@ -64,6 +64,8 @@ IDE 遵循 CaPilot 主仓库的 **LUCY styleguide**（8-bit Pixel × Apple Smoot
 
 > 已落地（2026-08-17）：**默认交互终端 = OS shell**。新 runtime `shell`：Windows 优先 `pwsh` 否则 `ComSpec`/cmd；Unix 用 `$SHELL`/bash/sh。新建终端模板固定第一项为「终端」；`bash-rc`（Git Bash）降为可选（未安装则隐藏）。文件树「在此打开终端」与快速启动走 `shell`。Agent 启动仍不经过 shell。
 
+> 已落地（2026-08-17）：**Windows 进程树回收 + 文件树/快速启动按 shell 语义适配**。`pty_core::kill` / 探测超时走 `process_kill::kill_process_tree`（Windows `taskkill /T /F`，Unix 进程组 SIGKILL），避免 agent 孙进程残留。文件树「运行此文件 / 在当前终端打开」按当前 shell 风味（PowerShell / cmd / POSIX）生成 `cd` 与引号；`.py` 在 Windows 用 `python`，并识别 `.ps1`/`.bat`/`.cmd`。快速启动编辑框提示命令注入的是系统默认 shell（非 bash）。
+
 ### 待开发项
 
 - **编辑器外部改动监视**（notify → 前端刷新）：Git 面板已用 2.5s 前端轮询兜底，编辑器标签页本身仍未监听磁盘改动

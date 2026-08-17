@@ -9,6 +9,16 @@ import { useStore } from "../../state/store";
 import type { ContentSearchFileResult, ContentSearchMatch } from "../../state/store";
 import { fileTab, isImagePath } from "../../state/openFile";
 import { spawnBashAt } from "../../state/agentActions";
+import {
+  baseName,
+  detectShellFlavor,
+  joinPath,
+  parentPath,
+  runCommandForFile,
+  shellCd,
+  shellCdAndRun,
+  type ShellFlavor,
+} from "../../state/shellPath";
 import { useFileContentSearch } from "./useFileContentSearch";
 import { TodoPanel } from "./TodoPanel";
 import { CommitGraph, type GitLogEntry } from "./CommitGraph";
@@ -318,9 +328,9 @@ function fileClass(name: string): { cls: string; icon: string } {
   return { cls: "file", icon: "file-text" };
 }
 
-/** Single-quote a path for a bash command line (handles embedded single quotes). */
-function shq(p: string): string {
-  return `'${p.replace(/'/g, `'\\''`)}'`;
+/** Normalize separators so prefix checks work for both `/` and `\` roots. */
+function normPath(p: string): string {
+  return p.replace(/\\/g, "/");
 }
 
 /** Resolve the project that owns an absolute path: focused project wins, then
@@ -329,40 +339,39 @@ function shq(p: string): string {
 function projectForPath(path: string): string {
   const s = useStore.getState();
   const roots = s.projectRoots;
-  const under = (root: string | undefined) =>
-    !!root && (path === root || path.startsWith(root.endsWith("/") ? root : root + "/"));
+  const np = normPath(path);
+  const under = (root: string | undefined) => {
+    if (!root) return false;
+    const nr = normPath(root).replace(/\/+$/, "");
+    return np === nr || np.startsWith(nr + "/");
+  };
   if (s.focusedProject && under(roots[s.focusedProject])) return s.focusedProject;
   for (const [name, root] of Object.entries(roots)) {
     if (under(root)) return name;
   }
-  const m = path.match(/workspaces\/([^/]+)/);
+  const m = np.match(/workspaces\/([^/]+)/);
   if (m) return m[1];
-  const parts = path.split("/").filter(Boolean);
+  const parts = np.split("/").filter(Boolean);
   return parts[parts.length - 1] || "default";
 }
 
-/** Build the shell command that runs a file from its own directory (cwd = dir),
- *  or null when the file isn't runnable. Uses the file's relative `./name`. */
-function runCommandFor(e: FsEntry): string | null {
-  const dot = e.name.lastIndexOf(".");
-  const ext = dot >= 0 ? e.name.slice(dot).toLowerCase() : "";
-  const rel = `./${e.name}`;
-  const q = shq(rel);
-  switch (ext) {
-    case ".py": return `python3 ${q}`;
-    case ".sh":
-    case ".bash": return `bash ${q}`;
-    case ".js":
-    case ".mjs":
-    case ".cjs": return `node ${q}`;
-    case ".ts":
-    case ".tsx": return `npx tsx ${q}`;
-    case ".rb": return `ruby ${q}`;
-    case ".php": return `php ${q}`;
-    case ".pl": return `perl ${q}`;
-    case ".go": return `go run ${q}`;
-    default: return e.executable ? q : null;
+/** Shell flavor for the single open plain terminal (or OS default when none). */
+function flavorForAgent(agentId: string | null): ShellFlavor {
+  const s = useStore.getState();
+  if (!agentId) {
+    const shellRt = s.runtimes.find((r) => r.id === "shell");
+    return detectShellFlavor("shell", shellRt?.name);
   }
+  const agent = s.agents.get(agentId);
+  const rt = agent?.runtime ?? "shell";
+  const info = s.runtimes.find((r) => r.id === rt);
+  return detectShellFlavor(rt, info?.name ?? agent?.title);
+}
+
+/** Build the shell command that runs a file from its own directory (cwd = dir),
+ *  or null when the file isn't runnable. */
+function runCommandFor(e: FsEntry, flavor: ShellFlavor): string | null {
+  return runCommandForFile(e.name, !!e.executable, flavor);
 }
 
 /** Copy text to the OS clipboard (navigator API with execCommand fallback). */
@@ -464,7 +473,7 @@ function FilesPanel() {
         const list = await invoke<FsEntry[]>("fs_list", { dir: d });
         setDirs((prev) => new Map(prev).set(d, list));
         for (const e of list) {
-          if (e.is_dir && !SKIP_DIRS.has(e.name)) stack.push(`${d}/${e.name}`);
+          if (e.is_dir && !SKIP_DIRS.has(e.name)) stack.push(joinPath(d, e.name));
         }
       } catch {
         // Unreadable directory — skip.
@@ -547,10 +556,10 @@ function FilesPanel() {
       try {
         const entries: GitEntry[] =
           (await invoke<GitEntry[]>("git_status", { dir: root })) ?? [];
-        const base = root.endsWith("/") ? root : `${root}/`;
         const next: Record<string, GitFileState> = {};
         for (const e of entries) {
-          next[base + e.path] = {
+          // git reports repo-relative paths with `/`; join onto the OS root.
+          next[joinPath(root, e.path)] = {
             status: e.index === "?" && e.worktree === "?" ? "new" : "mod",
             add: e.add,
             del: e.del,
@@ -582,13 +591,16 @@ function FilesPanel() {
   const dirGit = useMemo(() => {
     const hasMod = new Set<string>();
     const hasNew = new Set<string>();
-    const base = root.endsWith("/") ? root : `${root}/`;
+    const base = normPath(root).replace(/\/+$/, "") + "/";
     for (const [p, st] of Object.entries(gitState)) {
-      let dir = p.slice(0, p.lastIndexOf("/"));
-      while (dir.startsWith(base)) {
+      let dir = parentPath(p);
+      // Walk ancestors using normalized separators so Windows `\` roots match.
+      while (normPath(dir).startsWith(base) || normPath(dir) + "/" === base) {
         if (st.status === "mod") hasMod.add(dir);
         else hasNew.add(dir);
-        dir = dir.slice(0, dir.lastIndexOf("/"));
+        const next = parentPath(dir);
+        if (!next || next === dir) break;
+        dir = next;
       }
     }
     return { hasMod, hasNew };
@@ -663,11 +675,11 @@ function FilesPanel() {
     if (!creating) return;
     const name = newName.trim();
     if (!name) return;
-    if (name.includes("/") || name === "." || name === "..") {
-      setCreateError("名称不能包含 / 或为 . / ..");
+    if (name.includes("/") || name.includes("\\") || name === "." || name === "..") {
+      setCreateError("名称不能包含路径分隔符或为 . / ..");
       return;
     }
-    const path = `${creating.dir}/${name}`;
+    const path = joinPath(creating.dir, name);
     try {
       if (creating.kind === "file") {
         await invoke("fs_create_file", { path });
@@ -701,7 +713,7 @@ function FilesPanel() {
     if (!menu) return root;
     if (menu.kind !== "file") return menu.path || root;
     const p = menu.path || "";
-    return p.slice(0, p.lastIndexOf("/")) || root;
+    return parentPath(p) || root;
   };
 
   const doCopy = () => {
@@ -722,10 +734,10 @@ function FilesPanel() {
     const isMove = clip.mode === "cut";
     try {
       const created = await invoke<string>("fs_paste", { src: clip.path, destDir: dest, isMove });
-      const name = created.slice(created.lastIndexOf("/") + 1);
+      const name = baseName(created);
       setNotice({ text: `已${isMove ? "移动" : "复制"}为 ${name}` });
       loadChildren(dest);
-      const srcParent = clip.path.slice(0, clip.path.lastIndexOf("/"));
+      const srcParent = parentPath(clip.path);
       if (srcParent !== dest) loadChildren(srcParent);
       if (isMove) setClip(null);
     } catch (err) {
@@ -734,19 +746,20 @@ function FilesPanel() {
     closeMenu();
   };
 
-  /** cd the single open bash terminal to a folder (req: open in current terminal). */
+  /** cd the single open shell terminal to a folder (req: open in current terminal). */
   const doOpenInCurrentTerminal = () => {
     if (!menu?.path || !singleBashId) return;
+    const flavor = flavorForAgent(singleBashId);
     invoke("agent_write", {
       id: singleBashId,
-      data: `cd ${shq(menu.path)}`,
+      data: shellCd(menu.path, flavor),
       raw: false,
     }).catch(() => {});
     setActiveTab(singleBashId);
     closeMenu();
   };
 
-  /** Spawn a new bash terminal rooted at a folder. */
+  /** Spawn a new OS shell terminal rooted at a folder. */
   const doOpenInNewTerminal = () => {
     if (!menu?.path) return;
     const proj = projectForPath(menu.path);
@@ -759,22 +772,26 @@ function FilesPanel() {
   /** Resolve the runnable command for the menu's file path (null = not runnable). */
   const fileRunCommand = (path: string | undefined): string | null => {
     if (!path) return null;
-    const parent = path.slice(0, path.lastIndexOf("/"));
-    const entry = dirs.get(parent)?.find((e) => `${parent}/${e.name}` === path);
-    return entry ? runCommandFor(entry) : null;
+    const parent = parentPath(path);
+    const flavor = flavorForAgent(singleBashId);
+    const entry = dirs
+      .get(parent)
+      ?.find((e) => joinPath(parent, e.name) === path || `${parent}/${e.name}` === path);
+    return entry ? runCommandFor(entry, flavor) : null;
   };
 
-  /** Run a file: reuse the single bash terminal if present (cd + run), else
-   *  spawn a fresh bash terminal in the file's directory and run it there. */
+  /** Run a file: reuse the single shell terminal if present (cd + run), else
+   *  spawn a fresh OS shell in the file's directory and run it there. */
   const doRunFile = () => {
     if (!menu?.path) return;
+    const flavor = flavorForAgent(singleBashId);
     const cmd = fileRunCommand(menu.path);
     if (!cmd) return;
-    const dir = menu.path.slice(0, menu.path.lastIndexOf("/"));
+    const dir = parentPath(menu.path);
     if (singleBashId) {
       invoke("agent_write", {
         id: singleBashId,
-        data: `cd ${shq(dir)} && ${cmd}`,
+        data: shellCdAndRun(dir, cmd, flavor),
         raw: false,
       }).catch(() => {});
       setActiveTab(singleBashId);
@@ -801,13 +818,13 @@ function FilesPanel() {
   /** Delete a file/dir after confirmation. Shared by the context menu and the
    *  Del keyboard shortcut. Clears the tree selection when it targeted `path`. */
   const deletePath = async (path: string) => {
-    const name = path.slice(path.lastIndexOf("/") + 1);
+    const name = baseName(path);
     const ok = await confirm(`确定删除「${name}」？此操作不可撤销。`, {
       title: "删除",
       kind: "warning",
     });
     if (!ok) return;
-    const parent = path.slice(0, path.lastIndexOf("/"));
+    const parent = parentPath(path);
     try {
       await invoke("fs_delete", { path });
       loadChildren(parent);
@@ -826,7 +843,7 @@ function FilesPanel() {
 
   const startRename = (path: string) => {
     setRenaming(path);
-    setRenameValue(path.slice(path.lastIndexOf("/") + 1));
+    setRenameValue(baseName(path));
     setRenameError("");
     setMenu(null);
   };
@@ -840,25 +857,38 @@ function FilesPanel() {
   const submitRename = async () => {
     if (!renaming) return;
     const name = renameValue.trim();
-    if (!name || name.includes("/") || name === "." || name === "..") {
-      setRenameError("名称不能为空、包含 / 或为 . / ..");
+    if (
+      !name ||
+      name.includes("/") ||
+      name.includes("\\") ||
+      name === "." ||
+      name === ".."
+    ) {
+      setRenameError("名称不能为空、包含路径分隔符或为 . / ..");
       return;
     }
-    const parent = renaming.slice(0, renaming.lastIndexOf("/"));
+    const parent = parentPath(renaming);
     try {
       const newPath = await invoke<string>("fs_rename", { src: renaming, newName: name });
       // Drop stale cached children of a renamed dir, then re-show it expanded.
+      // Match both `/` and `\` prefixes (Windows roots use `\`).
+      const isUnder = (k: string, prefix: string) => {
+        if (k === prefix) return true;
+        const nk = normPath(k);
+        const np = normPath(prefix).replace(/\/+$/, "");
+        return nk.startsWith(np + "/");
+      };
       setDirs((prev) => {
         const next = new Map(prev);
         for (const k of prev.keys()) {
-          if (k === renaming || k.startsWith(`${renaming}/`)) next.delete(k);
+          if (isUnder(k, renaming)) next.delete(k);
         }
         return next;
       });
       setExpanded((prev) => {
         const next = new Set(prev);
         for (const k of prev) {
-          if (k === renaming || k.startsWith(`${renaming}/`)) next.delete(k);
+          if (isUnder(k, renaming)) next.delete(k);
         }
         next.add(newPath);
         return next;
@@ -888,7 +918,7 @@ function FilesPanel() {
   const pasteTarget = (): string => {
     if (!selected) return root;
     if (selected.isDir) return selected.path;
-    return selected.path.slice(0, selected.path.lastIndexOf("/")) || root;
+    return parentPath(selected.path) || root;
   };
 
   /** Cmd/Ctrl+V: paste the app-internal clipboard into the selection target. */
@@ -898,10 +928,10 @@ function FilesPanel() {
     const isMove = clip.mode === "cut";
     try {
       const created = await invoke<string>("fs_paste", { src: clip.path, destDir: dest, isMove });
-      const name = created.slice(created.lastIndexOf("/") + 1);
+      const name = baseName(created);
       setNotice({ text: `已${isMove ? "移动" : "复制"}为 ${name}` });
       loadChildren(dest);
-      const srcParent = clip.path.slice(0, clip.path.lastIndexOf("/"));
+      const srcParent = parentPath(clip.path);
       if (srcParent !== dest) loadChildren(srcParent);
       if (isMove) setClip(null);
     } catch (err) {
@@ -928,13 +958,13 @@ function FilesPanel() {
         e.preventDefault();
         closeMenu();
         setClip({ path: selected.path, mode: "copy" });
-        setNotice({ text: `已复制 ${selected.path.slice(selected.path.lastIndexOf("/") + 1)}` });
+        setNotice({ text: `已复制 ${baseName(selected.path)}` });
       } else if (mod && !e.shiftKey && !e.altKey && k === "x") {
         if (!selected) return;
         e.preventDefault();
         closeMenu();
         setClip({ path: selected.path, mode: "cut" });
-        setNotice({ text: `已剪切 ${selected.path.slice(selected.path.lastIndexOf("/") + 1)}` });
+        setNotice({ text: `已剪切 ${baseName(selected.path)}` });
       } else if (mod && !e.shiftKey && !e.altKey && k === "v") {
         if (!clip) return;
         e.preventDefault();
@@ -969,7 +999,7 @@ function FilesPanel() {
     return (
       <>
         {entries.map((e) => {
-          const path = `${dir}/${e.name}`;
+          const path = joinPath(dir, e.name);
           const isCutSource = clip?.mode === "cut" && clip.path === path;
           if (renaming === path) {
             return (
@@ -1691,7 +1721,7 @@ function GitPanel() {
   };
 
   const readWorktreeSafe = async (file: string): Promise<string> => {
-    const abs = root.endsWith("/") ? `${root}${file}` : `${root}/${file}`;
+    const abs = joinPath(root, file);
     try {
       return await invoke<string>("fs_read", { path: abs });
     } catch {
@@ -1851,8 +1881,8 @@ function GitPanel() {
   };
 
   const openInEditor = (path: string) => {
-    const abs = root.endsWith("/") ? `${root}${path}` : `${root}/${path}`;
-    const name = path.split("/").pop() || path;
+    const abs = joinPath(root, path);
+    const name = baseName(path) || path;
     addTab(fileTab(abs, name));
     setActiveTab(`file:${abs}`);
   };
@@ -1862,8 +1892,8 @@ function GitPanel() {
   const openDiffInEditor = (path: string) => {
     const c = diffContent[path];
     if (!c) return;
-    const abs = root.endsWith("/") ? `${root}${path}` : `${root}/${path}`;
-    const name = path.split("/").pop() || path;
+    const abs = joinPath(root, path);
+    const name = baseName(path) || path;
     addTab({
       id: `diff:${abs}`,
       type: "diff",

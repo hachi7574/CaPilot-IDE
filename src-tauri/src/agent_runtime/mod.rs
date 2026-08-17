@@ -1,6 +1,7 @@
 pub mod adapter;
 pub mod cat_breeds;
 pub mod executable;
+pub mod process_kill;
 pub mod pty_core;
 pub mod runtimes;
 pub mod status_hooks;

@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { useStore, TermTemplate } from "../../state/store";
 import { spawnTerminal } from "../../state/agentActions";
+import { detectShellFlavor, isWindowsHost } from "../../state/shellPath";
 import { Icon, runtimeIcon } from "../Icon";
 
 /**
@@ -11,6 +12,10 @@ import { Icon, runtimeIcon } from "../Icon";
  * templates are hidden when their runtime is not detected (same source as
  * Settings → 已安装). Bash is optional on Windows (hidden when missing).
  * Right-click a non-fixed template to rename it or edit its launch command.
+ *
+ * Quick-start commands are typed into the OS default shell after it reaches
+ * its prompt — so the command line must match that shell (PowerShell / cmd on
+ * Windows, $SHELL on Unix). See the modal hint below.
  */
 export function TerminalTemplatePicker({
   project,
@@ -192,6 +197,26 @@ function TermTemplateModal({
 }) {
   const [nm, setNm] = useState(name);
   const [cmd, setCmd] = useState(command);
+  const shellRt = useStore((s) => s.runtimes.find((r) => r.id === "shell"));
+  const flavor = detectShellFlavor("shell", shellRt?.name);
+  const shellHint = (() => {
+    if (flavor === "powershell") {
+      return "命令会注入到 PowerShell（系统默认终端）。示例：pnpm dev  或  python .\\script.py";
+    }
+    if (flavor === "cmd") {
+      return "命令会注入到 cmd.exe。示例：pnpm dev  或  python script.py";
+    }
+    if (isWindowsHost()) {
+      return "命令会注入到系统终端。Windows 上默认是 PowerShell/cmd，语法勿按 bash 写（无 && 链式时请用 ; 或分别启动）。";
+    }
+    return "命令会注入到系统 shell（$SHELL）。可留空只开终端。";
+  })();
+  const cmdPlaceholder =
+    flavor === "powershell"
+      ? "PowerShell 命令（可留空）— 例: pnpm dev"
+      : flavor === "cmd"
+        ? "cmd 命令（可留空）— 例: pnpm dev"
+        : "在系统终端中执行的命令（可留空）";
 
   const submit = () => {
     const trimmed = nm.trim();
@@ -218,7 +243,7 @@ function TermTemplateModal({
         <div className="ug-nproj-label">启动指令</div>
         <input
           className="nproj-input"
-          placeholder="在系统终端中执行的命令（可留空）"
+          placeholder={cmdPlaceholder}
           value={cmd}
           onChange={(e) => setCmd(e.target.value)}
           onKeyDown={(e) => {
@@ -226,6 +251,12 @@ function TermTemplateModal({
             if (e.key === "Escape") onClose();
           }}
         />
+        <div
+          className="ug-nproj-label"
+          style={{ opacity: 0.7, fontWeight: 400, marginTop: 4, lineHeight: 1.4 }}
+        >
+          {shellHint}
+        </div>
         <div className="nproj-actions">
           {canDelete && onDelete ? (
             <button className="nproj-btn danger" onClick={onDelete}>

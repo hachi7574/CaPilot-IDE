@@ -334,16 +334,9 @@ pub fn run_cmd_timeout(mut cmd: Command, timeout: Duration) -> Option<std::proce
 }
 
 fn kill_probe_tree(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    {
-        // Negative pid = process group (setsid above made pgid == pid).
-        let pid = child.id() as i32;
-        if pid > 0 {
-            unsafe {
-                libc::kill(-pid, libc::SIGKILL);
-            }
-        }
-    }
+    // Probes call setsid on Unix (process group == pid) and may spawn npm/node
+    // wrappers on both platforms — tear down the whole tree, not just the root.
+    crate::agent_runtime::process_kill::kill_process_tree(child.id());
     let _ = child.kill();
 }
 

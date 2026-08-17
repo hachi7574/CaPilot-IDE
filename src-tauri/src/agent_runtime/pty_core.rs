@@ -346,6 +346,9 @@ impl PtyCore {
             let spawning = self.spawning.lock().unwrap();
             let mut children = self.children.lock().unwrap();
             if spawning.get(&agent_id) != Some(&token) {
+                if pid != 0 {
+                    crate::agent_runtime::process_kill::kill_process_tree(pid);
+                }
                 let _ = child.kill();
                 let _ = child.wait();
                 // `slot` is still a local here → dropped on return → quota freed.
@@ -526,6 +529,12 @@ impl PtyCore {
             // not fire `on_exit` and misreport this as a natural session end.
             pc.killed.store(true, Ordering::SeqCst);
             pc.on_exit = None;
+            // portable_pty only terminates the direct child. Agent CLIs (node
+            // wrappers, nested shells) leave grandchildren behind on Windows
+            // unless the whole tree is killed — see `process_kill`.
+            if pc.pid != 0 {
+                crate::agent_runtime::process_kill::kill_process_tree(pc.pid);
+            }
             let _ = pc.child.kill();
             // Reap to avoid a zombie (Bug 1).
             let _ = pc.child.wait();
