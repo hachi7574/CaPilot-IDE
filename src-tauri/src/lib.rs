@@ -1719,6 +1719,7 @@ fn setting_set(
 /// `available` is true only when the update server announced a strictly newer
 /// version (the updater's own semver comparator decides).
 #[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct UpdateStatus {
     current_version: String,
     latest_version: Option<String>,
@@ -1731,6 +1732,15 @@ struct UpdateStatus {
     installable: bool,
 }
 
+/// Per-endpoint HTTP budget for `latest.json` probes. The updater walks
+/// endpoints in order; without a timeout a hung first mirror (common on flaky
+/// CN proxies) blocks forever and the Settings 「检查更新」 button looks dead
+/// because the frontend refuses to re-enter while status is `checking`.
+const UPDATE_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Generous budget for the binary download itself (mirrors + slow links).
+const UPDATE_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// Check the update server for a newer version. Network / server failures are
 /// surfaced as a friendly error string rather than a crash — the frontend shows
 /// it inline in Settings → 关于 and never blocks startup on it.
@@ -1738,8 +1748,12 @@ struct UpdateStatus {
 async fn update_check(app: tauri::AppHandle) -> Result<UpdateStatus, String> {
     let current = app.package_info().version.to_string();
     let installable = !cfg!(debug_assertions);
+    // `updater()` has no default timeout — build explicitly so a dead endpoint
+    // fails over to the next one instead of hanging the whole check.
     let updater = app
-        .updater()
+        .updater_builder()
+        .timeout(UPDATE_CHECK_TIMEOUT)
+        .build()
         .map_err(|e| format!("更新器初始化失败: {e}"))?;
     match updater.check().await {
         Ok(Some(update)) => Ok(UpdateStatus {
@@ -1841,14 +1855,19 @@ async fn update_download_and_install(
     if cfg!(debug_assertions) {
         return Err("开发构建不支持自动安装，请下载安装包手动升级。".to_string());
     }
+    // Short timeout on the metadata probe so a hung mirror fails over; the
+    // download itself gets a longer budget below.
     let updater = app
-        .updater()
+        .updater_builder()
+        .timeout(UPDATE_CHECK_TIMEOUT)
+        .build()
         .map_err(|e| format!("更新器初始化失败: {e}"))?;
     let mut update = updater
         .check()
         .await
         .map_err(|e| format!("无法连接更新服务器: {e}"))?
         .ok_or_else(|| "当前已是最新版本。".to_string())?;
+    update.timeout = Some(UPDATE_DOWNLOAD_TIMEOUT);
 
     let original_url = update.download_url.clone();
     let candidates = update_download_url_candidates(&original_url);

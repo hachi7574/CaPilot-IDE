@@ -210,7 +210,7 @@ function UpdateStatusItem({
   const label = downloading
     ? "更新中…"
     : hasUpdate
-      ? `v${latest} 可更新`
+      ? `可更新 v${latest}`
       : status === "checking"
         ? "检查更新…"
         : status === "error"
@@ -224,7 +224,7 @@ function UpdateStatusItem({
   const title = downloading
     ? "正在下载并安装更新"
     : hasUpdate
-      ? `发现新版本 v${latest}（当前 v${currentVersion ?? "…"}）。点击${installable ? "立即更新" : "查看"}。`
+      ? `存在可更新版本 v${latest}（当前 v${currentVersion ?? "…"}）。点击${installable ? "立即更新" : "查看"}。`
       : status === "error"
         ? "上次检查失败，点击重试"
         : status === "up-to-date"

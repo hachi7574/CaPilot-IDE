@@ -12,8 +12,6 @@
 //!   a session/group leader (PTY slaves and probes that called `setsid`),
 //!   then `kill(pid, SIGKILL)` as a fallback for the root itself.
 
-use std::process::{Command, Stdio};
-
 /// Kill `pid` and every descendant best-effort. No-op for pid 0 / unknown.
 /// Never returns an error to callers — teardown is best-effort and must not
 /// block session cleanup when the OS already reaped the tree.
@@ -25,6 +23,7 @@ pub fn kill_process_tree(pid: u32) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
         // CREATE_NO_WINDOW: avoid a brief console flash when CaPilot is a GUI app.
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let mut cmd = Command::new("taskkill");

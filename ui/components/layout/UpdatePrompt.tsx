@@ -42,7 +42,7 @@ export function UpdatePrompt() {
       </div>
       <div className="update-prompt-body">
         <div className="update-prompt-title">
-          发现新版本 v{latest}
+          存在可更新版本 v{latest}
           {current ? (
             <span className="update-prompt-current">（当前 v{current}）</span>
           ) : null}
@@ -52,7 +52,9 @@ export function UpdatePrompt() {
             {notes.split("\n").find((l) => l.trim()) ?? ""}
           </div>
         ) : (
-          <div className="update-prompt-notes">可下载并安装更新</div>
+          <div className="update-prompt-notes">
+            当前 v{current ?? "…"} → 可升级到 v{latest}
+          </div>
         )}
         {pct != null ? (
           <div className="update-prompt-progress">

@@ -4091,8 +4091,10 @@ html[data-theme="quantum"] .app::before {
   gap: 12px;
 }
 .settings-update-identity {
+  flex: 1;
   min-width: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: 8px;
 }
@@ -4106,6 +4108,43 @@ html[data-theme="quantum"] .app::before {
   font-family: var(--mono);
   font-size: var(--fs-2xs);
   color: var(--muted);
+}
+.settings-update-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--brand) 55%, var(--rule));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--brand) 14%, var(--bg));
+  color: var(--brand) !important;
+  font-family: var(--pixel) !important;
+  font-size: var(--fs-2xs) !important;
+  letter-spacing: 0.02em;
+}
+.settings-update-available-callout {
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--brand) 45%, var(--rule));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--brand) 10%, var(--bg));
+  color: var(--ink);
+  font-family: var(--pixel-body);
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+}
+.settings-nav button.has-update small {
+  color: var(--brand);
+  font-weight: 500;
+}
+.settings-nav button.has-update b::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--brand);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand) 25%, transparent);
+  vertical-align: middle;
 }
 .settings-update-check,
 .settings-update-install,
@@ -4289,10 +4328,11 @@ html[data-theme="quantum"] .app::before {
 }
 
 
-/* ── In-app update prompt (top-right, above chrome) ─────────────── */
+/* ── In-app update prompt (bottom-right, above status bar) ──────── */
 .update-prompt {
   position: fixed;
-  top: 40px;
+  /* Status bar is 28px + 2px top border; sit a few px above it. */
+  bottom: 40px;
   right: 14px;
   z-index: 5500;
   display: flex;
@@ -4309,7 +4349,7 @@ html[data-theme="quantum"] .app::before {
   animation: update-prompt-in 0.22s var(--ease-apple, cubic-bezier(0.25, 0.1, 0.25, 1));
 }
 @keyframes update-prompt-in {
-  from { opacity: 0; transform: translateY(-8px); }
+  from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
 }
 .update-prompt-icon {

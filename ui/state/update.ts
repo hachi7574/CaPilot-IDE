@@ -11,6 +11,17 @@ import { notify } from "./notify";
  * the 启动时自动检查更新 preference, and (when enabled) schedules a background
  * check a few seconds later so startup isn't delayed by a slow update server.
  */
+
+/** Client-side ceiling so the UI never stays on 「检查中…」 forever if the
+ *  backend hang escapes the per-endpoint Rust timeout (3 endpoints × 10s +
+ *  slack). On fire we flip to `error` and bump the generation so a late reply
+ *  cannot overwrite a newer check. */
+const CHECK_CLIENT_TIMEOUT_MS = 35_000;
+
+/** Monotonic generation for in-flight checks. Timeout / a newer click invalidates
+ *  older invokes so their resolve/reject is ignored. */
+let checkGeneration = 0;
+
 export function useUpdateSync() {
   useEffect(() => {
     let cancelled = false;
@@ -70,15 +81,67 @@ interface CheckOptions {
   notifyOnFound?: boolean;
 }
 
+/** Read a string field that may arrive as camelCase or snake_case. */
+function pickStr(
+  obj: Record<string, unknown>,
+  camel: string,
+  snake: string
+): string | null {
+  const a = obj[camel];
+  if (typeof a === "string" && a.length > 0) return a;
+  const b = obj[snake];
+  if (typeof b === "string" && b.length > 0) return b;
+  return null;
+}
+
+/** Normalize the Rust `update_check` payload onto the frontend wire shape. */
+function normalizeUpdateStatus(raw: Record<string, unknown>): UpdateStatus {
+  const available = raw.available === true;
+  const installable = raw.installable === true;
+  return {
+    currentVersion:
+      pickStr(raw, "currentVersion", "current_version") ?? "",
+    latestVersion: pickStr(raw, "latestVersion", "latest_version"),
+    available,
+    notes: pickStr(raw, "notes", "notes"),
+    publishedAt: pickStr(raw, "publishedAt", "published_at"),
+    target: pickStr(raw, "target", "target") ?? "",
+    installable,
+  };
+}
+
 /** Ask the backend for the latest version and fold the result into the store.
- *  Idempotent: a check already in flight (or a download in progress) is a no-op. */
+ *  Idempotent while a check/download is already in flight; the client timeout
+ *  always clears `checking` so a hung probe never permanently disables the
+ *  button. */
 export async function checkForUpdate(opts: CheckOptions = {}): Promise<void> {
   const s = useStore.getState();
   if (s.updateStatus === "checking" || s.updateDownloading) return;
 
+  const gen = ++checkGeneration;
   useStore.setState({ updateStatus: "checking", updateError: null });
+
+  const timeoutId = setTimeout(() => {
+    if (gen !== checkGeneration) return;
+    // Invalidate this invoke so a late backend reply cannot clobber the error.
+    checkGeneration += 1;
+    useStore.setState({
+      updateStatus: "error",
+      updateError: "检查更新超时，请稍后重试",
+      updateCheckedAt: Date.now(),
+    });
+  }, CHECK_CLIENT_TIMEOUT_MS);
+
   try {
-    const res = await invoke<UpdateStatus>("update_check");
+    // Backend historically emitted snake_case despite the camelCase comment;
+    // accept both shapes so a stale binary or missing rename_all never leaves
+    // the UI stuck on bare "vX.Y.Z" with available=true but latest undefined.
+    const raw = await invoke<UpdateStatus & Record<string, unknown>>(
+      "update_check"
+    );
+    if (gen !== checkGeneration) return;
+    const res = normalizeUpdateStatus(raw);
+
     // A newer release cancels any prior "稍后" dismiss for an older tag so the
     // in-app banner can reappear for the new version.
     const prevDismissed = useStore.getState().updatePromptDismissedVersion;
@@ -114,15 +177,18 @@ export async function checkForUpdate(opts: CheckOptions = {}): Promise<void> {
       useStore.setState({ updateNotifiedVersion: res.latestVersion });
       notify(
         "CaPilot 有新版本",
-        `v${res.latestVersion} 已可用 — 可在应用内提示中升级，或打开 设置 → 关于。`
+        `存在可更新版本 v${res.latestVersion} — 可在应用内提示中升级，或打开 设置 → 关于与更新。`
       );
     }
   } catch (e) {
+    if (gen !== checkGeneration) return;
     useStore.setState({
       updateStatus: "error",
       updateError: String(e),
       updateCheckedAt: Date.now(),
     });
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 

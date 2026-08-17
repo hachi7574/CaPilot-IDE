@@ -71,8 +71,9 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://gh-proxy.com/https://github.com/hachi7574/CaPilot-IDE/releases/latest/download/latest.json",
-        "https://github.com/hachi7574/CaPilot-IDE/releases/latest/download/latest.json"
+        "https://github.com/hachi7574/CaPilot-IDE/releases/latest/download/latest.json",
+        "https://ghfast.top/https://github.com/hachi7574/CaPilot-IDE/releases/latest/download/latest.json",
+        "https://gh-proxy.com/https://github.com/hachi7574/CaPilot-IDE/releases/latest/download/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE3QzczNzRBMzAxRkVDM0IKUldRNzdCOHdTamZIRjlNd3g0cXVxdmJIWjQrNGpKb1dKb1BIdnNsbHUyTzB6WDlhc0tEdEFFcTgK",
       "windows": {

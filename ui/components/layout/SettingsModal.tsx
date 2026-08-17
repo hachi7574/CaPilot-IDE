@@ -397,11 +397,21 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 <span><b>会话</b><small>退出与引导</small></span>
               </button>
               <button
-                className={activeSection === "updates" ? "active" : ""}
+                className={
+                  (activeSection === "updates" ? "active" : "") +
+                  (updateStatus === "available" ? " has-update" : "")
+                }
                 onClick={() => jumpToSection("updates")}
               >
                 <Icon name="download" size={14} />
-                <span><b>更新</b><small>版本与安装</small></span>
+                <span>
+                  <b>更新</b>
+                  <small>
+                    {updateStatus === "available" && updateLatest
+                      ? `可更新 v${updateLatest}`
+                      : "版本与安装"}
+                  </small>
+                </span>
               </button>
             </nav>
             <div className="settings-rail-readout">
@@ -966,6 +976,11 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             <div className="settings-update-identity">
               <b>CaPilot IDE</b>
               <span>当前 v{currentVersion ?? "…"}</span>
+              {updateStatus === "available" && updateLatest && (
+                <span className="settings-update-badge" role="status">
+                  存在可更新版本 v{updateLatest}
+                </span>
+              )}
             </div>
             <button
               type="button"
@@ -992,6 +1007,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                     ? " is-warn"
                     : "")
             }
+            role="status"
+            aria-live="polite"
           >
             {updateStatus === "idle" && (
               <>
@@ -1002,7 +1019,9 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             {updateStatus === "checking" && (
               <>
                 <strong>正在检查更新…</strong>
-                <span>当前 v{currentVersion ?? "…"}</span>
+                <span>
+                  当前 v{currentVersion ?? "…"} · 正在连接更新服务器
+                </span>
               </>
             )}
             {updateStatus === "up-to-date" && (
@@ -1017,9 +1036,10 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             )}
             {updateStatus === "available" && updateLatest && (
               <>
-                <strong>发现新版本 v{updateLatest}</strong>
+                <strong>存在可更新版本</strong>
                 <span>
                   当前 v{currentVersion ?? "…"} → 可升级到 v{updateLatest}
+                  {" · 点击下方按钮下载并安装"}
                 </span>
               </>
             )}
@@ -1033,6 +1053,10 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
 
           {updateStatus === "available" && (
             <div className="settings-update-actions">
+              <div className="settings-update-available-callout">
+                已检测到新版本 v{updateLatest}，当前运行的是 v
+                {currentVersion ?? "…"}。可立即下载安装。
+              </div>
               {updateNotes && (
                 <details className="settings-update-notes">
                   <summary>发布说明</summary>
@@ -1047,7 +1071,11 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                   disabled={!updateInstallable || updateDownloading}
                 >
                   <Icon name="download" size={12} />
-                  {updateDownloading ? "下载中…" : "下载并安装"}
+                  {updateDownloading
+                    ? "下载中…"
+                    : updateLatest
+                      ? `下载并安装 v${updateLatest}`
+                      : "下载并安装"}
                 </button>
                 {!updateInstallable && (
                   <span className="settings-update-status is-warn">
