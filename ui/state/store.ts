@@ -769,8 +769,10 @@ interface AppState {
   updateNotes: string | null;
   updateError: string | null;
   updateDownloading: boolean;
-  /** 0..1 download progress while installing. */
+  /** 0..1 download progress while installing; null when indeterminate. */
   updateProgress: number | null;
+  /** Absolute bytes downloaded when the server omits Content-Length. */
+  updateBytesDownloaded: number | null;
   /** Whether the running build supports in-app install (false = dev build). */
   updateInstallable: boolean;
   /** Latest version already surfaced via notification this session (dedup —
@@ -1158,6 +1160,7 @@ export const useStore = create<AppState>((set, get) => {
   updateError: null,
   updateDownloading: false,
   updateProgress: null,
+  updateBytesDownloaded: null,
   updateInstallable: false,
   updateNotifiedVersion: null,
   updatePromptDismissedVersion: null,

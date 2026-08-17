@@ -109,27 +109,51 @@ export async function checkForUpdate(opts: CheckOptions = {}): Promise<void> {
   }
 }
 
-/** Download + install the pending update, streaming 0..1 progress to the store.
- *  On success the backend relaunches the app, so this typically never resolves. */
+/** Download + install the pending update, streaming progress to the store.
+ *  On success the backend relaunches the app, so this typically never resolves.
+ *
+ *  Progress channel encoding (from Rust):
+ *  - `0..1`  fraction when Content-Length is known
+ *  - `>= 2`  `2 + bytesDownloaded` when length is unknown (show MB instead) */
 export async function downloadAndInstall(): Promise<void> {
   const s = useStore.getState();
   if (s.updateDownloading) return;
 
-  useStore.setState({ updateDownloading: true, updateProgress: 0 });
+  useStore.setState({
+    updateDownloading: true,
+    updateProgress: 0,
+    updateBytesDownloaded: 0,
+  });
   const channel = new Channel<number>();
   channel.onmessage = (p) => {
-    const progress = typeof p === "number" ? Math.min(1, Math.max(0, p)) : 0;
-    useStore.setState({ updateProgress: progress });
+    if (typeof p !== "number" || Number.isNaN(p)) return;
+    if (p >= 2) {
+      // Indeterminate: absolute bytes encoded as 2 + bytes.
+      useStore.setState({
+        updateProgress: null,
+        updateBytesDownloaded: Math.max(0, Math.round(p - 2)),
+      });
+      return;
+    }
+    useStore.setState({
+      updateProgress: Math.min(1, Math.max(0, p)),
+      updateBytesDownloaded: null,
+    });
   };
 
   try {
     await invoke("update_download_and_install", { onProgress: channel });
     // App was relaunched on success — this line usually never runs.
-    useStore.setState({ updateDownloading: false, updateProgress: null });
+    useStore.setState({
+      updateDownloading: false,
+      updateProgress: null,
+      updateBytesDownloaded: null,
+    });
   } catch (e) {
     useStore.setState({
       updateDownloading: false,
       updateProgress: null,
+      updateBytesDownloaded: null,
       updateStatus: "error",
       updateError: String(e),
     });

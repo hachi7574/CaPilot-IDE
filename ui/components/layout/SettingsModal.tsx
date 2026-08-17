@@ -119,6 +119,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const updateError = useStore((s) => s.updateError);
   const updateDownloading = useStore((s) => s.updateDownloading);
   const updateProgress = useStore((s) => s.updateProgress);
+  const updateBytesDownloaded = useStore((s) => s.updateBytesDownloaded);
   const updateInstallable = useStore((s) => s.updateInstallable);
   const autoCheckUpdate = useStore((s) => s.autoCheckUpdate);
   const setAutoCheckUpdate = useStore((s) => s.setAutoCheckUpdate);
@@ -963,15 +964,26 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                   <span className="settings-update-status is-warn">开发构建不支持自动安装</span>
                 )}
               </div>
-              {updateDownloading && updateProgress != null && (
+              {updateDownloading && (
                 <div className="settings-update-progress">
-                  <div className="settings-update-progress-track">
-                    <div
-                      className="settings-update-progress-bar"
-                      style={{ width: `${Math.round(updateProgress * 100)}%` }}
-                    />
-                  </div>
-                  <span>{Math.round(updateProgress * 100)}%</span>
+                  {updateProgress != null ? (
+                    <>
+                      <div className="settings-update-progress-track">
+                        <div
+                          className="settings-update-progress-bar"
+                          style={{ width: `${Math.round(updateProgress * 100)}%` }}
+                        />
+                      </div>
+                      <span>{Math.round(updateProgress * 100)}%</span>
+                    </>
+                  ) : (
+                    <span>
+                      已下载{" "}
+                      {updateBytesDownloaded != null
+                        ? `${(updateBytesDownloaded / (1024 * 1024)).toFixed(1)} MB`
+                        : "…"}
+                    </span>
+                  )}
                 </div>
               )}
             </div>

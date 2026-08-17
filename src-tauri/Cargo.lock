@@ -450,6 +450,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "uds_windows",
+ "url",
  "uuid",
  "vt100",
 ]

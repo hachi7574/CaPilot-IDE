@@ -17,6 +17,7 @@ export function UpdatePrompt() {
   const installable = useStore((s) => s.updateInstallable);
   const downloading = useStore((s) => s.updateDownloading);
   const progress = useStore((s) => s.updateProgress);
+  const bytesDownloaded = useStore((s) => s.updateBytesDownloaded);
   const dismissed = useStore((s) => s.updatePromptDismissedVersion);
 
   if (status !== "available" || !latest) return null;
@@ -24,6 +25,10 @@ export function UpdatePrompt() {
 
   const pct =
     downloading && progress != null ? Math.round(progress * 100) : null;
+  const bytesLabel =
+    downloading && progress == null && bytesDownloaded != null
+      ? `${(bytesDownloaded / (1024 * 1024)).toFixed(1)} MB`
+      : null;
 
   return (
     <div
@@ -49,7 +54,7 @@ export function UpdatePrompt() {
         ) : (
           <div className="update-prompt-notes">可下载并安装更新</div>
         )}
-        {pct != null && (
+        {pct != null ? (
           <div className="update-prompt-progress">
             <div className="update-prompt-progress-track">
               <div
@@ -59,7 +64,11 @@ export function UpdatePrompt() {
             </div>
             <span>{pct}%</span>
           </div>
-        )}
+        ) : bytesLabel ? (
+          <div className="update-prompt-progress">
+            <span>已下载 {bytesLabel}</span>
+          </div>
+        ) : null}
       </div>
       <div className="update-prompt-actions">
         <button

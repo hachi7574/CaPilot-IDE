@@ -128,6 +128,23 @@ try {
   rmSync(sigDir, { recursive: true, force: true });
 }
 
+// Prefer a GitHub-release mirror for the download URL. Signatures cover file
+// bytes only, so swapping the host is safe and much faster for users where
+// github.com / release-assets.githubusercontent.com is throttled (common on
+// CN networks, especially Windows clients without a system proxy).
+// The app also rewrites/falls back at download time; baking the mirror into
+// latest.json helps older clients that don't have that path yet.
+const RELEASE_MIRROR_PREFIX = "https://gh-proxy.com/";
+for (const p of Object.values(platforms)) {
+  if (
+    typeof p.url === "string" &&
+    (p.url.includes("://github.com/") ||
+      p.url.includes("://release-assets.githubusercontent.com/"))
+  ) {
+    p.url = RELEASE_MIRROR_PREFIX + p.url;
+  }
+}
+
 // ── Write the manifest ──────────────────────────────────────────
 const manifest = {
   version,

@@ -44,6 +44,7 @@ globset = "0.4"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tauri-plugin-updater = "2.10.1"
+url = "2"
 tauri-plugin-notification = "2.3.3"
 tauri-plugin-dialog = "2.7.2"
 tauri-plugin-store = "2.4.4"

@@ -1720,11 +1720,67 @@ async fn ci_status(tag: Option<String>) -> Result<ci::CiStatus, String> {
     ci::fetch_ci_status(&tag.unwrap_or(fallback)).await
 }
 
-/// Download and install the pending update, streaming 0..1 progress through
-/// `on_progress`. The updater plugin only relaunches the process on Windows
-/// (the NSIS installer's `/UPDATE` mode + `process::exit`); on Linux/macOS it
-/// swaps the binary in place and returns, so the app restarts explicitly here
-/// to actually run the new build.
+/// Prefer faster GitHub-release mirrors when the asset is hosted on github.com
+/// (or the Azure blob host GitHub redirects to). Signature verification covers
+/// file bytes only, so the download host can change. Original URL is always
+/// tried last as a fallback.
+fn update_download_url_candidates(url: &url::Url) -> Vec<url::Url> {
+    // Strip known mirror prefixes so we never double-wrap when latest.json
+    // already points at a proxy (or a previous attempt rewrote the URL).
+    const MIRRORS: &[&str] = &["https://gh-proxy.com/", "https://ghfast.top/"];
+    let mut canonical = url.as_str().to_string();
+    loop {
+        let mut stripped = false;
+        for prefix in MIRRORS {
+            if let Some(rest) = canonical.strip_prefix(prefix) {
+                canonical = rest.to_string();
+                stripped = true;
+                break;
+            }
+        }
+        if !stripped {
+            break;
+        }
+    }
+
+    let is_gh = canonical.contains("://github.com/")
+        || canonical.contains("://objects.githubusercontent.com/")
+        || canonical.contains("://release-assets.githubusercontent.com/");
+
+    let mut out = Vec::new();
+    if is_gh {
+        // gh-proxy.com has been the most reliable accelerator for release
+        // assets from CN networks in our measurements; ghfast.top is backup.
+        for prefix in MIRRORS {
+            if let Ok(u) = url::Url::parse(&format!("{prefix}{canonical}")) {
+                out.push(u);
+            }
+        }
+        if let Ok(u) = url::Url::parse(&canonical) {
+            out.push(u);
+        }
+    } else {
+        out.push(url.clone());
+    }
+
+    // De-dupe while preserving order.
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|u| seen.insert(u.as_str().to_string()));
+    out
+}
+
+/// Download and install the pending update, streaming progress through
+/// `on_progress`.
+///
+/// Progress encoding (single f64 channel):
+/// - `0.0..1.0` — fraction when `Content-Length` is known
+/// - `>= 2.0` — `2.0 + bytes_downloaded` when length is unknown (common on
+///   some proxies/mirrors); the frontend shows "已下载 X MB" instead of a bar
+///
+/// The updater plugin only relaunches the process on Windows (the NSIS
+/// installer's `/UPDATE` mode + `process::exit`); on Linux/macOS it swaps the
+/// binary in place and returns, so the app restarts explicitly here to
+/// actually run the new build.
 #[tauri::command]
 async fn update_download_and_install(
     app: tauri::AppHandle,
@@ -1736,32 +1792,56 @@ async fn update_download_and_install(
     let updater = app
         .updater()
         .map_err(|e| format!("更新器初始化失败: {e}"))?;
-    let update = updater
+    let mut update = updater
         .check()
         .await
         .map_err(|e| format!("无法连接更新服务器: {e}"))?
         .ok_or_else(|| "当前已是最新版本。".to_string())?;
 
-    // Track accumulated bytes so the progress channel reports true 0..1, not a
-    // per-chunk ratio (the updater only hands us each chunk's length).
-    let downloaded = AtomicU64::new(0);
-    let bytes = update
-        .download(
-            |chunk_len, content_length| {
-                if let Some(total) = content_length {
-                    if total > 0 {
-                        let acc = downloaded.fetch_add(chunk_len as u64, Ordering::Relaxed)
-                            + chunk_len as u64;
-                        let _ = on_progress.send(acc as f64 / total as f64);
+    let original_url = update.download_url.clone();
+    let candidates = update_download_url_candidates(&original_url);
+
+    let mut last_err = String::from("下载失败");
+    let mut bytes: Option<Vec<u8>> = None;
+    for candidate in candidates {
+        update.download_url = candidate.clone();
+        // Fresh counter per attempt so a failed mirror doesn't skew progress.
+        let downloaded = AtomicU64::new(0);
+        let _ = on_progress.send(0.0);
+        match update
+            .download(
+                |chunk_len, content_length| {
+                    let acc = downloaded.fetch_add(chunk_len as u64, Ordering::Relaxed)
+                        + chunk_len as u64;
+                    if let Some(total) = content_length {
+                        if total > 0 {
+                            let _ = on_progress.send(acc as f64 / total as f64);
+                            return;
+                        }
                     }
-                }
-            },
-            || {
-                let _ = on_progress.send(1.0);
-            },
-        )
-        .await
-        .map_err(|e| format!("下载失败: {e}"))?;
+                    // No Content-Length (or zero): encode absolute bytes so the
+                    // UI can still show movement instead of a stuck 0% bar.
+                    let _ = on_progress.send(2.0 + acc as f64);
+                },
+                || {
+                    let _ = on_progress.send(1.0);
+                },
+            )
+            .await
+        {
+            Ok(b) => {
+                bytes = Some(b);
+                break;
+            }
+            Err(e) => {
+                last_err = format!("下载失败 ({candidate}): {e}");
+                // Try next mirror / original. Don't leave a half-full bar.
+                let _ = on_progress.send(0.0);
+            }
+        }
+    }
+
+    let bytes = bytes.ok_or(last_err)?;
 
     update
         .install(bytes)
