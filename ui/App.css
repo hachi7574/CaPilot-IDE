@@ -74,6 +74,31 @@ body::after {
 .app { display: flex; flex-direction: column; height: 100vh; position: relative; z-index: 1; }
 .app-body { display: flex; flex: 1; overflow: hidden; min-height: 0; }
 
+/* Frameless-window resize grips (`decorations: false`). Transparent hit
+   targets over the outer 6px; corners are 12×12 so diagonal resize is easy.
+   pointer-events only on the strips themselves — the container never blocks
+   clicks into the app. Hidden while maximized (see WindowResizeEdges). */
+.win-edges {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+}
+.win-edge {
+  position: absolute;
+  pointer-events: auto;
+  /* Keep above content but don't paint — pure hit target. */
+  background: transparent;
+}
+.win-edge-n { top: 0; left: 12px; right: 12px; height: 6px; cursor: n-resize; }
+.win-edge-s { bottom: 0; left: 12px; right: 12px; height: 6px; cursor: s-resize; }
+.win-edge-w { left: 0; top: 12px; bottom: 12px; width: 6px; cursor: w-resize; }
+.win-edge-e { right: 0; top: 12px; bottom: 12px; width: 6px; cursor: e-resize; }
+.win-edge-nw { top: 0; left: 0; width: 12px; height: 12px; cursor: nw-resize; }
+.win-edge-ne { top: 0; right: 0; width: 12px; height: 12px; cursor: ne-resize; }
+.win-edge-sw { bottom: 0; left: 0; width: 12px; height: 12px; cursor: sw-resize; }
+.win-edge-se { bottom: 0; right: 0; width: 12px; height: 12px; cursor: se-resize; }
+
 /* ── Titlebar ─────────────────────────────────────────────────── */
 
 .titlebar {
@@ -98,21 +123,16 @@ body::after {
   display: flex; flex-direction: column; flex-shrink: 0; overflow: hidden;
 }
 
-.left-sidebar.collapsed { width: 44px; min-width: 44px; border-left: none; }
-
-/* Collapsed rail: a slim strip that keeps the window controls reachable when
-   the project tree is hidden (frameless window — no native buttons). Clicking
-   the empty rail re-expands. */
-.sidebar-rail {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  padding: 6px 0;
-  cursor: pointer;
+.left-sidebar.collapsed {
+  /* Fully hide the project tree + op bar. Window controls move to the tab
+     bar (see .tab-win-controls) so a collapsed state no longer needs a 44px
+     rail strip on the right edge. */
+  width: 0;
+  min-width: 0;
+  border-left: none;
+  overflow: hidden;
+  pointer-events: none;
 }
-.sidebar-rail .rail-btn { width: 100%; height: 30px; }
 
 /* Zone 2 — Op bar */
 .sidebar-actions {
@@ -338,6 +358,22 @@ body::after {
   transition: color .2s var(--ease-apple);
 }
 .tab-add:hover { color: var(--brand); }
+
+/* Window controls hosted on the tab bar while the left sidebar is collapsed.
+   `margin-left: auto` pins them to the trailing edge; tabs scroll under the
+   flex spacer without pushing the buttons off-screen. `flex-shrink: 0` keeps
+   the trio intact when the strip overflows. */
+.tab-win-controls {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin-left: auto;
+  flex-shrink: 0;
+  padding-left: 6px;
+  -webkit-app-region: no-drag;
+}
+.tab-win-controls .win-sep { margin-right: 2px; }
+.tab-win-controls .win-btn { height: 26px; }
 
 /* ── Content Area ─────────────────────────────────────────────── */
 
@@ -835,6 +871,41 @@ body::after {
   outline-offset: 2px;
 }
 
+/* Status-bar version / update chip (right side). Neutral by default; brand-
+   tinted when a newer release is waiting. */
+.sb-update {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  background: transparent;
+  margin: 0;
+  padding: 0;
+  font: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  color: var(--ink2);
+}
+.sb-update .sb-val {
+  font-family: 'JetBrainsMono', ui-monospace, monospace;
+  font-size: var(--fs-xs);
+  letter-spacing: 0;
+  text-transform: none;
+}
+.sb-update:hover:not(:disabled) { color: var(--ink); }
+.sb-update:disabled { opacity: 0.65; cursor: default; }
+.sb-update.is-update { color: var(--brand); }
+.sb-update.is-update:hover:not(:disabled) {
+  color: var(--brand);
+  filter: brightness(1.1);
+}
+.sb-update.is-warn { color: var(--warn); }
+.sb-update:focus-visible {
+  outline: 1px solid var(--warn);
+  outline-offset: 2px;
+}
+
 /* ── Resource monitor (DevPlan §10) ──────────────────────────── */
 
 .resource-item { color: var(--ai); }
@@ -1123,6 +1194,8 @@ body::after {
   white-space: nowrap;
 }
 .tt-item:hover { background: var(--bg3); color: var(--ink); }
+.tt-item.is-missing { opacity: 0.55; }
+.tt-item.is-missing .tt-cmd { color: var(--warn); font-family: inherit; max-width: none; }
 .tt-item .tt-icon { flex-shrink: 0; }
 .tt-item .tt-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
 .tt-item .tt-cmd {
@@ -4073,6 +4146,47 @@ html[data-theme="quantum"] .app::before {
 }
 .settings-update-status.is-ok { color: var(--success); }
 .settings-update-status.is-warn { color: var(--warn); }
+
+/* Always-on verdict card under the identity row — answers "最新 / 有更新 /
+   失败 / 检查中" at a glance even before the user clicks anything. */
+.settings-update-verdict {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.settings-update-verdict strong {
+  font-family: var(--pixel-body);
+  font-size: var(--fs-sm);
+  font-weight: 400;
+  color: var(--ink);
+}
+.settings-update-verdict span {
+  font-family: var(--mono);
+  font-size: var(--fs-2xs);
+  color: var(--ink2);
+  line-height: 1.45;
+}
+.settings-update-verdict.is-latest {
+  border-color: color-mix(in srgb, var(--success) 45%, var(--rule));
+  background: color-mix(in srgb, var(--success) 8%, var(--bg));
+}
+.settings-update-verdict.is-latest strong { color: var(--success); }
+.settings-update-verdict.is-update {
+  border-color: color-mix(in srgb, var(--brand) 55%, var(--rule));
+  background: color-mix(in srgb, var(--brand) 10%, var(--bg));
+}
+.settings-update-verdict.is-update strong { color: var(--brand); }
+.settings-update-verdict.is-warn {
+  border-color: color-mix(in srgb, var(--warn) 50%, var(--rule));
+  background: color-mix(in srgb, var(--warn) 8%, var(--bg));
+}
+.settings-update-verdict.is-warn strong { color: var(--warn); }
+
 .settings-update-actions { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
 .settings-update-notes {
   font-size: var(--fs-xs);

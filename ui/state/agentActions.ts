@@ -188,7 +188,7 @@ export async function sendPromptToAgent(
 /**
  * Assign a todo tag to an agent and send its text as a prompt. The tag leaves
  * 待分配 (becomes invisible `assigned`), linked to the session so it auto-lands
- * in 待验收 when the session's turn ends. For an ended/dormant session the
+ * in 待处理 when the session's turn ends. For an ended/dormant session the
  * standard reopen flow runs first (drop dead channel + flag resume + open the
  * terminal), then the prompt is injected once the resumed channel is live.
  */

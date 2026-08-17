@@ -310,9 +310,29 @@ export function Composer() {
   // Keep configured selection (`shownModel`) authoritative for checkmarks and
   // live switching. Provider-observed telemetry only changes the label.
   const actualModelId = configAgent?.last_usage?.actualModel ?? null;
-  const actualModel = actualModelId
-    ? models.find((model) => model.id === actualModelId) ?? null
-    : null;
+  // dsh (and some other) usage samples may report a bare model id or a
+  // provider-qualified one. Match the catalog generously so the button label
+  // does not stick on an unresolved raw id while the configured row is fine.
+  const resolveCatalogModel = (id: string | null | undefined) => {
+    if (!id) return null;
+    const exact = models.find((model) => model.id === id);
+    if (exact) return exact;
+    const bare = id.includes("/") ? id.slice(id.lastIndexOf("/") + 1) : id;
+    const suffixMatches = models.filter(
+      (model) => model.id === bare || model.id.endsWith(`/${bare}`)
+    );
+    if (suffixMatches.length === 1) return suffixMatches[0]!;
+    // Prefer the configured/default provider when several routes share a bare id.
+    const preferredProvider = (
+      models.find((model) => model.id === preferredModel) ?? defaultModel
+    )?.provider;
+    return (
+      suffixMatches.find((model) => model.provider === preferredProvider) ??
+      suffixMatches[0] ??
+      null
+    );
+  };
+  const actualModel = resolveCatalogModel(actualModelId);
   const displayedModelName = actualModelId
     ? (actualModel?.name ?? actualModelId)
     : (currentModel?.name ?? "选择模型");
@@ -584,12 +604,22 @@ export function Composer() {
         return;
       }
 
+      // No-op when the session already carries this model (and no effort
+      // change was requested).
+      if (
+        agent.model === modelId &&
+        (effortId === undefined || effortId === (agent.speed ?? s.speed))
+      ) {
+        s.setSelectedModel(modelId);
+        if (effortId) s.setSpeed(effortId as never);
+        return;
+      }
+
       modelSwitchingRef.current = true;
       try {
-        // dsh 的模型只在 spawn 时钉死：`/model` 会 fork 会话（历史保留、新
-        // 会话路由新模型），破坏「tab id = session id」身份。恢复会话只需
-        // 持久化配置，无需启动 PTY（见下方 dsh 分支）。pi 走 live selector，
-        // 需要 PTY 在跑。
+        // dsh live switch drives the in-process `/model` picker (fork-continue
+        // inside the same TUI process — no PTY kill). Dormant dsh only
+        // persists (patch on next open), so do not auto-resume just to switch.
         const resumed =
           agent.runtime !== "dsh" && !s.agentChannels.has(id)
             ? await ensureAgentChannel(id)
@@ -664,10 +694,86 @@ export function Composer() {
           await new Promise((resolve) => setTimeout(resolve, 120));
           await invoke("agent_write", { id, data: "\r", raw: true });
         } else if (agent.runtime === "dsh") {
-          // dsh 不支持原位换模型：/model 会做会话 fork 续聊（历史保留、新
-          // 会话路由新模型、旧会话留在 /resume），破坏 "tab id = session id"
-          // 身份。只持久化配置，由下一次 spawn / resume 经 --patch 钉死生效；
-          // 不驱动运行中的 TUI。
+          // Live path: drive the TUI `/model` picker. dsh-tui forks the
+          // conversation in-process (history kept, new provider session id,
+          // same PTY / same CaPilot tab). We do NOT kill/restart the process.
+          // Catalog order mirrors TUI listModels (deepseek-official then
+          // settings.yaml pi-ai providers); picker opens focused on the live
+          // route, so only the delta from current → target is arrowed.
+          // Dormant sessions: skip PTY injection — persist below, next open
+          // pins via --patch.
+          if (s.agentChannels.has(id) && agent.status !== "done") {
+            // TUI picker focuses the live route (`channel.provider/model`),
+            // not the configured CaPilot model. Prefer the usage-observed
+            // actual model (resolved against the catalog) so the arrow delta
+            // starts from the same row the picker highlights.
+            const resolveLiveId = (raw: string | null | undefined) => {
+              if (!raw) return null;
+              if (models.some((m) => m.id === raw)) return raw;
+              const bare = raw.includes("/")
+                ? raw.slice(raw.lastIndexOf("/") + 1)
+                : raw;
+              const matches = models.filter(
+                (m) => m.id === bare || m.id.endsWith(`/${bare}`)
+              );
+              if (matches.length === 1) return matches[0]!.id;
+              const preferredProvider = (
+                models.find((m) => m.id === (agent.model ?? shownModel)) ??
+                defaultModel
+              )?.provider;
+              return (
+                matches.find((m) => m.provider === preferredProvider)?.id ??
+                matches[0]?.id ??
+                null
+              );
+            };
+            const currentId =
+              resolveLiveId(agent.last_usage?.actualModel) ??
+              (agent.model && models.some((m) => m.id === agent.model)
+                ? agent.model
+                : null) ??
+              shownModel ??
+              defaultModel?.id ??
+              null;
+            const currentIndex = currentId
+              ? models.findIndex((m) => m.id === currentId)
+              : -1;
+            const targetIndex = models.findIndex((m) => m.id === modelId);
+            if (targetIndex < 0) {
+              throw new Error(`Unsupported dsh model: ${modelId}`);
+            }
+            await invoke("agent_write", { id, data: "/model", raw: true });
+            await new Promise((resolve) => setTimeout(resolve, 40));
+            await invoke("agent_write", { id, data: "\r", raw: true });
+            // Catalog load is async inside the TUI; wait for the picker.
+            await new Promise((resolve) => setTimeout(resolve, 420));
+            const from = currentIndex >= 0 ? currentIndex : 0;
+            const delta = targetIndex - from;
+            if (delta !== 0) {
+              const key = delta > 0 ? "\u001b[B" : "\u001b[A";
+              for (let i = 0; i < Math.abs(delta); i++) {
+                await invoke("agent_write", { id, data: key, raw: true });
+                if (i + 1 < Math.abs(delta)) {
+                  await new Promise((resolve) => setTimeout(resolve, 35));
+                }
+              }
+            }
+            await invoke("agent_write", { id, data: "\r", raw: true });
+            // Fork writes a new provider session id; refresh the DB resume_key
+            // so usage/resume pin the child (CaPilot tab id is unchanged).
+            // Retry once — session log mtime can lag the Enter by a beat.
+            const refreshResumeKey = async () => {
+              try {
+                await invoke("agent_refresh_resume_key", { id });
+              } catch (error) {
+                console.warn("dsh resume_key refresh failed:", error);
+              }
+            };
+            await new Promise((resolve) => setTimeout(resolve, 600));
+            await refreshResumeKey();
+            await new Promise((resolve) => setTimeout(resolve, 400));
+            await refreshResumeKey();
+          }
         } else if (agent.runtime === "pi") {
           // pi 的模型选择器（Ctrl+L）自带搜索框，聚焦即输入；模型搜索文本
           // 含 `provider/id`，输入 provider 限定的目录 id 让目标模型排第一，
@@ -686,8 +792,28 @@ export function Composer() {
         });
         const latest = useStore.getState().agents.get(id);
         if (latest) {
+          // Optimistic actualModel so the button label tracks the selection
+          // immediately; the next usage sample overwrites with the live route.
+          const last_usage =
+            agent.runtime === "dsh"
+              ? {
+                  ...(latest.last_usage ?? {
+                    contextWindowUsedTokens: null,
+                    contextWindowMaxTokens: null,
+                    cacheHitTokens: null,
+                    cacheTotalInputTokens: null,
+                    actualModel: null,
+                  }),
+                  actualModel: modelId,
+                }
+              : latest.last_usage;
           useStore.getState().addAgent(
-            { ...latest, model: modelId, speed: effortId ?? latest.speed },
+            {
+              ...latest,
+              model: modelId,
+              speed: effortId ?? latest.speed,
+              last_usage,
+            },
             null
           );
         }
@@ -699,7 +825,7 @@ export function Composer() {
         modelSwitchingRef.current = false;
       }
     },
-    [activeTab?.agentId, models]
+    [activeTab?.agentId, models, shownModel, defaultModel]
   );
 
   const applyThinkingSpeed = useCallback(
@@ -2276,9 +2402,6 @@ export function Composer() {
               ) : (
                 <>
                   <div className="cmp-menu-label">选择模型</div>
-                  {actualModelId && (
-                    <div className="cmp-menu-label">实际运行：{displayedModelName}</div>
-                  )}
                   {models.length === 0 && (
                     <div className="cmp-menu-empty">无可用模型</div>
                   )}

@@ -122,7 +122,13 @@ export function useAgentEvents() {
             break;
           case "hook_status":
             if (ev.status) {
-              s.setHookStatus(ev.agent_id, { status: ev.status, ts: ev.ts });
+              // Silent: journal replay after GUI restart must not chime/flash
+              // historical working→idle edges as live completions.
+              s.setHookStatus(
+                ev.agent_id,
+                { status: ev.status, ts: ev.ts },
+                { silent: true }
+              );
             }
             break;
         }

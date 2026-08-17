@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type MouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useStore, AgentInfo, ResourcePoint, RuntimeUsage } from "../../state/store";
 import { fmtCpu, fmtMem } from "../../state/resource";
+import { checkForUpdate, downloadAndInstall } from "../../state/update";
 import { Icon, runtimeIcon } from "../Icon";
 
 
@@ -51,7 +52,19 @@ function formatMemPair(used: number, total: number): string {
   return `${fmt(used)} / ${fmt(total)}${unit}`;
 }
 
-/** Human countdown from a number of (epoch) seconds, e.g. "3天4小时". */
+/** Compact countdown for the status bar, e.g. "3d" / "5h" / "12m". */
+function formatResetShort(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  const d = Math.floor(total / 86400);
+  const h = Math.floor((total % 86400) / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  if (d > 0) return `${d}d`;
+  if (h > 0) return `${h}h`;
+  if (m > 0) return `${m}m`;
+  return `${total}s`;
+}
+
+/** Human countdown for tooltips, e.g. "3天4小时". */
 function formatResetCountdown(seconds: number): string {
   const total = Math.max(0, Math.floor(seconds));
   const d = Math.floor(total / 86400);
@@ -63,12 +76,30 @@ function formatResetCountdown(seconds: number): string {
   return `${total}秒`;
 }
 
+/** Seconds remaining until `resets_at` (unix seconds), or null when unknown. */
+function secondsUntilReset(resetsAt: number | null | undefined, nowSec: number): number | null {
+  if (resetsAt == null) return null;
+  return Math.max(0, resetsAt - nowSec);
+}
+
 export function StatusBar() {
   const agents = useStore((s) => s.agents);
   const agentResources = useStore((s) => s.agentResources);
   const usageState = useStore((s) => s.usageState);
-  const bumpUsageRevision = useStore((s) => s.bumpUsageRevision);
+  const setUsage = useStore((s) => s.setUsage);
+  const currentVersion = useStore((s) => s.currentVersion);
+  const updateStatus = useStore((s) => s.updateStatus);
+  const updateLatest = useStore((s) => s.updateLatest);
+  const updateDownloading = useStore((s) => s.updateDownloading);
+  const updateInstallable = useStore((s) => s.updateInstallable);
   const [resourceOpen, setResourceOpen] = useState(false);
+  // Tick once a minute so reset countdowns (3d / 5h / 12m) stay honest without
+  // re-fetching the remote quota endpoints.
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    const timer = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 60_000);
+    return () => clearInterval(timer);
+  }, []);
 
   // Live system-wide CPU/MEM for the readout (2s tick). Always available, so
   // the bar shows the machine's overall state even when no agent is running.
@@ -140,11 +171,99 @@ export function StatusBar() {
             key={rt}
             runtime={rt}
             usage={usageState[rt]}
-            onRefresh={bumpUsageRevision}
+            nowSec={nowSec}
+            onFetched={(next) => setUsage(rt, next)}
           />
         ))}
       <span className="sb-spacer" />
+      {/* Version / update chip — always visible so the user doesn't need to
+          open Settings to learn whether an update exists. Click:
+          - available → install (or re-show the banner if dismissed)
+          - otherwise → run a fresh check */}
+      <UpdateStatusItem
+        currentVersion={currentVersion}
+        status={updateStatus}
+        latest={updateLatest}
+        downloading={updateDownloading}
+        installable={updateInstallable}
+      />
     </div>
+  );
+}
+
+/* ── Version / update chip ───────────────────────────────────── */
+
+function UpdateStatusItem({
+  currentVersion,
+  status,
+  latest,
+  downloading,
+  installable,
+}: {
+  currentVersion: string | null;
+  status: string;
+  latest: string | null;
+  downloading: boolean;
+  installable: boolean;
+}) {
+  const hasUpdate = status === "available" && !!latest;
+  const label = downloading
+    ? "更新中…"
+    : hasUpdate
+      ? `v${latest} 可更新`
+      : status === "checking"
+        ? "检查更新…"
+        : status === "error"
+          ? "更新检查失败"
+          : status === "up-to-date"
+            ? `v${currentVersion ?? "…"} · 最新`
+            : currentVersion
+              ? `v${currentVersion}`
+              : "版本…";
+
+  const title = downloading
+    ? "正在下载并安装更新"
+    : hasUpdate
+      ? `发现新版本 v${latest}（当前 v${currentVersion ?? "…"}）。点击${installable ? "立即更新" : "查看"}。`
+      : status === "error"
+        ? "上次检查失败，点击重试"
+        : status === "up-to-date"
+          ? `已是最新版本 v${currentVersion ?? "…"}。点击重新检查。`
+          : "点击检查更新";
+
+  const onClick = (event: MouseEvent) => {
+    event.stopPropagation();
+    if (downloading) return;
+    if (hasUpdate) {
+      // Bring the banner back if the user dismissed it earlier this session.
+      useStore.setState({ updatePromptDismissedVersion: null });
+      if (installable) {
+        void downloadAndInstall();
+      }
+      return;
+    }
+    void checkForUpdate({ notifyOnFound: true });
+  };
+
+  return (
+    <button
+      type="button"
+      className={
+        "sb-item sb-update" +
+        (hasUpdate || downloading ? " is-update" : "") +
+        (status === "error" ? " is-warn" : "")
+      }
+      onClick={onClick}
+      title={title}
+      disabled={downloading || status === "checking"}
+      aria-label={title}
+    >
+      <Icon
+        name={hasUpdate || downloading ? "download" : "refresh-cw"}
+        size={12}
+      />
+      <span className="sb-val">{label}</span>
+    </button>
   );
 }
 
@@ -153,37 +272,63 @@ export function StatusBar() {
 function UsageItem({
   runtime,
   usage,
-  onRefresh,
+  nowSec,
+  onFetched,
 }: {
   runtime: "codex" | "opencode";
   usage: RuntimeUsage;
-  onRefresh: () => void;
+  nowSec: number;
+  onFetched: (usage: RuntimeUsage) => void;
 }) {
+  const [refreshing, setRefreshing] = useState(false);
   const displayName = runtime === "codex" ? "Codex" : "OpenCode";
   // Headline the 7d/weekly window when present (the meaningful quota); codex has
   // only that window, opencode reports rolling(5h)/weekly(7d)/monthly(30d).
   const primary = usage.windows.find((w) => w.label === "7d") ?? usage.windows[0];
   const remaining = primary?.remaining_pct ?? null;
-  const label = remaining != null ? `${primary.label} ${Math.round(remaining)}%` : primary?.label ?? "";
+  const resetLeft = secondsUntilReset(primary?.resets_at, nowSec);
+  // Prefer real reset countdown ("3d"/"5h"/"12m") over the static window label
+  // ("7d") so the bar answers "when does this refill?" at a glance.
+  const resetText = resetLeft != null ? formatResetShort(resetLeft) : null;
+  const label =
+    remaining != null
+      ? `${resetText ?? primary.label} ${Math.round(remaining)}%`
+      : resetText ?? primary?.label ?? "";
 
   // Full breakdown for the tooltip: each window's used/remaining + countdown.
   const lines = usage.windows.map((w) => {
     const used = w.used_pct != null ? `已用 ${Math.round(w.used_pct)}%` : null;
     const rem = w.remaining_pct != null ? `剩余 ${Math.round(w.remaining_pct)}%` : null;
-    const reset = w.resets_at
-      ? `重置还有 ${formatResetCountdown(w.resets_at - Math.floor(Date.now() / 1000))}`
-      : null;
+    const left = secondsUntilReset(w.resets_at, nowSec);
+    const reset = left != null ? `重置还有 ${formatResetCountdown(left)}` : null;
     return `${w.label} · ${[used, rem].filter(Boolean).join(" / ")}${reset ? ` · ${reset}` : ""}`;
   });
   const plan = usage.plan_type ? `（${usage.plan_type}）` : "";
-  const tooltip = [`${displayName}${plan}`, ...lines].join("\n");
+  const tooltip = [`${displayName}${plan}`, ...lines, refreshing ? "刷新中…" : "点击立即刷新"].join("\n");
+
+  const handleRefresh = async (event: MouseEvent) => {
+    // Stop the status-bar resource popover / other siblings from reacting.
+    event.stopPropagation();
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      const next = await invoke<RuntimeUsage>("usage_fetch", { runtime });
+      onFetched(next);
+    } catch {
+      // Keep the last known value; tooltip still invites another try.
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   return (
-    <span
-      className="sb-item sb-usage"
-      onClick={onRefresh}
-      title={`${tooltip}\n点击立即刷新`}
-      style={{ cursor: "pointer" }}
+    <button
+      type="button"
+      className={`sb-item sb-usage${refreshing ? " is-refreshing" : ""}`}
+      onClick={handleRefresh}
+      title={tooltip}
+      disabled={refreshing}
+      aria-label={`${displayName} 用量，点击刷新`}
     >
       <Icon
         name={runtime === "codex" ? "openai" : "opencode"}
@@ -193,7 +338,7 @@ function UsageItem({
       <span className="sb-val" style={{ color: quotaColor(remaining) }}>
         {label}
       </span>
-    </span>
+    </button>
   );
 }
 

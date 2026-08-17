@@ -243,15 +243,17 @@ fn build_and_spawn(
         workspace_id.unwrap_or_else(|| format!("wks_{}", uuid::Uuid::new_v4().simple()));
     agent_runtime::adapter::ensure_cli_path();
     let adapter = get_adapter(runtime);
-    if !adapter.is_available() {
-        return Err(format!("Runtime '{}' is not available", runtime));
-    }
-    // Runtime-specific pre-flight validation (e.g. dsh's composed-plugin
-    // probe): reject a broken launch with the reason instead of a terminal
-    // that spawns and immediately clean-exits.
+    // Prefer adapter-authored diagnostics (e.g. bash → install Git for Windows)
+    // over the generic "not available" string so the toast tells the user what
+    // to install. preflight runs even when is_available is false.
     if let Some(message) = adapter.preflight() {
         log::warn!("spawn preflight rejected {runtime}: {message}");
         return Err(message);
+    }
+    if !adapter.is_available() {
+        return Err(format!(
+            "运行时「{runtime}」不可用：未在 PATH 中找到对应命令。请安装后重启 CaPilot。"
+        ));
     }
 
     // Provider adapters own the valid choices. This also normalizes a legacy
@@ -963,6 +965,45 @@ async fn agent_switch_runtime(
         rec.cwd.clone(),
         on_data,
     )
+}
+
+/// Re-detect the provider session id for a live agent and persist it as
+/// `resume_key`. Used after in-process session forks (dsh `/model` switch)
+/// so the next resume / context-usage sample pins the child conversation
+/// without killing the PTY. Best-effort: returns the new key when found,
+/// or the existing key / None when detection finds nothing newer.
+#[tauri::command]
+async fn agent_refresh_resume_key(
+    persistence: tauri::State<'_, Arc<Persistence>>,
+    id: String,
+) -> Result<Option<String>, String> {
+    let rec = {
+        let db = persistence.db().lock().unwrap();
+        db.get(&id).map_err(|e| e.to_string())?
+    };
+    let Some(rec) = rec else {
+        return Err(format!("Session not found: {id}"));
+    };
+    let adapter = get_adapter(&rec.runtime);
+    let detected = adapter
+        .capture_resume_key(&rec.cwd)
+        .or_else(|| adapter.recover_resume_key(&id, &rec.cwd, rec.created_at));
+    let Some(key) = detected else {
+        return Ok(rec.resume_key.clone());
+    };
+    if rec.resume_key.as_deref() == Some(key.as_str()) {
+        return Ok(Some(key));
+    }
+    let now = now_ms();
+    if let Ok(db) = persistence.db().lock() {
+        let _ = db.update_resume_key(&id, &key, now);
+    }
+    if let Ok(mut meta) = read_agent_meta(&rec.project, &id) {
+        meta.resume_key = Some(key.clone());
+        meta.updated_at = now;
+        let _ = write_agent_meta(&rec.project, &meta);
+    }
+    Ok(Some(key))
 }
 
 /// Update a session's composer config (permission mode / speed / model).
@@ -3991,6 +4032,7 @@ pub fn run() {
             agent_resize,
             agent_switch_runtime,
             agent_set_session_config,
+            agent_refresh_resume_key,
             agent_rename,
             sessions_list,
             sessions_delete,

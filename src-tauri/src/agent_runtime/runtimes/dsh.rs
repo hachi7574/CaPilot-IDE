@@ -304,7 +304,9 @@ impl DshAdapter {
     ///    A trailing `{inputTokens:0, outputTokens:0}` reset chunk is skipped.
     ///  - session-cumulative cache stats across ALL usage events (the cache hit
     ///    rate numerator/denominator, matching the codex/claude adapters).
-    ///  - `observed_model`: the route model from the last `request/header`.
+    ///  - `observed_model`: provider-qualified route id (`provider/model`) from
+    ///    the last `request/header` when both halves are present; bare model
+    ///    id only when the log omits provider (legacy).
     fn parse_usage_from_content(content: &str) -> DshUsage {
         let mut last_used = None;
         let mut observed_model = None;
@@ -320,11 +322,19 @@ impl DshAdapter {
             };
             match v.get("type").and_then(Value::as_str) {
                 Some("request/header") => {
-                    if let Some(model) = v
+                    let model = v
                         .pointer("/data/header/config/model")
-                        .and_then(Value::as_str)
-                    {
-                        observed_model = Some(model.to_string());
+                        .and_then(Value::as_str);
+                    let provider = v
+                        .pointer("/data/header/config/provider")
+                        .and_then(Value::as_str);
+                    if let Some(model) = model {
+                        observed_model = Some(match provider {
+                            Some(provider) if !provider.is_empty() => {
+                                format!("{provider}/{model}")
+                            }
+                            _ => model.to_string(),
+                        });
                     }
                 }
                 Some("assistant/chunk")
@@ -842,26 +852,22 @@ console.log(JSON.stringify(out));
         ]
     }
 
-    /// Assemble the provider-qualified ModelInfo list from the deepseek-official
-    /// entries plus any llm-pi-ai providers, marking the user's
+    /// Assemble the provider-qualified ModelInfo list from llm-pi-ai providers
+    /// plus the deepseek-official entries, marking the user's
     /// `agent-default-model` (when present in the catalog) as the default.
+    ///
+    /// Order must match dsh-tui `channel.listModels()` (llm.listProviders()
+    /// registration order × each adapter's listModels). In the composed
+    /// dsh-tui profile, `llm-pi-ai` mounts before `llm-deepseek`, so pi-ai
+    /// routes come first and deepseek-official last. Composer live `/model`
+    /// switching arrows by catalog index — a mismatched order selects the
+    /// wrong row.
     fn build_model_list(
         ds_models: &[(&str, &str)],
         probe: Option<&ModelCatalogProbe>,
     ) -> Vec<ModelInfo> {
         let ds_efforts = Self::deepseek_official_efforts();
-        let mut models: Vec<ModelInfo> = ds_models
-            .iter()
-            .map(|(id, name)| ModelInfo {
-                id: format!("deepseek-official/{id}"),
-                name: name.to_string(),
-                provider: "deepseek-official".into(),
-                is_default: false,
-                // deepseek-official always advertises off/high/max (unless the
-                // deployment disables thinking, which we don't model here).
-                efforts: Some(ds_efforts.clone()),
-            })
-            .collect();
+        let mut models: Vec<ModelInfo> = Vec::new();
         if let Some(probe) = probe {
             for provider in &probe.pi {
                 for m in &provider.models {
@@ -878,6 +884,17 @@ console.log(JSON.stringify(out));
                     });
                 }
             }
+        }
+        for (id, name) in ds_models {
+            models.push(ModelInfo {
+                id: format!("deepseek-official/{id}"),
+                name: name.to_string(),
+                provider: "deepseek-official".into(),
+                is_default: false,
+                // deepseek-official always advertises off/high/max (unless the
+                // deployment disables thinking, which we don't model here).
+                efforts: Some(ds_efforts.clone()),
+            });
         }
         // Default = the model the user's settings.yaml points at (what a bare
         // `dsh` TUI boots), else the first deepseek-official flash entry.
@@ -1410,7 +1427,7 @@ mod tests {
         // Session-cumulative: 100+1000 + 50+1500 = 2650 prompt, 2500 hit.
         assert_eq!(usage.cache_hit, 1000 + 1500);
         assert_eq!(usage.cache_total, 100 + 1000 + 50 + 1500);
-        assert_eq!(usage.observed_model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(usage.observed_model.as_deref(), Some("deepseek-official/deepseek-v4-flash"));
     }
 
     #[test]
@@ -1453,7 +1470,7 @@ mod tests {
             assert_eq!(usage.cache_hit_tokens, Some(40));
             assert_eq!(usage.cache_total_input_tokens, Some(50));
             // Provider-observed route model is surfaced as display telemetry.
-            assert_eq!(usage.actual_model.as_deref(), Some("deepseek-v4-flash"));
+            assert_eq!(usage.actual_model.as_deref(), Some("deepseek-official/deepseek-v4-flash"));
         });
     }
 
@@ -1715,19 +1732,19 @@ mod tests {
             Some(&probe),
         );
         assert_eq!(models.len(), 3);
-        // The deepseek-official flash keeps its id but loses the default to the
-        // user's agent-default-model.
-        assert_eq!(models[0].id, "deepseek-official/deepseek-v4-flash");
-        assert!(!models[0].is_default);
-        assert_eq!(models[1].id, "deepseek-official/deepseek-v4-pro");
+        // TUI registration order: pi-ai first, deepseek-official last. The
+        // user's agent-default-model still wins the default flag.
+        assert_eq!(models[0].id, "opencode-go/deepseek-v4-flash");
+        assert_eq!(models[0].provider, "opencode-go");
+        assert!(models[0].is_default);
+        assert_eq!(models[1].id, "deepseek-official/deepseek-v4-flash");
         assert!(!models[1].is_default);
-        assert_eq!(models[2].id, "opencode-go/deepseek-v4-flash");
-        assert_eq!(models[2].provider, "opencode-go");
-        assert!(models[2].is_default);
+        assert_eq!(models[2].id, "deepseek-official/deepseek-v4-pro");
+        assert!(!models[2].is_default);
         // deepseek-official always exposes off/high/max; hand-declared pi-ai
         // models expose an empty efforts list so the composer hides multi-tier
         // choices on those routes.
-        let ds_efforts = models[0].efforts.as_ref().expect("ds efforts");
+        let ds_efforts = models[1].efforts.as_ref().expect("ds efforts");
         assert_eq!(
             ds_efforts.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
             vec!["off", "high", "max"]
@@ -1736,7 +1753,7 @@ mod tests {
         // resolves to under the isolated HOME — "high" when effort.json is
         // missing).
         assert_eq!(ds_efforts.iter().filter(|e| e.is_default).count(), 1);
-        assert_eq!(models[2].efforts.as_ref().map(|e| e.len()), Some(0));
+        assert_eq!(models[0].efforts.as_ref().map(|e| e.len()), Some(0));
     }
 
     #[test]

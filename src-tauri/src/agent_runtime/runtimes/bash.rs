@@ -1,6 +1,8 @@
 use crate::agent_runtime::adapter::{
     AgentRuntimeAdapter, AgentSession, ModelInfo, PermissionModeInfo, ThinkingOptionInfo,
 };
+use std::path::PathBuf;
+use std::sync::OnceLock;
 
 /// Shell runtime in two flavours:
 /// - `"bash"` (norc: true) — minimal shell, skips `~/.bashrc` (clean, fast).
@@ -16,9 +18,89 @@ impl BashAdapter {
         Self { id, norc }
     }
 
-    fn check_available() -> bool {
-        crate::agent_runtime::adapter::cli_available("bash")
+    /// Resolve the bash binary once per process.
+    ///
+    /// Order:
+    /// 1. `bash` on PATH (after [`ensure_cli_path`] has prepended Git bins on Windows)
+    /// 2. Well-known Git for Windows install paths (absolute `bash.exe`)
+    ///
+    /// Returning an absolute path on Windows avoids a later PATH race and makes
+    /// spawn failures point at a real file the user can inspect.
+    fn resolve_bash() -> Option<PathBuf> {
+        static CACHED: OnceLock<Option<PathBuf>> = OnceLock::new();
+        CACHED
+            .get_or_init(|| {
+                // Make sure Git\bin is visible before the PATH probe.
+                crate::agent_runtime::adapter::ensure_cli_path();
+
+                if crate::agent_runtime::adapter::cli_available("bash") {
+                    // Prefer the bare name when PATH works — lets the OS honour
+                    // PATHEXT / user overrides. Absolute path is only needed when
+                    // the bare name is missing (common on desktop-launched Win).
+                    return Some(PathBuf::from("bash"));
+                }
+
+                #[cfg(windows)]
+                {
+                    if let Some(p) = find_windows_bash_exe() {
+                        if bash_runs(&p) {
+                            return Some(p);
+                        }
+                    }
+                }
+
+                None
+            })
+            .clone()
     }
+
+    fn unavailable_message() -> String {
+        #[cfg(windows)]
+        {
+            "未检测到 bash。请安装 Git for Windows（勾选 Git Bash），\
+             或把 bash.exe 所在目录加入 PATH 后重启 CaPilot。\
+             常见路径：C:\\Program Files\\Git\\bin\\bash.exe"
+                .to_string()
+        }
+        #[cfg(not(windows))]
+        {
+            "未检测到 bash。请安装 bash 并确保它在 PATH 中，然后重启 CaPilot。"
+                .to_string()
+        }
+    }
+}
+
+/// True when `path --version` exits 0 within the CLI probe timeout.
+fn bash_runs(path: &std::path::Path) -> bool {
+    let mut c = std::process::Command::new(path);
+    c.arg("--version");
+    crate::agent_runtime::adapter::run_cmd_timeout(
+        c,
+        crate::agent_runtime::adapter::CLI_PROBE_TIMEOUT,
+    )
+    .is_some_and(|o| o.status.success())
+}
+
+/// Probe well-known Git for Windows layouts for `bash.exe`.
+#[cfg(windows)]
+fn find_windows_bash_exe() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    for dir in crate::agent_runtime::adapter::windows_git_bin_dirs() {
+        candidates.push(dir.join("bash.exe"));
+    }
+
+    // Hard-coded last-resort paths (cover installs where env vars are stripped).
+    for root in [
+        r"C:\Program Files\Git",
+        r"C:\Program Files (x86)\Git",
+        r"C:\Git",
+    ] {
+        candidates.push(PathBuf::from(root).join(r"bin\bash.exe"));
+        candidates.push(PathBuf::from(root).join(r"usr\bin\bash.exe"));
+    }
+
+    candidates.into_iter().find(|p| p.is_file())
 }
 
 impl AgentRuntimeAdapter for BashAdapter {
@@ -35,7 +117,7 @@ impl AgentRuntimeAdapter for BashAdapter {
     }
 
     fn is_available(&self) -> bool {
-        Self::check_available()
+        Self::resolve_bash().is_some()
     }
 
     fn is_authenticated(&self) -> bool {
@@ -43,8 +125,16 @@ impl AgentRuntimeAdapter for BashAdapter {
     }
 
     fn version(&self) -> Option<String> {
+        let bin = Self::resolve_bash()?;
         // `bash --version`'s first line is "GNU bash, version 5.2.15(1)-release …".
-        crate::agent_runtime::adapter::cli_version("bash")
+        if let Some(s) = bin.to_str() {
+            crate::agent_runtime::adapter::cli_version(s)
+        } else if bash_runs(&bin) {
+            // Non-UTF8 path that still runs — surface a generic label.
+            Some("bash".to_string())
+        } else {
+            None
+        }
     }
 
     fn list_models(&self) -> Vec<ModelInfo> {
@@ -59,15 +149,32 @@ impl AgentRuntimeAdapter for BashAdapter {
         vec![]
     }
 
+    fn preflight(&self) -> Option<String> {
+        if Self::resolve_bash().is_some() {
+            None
+        } else {
+            Some(Self::unavailable_message())
+        }
+    }
+
     fn spawn_interactive(&self, _session: &AgentSession) -> Result<(String, Vec<String>), String> {
-        // `--norc` for the minimal shell; the full variant just runs `bash`
-        // (interactive), which sources /etc/bash.bashrc + ~/.bashrc.
+        let bin = Self::resolve_bash().ok_or_else(Self::unavailable_message)?;
+        // `--norc` for the minimal shell; the full variant just runs bash
+        // (interactive), which sources /etc/bash.bashrc + ~/.bashrc (or the
+        // Git Bash equivalents under Windows).
         let args = if self.norc {
             vec!["--norc".to_string()]
         } else {
             vec![]
         };
-        Ok(("bash".to_string(), args))
+        // Use the resolved path (may be absolute on Windows) so spawn does not
+        // re-depend on a later PATH mutation.
+        let cmd = bin
+            .to_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| "bash".to_string());
+        Ok((cmd, args))
     }
 
     fn resume_args(&self, _session: &AgentSession) -> Vec<String> {
@@ -80,5 +187,29 @@ impl AgentRuntimeAdapter for BashAdapter {
 
     fn mode_args(&self, _mode: &str) -> Vec<String> {
         vec![]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_bash_finds_system_bash_on_unix() {
+        #[cfg(unix)]
+        {
+            assert!(
+                BashAdapter::resolve_bash().is_some(),
+                "unix CI / dev boxes must have bash on PATH"
+            );
+        }
+    }
+
+    #[test]
+    fn unavailable_message_mentions_install_hint() {
+        let msg = BashAdapter::unavailable_message();
+        assert!(msg.contains("bash"), "{msg}");
+        #[cfg(windows)]
+        assert!(msg.contains("Git"), "{msg}");
     }
 }

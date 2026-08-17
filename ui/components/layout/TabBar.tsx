@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   useStore,
   Tab,
@@ -103,6 +104,7 @@ export function TabBar() {
   const projectRoots = useStore((s) => s.projectRoots);
   const focusedProject = useStore((s) => s.focusedProject);
   const draggedTabId = useStore((s) => s.draggedTabId);
+  const leftSidebarOpen = useStore((s) => s.leftSidebarOpen);
   const setActiveTab = useStore((s) => s.setActiveTab);
   const setDraggedTabId = useStore((s) => s.setDraggedTabId);
   const closeTab = useStore((s) => s.closeTab);
@@ -111,6 +113,32 @@ export function TabBar() {
   // Tab-label flash requests: a running → other transition bumps the seq, and
   // the effect below re-triggers the `.tab-flash` CSS animation on the tab.
   const tabFlash = useStore((s) => s.tabFlash);
+
+  // When the left sidebar is collapsed its op-bar (and the window controls
+  // it hosts) is gone. Host min/max/close on the tab bar instead so the
+  // frameless window stays operable without a 44px rail strip.
+  const appWindow = useMemo(() => getCurrentWindow(), []);
+  const [winMaximized, setWinMaximized] = useState(false);
+  useEffect(() => {
+    if (leftSidebarOpen) return;
+    let alive = true;
+    let unlisten: (() => void) | undefined;
+    const refresh = () => {
+      appWindow.isMaximized().then((m) => alive && setWinMaximized(m)).catch(() => {});
+    };
+    refresh();
+    appWindow
+      .onResized(refresh)
+      .then((u) => {
+        if (alive) unlisten = u;
+        else u();
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
+  }, [appWindow, leftSidebarOpen]);
 
   // Drag-reorder state. During a drag we DON'T mutate the store's tabs array
   // (that would re-render ContentArea and its live terminals on every move);
@@ -586,6 +614,35 @@ export function TabBar() {
       <button className="tab-add" title="新建终端" onClick={openPicker}>
         +
       </button>
+      {/* Spacer keeps window controls pinned to the trailing edge while tabs
+          scroll independently under overflow. Only shown when the sidebar is
+          collapsed (open sidebar already hosts these buttons in its op bar). */}
+      {!leftSidebarOpen && (
+        <div className="tab-win-controls">
+          <span className="win-sep" aria-hidden />
+          <span
+            className="sidebar-btn win-btn"
+            onClick={() => void appWindow.minimize()}
+            title="最小化"
+          >
+            <Icon name="minus" size={14} />
+          </span>
+          <span
+            className="sidebar-btn win-btn"
+            onClick={() => void appWindow.toggleMaximize()}
+            title={winMaximized ? "还原" : "最大化"}
+          >
+            <Icon name={winMaximized ? "copy" : "square"} size={13} />
+          </span>
+          <span
+            className="sidebar-btn win-btn win-close"
+            onClick={() => void appWindow.close()}
+            title="关闭"
+          >
+            <Icon name="x" size={14} />
+          </span>
+        </div>
+      )}
       {tabMenu && (
         <div
           className="ctx-menu"

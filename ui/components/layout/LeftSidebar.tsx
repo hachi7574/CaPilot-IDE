@@ -556,9 +556,11 @@ export function LeftSidebar() {
         className={`left-sidebar${!leftSidebarOpen ? " collapsed" : ""}`}
         style={leftSidebarOpen ? { width: leftWidth } : undefined}
       >
-        {leftSidebarOpen ? (
+        {leftSidebarOpen && (
           <>
-            {/* Zone 2: Op bar */}
+            {/* Zone 2: Op bar — window controls live here while the sidebar is
+                open. When collapsed they move to the tab bar (see TabBar) so
+                the frameless chrome stays reachable without a 44px rail. */}
             <div className="sidebar-actions" data-tauri-drag-region>
               <span className="sidebar-btn" onClick={() => setSettingsOpen(true)} title="设置">
                 <Icon name="settings" size={16} />
@@ -848,46 +850,6 @@ export function LeftSidebar() {
               />
             </div>
           </>
-        ) : (
-          // Collapsed rail: frameless window — keep the window controls
-          // reachable when the project tree is hidden. Clicking the empty
-          // rail (or the resize handle line) re-expands.
-          <div
-            className="sidebar-rail"
-            onClick={toggleLeftSidebar}
-            title="点击空白展开侧栏"
-          >
-            <span
-              className="sidebar-btn rail-btn win-btn"
-              onClick={(e) => {
-                e.stopPropagation();
-                void appWindow.minimize();
-              }}
-              title="最小化"
-            >
-              <Icon name="minus" size={14} />
-            </span>
-            <span
-              className="sidebar-btn rail-btn win-btn"
-              onClick={(e) => {
-                e.stopPropagation();
-                void appWindow.toggleMaximize();
-              }}
-              title={winMaximized ? "还原" : "最大化"}
-            >
-              <Icon name={winMaximized ? "copy" : "square"} size={13} />
-            </span>
-            <span
-              className="sidebar-btn rail-btn win-btn win-close"
-              onClick={(e) => {
-                e.stopPropagation();
-                void appWindow.close();
-              }}
-              title="关闭"
-            >
-              <Icon name="x" size={14} />
-            </span>
-          </div>
         )}
       </div>
 

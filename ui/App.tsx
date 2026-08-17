@@ -4,6 +4,7 @@ import { MainArea } from "./components/layout/MainArea";
 import { RightSidebar } from "./components/layout/RightSidebar";
 import { StatusBar } from "./components/layout/StatusBar";
 import { UpdatePrompt } from "./components/layout/UpdatePrompt";
+import { WindowResizeEdges } from "./components/layout/WindowResizeEdges";
 import { Onboarding } from "./components/onboarding/Onboarding";
 import { useResourceSync } from "./state/resource";
 import { useRuntimeSync } from "./state/runtime";
@@ -69,6 +70,9 @@ function App() {
       </div>
       <StatusBar />
       <UpdatePrompt />
+      {/* Frameless window (`decorations: false`): OS edge-resize is missing in
+          tauri dev on many Linux compositors — overlay grips restore it. */}
+      <WindowResizeEdges />
       <DevAnnotationsGate />
       {!onboarded && <Onboarding />}
     </div>

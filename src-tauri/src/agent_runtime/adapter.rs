@@ -165,31 +165,42 @@ pub const CLI_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Ensure user-local CLI install dirs are on `PATH` for the whole process.
 ///
-/// Desktop launches (`.desktop` / dock) often inherit a stripped environment
-/// that lacks `~/.local/bin`, `~/.cargo/bin`, and Node version-manager bins
-/// (`~/APP/n/bin`, `~/.n/bin`, …) where agent CLIs typically live. Interactive
-/// terminals source the user's shell rc and see them; CaPilot must match so
-/// Settings detection and PTY spawns agree. Idempotent — safe to call often.
+/// Desktop launches (`.desktop` / dock / Start Menu shortcuts) often inherit a
+/// stripped environment that lacks `~/.local/bin`, `~/.cargo/bin`, Node
+/// version-manager bins, and — on Windows — Git for Windows' `bin` / `usr\bin`
+/// (where `bash.exe` lives even when the installer did not put Git on the user
+/// PATH). Interactive terminals source the user's shell rc and see them;
+/// CaPilot must match so Settings detection and PTY spawns agree. Idempotent —
+/// safe to call often.
 pub fn ensure_cli_path() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        let Ok(home) = crate::persistence::user_home() else {
-            return;
-        };
-        let candidates = [
-            home.join(".local/bin"),
-            home.join(".cargo/bin"),
-            home.join("APP/n/bin"),
-            home.join(".n/bin"),
-            home.join("n/bin"),
-            home.join(".volta/bin"),
-            home.join(".asdf/shims"),
-            home.join(".local/share/pnpm"),
-            #[cfg(target_os = "macos")]
-            PathBuf::from("/opt/homebrew/bin"),
-            #[cfg(target_os = "macos")]
-            PathBuf::from("/usr/local/bin"),
-        ];
+        let home = crate::persistence::user_home().ok();
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Some(home) = home.as_ref() {
+            candidates.extend([
+                home.join(".local/bin"),
+                home.join(".cargo/bin"),
+                home.join("APP/n/bin"),
+                home.join(".n/bin"),
+                home.join("n/bin"),
+                home.join(".volta/bin"),
+                home.join(".asdf/shims"),
+                home.join(".local/share/pnpm"),
+            ]);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            candidates.push(PathBuf::from("/opt/homebrew/bin"));
+            candidates.push(PathBuf::from("/usr/local/bin"));
+        }
+        // Git for Windows ships bash.exe under Git\bin (and a fuller usr\bin).
+        // Desktop-launched apps often miss these even when Git is installed,
+        // because the shortcut PATH is not the interactive shell PATH.
+        #[cfg(windows)]
+        {
+            candidates.extend(windows_git_bin_dirs());
+        }
 
         #[cfg(windows)]
         let sep = ";";
@@ -227,6 +238,52 @@ pub fn ensure_cli_path() {
             std::env::set_var("PATH", parts.join(sep));
         }
     });
+}
+
+/// Directories that commonly hold `bash.exe` / `git.exe` on a Windows Git for
+/// Windows install. Existence-checked by the caller before PATH mutation.
+#[cfg(windows)]
+pub fn windows_git_bin_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut roots: Vec<PathBuf> = Vec::new();
+
+    // Official / winget defaults.
+    for key in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
+        if let Ok(base) = std::env::var(key) {
+            roots.push(PathBuf::from(base).join("Git"));
+            // Some portable / scoop-style layouts nest under Programs.
+            if key == "LOCALAPPDATA" {
+                roots.push(PathBuf::from(base).join("Programs").join("Git"));
+            }
+        }
+    }
+    // Scoop: ~/scoop/apps/git/current/{bin,usr/bin}
+    if let Ok(home) = crate::persistence::user_home() {
+        roots.push(home.join("scoop").join("apps").join("git").join("current"));
+        // User-local Git install without admin.
+        roots.push(home.join("AppData").join("Local").join("Programs").join("Git"));
+    }
+    // Explicit override for odd installs / CI.
+    if let Ok(root) = std::env::var("CAPILOT_GIT_ROOT") {
+        roots.push(PathBuf::from(root));
+    }
+
+    for root in roots {
+        // Prefer `bin` (bash.exe shim) then the MSYS `usr\bin`.
+        for sub in ["bin", "usr\\bin", "usr/bin", "cmd"] {
+            let d = root.join(sub);
+            if d.is_dir() {
+                dirs.push(d);
+            }
+        }
+    }
+    dirs
+}
+
+#[cfg(not(windows))]
+#[allow(dead_code)]
+pub fn windows_git_bin_dirs() -> Vec<PathBuf> {
+    Vec::new()
 }
 
 /// Run a short CLI probe with a hard timeout. Returns `None` when the binary

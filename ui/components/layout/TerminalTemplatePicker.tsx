@@ -31,7 +31,7 @@ export function TerminalTemplatePicker({
   const [edit, setEdit] = useState<TermTemplate | null>(null);
   const [adding, setAdding] = useState(false);
 
-  // Hide agent templates whose CLI isn't installed. Shell templates (bash /
+// Hide agent templates whose CLI isn't installed. Shell templates (bash /
   // bash-rc, including user quick-starts) always stay. While the runtime probe
   // hasn't returned yet, keep agent entries visible to avoid a bash-only flash.
   const availableRuntimeIds = new Set(
@@ -42,6 +42,16 @@ export function TerminalTemplatePicker({
     if (runtimes.length === 0) return true;
     return availableRuntimeIds.has(t.runtime);
   });
+  // bash / bash-rc share one adapter probe. When missing (common on Windows
+  // without Git Bash on PATH), keep the row clickable so spawn still surfaces
+  // the install hint toast — but mark it so the user knows before clicking.
+  const bashAvailable = (() => {
+    const hit = runtimes.find(
+      (rt) => rt.id === "bash-rc" || rt.id === "bash" || rt.id.startsWith("bash")
+    );
+    // Unknown (runtimes not loaded yet) → don't grey out.
+    return hit ? hit.available : true;
+  })();
 
   // Keep the menu fully on-screen: the anchor is the "＋" button's bottom-right
   // corner, which can sit close to the viewport edge. Measure after paint and
@@ -86,28 +96,43 @@ export function TerminalTemplatePicker({
         onContextMenu={(e) => e.stopPropagation()}
       >
         <div className="tt-label">新建终端</div>
-        {visibleTemplates.map((t) => (
-          <div
-            key={t.id}
-            className="tt-item"
-            onClick={() => {
-              spawnTerminal(project, t).catch(console.error);
-              onClose();
-            }}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              if (t.fixed) return;
-              setEdit(t);
-            }}
-            title={t.fixed ? "固定模板" : "右键编辑 / 重命名"}
-          >
-            <span className="tt-icon">
-              <Icon name={runtimeIcon(t.runtime)} size={16} />
-            </span>
-            <span className="tt-name">{t.name}</span>
-            {t.command && <span className="tt-cmd">{t.command}</span>}
-          </div>
-        ))}
+        {visibleTemplates.map((t) => {
+          const isBash = t.runtime.startsWith("bash");
+          const missing = isBash && !bashAvailable;
+          return (
+            <div
+              key={t.id}
+              className={"tt-item" + (missing ? " is-missing" : "")}
+              onClick={() => {
+                // Still attempt spawn when missing — backend returns a
+                // Chinese install hint (Git for Windows / PATH) via toast.
+                spawnTerminal(project, t).catch(console.error);
+                onClose();
+              }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                if (t.fixed) return;
+                setEdit(t);
+              }}
+              title={
+                missing
+                  ? "未检测到 bash。Windows 请安装 Git for Windows（Git Bash）并重启 CaPilot"
+                  : t.fixed
+                    ? "固定模板"
+                    : "右键编辑 / 重命名"
+              }
+            >
+              <span className="tt-icon">
+                <Icon name={runtimeIcon(t.runtime)} size={16} />
+              </span>
+              <span className="tt-name">{t.name}</span>
+              {missing && <span className="tt-cmd">未安装</span>}
+              {!missing && t.command && (
+                <span className="tt-cmd">{t.command}</span>
+              )}
+            </div>
+          );
+        })}
         <div className="tt-sep" />
         <div className="tt-item tt-add" onClick={() => setAdding(true)}>
           <Icon name="plus" size={12} /> 添加快速启动

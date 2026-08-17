@@ -133,6 +133,18 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
       .catch(() => {});
   }, [currentVersion]);
 
+  // Opening Settings should never leave the user staring at a blank "no
+  // status" row. If we haven't checked this session (or the last check
+  // failed), kick one off immediately so 关于与更新 always answers
+  // "最新 / 有更新 / 失败".
+  useEffect(() => {
+    if (updateStatus === "idle" || updateStatus === "error") {
+      void checkForUpdate();
+    }
+    // Only on mount — manual re-check is the button.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const [scanning, setScanning] = useState(false);
   const [detectError, setDetectError] = useState<string | null>(null);
   const reDetect = () => {
@@ -951,7 +963,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           <div className="settings-update-row">
             <div className="settings-update-identity">
               <b>CaPilot IDE</b>
-              <span>v{currentVersion ?? "…"}</span>
+              <span>当前 v{currentVersion ?? "…"}</span>
             </div>
             <button
               type="button"
@@ -964,15 +976,58 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             </button>
           </div>
 
-          {updateStatus === "up-to-date" && (
-            <div className="settings-update-status">已是最新版本</div>
-          )}
-          {updateStatus === "error" && updateError && (
-            <div className="settings-update-status is-warn">{updateError}</div>
-          )}
-          {updateStatus === "available" && updateLatest && (
-            <div className="settings-update-status is-ok">发现新版本 v{updateLatest}</div>
-          )}
+          {/* Always-visible verdict card — idle/checking/latest/update/error.
+              Before the first check the user still sees an explicit state, not
+              a blank panel that looks like "no info". */}
+          <div
+            className={
+              "settings-update-verdict" +
+              (updateStatus === "available"
+                ? " is-update"
+                : updateStatus === "up-to-date"
+                  ? " is-latest"
+                  : updateStatus === "error"
+                    ? " is-warn"
+                    : "")
+            }
+          >
+            {updateStatus === "idle" && (
+              <>
+                <strong>尚未检查更新</strong>
+                <span>打开本页会自动检查；也可点右上角「检查更新」。</span>
+              </>
+            )}
+            {updateStatus === "checking" && (
+              <>
+                <strong>正在检查更新…</strong>
+                <span>当前 v{currentVersion ?? "…"}</span>
+              </>
+            )}
+            {updateStatus === "up-to-date" && (
+              <>
+                <strong>已是最新版本</strong>
+                <span>
+                  当前 v{currentVersion ?? "…"}
+                  {updateLatest ? ` · 远端 v${updateLatest}` : ""}
+                  {" · 无需更新"}
+                </span>
+              </>
+            )}
+            {updateStatus === "available" && updateLatest && (
+              <>
+                <strong>发现新版本 v{updateLatest}</strong>
+                <span>
+                  当前 v{currentVersion ?? "…"} → 可升级到 v{updateLatest}
+                </span>
+              </>
+            )}
+            {updateStatus === "error" && (
+              <>
+                <strong>检查更新失败</strong>
+                <span>{updateError || "未知错误，请稍后重试"}</span>
+              </>
+            )}
+          </div>
 
           {updateStatus === "available" && (
             <div className="settings-update-actions">
@@ -993,7 +1048,9 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                   {updateDownloading ? "下载中…" : "下载并安装"}
                 </button>
                 {!updateInstallable && (
-                  <span className="settings-update-status is-warn">开发构建不支持自动安装</span>
+                  <span className="settings-update-status is-warn">
+                    开发构建不支持自动安装，请使用发布包
+                  </span>
                 )}
               </div>
               {updateDownloading && (

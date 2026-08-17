@@ -390,18 +390,18 @@ export const TODO_DRAG_MIME = "application/x-capilot-todo";
 /**
  * One task tag shown in the right sidebar's 概览 tab. Lifecycle:
  * `todo` (待分配, visible) → `assigned` (dropped onto a session, in-flight and
- * invisible) → `done` (待验收, visible with the session name). `done` is reached
- * automatically when the assigned session's hook goes working → idle, or
- * manually via the check button on an unassigned tag.
+ * invisible) → `done` (待处理/待验收, visible with the session name). `done` is
+ * reached automatically when the assigned session's turn ends (hook leaves a
+ * non-idle status for `idle`, or the session process exits as `done`).
  */
 export interface TodoTag {
   id: string;
   text: string;
-  /** todo=待分配(可见) · assigned=已分配 in-flight(不可见) · done=待验收(可见) */
+  /** todo=待分配(可见) · assigned=已分配 in-flight(不可见) · done=待处理(可见) */
   status: "todo" | "assigned" | "done";
   /** The session the tag was assigned to (assigned/done). */
   agentId?: string | null;
-  /** Session name shown on the 待验收 tag. */
+  /** Session name shown on the 待处理 tag. */
   sessionName?: string | null;
   /** Owning project; null = global. Assigned tags take the session's project. */
   project?: string | null;
@@ -780,6 +780,8 @@ interface AppState {
   updateNotifiedVersion: string | null;
   /** Version the user dismissed on the in-app update prompt this session. */
   updatePromptDismissedVersion: string | null;
+  /** Epoch ms of the last finished update check (success or error). */
+  updateCheckedAt: number | null;
   /** Whether the app auto-checks for updates on startup (default true). */
   autoCheckUpdate: boolean;
 
@@ -810,8 +812,14 @@ interface AppState {
    *  `agentSubmittedAt` flash marker so the tab reads 运行中 while the
    *  lifecycle hook catches up; clears the activity-based wakeup marker. */
   markAgentSubmitted: (id: string) => void;
-  /** Update (or clear with `null`) an agent's hook-reported lifecycle status. */
-  setHookStatus: (id: string, hook: HookStatus | null) => void;
+  /** Update (or clear with `null`) an agent's hook-reported lifecycle status.
+   *  Pass `{ silent: true }` for offline journal replay so historical
+   *  `working → idle` edges do not chime / flash as if they just happened. */
+  setHookStatus: (
+    id: string,
+    hook: HookStatus | null,
+    opts?: { silent?: boolean }
+  ) => void;
   /** Request the tab bar to flash an agent's tab label twice (a running → other
    *  transition just happened). */
   flashTab: (id: string) => void;
@@ -1070,6 +1078,45 @@ function saveTodos(todos: TodoTag[]) {
   );
 }
 
+/** Hook statuses that mean a turn is still in flight (or blocked on the user).
+ *  Leaving any of these for `idle` completes an assigned tag — not only the
+ *  strict `working → idle` edge. A turn that ends after a permission/question
+ *  prompt often lands as `waiting_input|awaiting_choice → idle` when the 1s
+ *  poll (or a coalesced event) never observed the brief `working` in between. */
+const IN_FLIGHT_HOOK = new Set([
+  "working",
+  "waiting_input",
+  "awaiting_choice",
+]);
+
+/**
+ * Mark every in-flight (assigned) tag on `agentId` as done / 待处理.
+ * No-op when none match. Returns the (possibly unchanged) list; persists only
+ * when something actually moved.
+ */
+function completeAssignedTodos(
+  todos: TodoTag[],
+  agentId: string,
+  sessionName?: string | null
+): TodoTag[] {
+  if (!todos.some((t) => t.status === "assigned" && t.agentId === agentId)) {
+    return todos;
+  }
+  const now = Date.now();
+  const next = todos.map((t) =>
+    t.status === "assigned" && t.agentId === agentId
+      ? {
+          ...t,
+          status: "done" as const,
+          doneAt: now,
+          sessionName: sessionName ?? t.sessionName,
+        }
+      : t
+  );
+  saveTodos(next);
+  return next;
+}
+
 export const useStore = create<AppState>((set, get) => {
   // Local-only removal of a project's UI state (list, root map, focus, tabs,
   // agents) WITHOUT any backend call. `removeProject` and the worktree flows
@@ -1166,6 +1213,7 @@ export const useStore = create<AppState>((set, get) => {
   updateInstallable: false,
   updateNotifiedVersion: null,
   updatePromptDismissedVersion: null,
+  updateCheckedAt: null,
   autoCheckUpdate: true,
   ciStatus: null,
   ciPolling: false,
@@ -1290,7 +1338,16 @@ export const useStore = create<AppState>((set, get) => {
       const agents = new Map(s.agents);
       const a = agents.get(id);
       if (a) agents.set(id, { ...a, status });
-      return { agents };
+      // Process exit is a hard end-of-work signal. If the status hook never
+      // delivered a clean non-idle → idle edge (short turns, missed poll, hook
+      // not wired), the assigned tag would otherwise stay invisible forever —
+      // promote it to 待处理 here. `removeAgent` still reverts on explicit
+      // delete; this path is natural exit only.
+      let todos = s.todos;
+      if (status === "done" && a) {
+        todos = completeAssignedTodos(todos, id, a.title);
+      }
+      return todos === s.todos ? { agents } : { agents, todos };
     });
   },
 
@@ -1386,14 +1443,20 @@ export const useStore = create<AppState>((set, get) => {
         : { agentSubmittedAt: submittedAt, agentActiveAt: activeAt };
     }),
 
-  setHookStatus: (id, hook) => {
+  setHookStatus: (id, hook, opts) => {
     // Running → other transition (the hook went working → idle / waiting_input
     // / awaiting_choice / dormant): sound the completion chime and flash the
     // agent's tab label. Checked before `set` so the two callers (the 1s poll
     // and the `agent://hook-status` event) can't double-fire: the second call
     // sees prev already on the new status.
+    // Silent mode is for `agent_sync_events` replay after a GUI restart: the
+    // daemon journal still holds every historical working→idle from earlier in
+    // this daemon lifetime, and replaying those must restore store state only
+    // — not re-fire completion UX on already-idle sessions.
+    const silent = opts?.silent === true;
     const prevHook = useStore.getState().hookStatus.get(id);
     if (
+      !silent &&
       prevHook &&
       hook &&
       prevHook.status === "working" &&
@@ -1421,9 +1484,11 @@ export const useStore = create<AppState>((set, get) => {
       // A turn completed: the hook went working → idle (claude Stop, codex Stop,
       // opencode session idle). If the agent's tab is off-screen the user hasn't
       // seen the result — flag it so the tab reads 已完成 instead of 空闲.
+      // Skipped on silent replay: historical edges are not "just finished".
       let unreadCompletion = s.unreadCompletion;
       const tab = s.tabs.find((t) => t.agentId === id);
       if (
+        !silent &&
         hook &&
         prev &&
         prev.status === "working" &&
@@ -1435,20 +1500,24 @@ export const useStore = create<AppState>((set, get) => {
         unreadCompletion.add(id);
       }
       // Task auto-complete: an in-flight (assigned) tag on this session is done
-      // when the turn ends — move it to 待验收 with the session name. Unlike the
-      // unread flag this does not depend on tab visibility; a finished task is
-      // finished whether or not anyone was watching the terminal.
+      // when the turn ends — move it to 待处理 with the session name. Trigger on
+      // any in-flight hook status → idle (not only working→idle): after a
+      // permission/question block the brief working pulse is easy to miss, and
+      // the observed edge is often waiting_input|awaiting_choice → idle.
+      // Unlike the unread flag this does not depend on tab visibility. Still
+      // runs on silent replay so offline completions catch assigned todos up.
       let todos = s.todos;
-      if (hook && prev && prev.status === "working" && hook.status === "idle") {
-        const sessionName = s.agents.get(id)?.title;
-        if (todos.some((t) => t.status === "assigned" && t.agentId === id)) {
-          todos = todos.map((t) =>
-            t.status === "assigned" && t.agentId === id
-              ? { ...t, status: "done" as const, doneAt: Date.now(), sessionName: sessionName ?? t.sessionName }
-              : t
-          );
-          saveTodos(todos);
-        }
+      if (
+        hook &&
+        prev &&
+        hook.status === "idle" &&
+        IN_FLIGHT_HOOK.has(prev.status)
+      ) {
+        todos = completeAssignedTodos(
+          todos,
+          id,
+          s.agents.get(id)?.title
+        );
       }
       return { hookStatus, unreadCompletion, todos };
     });
@@ -2008,17 +2077,26 @@ export const useStore = create<AppState>((set, get) => {
     set((s) => {
       // The tag keeps its creation-time scope: only the assignment link changes.
       // A tag born in the global view stays global (project untouched) so it
-      // lands back in the global 待验收 when the session's turn ends — re-homing
+      // lands back in the global 待处理 when the session's turn ends — re-homing
       // it to the session's project here would make it vanish from the view it
       // was created in.
       // A session never accumulates multiple task tags: if it already has one
-      // (assigned in-flight or a 待验收 tag), the new assignment supersedes it —
-      // drop the session's existing tag(s) so only the newest one remains.
+      // (assigned in-flight or a 待处理 tag), the new assignment supersedes it —
+      // drop the session's *other* tag(s), but keep `id` so the map below can
+      // promote it. (The old `t.id !== id && …` filter deleted the target tag
+      // itself — assign looked like a silent delete, and nothing ever reached
+      // 待处理 on turn end.)
       const todos = s.todos
-        .filter((t) => t.id !== id && t.agentId !== agentId)
+        .filter((t) => t.id === id || t.agentId !== agentId)
         .map((t) =>
-          t.id === id && t.status === "todo"
-            ? { ...t, status: "assigned" as const, agentId, sessionName }
+          t.id === id
+            ? {
+                ...t,
+                status: "assigned" as const,
+                agentId,
+                sessionName,
+                doneAt: null,
+              }
             : t
         );
       saveTodos(todos);

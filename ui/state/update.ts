@@ -79,12 +79,28 @@ export async function checkForUpdate(opts: CheckOptions = {}): Promise<void> {
   useStore.setState({ updateStatus: "checking", updateError: null });
   try {
     const res = await invoke<UpdateStatus>("update_check");
+    // A newer release cancels any prior "稍后" dismiss for an older tag so the
+    // in-app banner can reappear for the new version.
+    const prevDismissed = useStore.getState().updatePromptDismissedVersion;
+    const dismissStillValid =
+      res.available &&
+      res.latestVersion &&
+      prevDismissed &&
+      prevDismissed === res.latestVersion
+        ? prevDismissed
+        : res.available
+          ? null
+          : prevDismissed;
     useStore.setState({
       updateStatus: res.available ? "available" : "up-to-date",
       updateLatest: res.latestVersion,
       updateNotes: res.notes,
       updateInstallable: res.installable,
       updateError: null,
+      updateCheckedAt: Date.now(),
+      // Prefer the server's current version when our bootstrap hasn't landed.
+      currentVersion: res.currentVersion || useStore.getState().currentVersion,
+      updatePromptDismissedVersion: dismissStillValid,
     });
 
     // Secondary system notification (often silent on Linux/Wayland). The
@@ -105,6 +121,7 @@ export async function checkForUpdate(opts: CheckOptions = {}): Promise<void> {
     useStore.setState({
       updateStatus: "error",
       updateError: String(e),
+      updateCheckedAt: Date.now(),
     });
   }
 }
