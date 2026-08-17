@@ -6,9 +6,11 @@ import { Icon, runtimeIcon } from "../Icon";
 /**
  * New-terminal template picker for the project "+" / tab-bar "+" buttons.
  *
- * bash (fixed, always first) / Claude / Codex / dsh / user-defined quick-start
- * commands. Right-click a non-fixed template to rename it or edit its launch
- * command; "＋ 添加快速启动" adds a new one (persisted to localStorage).
+ * bash (fixed, always first) / installed agent CLIs (Claude / Codex / dsh / Pi)
+ * / user-defined quick-start commands. Agent templates are hidden when their
+ * runtime is not detected (same source as Settings → 已安装). Right-click a
+ * non-fixed template to rename it or edit its launch command; "＋ 添加快速启动"
+ * adds a new one (persisted to localStorage).
  */
 export function TerminalTemplatePicker({
   project,
@@ -22,11 +24,24 @@ export function TerminalTemplatePicker({
   onClose: () => void;
 }) {
   const termTemplates = useStore((s) => s.termTemplates);
+  const runtimes = useStore((s) => s.runtimes);
   const addTermTemplate = useStore((s) => s.addTermTemplate);
   const updateTermTemplate = useStore((s) => s.updateTermTemplate);
   const removeTermTemplate = useStore((s) => s.removeTermTemplate);
   const [edit, setEdit] = useState<TermTemplate | null>(null);
   const [adding, setAdding] = useState(false);
+
+  // Hide agent templates whose CLI isn't installed. Shell templates (bash /
+  // bash-rc, including user quick-starts) always stay. While the runtime probe
+  // hasn't returned yet, keep agent entries visible to avoid a bash-only flash.
+  const availableRuntimeIds = new Set(
+    runtimes.filter((r) => r.available).map((r) => r.id)
+  );
+  const visibleTemplates = termTemplates.filter((t) => {
+    if (t.fixed || t.runtime === "bash" || t.runtime === "bash-rc") return true;
+    if (runtimes.length === 0) return true;
+    return availableRuntimeIds.has(t.runtime);
+  });
 
   // Keep the menu fully on-screen: the anchor is the "＋" button's bottom-right
   // corner, which can sit close to the viewport edge. Measure after paint and
@@ -50,7 +65,8 @@ export function TerminalTemplatePicker({
       top = Math.max(pad, window.innerHeight - rect.height - pad);
     }
     setPos({ left, top });
-  }, [anchor.x, anchor.y]);
+    // Re-measure when the filtered list shrinks (runtime probe resolves mid-open).
+  }, [anchor.x, anchor.y, visibleTemplates.length]);
 
   return (
     <>
@@ -70,7 +86,7 @@ export function TerminalTemplatePicker({
         onContextMenu={(e) => e.stopPropagation()}
       >
         <div className="tt-label">新建终端</div>
-        {termTemplates.map((t) => (
+        {visibleTemplates.map((t) => (
           <div
             key={t.id}
             className="tt-item"
