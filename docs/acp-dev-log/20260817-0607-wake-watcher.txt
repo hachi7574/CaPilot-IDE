@@ -1,0 +1,19 @@
+【ACP Watcher tick | 立即巡检】
+
+读 docs/acp-prompts/watcher-loop-tick.md 与 docs/acp-dev-status.md。
+
+你是 ed60735f-697e-4222-b470-69557ae6d9e3
+cwd=/home/hachi/.paseo/worktrees/293djwjk/precious-husky
+Dev=ad172813-30c1-4bea-82fe-ddfa1e4b0885
+Test=d62ccd50-e114-4625-a058-6bb75a76dad6
+
+不写业务代码。goal_met=false。phase_gate=test_failed。DEF-011 真 UI 无回复。
+
+1. 读 status / git / get_agent_status
+2. test_failed 且 Dev idle → send Dev 修 DEF-011
+3. dev_done 且 Test idle → send Test
+4. 有人 running → 只 heartbeat
+5. 写 acp-dev-log watcher 与 status heartbeat
+6. 若无 20m 自唤醒：paseo heartbeat create，cron 每 20 分，prompt 复述本 tick 要点，长期
+
+结束，勿 sleep 占满。

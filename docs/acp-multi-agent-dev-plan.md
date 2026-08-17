@@ -47,11 +47,15 @@ paseo send ed60735f-697e-4222-b470-69557ae6d9e3 --prompt-file docs/acp-prompts/w
 ### 0.2.1 协作补充（强制）
 
 1. **Subagent：** Dev、Test 工作中均可拉 subagent 并行；创建者对合入/结论负责。  
-2. **测试独立：** Test 根据 **git diff / 交付行为** 制定多角度计划；禁止只执行设计文档清单或只测 Dev 点名项；§12 是覆盖率灵感与发布目标，不是逐步脚本。  
-3. **直连通知：**  
-   - Dev：`phase_gate=dev_done` 并写 log 后 → 立刻 `paseo send` Test  
-   - Test：`test_passed` / `test_failed` 并写 defects/log 后 → 立刻 `paseo send` Dev  
-4. **Watcher：** 20 分钟 tick 仅救援（忘 send、锁超时、idle 过久、phase 出口、goal_met）；已有正确 running 时不重复轰炸。
+2. **测试独立：** Test 根据 **git diff / 源码** 自定测法与多角度计划。§12/设计稿是覆盖率灵感，不是逐步脚本。  
+   - Dev→Test **只报事实**（commit、paths、behavior、self_check、limits）。  
+   - **禁止** Dev 写「请测试/请验证/重点看/复测清单」；Test **忽略**此类派工，禁止只读文档走形式。  
+3. **通知拓扑（硬约束）：**  
+   - ✅ `Dev → Test`、`Test → Dev`  
+   - ✅ `Watcher → Dev|Test`（仅 20m 救援 / 补 phase）  
+   - ❌ **`Dev → Watcher`、`Test → Watcher`**（禁止抄送、禁止「请 Watcher 推进」）  
+4. **phase 推进：** Test 在 `test_passed` 且本 phase 出口满足时，**自己**写 `current_phase+=1`、`phase_gate=pending`，再 send Dev；Watcher 只在双方 idle 且 status 未 +phase 时补洞。Dev **禁止**干等 Watcher。  
+5. **Watcher：** 只读 status/git/agent 状态；不期待收件箱里有 Dev/Test 来信。
 
 ### 0.3 绝对约束（所有角色共用）
 

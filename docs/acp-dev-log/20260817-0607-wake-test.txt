@@ -1,0 +1,15 @@
+【ACP Test 唤醒 | phase_gate=test_failed | DEF-011】
+
+读 docs/acp-dev-status.md、docs/acp-prompts/test.md、docs/acp-dev-log/20260817-0607-orchestrator.md。
+
+身份 d62ccd50-e114-4625-a058-6bb75a76dad6
+cwd /home/hachi/.paseo/worktrees/293djwjk/precious-husky
+Dev ad172813-30c1-4bea-82fe-ddfa1e4b0885
+
+用户确认 UI 聊天无反应。eng 绿 ≠ product 过门。禁止 goal_met=true。禁止 send Watcher。禁止改业务与 LeftSidebar。
+
+1. Dev 未交新 commit 前：从源码独立证伪 DEF-011（错误上屏、live/resume、zen 限流可见性、二进制新旧），写 log/defects。
+2. 收到 dev_done：自拟测法（diff→源码→命令），mock 与真 opencode 分列。
+3. 失败 test_failed+DEF 只 send Dev；通过仍缺手点则不得 goal_met。
+
+立即开始。

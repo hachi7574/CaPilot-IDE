@@ -1,0 +1,29 @@
+【ACP Dev 紧急唤醒 | phase_gate=test_failed | DEF-011 blocker】
+
+先读：
+- docs/acp-dev-status.md（06:07 编排更新，含 DEF-011 现场事实）
+- docs/acp-prompts/dev.md（只 send Test，禁止 Watcher；handoff 只陈述事实）
+- docs/acp-dev-log/20260817-1120-dev.md
+- docs/acp-dev-log/20260817-0607-orchestrator.md
+
+身份：ad172813-30c1-4bea-82fe-ddfa1e4b0885
+cwd 必须：/home/hachi/.paseo/worktrees/293djwjk/precious-husky
+Test=d62ccd50-e114-4625-a058-6bb75a76dad6
+
+用户：「依然聊天没有反应」。goal_met 禁止 true。
+
+## 目标
+修到 worktree 构建的 CaPilot 里：新建 acp:opencode，发短消息，面板出现助手正文或可见人话错误；zen 限流应 fallback 到 opencode-go/deepseek-v4-flash 并出字。
+
+## 现场事实
+1. /usr/bin/capilot-ide mtime 04:56；phase5 3c0875848@05:51；无 tauri dev GUI——用户窗口可能不是 phase5。
+2. sessions.db ACP model=opencode/deepseek-v4-flash-free（zen 限流）。
+3. stdio 锚点：configId=model + go flash → pong chunk OK。
+4. 可疑：Composer handleSend catch 仅 console.error；live=true 但 bridge 无会话不 resume；emptyAcpSession.live 默认 true；错误未进面板=静默。
+
+## 约束
+禁止改 LeftSidebar 用户改动；禁止迁 PTY；禁止 send Watcher；commit 含 phase5/DEF-011。
+
+## 交付
+修静默 + cargo test acp + tsc + status dev_done + log + fact-only send Test。
+现在开工。

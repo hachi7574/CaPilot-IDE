@@ -1,6 +1,6 @@
 # 发给三个 Paseo agent 的 Prompt
 
-> 更新：2026-08-17（Dev↔Test 直连 + subagent + 测试独立多角度）  
+> 更新：2026-08-17（禁止 Dev/Test→Watcher；**Dev→Test 只报事实**；Test 自定测法）  
 > worktree：`/home/hachi/.paseo/worktrees/293djwjk/precious-husky`  
 > 设计：`docs/acp-runtime-plan.md`（锚点 **`acp:opencode`**）  
 > 状态：`docs/acp-dev-status.md`
@@ -14,8 +14,12 @@
 ## 协作要点（给人类）
 
 1. **Dev / Test 可用 subagent** 并行加速；本人对结果负责。  
-2. **测试独立：** 按**实际 diff/交付**自定多角度计划；设计文档与 Dev 建议只是参考，禁止只测文档清单或只测 Dev 点名项。  
-3. **主通知路径：** Dev 完成 → **直接 send Test**；Test 完成 → **直接 send Dev**。Watcher 20 分钟只做卡死救援与 phase/goal 推进。  
+2. **测试独立：** Test 只根据 **diff/源码** 自定测法；**Dev→Test 只报事实**（commit/paths/behavior/self_check/limits），**禁止**「请测试…」派工。  
+3. **通知拓扑（硬）：**  
+   - 允许：`Dev → Test`、`Test → Dev`、`Watcher → Dev|Test`（仅救援）  
+   - **禁止：`Dev → Watcher`、`Test → Watcher`**  
+4. **phase 推进：** Test 在出口满足时自己 +phase 并 send Dev；Watcher 20m 只补洞。  
+5. Dev **不要**等 Watcher；Test **不要**只读文档打勾。
 
 ## 发送
 
