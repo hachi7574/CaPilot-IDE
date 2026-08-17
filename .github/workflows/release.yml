@@ -94,17 +94,38 @@ jobs:
             pnpm tauri signer sign "$deb"
           done
 
-      - name: Upload bundles to the release
+      # Platform-scoped globs: a single files: block listing every target makes
+      # Windows warn about missing appimage/deb (and Linux about nsis). Only upload
+      # what this runner actually produced. Retries absorb intermittent GitHub
+      # Releases 503s that otherwise fail a green build at the last step.
+      - name: Upload Linux bundles to the release
+        if: matrix.platform == 'linux'
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           name: CaPilot ${{ github.ref_name }}
           draft: false
           prerelease: false
+          fail_on_unmatched_files: true
           files: |
             src-tauri/target/release/bundle/appimage/*
             src-tauri/target/release/bundle/deb/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Windows bundles to the release
+        if: matrix.platform == 'windows'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: CaPilot ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          files: |
             src-tauri/target/release/bundle/nsis/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # Runs after every platform upload finished. Reads each platform's `.sig`
   # content (produced at build time) and writes the static latest.json the app
