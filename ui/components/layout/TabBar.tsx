@@ -16,6 +16,8 @@ import {
 } from "../../state/agentActions";
 import { TerminalTemplatePicker } from "./TerminalTemplatePicker";
 import { RenameAgentModal } from "./RenameAgentModal";
+import { ExitDaemonDialog } from "./ExitDaemonDialog";
+import { handleTitlebarClose } from "../../state/exitDaemon";
 import { Icon, runtimeIcon } from "../Icon";
 
 function projectOf(cwd: string): string {
@@ -119,6 +121,7 @@ export function TabBar() {
   // frameless window stays operable without a 44px rail strip.
   const appWindow = useMemo(() => getCurrentWindow(), []);
   const [winMaximized, setWinMaximized] = useState(false);
+  const [exitDialogOpen, setExitDialogOpen] = useState(false);
   useEffect(() => {
     if (leftSidebarOpen) return;
     let alive = true;
@@ -139,6 +142,10 @@ export function TabBar() {
       unlisten?.();
     };
   }, [appWindow, leftSidebarOpen]);
+
+  const onTitlebarClose = () => {
+    void handleTitlebarClose(() => setExitDialogOpen(true));
+  };
 
   // Drag-reorder state. During a drag we DON'T mutate the store's tabs array
   // (that would re-render ContentArea and its live terminals on every move);
@@ -636,7 +643,7 @@ export function TabBar() {
           </span>
           <span
             className="sidebar-btn win-btn win-close"
-            onClick={() => void appWindow.close()}
+            onClick={onTitlebarClose}
             title="关闭"
           >
             <Icon name="x" size={14} />
@@ -704,6 +711,9 @@ export function TabBar() {
           initial={agents.get(renameTabId)?.title ?? ""}
           onClose={() => setRenameTabId(null)}
         />
+      )}
+      {exitDialogOpen && (
+        <ExitDaemonDialog onCancel={() => setExitDialogOpen(false)} />
       )}
     </div>
   );

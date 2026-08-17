@@ -24,7 +24,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -117,6 +117,11 @@ pub struct PtyBridge {
     last_event_seq: AtomicU64,
     /// Set on shutdown so the event-forwarding thread doesn't outlive the GUI.
     closed: AtomicBool,
+    /// One-shot override for the next GUI exit (set by `app_prepare_exit`).
+    /// 0 = none (fall back to the persisted `exit_daemon_mode` setting),
+    /// 1 = keep/detach, 2 = kill/shutdown. Lets the close-dialog honour a
+    /// non-remembered pick without permanently rewriting the setting.
+    exit_override: AtomicU8,
 }
 
 impl PtyBridge {
@@ -237,6 +242,7 @@ impl PtyBridge {
             last_event_seq: AtomicU64::new(0),
             app: Mutex::new(None),
             closed: AtomicBool::new(false),
+            exit_override: AtomicU8::new(0),
         }
     }
 
@@ -249,6 +255,7 @@ impl PtyBridge {
             last_event_seq: AtomicU64::new(0),
             app: Mutex::new(None),
             closed: AtomicBool::new(false),
+            exit_override: AtomicU8::new(0),
         }
     }
 
@@ -261,6 +268,7 @@ impl PtyBridge {
             last_event_seq: AtomicU64::new(0),
             app: Mutex::new(None),
             closed: AtomicBool::new(false),
+            exit_override: AtomicU8::new(0),
         }
     }
 
@@ -724,6 +732,29 @@ impl PtyBridge {
                 let _ = client.detach();
             }
             PtyOwner::Unavailable(_) => {}
+        }
+    }
+
+    /// One-shot exit policy for the *next* `ExitRequested` only.
+    /// `mode` is `"keep"` (detach) or `"kill"` (shutdown). Used by the close
+    /// dialog when the user picks without "记住选择", so the choice applies
+    /// once without permanently rewriting `exit_daemon_mode`.
+    pub fn prepare_exit(&self, mode: &str) {
+        let v = match mode {
+            "kill" => 2u8,
+            "keep" => 1u8,
+            _ => 0u8,
+        };
+        self.exit_override.store(v, Ordering::Release);
+    }
+
+    /// Consume the one-shot exit override. Returns `Some("keep"|"kill")` when
+    /// the frontend staged a pick, else `None` (fall back to the setting).
+    pub fn take_exit_override(&self) -> Option<&'static str> {
+        match self.exit_override.swap(0, Ordering::AcqRel) {
+            1 => Some("keep"),
+            2 => Some("kill"),
+            _ => None,
         }
     }
 

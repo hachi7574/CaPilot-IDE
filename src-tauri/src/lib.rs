@@ -90,6 +90,13 @@ const AUTO_CHECK_UPDATE_KEY: &str = "auto_check_update";
 /// 运行中 (Settings → 外观与显示 → 提示音). Defaults to enabled when unset.
 const SOUND_ENABLED_KEY: &str = "sound_enabled";
 
+/// Settings KV key: what happens to the PTY daemon / live agent terminals when
+/// the GUI exits. Values:
+/// - `"ask"` (default / unset) — frontend shows a chooser on close;
+/// - `"keep"` — detach only; daemon + agent PTYs keep running;
+/// - `"kill"` — shut down the daemon and kill every live PTY.
+const EXIT_DAEMON_MODE_KEY: &str = "exit_daemon_mode";
+
 /// Settings KV key: last focused sidebar project name. Restored on startup so
 /// the IDE reopens the project the user was last working in, not the first
 /// alphabetically-sorted entry from `list_projects`.
@@ -1711,13 +1718,42 @@ fn setting_set(
         TODOS_KEY,
         AUTO_CHECK_UPDATE_KEY,
         SOUND_ENABLED_KEY,
+        EXIT_DAEMON_MODE_KEY,
         FOCUSED_PROJECT_KEY,
     ];
     if !ALLOWED.contains(&key.as_str()) {
         return Err(format!("unknown setting key: {}", key));
     }
+    // Normalize exit_daemon_mode so a bad frontend write can't stick an unknown
+    // value that the quit path would then misinterpret.
+    let value = if key == EXIT_DAEMON_MODE_KEY {
+        match value.as_str() {
+            "keep" | "kill" | "ask" => value,
+            _ => "ask".to_string(),
+        }
+    } else {
+        value
+    };
     let db = persistence.db().lock().unwrap();
     db.set_setting(&key, &value).map_err(|e| e.to_string())
+}
+
+/// Stage the exit policy for the *next* window close only. Called by the
+/// frontend close dialog right before `window.close()`, so a non-remembered
+/// pick still reaches `ExitRequested` without permanently rewriting
+/// `exit_daemon_mode`. `mode` is `"keep"` or `"kill"`.
+#[tauri::command]
+fn app_prepare_exit(
+    bridge: tauri::State<'_, Arc<bridge::PtyBridge>>,
+    mode: String,
+) -> Result<(), String> {
+    match mode.as_str() {
+        "keep" | "kill" => {
+            bridge.prepare_exit(&mode);
+            Ok(())
+        }
+        other => Err(format!("invalid exit mode: {other}")),
+    }
 }
 
 // ── Version check / self-update ─────────────────────────────────
@@ -4108,6 +4144,7 @@ pub fn run() {
             sessions_delete,
             setting_get,
             setting_set,
+            app_prepare_exit,
             update_check,
             update_download_and_install,
             ci_status,
@@ -4197,16 +4234,32 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(move |app_handle, event| {
             match event {
-                // App quit (Phase 4 §9.4): DETACH, don't kill. The daemon and its
-                // sessions keep running across GUI restarts; a reconnecting GUI
-                // re-attaches to the same `(daemon_instance_id, agent_id,
-                // generation, pid)`. In-process fallback has no daemon to keep
-                // PTYs alive, so `detach` kills them there (same as the old
-                // teardown — sessions stay `running` in the DB and resume next
-                // launch).
+                // App quit: honour a one-shot override from the close dialog
+                // (`app_prepare_exit`) first, else Settings → 退出时后台终端
+                // (`exit_daemon_mode`).
+                // - keep (default / ask / unset): DETACH — daemon + agent PTYs
+                //   keep running so a reconnecting GUI can re-attach (§9.4).
+                // - kill: shut the daemon down and kill every live PTY.
+                // In-process fallback has no daemon either way, so both paths
+                // tear PTYs down there. The frontend intercepts the close
+                // button when mode is `ask` and only calls window.close() after
+                // the user picks (optionally remembering the choice).
                 tauri::RunEvent::ExitRequested { .. } => {
                     let bridge = app_handle.state::<Arc<bridge::PtyBridge>>();
-                    bridge.detach();
+                    let mode = bridge.take_exit_override().map(|s| s.to_string()).unwrap_or_else(|| {
+                        app_handle
+                            .state::<Arc<Persistence>>()
+                            .db()
+                            .lock()
+                            .ok()
+                            .and_then(|db| db.get_setting(EXIT_DAEMON_MODE_KEY).ok().flatten())
+                            .unwrap_or_default()
+                    });
+                    if mode == "kill" {
+                        bridge.kill_all();
+                    } else {
+                        bridge.detach();
+                    }
                 }
                 _ => {}
             }

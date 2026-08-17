@@ -1973,6 +1973,83 @@ body::after {
   border-color: var(--primary);
 }
 
+.permission-confirm-btn.danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.permission-confirm-btn.danger:hover,
+.permission-confirm-btn.danger:focus-visible {
+  color: var(--ink);
+  background: rgb(var(--danger-rgb, 220 60 60) / 0.18);
+  border-color: var(--danger);
+}
+
+/* ── Exit-daemon close dialog (extends permission-confirm) ───── */
+.exit-daemon-dialog {
+  width: min(420px, calc(100vw - 48px));
+}
+
+.exit-daemon-desc {
+  margin: 10px 0 0;
+  color: var(--ink2);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+}
+
+.exit-daemon-bullets {
+  margin: 12px 0 0;
+  padding-left: 1.2em;
+  color: var(--ink2);
+  font-size: var(--fs-xs);
+  line-height: 1.55;
+}
+
+.exit-daemon-bullets b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.exit-daemon-remember {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  color: var(--ink);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  user-select: none;
+}
+
+.exit-daemon-remember input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--brand);
+  cursor: pointer;
+}
+
+.exit-daemon-hint {
+  margin: 8px 0 0;
+  color: var(--ink3, var(--ink2));
+  font-size: var(--fs-2xs);
+  line-height: 1.5;
+}
+
+.exit-daemon-hint b {
+  color: var(--ink2);
+  font-weight: 600;
+}
+
+.exit-daemon-actions {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.exit-daemon-actions .permission-confirm-btn {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
 /* ── New-project modal + empty-project row (nproj-*) ───────────── */
 
 .nproj-overlay {

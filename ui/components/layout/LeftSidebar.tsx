@@ -12,6 +12,8 @@ import {
 import { SettingsModal } from "./SettingsModal";
 import { TerminalTemplatePicker } from "./TerminalTemplatePicker";
 import { RenameAgentModal } from "./RenameAgentModal";
+import { ExitDaemonDialog } from "./ExitDaemonDialog";
+import { handleTitlebarClose } from "../../state/exitDaemon";
 import { Icon, runtimeIcon } from "../Icon";
 
 /** Derive the workspace project name from an agent cwd. Prefers the
@@ -150,6 +152,7 @@ export function LeftSidebar() {
   // shows the restore glyph while the window is maximized.
   const appWindow = useMemo(() => getCurrentWindow(), []);
   const [winMaximized, setWinMaximized] = useState(false);
+  const [exitDialogOpen, setExitDialogOpen] = useState(false);
   useEffect(() => {
     let alive = true;
     let unlisten: (() => void) | undefined;
@@ -169,6 +172,10 @@ export function LeftSidebar() {
       unlisten?.();
     };
   }, [appWindow]);
+
+  const onTitlebarClose = useCallback(() => {
+    void handleTitlebarClose(() => setExitDialogOpen(true));
+  }, []);
 
   // On mount, pull the on-disk workspace list so empty projects render too.
   // Rust `list_projects` returns `{name, root}` entries — feed both the name
@@ -605,7 +612,7 @@ export function LeftSidebar() {
               </span>
               <span
                 className="sidebar-btn win-btn win-close"
-                onClick={() => void appWindow.close()}
+                onClick={onTitlebarClose}
                 title="关闭"
               >
                 <Icon name="x" size={14} />
@@ -894,6 +901,9 @@ export function LeftSidebar() {
         />
       )}
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
+      {exitDialogOpen && (
+        <ExitDaemonDialog onCancel={() => setExitDialogOpen(false)} />
+      )}
       {nprojOpen && (
         <NewProjectModal
           error={nprojError}

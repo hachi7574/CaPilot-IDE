@@ -11,6 +11,11 @@ import {
 } from "../../state/store";
 import { THEMES, getTheme, DEFAULT_THEME_ID } from "../../state/themes";
 import { checkForUpdate, downloadAndInstall } from "../../state/update";
+import {
+  loadExitDaemonMode,
+  saveExitDaemonMode,
+  type ExitDaemonMode,
+} from "../../state/exitDaemon";
 import { Icon, runtimeIcon } from "../Icon";
 import { isShellRuntime, isWindowsHost } from "../../state/shellPath";
 
@@ -235,6 +240,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   // Session-end handling: "keep" (default) marks a naturally-exited session done
   // (recoverable from the sidebar's "已结束" group); "delete" removes it.
   const [sessionEndMode, setSessionEndMode] = useState<"keep" | "delete">("keep");
+  // GUI-exit handling for the PTY daemon / live agent terminals.
+  const [exitDaemonMode, setExitDaemonMode] = useState<ExitDaemonMode>("ask");
   useEffect(() => {
     invoke<string | null>("setting_get", { key: "session_end_mode" })
       .then((v) => {
@@ -243,6 +250,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
       .catch(() => {
         // Backend not ready — keep default.
       });
+    loadExitDaemonMode().then(setExitDaemonMode).catch(() => {});
   }, []);
 
   const changeSessionEndMode = async (mode: "keep" | "delete") => {
@@ -250,6 +258,11 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     await invoke("setting_set", { key: "session_end_mode", value: mode }).catch(
       () => {}
     );
+  };
+
+  const changeExitDaemonMode = async (mode: ExitDaemonMode) => {
+    setExitDaemonMode(mode);
+    await saveExitDaemonMode(mode);
   };
 
   const reShowOnboarding = () => {
@@ -1121,6 +1134,60 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             >
               <Icon name="trash-2" size={14} />
               <span><b>直接删除</b><small>退出后立即清理会话记录</small></span>
+            </button>
+          </div>
+          <div className="settings-field-label" style={{ marginTop: 14 }}>
+            <span>退出时后台终端</span>
+            <small>关闭窗口时守护进程与 agent 终端的处理方式</small>
+          </div>
+          <div className="settings-choice-grid">
+            <button
+              className={exitDaemonMode === "ask" ? "active" : ""}
+              onClick={() => void changeExitDaemonMode("ask")}
+              style={{
+                fontFamily: "var(--pixel)",
+                fontSize: "var(--fs-2xs)",
+                padding: "6px 12px",
+                border: `1px solid ${exitDaemonMode === "ask" ? "var(--brand)" : "var(--rule2)"}`,
+                color: exitDaemonMode === "ask" ? "var(--brand)" : "var(--ink2)",
+                background: exitDaemonMode === "ask" ? "rgb(var(--brand-rgb) / .08)" : "transparent",
+                cursor: "pointer",
+              }}
+            >
+              <Icon name="circle-alert" size={14} />
+              <span><b>每次询问</b><small>点关闭时弹出选择（默认）</small></span>
+            </button>
+            <button
+              className={exitDaemonMode === "keep" ? "active" : ""}
+              onClick={() => void changeExitDaemonMode("keep")}
+              style={{
+                fontFamily: "var(--pixel)",
+                fontSize: "var(--fs-2xs)",
+                padding: "6px 12px",
+                border: `1px solid ${exitDaemonMode === "keep" ? "var(--brand)" : "var(--rule2)"}`,
+                color: exitDaemonMode === "keep" ? "var(--brand)" : "var(--ink2)",
+                background: exitDaemonMode === "keep" ? "rgb(var(--brand-rgb) / .08)" : "transparent",
+                cursor: "pointer",
+              }}
+            >
+              <Icon name="play" size={14} />
+              <span><b>保留后台</b><small>守护进程与会话继续运行</small></span>
+            </button>
+            <button
+              className={exitDaemonMode === "kill" ? "active danger" : "danger"}
+              onClick={() => void changeExitDaemonMode("kill")}
+              style={{
+                fontFamily: "var(--pixel)",
+                fontSize: "var(--fs-2xs)",
+                padding: "6px 12px",
+                border: `1px solid ${exitDaemonMode === "kill" ? "var(--brand)" : "var(--rule2)"}`,
+                color: exitDaemonMode === "kill" ? "var(--brand)" : "var(--ink2)",
+                background: exitDaemonMode === "kill" ? "rgb(var(--brand-rgb) / .08)" : "transparent",
+                cursor: "pointer",
+              }}
+            >
+              <Icon name="square" size={14} />
+              <span><b>结束后台</b><small>关闭守护进程并结束所有 agent</small></span>
             </button>
           </div>
         </section>
