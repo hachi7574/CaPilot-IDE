@@ -250,10 +250,11 @@ pub fn windows_git_bin_dirs() -> Vec<PathBuf> {
     // Official / winget defaults.
     for key in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
         if let Ok(base) = std::env::var(key) {
-            roots.push(PathBuf::from(base).join("Git"));
+            let base = PathBuf::from(base);
+            roots.push(base.join("Git"));
             // Some portable / scoop-style layouts nest under Programs.
             if key == "LOCALAPPDATA" {
-                roots.push(PathBuf::from(base).join("Programs").join("Git"));
+                roots.push(base.join("Programs").join("Git"));
             }
         }
     }
