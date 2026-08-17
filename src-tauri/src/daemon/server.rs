@@ -221,12 +221,26 @@ impl DaemonServer {
         std::thread::Builder::new()
             .name("daemon-conn".into())
             .spawn(move || {
-                let _ = server.serve_connection(stream);
+                if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = server.serve_connection(stream);
+                })) {
+                    let msg = panic_message(&payload);
+                    eprintln!("capilot daemon: connection thread panicked: {msg}");
+                    log::error!("daemon connection thread panicked: {msg}");
+                }
             })
             .expect("spawn daemon connection thread");
     }
 
     fn serve_connection(&self, stream: UnixStream) -> io::Result<()> {
+        // The accept loop runs the listener in non-blocking mode. On Windows
+        // AF_UNIX (uds_windows), accepted sockets inherit that flag — a later
+        // blocking `read_frame` then fails with WSAEWOULDBLOCK (os error 10035)
+        // the moment the client has no bytes queued, which the GUI surfaces as
+        // "daemon closed the connection" on the first Spawn. Force the accepted
+        // stream back to blocking before any handshake / request I/O. Harmless
+        // on Unix (accepted fds do not inherit O_NONBLOCK from the listener).
+        stream.set_nonblocking(false)?;
         // Write timeout so a slow/dead client can't stall a PTY reader thread
         // forever on an event write (§4.3 — Phase 3 replaces this with a bounded
         // send queue; a timeout-bounded write keeps the invariant today).
@@ -311,8 +325,30 @@ impl DaemonServer {
                     break;
                 }
             };
-            let resp = self.handle_request(&conn, req);
-            let payload = serde_json::to_vec(&resp).expect("response serializes");
+            // Catch panics so a bad spawn fails the request instead of silently
+            // killing the connection thread and surfacing as
+            // "daemon closed the connection" on the GUI.
+            let resp = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.handle_request(&conn, req)
+            })) {
+                Ok(r) => r,
+                Err(payload) => {
+                    let msg = panic_message(&payload);
+                    eprintln!("capilot daemon: request panicked: {msg}");
+                    log::error!("daemon request panicked: {msg}");
+                    Response::Error {
+                        code: "internal".into(),
+                        message: format!("daemon panic: {msg}"),
+                    }
+                }
+            };
+            let payload = match serde_json::to_vec(&resp) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("capilot daemon: response serialize failed: {e}");
+                    break;
+                }
+            };
             if write_frame(
                 &mut *conn.writer.lock().unwrap_or_else(|p| p.into_inner()),
                 FRAME_RESPONSE,
@@ -865,6 +901,16 @@ fn journal_event_to_protocol(ev: LifecycleEvent) -> JournalEvent {
         kind,
         exit_code: exit_code.and_then(|v| v.as_i64()).map(|v| v as i32),
         status: status.and_then(|v| v.as_str()).map(|s| s.to_string()),
+    }
+}
+
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
     }
 }
 

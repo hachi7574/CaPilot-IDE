@@ -200,6 +200,18 @@ pub fn ensure_cli_path() {
         #[cfg(windows)]
         {
             candidates.extend(windows_git_bin_dirs());
+            // npm global shims (`claude.cmd`, `codex.cmd`, …) live here. Desktop
+            // launches sometimes inherit a PATH without %APPDATA%\npm even when
+            // the user installed CLIs via `npm i -g`.
+            if let Ok(appdata) = std::env::var("APPDATA") {
+                candidates.push(PathBuf::from(appdata).join("npm"));
+            }
+            if let Ok(local) = std::env::var("LOCALAPPDATA") {
+                let local = PathBuf::from(local);
+                candidates.push(local.join("npm"));
+                // pnpm's global bin dir (user-level).
+                candidates.push(local.join("pnpm"));
+            }
         }
 
         #[cfg(windows)]
@@ -246,27 +258,54 @@ pub fn ensure_cli_path() {
 pub fn windows_git_bin_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let mut roots: Vec<PathBuf> = Vec::new();
+    let mut push_root = |p: PathBuf| {
+        if p.as_os_str().is_empty() {
+            return;
+        }
+        if !roots.iter().any(|r| r == &p) {
+            roots.push(p);
+        }
+    };
+
+    // Git for Windows writes InstallPath to the registry even when the user
+    // picks a non-default drive (e.g. `A:\Git`). Desktop-launched apps often
+    // miss that path because it is not under Program Files.
+    for root in windows_git_registry_roots() {
+        push_root(root);
+    }
 
     // Official / winget defaults.
     for key in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
         if let Ok(base) = std::env::var(key) {
             let base = PathBuf::from(base);
-            roots.push(base.join("Git"));
+            push_root(base.join("Git"));
             // Some portable / scoop-style layouts nest under Programs.
             if key == "LOCALAPPDATA" {
-                roots.push(base.join("Programs").join("Git"));
+                push_root(base.join("Programs").join("Git"));
             }
         }
     }
     // Scoop: ~/scoop/apps/git/current/{bin,usr/bin}
     if let Ok(home) = crate::persistence::user_home() {
-        roots.push(home.join("scoop").join("apps").join("git").join("current"));
+        push_root(home.join("scoop").join("apps").join("git").join("current"));
         // User-local Git install without admin.
-        roots.push(home.join("AppData").join("Local").join("Programs").join("Git"));
+        push_root(
+            home.join("AppData")
+                .join("Local")
+                .join("Programs")
+                .join("Git"),
+        );
     }
     // Explicit override for odd installs / CI.
     if let Ok(root) = std::env::var("CAPILOT_GIT_ROOT") {
-        roots.push(PathBuf::from(root));
+        push_root(PathBuf::from(root));
+    }
+
+    // Derive the Git root from a `git.exe` already on PATH
+    // (`…\Git\cmd\git.exe` → `…\Git`). Covers portable installs that only
+    // put `cmd` on PATH and never wrote the registry key.
+    if let Some(root) = git_root_from_path_git() {
+        push_root(root);
     }
 
     for root in roots {
@@ -279,6 +318,99 @@ pub fn windows_git_bin_dirs() -> Vec<PathBuf> {
         }
     }
     dirs
+}
+
+/// Read `InstallPath` from the Git for Windows registry keys (HKLM / HKCU,
+/// native + WOW6432Node). Returns zero or more candidate roots.
+#[cfg(windows)]
+fn windows_git_registry_roots() -> Vec<PathBuf> {
+    // `reg query` avoids a winreg dependency; output is small and local.
+    const KEYS: &[&str] = &[
+        r"HKLM\SOFTWARE\GitForWindows",
+        r"HKLM\SOFTWARE\WOW6432Node\GitForWindows",
+        r"HKCU\SOFTWARE\GitForWindows",
+        r"HKCU\SOFTWARE\WOW6432Node\GitForWindows",
+    ];
+    let mut roots = Vec::new();
+    for key in KEYS {
+        let mut cmd = std::process::Command::new("reg");
+        cmd.args(["query", key, "/v", "InstallPath"]);
+        // Hide the console flash on desktop-launched probes.
+        crate::agent_runtime::executable::hide_windows_console(&mut cmd);
+        let Some(out) = run_cmd_timeout(cmd, Duration::from_secs(2)) else {
+            continue;
+        };
+        if !out.status.success() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        // Typical line: `    InstallPath    REG_SZ    A:\Git`
+        for line in text.lines() {
+            let lower = line.to_ascii_lowercase();
+            let Some(idx) = lower.find("installpath") else {
+                continue;
+            };
+            let after_name = line[idx + "installpath".len()..].trim_start();
+            // after_name ≈ "REG_SZ    A:\Git"
+            let mut parts = after_name.split_whitespace();
+            let first = parts.next().unwrap_or("");
+            let path = if first.eq_ignore_ascii_case("REG_SZ")
+                || first.eq_ignore_ascii_case("REG_EXPAND_SZ")
+            {
+                parts.collect::<Vec<_>>().join(" ")
+            } else {
+                after_name.trim().to_string()
+            };
+            let path = path.trim();
+            if path.is_empty() {
+                continue;
+            }
+            let p = PathBuf::from(path);
+            if p.is_dir() && !roots.iter().any(|r| r == &p) {
+                roots.push(p);
+            }
+        }
+    }
+    roots
+}
+
+/// If `git.exe` is already on PATH under a `…\Git\cmd` or `…\Git\mingw64\bin`
+/// layout, return the `…\Git` root so we can also find `bash.exe`.
+///
+/// Walks PATH directly — must NOT call [`crate::agent_runtime::executable::resolve_executable`]
+/// because that re-enters [`ensure_cli_path`] (which is what calls us).
+#[cfg(windows)]
+fn git_root_from_path_git() -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let git_exe = dir.join("git.exe");
+        if !git_exe.is_file() {
+            continue;
+        }
+        // dir is typically `…\Git\cmd` or `…\Git\mingw64\bin`.
+        let mut cur = dir.as_path();
+        for _ in 0..6 {
+            let bash_bin = cur.join(r"bin\bash.exe");
+            let bash_usr = cur.join(r"usr\bin\bash.exe");
+            if bash_bin.is_file() || bash_usr.is_file() {
+                return Some(cur.to_path_buf());
+            }
+            if cur
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|n| n.eq_ignore_ascii_case("Git"))
+            {
+                // Accept even if bash isn't next to it yet — caller will check
+                // bin/usr\bin children.
+                return Some(cur.to_path_buf());
+            }
+            cur = match cur.parent() {
+                Some(p) => p,
+                None => break,
+            };
+        }
+    }
+    None
 }
 
 #[cfg(not(windows))]
@@ -497,7 +629,6 @@ impl Serialize for AgentError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
 
     #[test]
     fn cli_available_finds_bash() {
@@ -509,6 +640,7 @@ mod tests {
     fn run_cmd_timeout_kills_sleep() {
         #[cfg(unix)]
         {
+            use std::time::{Duration, Instant};
             let mut cmd = Command::new("sleep");
             cmd.arg("30");
             let start = Instant::now();
@@ -528,5 +660,28 @@ mod tests {
         ensure_cli_path();
         // Smoke: PATH is still a non-empty string after the call.
         assert!(!std::env::var_os("PATH").unwrap_or_default().is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_git_bin_dirs_finds_bash() {
+        // This host installs Git for Windows at a non-default drive (A:\Git).
+        // Discovery must surface at least one directory containing bash.exe via
+        // registry InstallPath and/or PATH-derived root.
+        let dirs = windows_git_bin_dirs();
+        assert!(
+            !dirs.is_empty(),
+            "expected at least one Git bin dir from registry/PATH"
+        );
+        let has_bash = dirs.iter().any(|d| d.join("bash.exe").is_file());
+        assert!(has_bash, "none of {dirs:?} contain bash.exe");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn registry_roots_are_real_dirs_when_present() {
+        for r in windows_git_registry_roots() {
+            assert!(r.is_dir(), "{r:?}");
+        }
     }
 }

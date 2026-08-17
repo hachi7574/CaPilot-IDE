@@ -12,6 +12,7 @@ import { spawnBashAt } from "../../state/agentActions";
 import {
   baseName,
   detectShellFlavor,
+  isShellRuntime,
   joinPath,
   parentPath,
   runCommandForFile,
@@ -359,8 +360,13 @@ function projectForPath(path: string): string {
 function flavorForAgent(agentId: string | null): ShellFlavor {
   const s = useStore.getState();
   if (!agentId) {
-    const shellRt = s.runtimes.find((r) => r.id === "shell");
-    return detectShellFlavor("shell", shellRt?.name);
+    // Prefer an explicit Windows shell when available; fall back to auto `shell`.
+    const order = ["powershell", "cmd", "shell", "bash-rc"];
+    for (const id of order) {
+      const rt = s.runtimes.find((r) => r.id === id && r.available);
+      if (rt) return detectShellFlavor(id, rt.name);
+    }
+    return detectShellFlavor("shell");
   }
   const agent = s.agents.get(agentId);
   const rt = agent?.runtime ?? "shell";
@@ -436,15 +442,13 @@ function FilesPanel() {
   const tabs = useStore((s) => s.tabs);
   const agents = useStore((s) => s.agents);
   const rightSidebarOpen = useStore((s) => s.rightSidebarOpen);
-  // Exactly one open plain shell (OS shell / bash; agent sessions excluded) →
-  // the "open in current terminal" folder action becomes available.
+  // Exactly one open plain shell (OS shell / PowerShell / cmd / bash; agent
+  // sessions excluded) → the "open in current terminal" folder action becomes
+  // available.
   const bashIds = tabs
     .filter((t) => t.type === "agent" && t.agentId)
     .map((t) => t.agentId!)
-    .filter((id) => {
-      const rt = agents.get(id)?.runtime ?? "";
-      return rt === "shell" || rt.startsWith("bash");
-    });
+    .filter((id) => isShellRuntime(agents.get(id)?.runtime));
   const singleBashId = bashIds.length === 1 ? bashIds[0] : null;
 
   useEffect(() => {

@@ -1,6 +1,10 @@
 import { create } from "zustand";
 import { invoke, Channel } from "@tauri-apps/api/core";
-import { THEMES, DEFAULT_THEME_ID } from "./themes";
+import {
+  THEMES,
+  DEFAULT_THEME_ID,
+  DEFAULT_WALLPAPER_OPACITY,
+} from "./themes";
 import { playConfirmationSound } from "./sound";
 
 // ── Types ───────────────────────────────────────────────────────
@@ -21,6 +25,13 @@ export type FontScale = "s" | "m" | "l" | "xl" | "xxl";
 /** Visual theme preset. Every theme keeps the IDE's pixel/terminal structure
  *  while swapping its material, phosphor and syntax-color system. */
 export type ThemeId = string;
+/**
+ * Wallpaper source mode:
+ * - `auto` — use the active theme cartridge's built-in image when present
+ * - `custom` — use the user-picked local image path
+ * - `off` — no wallpaper layer
+ */
+export type WallpaperMode = "auto" | "custom" | "off";
 
 /**
  * Provider's estimate of the CURRENT active-context occupancy for an agent
@@ -752,6 +763,16 @@ interface AppState {
   // Visual theme preset, reflected to <html data-theme="…"> by App.
   themeId: ThemeId;
 
+  /**
+   * Desktop wallpaper overlay. Independent of the color cartridge so a user can
+   * keep a theme's palette while swapping (or disabling) its backdrop art.
+   * Paths are absolute filesystem paths; the UI converts them via convertFileSrc.
+   */
+  wallpaperMode: WallpaperMode;
+  wallpaperPath: string | null;
+  /** Wallpaper image opacity 0–1 (single control; no separate scrim). */
+  wallpaperOpacity: number;
+
   /** Whether the running → other transition chime is enabled (default true). */
   soundEnabled: boolean;
 
@@ -915,6 +936,9 @@ interface AppState {
   setNprojOpen: (open: boolean) => void;
   setFontScale: (scale: FontScale) => void;
   setThemeId: (theme: ThemeId) => void;
+  setWallpaperMode: (mode: WallpaperMode) => void;
+  setWallpaperPath: (path: string | null) => void;
+  setWallpaperOpacity: (opacity: number) => void;
   /** Persist the Ctrl+T runtime preference (localStorage). */
   setCtrlTRuntime: (runtime: string) => void;
   setTodos: (todos: TodoTag[]) => void;
@@ -971,6 +995,48 @@ function loadThemeId(): ThemeId {
   return DEFAULT_THEME_ID;
 }
 
+const WALLPAPER_MODE_KEY = "capilot.wallpaper.mode";
+const WALLPAPER_PATH_KEY = "capilot.wallpaper.path";
+const WALLPAPER_OPACITY_KEY = "capilot.wallpaper.opacity";
+
+function clamp01(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  return Math.min(1, Math.max(0, n));
+}
+
+function loadWallpaperMode(): WallpaperMode {
+  try {
+    const value = localStorage.getItem(WALLPAPER_MODE_KEY);
+    if (value === "auto" || value === "custom" || value === "off") return value;
+  } catch {
+    // storage unavailable
+  }
+  return "auto";
+}
+
+function loadWallpaperPath(): string | null {
+  try {
+    const value = localStorage.getItem(WALLPAPER_PATH_KEY);
+    if (value && value.trim()) return value;
+  } catch {
+    // storage unavailable
+  }
+  return null;
+}
+
+function loadWallpaperOpacity(): number {
+  try {
+    const raw = localStorage.getItem(WALLPAPER_OPACITY_KEY);
+    if (raw != null) {
+      const n = Number(raw);
+      if (Number.isFinite(n)) return clamp01(n);
+    }
+  } catch {
+    // storage unavailable
+  }
+  return DEFAULT_WALLPAPER_OPACITY;
+}
+
 /** Persisted Ctrl+T runtime preference (default claude). The effective pick is
  *  resolved against the installed runtimes by `resolveCtrlTRuntime` (configured
  *  → claude → bash → hint). */
@@ -998,80 +1064,158 @@ export function resolveCtrlTRuntime(
   );
   if (available.has(configured)) return configured;
   if (available.has("claude")) return "claude";
+  if (available.has("powershell")) return "powershell";
+  if (available.has("cmd")) return "cmd";
   if (available.has("shell")) return "shell";
   if (available.has("bash-rc")) return "bash-rc";
   return null;
 }
 
 // ── New-terminal templates ──────────────────────────────────────
-// The project "+" button opens a picker: OS shell (fixed, always first) /
-// optional Git Bash / Claude / Codex / dsh / Pi / user quick-starts.
-// Built-in agent entries stay in the default list so they reappear when the
-// CLI is installed again; TerminalTemplatePicker hides ones whose runtime
-// reports `available: false`. Custom templates persist locally.
+// The project "+" button opens a picker: OS shells (PowerShell / CMD /
+// Git Bash on Windows; shell / bash on Unix) / Claude / Codex / dsh / Pi /
+// user quick-starts. Built-in agent entries stay in the default list so they
+// reappear when the CLI is installed again; TerminalTemplatePicker hides ones
+// whose runtime reports `available: false`. Custom templates persist locally.
 // (opencode was removed as a selectable runtime — see `known_runtimes`.)
 
 /** A new-terminal template shown in the project "+" picker. `command` is run
  *  after the shell starts (shell / bash*) / ignored for agent runtimes;
- *  `fixed` (OS shell) can't be renamed or removed. */
+ *  `fixed` (legacy OS shell row) can't be renamed or removed. */
 export interface TermTemplate {
   id: string;
   name: string;
   command: string;
-  runtime: "shell" | "bash" | "bash-rc" | "claude" | "codex" | "dsh" | "pi";
+  runtime:
+    | "shell"
+    | "powershell"
+    | "cmd"
+    | "bash"
+    | "bash-rc"
+    | "claude"
+    | "codex"
+    | "dsh"
+    | "pi";
   fixed?: boolean;
 }
 
 const TERM_TEMPLATES_KEY = "capilot.termTemplates";
-const DEFAULT_TEMPLATES: TermTemplate[] = [
-  { id: "shell", name: "终端", command: "", runtime: "shell", fixed: true },
-  { id: "bash-rc", name: "bash", command: "", runtime: "bash-rc" },
-  { id: "claude", name: "claude", command: "", runtime: "claude" },
-  { id: "codex", name: "codex", command: "", runtime: "codex" },
-  { id: "dsh", name: "dsh", command: "", runtime: "dsh" },
-  { id: "pi", name: "Pi", command: "", runtime: "pi" },
-];
+
+/** True when the UI is running on Windows (Tauri WebView). */
+function isWindowsUi(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const p = (navigator.platform || "").toLowerCase();
+  if (p.includes("win")) return true;
+  return (navigator.userAgent || "").toLowerCase().includes("windows");
+}
+
+const DEFAULT_TEMPLATES: TermTemplate[] = isWindowsUi()
+  ? [
+      // Explicit Windows shells — no single "终端" auto-pick row.
+      { id: "powershell", name: "PowerShell", command: "", runtime: "powershell" },
+      { id: "cmd", name: "CMD", command: "", runtime: "cmd" },
+      { id: "bash-rc", name: "Git Bash", command: "", runtime: "bash-rc" },
+      { id: "claude", name: "claude", command: "", runtime: "claude" },
+      { id: "codex", name: "codex", command: "", runtime: "codex" },
+      { id: "dsh", name: "dsh", command: "", runtime: "dsh" },
+      { id: "pi", name: "Pi", command: "", runtime: "pi" },
+    ]
+  : [
+      { id: "shell", name: "终端", command: "", runtime: "shell", fixed: true },
+      { id: "bash-rc", name: "bash", command: "", runtime: "bash-rc" },
+      { id: "claude", name: "claude", command: "", runtime: "claude" },
+      { id: "codex", name: "codex", command: "", runtime: "codex" },
+      { id: "dsh", name: "dsh", command: "", runtime: "dsh" },
+      { id: "pi", name: "Pi", command: "", runtime: "pi" },
+    ];
+
+/** Sort key so OS shells come first, then bash, then agents / quick-starts. */
+function shellSortRank(t: TermTemplate): number {
+  if (t.fixed) return 0;
+  switch (t.runtime) {
+    case "powershell":
+      return 1;
+    case "cmd":
+      return 2;
+    case "shell":
+      return 3;
+    case "bash":
+    case "bash-rc":
+      return 4;
+    default:
+      return 10;
+  }
+}
+
 function loadTermTemplates(): TermTemplate[] {
   try {
     const raw = localStorage.getItem(TERM_TEMPLATES_KEY);
     const stored: TermTemplate[] = raw ? (JSON.parse(raw) as TermTemplate[]) : [];
     // Migrations:
     // - drop minimal `--norc` "bash", omp, opencode (runtimes removed as new terminals)
-    // - promote the old fixed bash-rc row to the OS `shell` template
+    // - promote the old fixed bash-rc row to optional
     // - re-label legacy "正常 bash"
+    // - on Windows, replace the single fixed "shell" row with powershell/cmd/Git Bash
     const list = stored.filter(
       (t) => t.id !== "bash" && t.id !== "omp" && t.id !== "opencode"
     );
     for (const t of list) {
-      if (t.id === "bash-rc" && t.name === "正常 bash") t.name = "bash";
-      // Old installs pinned bash as the fixed first template — free it so the
-      // OS shell can take the fixed slot, and keep bash as an optional row.
+      if (t.id === "bash-rc" && t.name === "正常 bash") {
+        t.name = isWindowsUi() ? "Git Bash" : "bash";
+      }
+      // Old installs pinned bash as the fixed first template — free it so OS
+      // shells can take the leading slots.
       if (t.id === "bash-rc" && t.fixed) {
         t.fixed = false;
-        if (!t.name || t.name === "终端") t.name = "bash";
+        if (!t.name || t.name === "终端") {
+          t.name = isWindowsUi() ? "Git Bash" : "bash";
+        }
+      }
+      // On Windows rename plain "bash" label to Git Bash for clarity.
+      if (
+        isWindowsUi() &&
+        t.id === "bash-rc" &&
+        (t.name === "bash" || t.name === "Bash" || t.name === "Bash (rc)")
+      ) {
+        t.name = "Git Bash";
       }
     }
+
+    if (isWindowsUi()) {
+      // Drop the legacy auto "shell" fixed row — users pick PowerShell / CMD /
+      // Git Bash explicitly. Keep user quick-starts that still target "shell".
+      for (let i = list.length - 1; i >= 0; i--) {
+        const t = list[i];
+        if (t.id === "shell" && (!t.command || t.fixed)) {
+          list.splice(i, 1);
+        } else if (t.id === "shell") {
+          // User quick-start that used the OS shell runtime — retarget to
+          // PowerShell (the preferred Windows default) so injection still works.
+          t.runtime = "powershell";
+          t.fixed = false;
+          if (t.id === "shell") t.id = `tpl-shell-${Date.now()}`;
+        }
+      }
+    } else {
+      // Ensure the OS shell row stays fixed and first on Unix.
+      for (const t of list) {
+        if (t.id === "shell") {
+          t.fixed = true;
+          t.runtime = "shell";
+          if (!t.name) t.name = "终端";
+        }
+      }
+    }
+
     const ids = new Set(list.map((t) => t.id));
     for (const b of DEFAULT_TEMPLATES) {
       if (!ids.has(b.id)) list.push(b);
     }
-    // Ensure the OS shell row stays fixed and first even if a stale local
-    // copy lost the flag.
-    for (const t of list) {
-      if (t.id === "shell") {
-        t.fixed = true;
-        t.runtime = "shell";
-        if (!t.name) t.name = "终端";
-      }
-    }
-    // Fixed templates (OS shell) always come first; bash after shell, then agents.
+
     return list.sort((a, b) => {
-      const af = Number(b.fixed ?? false) - Number(a.fixed ?? false);
-      if (af !== 0) return af;
-      if (a.id === "shell") return -1;
-      if (b.id === "shell") return 1;
-      if (a.runtime.startsWith("bash") && !b.runtime.startsWith("bash")) return -1;
-      if (b.runtime.startsWith("bash") && !a.runtime.startsWith("bash")) return 1;
+      const ar = shellSortRank(a);
+      const br = shellSortRank(b);
+      if (ar !== br) return ar - br;
       return 0;
     });
   } catch {
@@ -1226,6 +1370,9 @@ export const useStore = create<AppState>((set, get) => {
   termTemplates: loadTermTemplates(),
   fontScale: loadFontScale(),
   themeId: loadThemeId(),
+  wallpaperMode: loadWallpaperMode(),
+  wallpaperPath: loadWallpaperPath(),
+  wallpaperOpacity: loadWallpaperOpacity(),
   ctrlTRuntime: loadCtrlTRuntime(),
   soundEnabled: true,
   todos: [],
@@ -2036,6 +2183,35 @@ export const useStore = create<AppState>((set, get) => {
       // ignore storage errors
     }
     set({ themeId });
+  },
+
+  setWallpaperMode: (wallpaperMode) => {
+    try {
+      localStorage.setItem(WALLPAPER_MODE_KEY, wallpaperMode);
+    } catch {
+      // ignore storage errors
+    }
+    set({ wallpaperMode });
+  },
+
+  setWallpaperPath: (wallpaperPath) => {
+    try {
+      if (wallpaperPath) localStorage.setItem(WALLPAPER_PATH_KEY, wallpaperPath);
+      else localStorage.removeItem(WALLPAPER_PATH_KEY);
+    } catch {
+      // ignore storage errors
+    }
+    set({ wallpaperPath });
+  },
+
+  setWallpaperOpacity: (opacity) => {
+    const wallpaperOpacity = clamp01(opacity);
+    try {
+      localStorage.setItem(WALLPAPER_OPACITY_KEY, String(wallpaperOpacity));
+    } catch {
+      // ignore storage errors
+    }
+    set({ wallpaperOpacity });
   },
 
   setCtrlTRuntime: (runtime) => {

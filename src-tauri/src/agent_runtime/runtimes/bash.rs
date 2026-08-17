@@ -24,8 +24,9 @@ impl BashAdapter {
     /// Resolve the bash binary once per process.
     ///
     /// Order:
-    /// 1. `bash` on PATH (after [`ensure_cli_path`] has prepended Git bins on Windows)
-    /// 2. Well-known Git for Windows install paths (absolute `bash.exe`)
+    /// 1. Well-known Git for Windows install paths (absolute `bash.exe`) —
+    ///    preferred on Windows so we never pick a random WSL/MSYS bash.
+    /// 2. `bash` on PATH (after [`ensure_cli_path`] has prepended Git bins)
     ///
     /// Returning an absolute path on Windows avoids a later PATH race and makes
     /// spawn failures point at a real file the user can inspect.
@@ -36,17 +37,42 @@ impl BashAdapter {
                 // Make sure Git\bin is visible before the PATH probe.
                 crate::agent_runtime::adapter::ensure_cli_path();
 
+                #[cfg(windows)]
+                {
+                    // Prefer an absolute Git-for-Windows bash.exe. Bare `bash` on
+                    // PATH can resolve to unrelated tools; absolute path also
+                    // survives PATH mutations between probe and PTY spawn.
+                    if let Some(p) = find_windows_bash_exe() {
+                        if bash_runs(&p) {
+                            return Some(p);
+                        }
+                        // File exists but --version failed (locked / broken
+                        // install). Still return it — spawn will surface the
+                        // real OS error rather than "not detected".
+                        if p.is_file() {
+                            return Some(p);
+                        }
+                    }
+                }
+
                 if crate::agent_runtime::adapter::cli_available("bash") {
-                    // Prefer the bare name when PATH works — lets the OS honour
-                    // PATHEXT / user overrides. Absolute path is only needed when
-                    // the bare name is missing (common on desktop-launched Win).
+                    // Prefer a real resolved path over the bare name so ConPTY
+                    // does not re-search PATH later.
+                    if let Some(r) =
+                        crate::agent_runtime::executable::resolve_executable("bash")
+                    {
+                        if r.path.is_file() {
+                            return Some(r.path);
+                        }
+                    }
                     return Some(PathBuf::from("bash"));
                 }
 
-                #[cfg(windows)]
+                #[cfg(not(windows))]
                 {
-                    if let Some(p) = find_windows_bash_exe() {
-                        if bash_runs(&p) {
+                    for path in ["/bin/bash", "/usr/bin/bash"] {
+                        let p = PathBuf::from(path);
+                        if p.is_file() && bash_runs(&p) {
                             return Some(p);
                         }
                     }
@@ -98,12 +124,32 @@ fn find_windows_bash_exe() -> Option<PathBuf> {
         r"C:\Program Files\Git",
         r"C:\Program Files (x86)\Git",
         r"C:\Git",
+        // Common non-C: portable / custom installs.
+        r"D:\Git",
+        r"E:\Git",
+        r"A:\Git",
     ] {
         candidates.push(PathBuf::from(root).join(r"bin\bash.exe"));
         candidates.push(PathBuf::from(root).join(r"usr\bin\bash.exe"));
     }
 
-    candidates.into_iter().find(|p| p.is_file())
+    // Prefer bin\bash.exe (the small launcher) over usr\bin when both exist.
+    let mut bin_hit = None;
+    let mut usr_hit = None;
+    for p in candidates {
+        if !p.is_file() {
+            continue;
+        }
+        let s = p.to_string_lossy().to_ascii_lowercase();
+        if s.ends_with(r"\bin\bash.exe") && !s.contains(r"\usr\bin\") {
+            bin_hit = Some(p);
+            break;
+        }
+        if usr_hit.is_none() {
+            usr_hit = Some(p);
+        }
+    }
+    bin_hit.or(usr_hit)
 }
 
 impl AgentRuntimeAdapter for BashAdapter {
@@ -115,7 +161,14 @@ impl AgentRuntimeAdapter for BashAdapter {
         if self.norc {
             "Bash"
         } else {
-            "Bash (rc)"
+            #[cfg(windows)]
+            {
+                "Git Bash"
+            }
+            #[cfg(not(windows))]
+            {
+                "Bash (rc)"
+            }
         }
     }
 

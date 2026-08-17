@@ -72,7 +72,28 @@ body::after {
 /* ── App Shell ────────────────────────────────────────────────── */
 
 .app { display: flex; flex-direction: column; height: 100vh; position: relative; z-index: 1; }
+.app-body,
+.statusbar {
+  position: relative;
+  z-index: 1;
+}
 .app-body { display: flex; flex: 1; overflow: hidden; min-height: 0; }
+
+/* Wallpaper layer: under shell chrome, above the solid html/body --bg fill.
+   Single image layer controlled by --wallpaper-opacity. z-index stays 0;
+   chrome siblings raise to 1 so they paint on top. */
+.app-wallpaper {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-color: var(--bg);
+  background-image: var(--wallpaper-image);
+  background-size: var(--wallpaper-size, cover);
+  background-position: var(--wallpaper-position, center);
+  background-repeat: no-repeat;
+  opacity: var(--wallpaper-opacity, 0.55);
+}
 
 /* Frameless-window resize grips (`decorations: false`). Transparent hit
    targets over the outer 6px; corners are 12×12 so diagonal resize is easy.
@@ -3224,6 +3245,39 @@ body::after { content: none; }
   box-shadow: inset 0 1px 0 rgb(var(--brand-rgb) / 0.08);
 }
 
+/* Wallpaper translucency — one shared surface recipe for chrome panels so left,
+   right, empty main area and tab chrome all match. Terminal stays fully opaque
+   (var(--term-bg) / xterm theme). No backdrop-filter (WebKitGTK is expensive). */
+html[data-wallpaper="on"] {
+  --wallpaper-surface: color-mix(in srgb, var(--bg2) 72%, transparent);
+  --wallpaper-chrome: color-mix(in srgb, var(--bg2) 78%, transparent);
+}
+html[data-wallpaper="on"] .left-sidebar,
+html[data-wallpaper="on"] .right-sidebar,
+html[data-wallpaper="on"] .right-panel,
+html[data-wallpaper="on"] .tab-panel,
+html[data-wallpaper="on"] .content-area,
+html[data-wallpaper="on"] .composer {
+  background: var(--wallpaper-surface);
+}
+html[data-wallpaper="on"] .titlebar,
+html[data-wallpaper="on"] .tab-bar,
+html[data-wallpaper="on"] .right-tabs,
+html[data-wallpaper="on"] .statusbar {
+  background-color: var(--wallpaper-chrome);
+}
+/* Nested fills stay clear so we don't stack two translucent layers (e.g.
+   empty-state over content-area) and accidentally re-opaque the wallpaper.
+   Terminal host keeps its own solid --term-bg. */
+html[data-wallpaper="on"] .main-area,
+html[data-wallpaper="on"] .content-panel,
+html[data-wallpaper="on"] .pane-shell,
+html[data-wallpaper="on"] .empty-state,
+html[data-wallpaper="on"] .ov-section,
+html[data-wallpaper="on"] .ov-section-body {
+  background: transparent;
+}
+
 /* Square, stepped chrome for interactive hardware controls. */
 .tab-item,
 .act-btn,
@@ -3387,7 +3441,7 @@ html[data-theme="handheld"] .term-search-bar { background: var(--bg2); }
    Anchored to `.app` (not `body`) so it shares the app's stacking context:
    panels that should not carry the lattice (resident full-screen runtimes like
    OpenCode) can raise their z-index above it, while popovers (> 1000) stay on
-   top regardless. */
+   top regardless. Sits above the wallpaper layer (z=0) and below chrome. */
 html[data-theme="quantum"] .app::before {
   content: "";
   position: fixed;
@@ -3529,6 +3583,92 @@ html[data-theme="quantum"] .app::before {
   text-align: right;
 }
 .settings-theme-option.active .settings-theme-option-state { color: var(--brand); }
+
+/* Wallpaper controls (Settings → 外观与显示). */
+.settings-wallpaper {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+  margin-bottom: 4px;
+}
+.settings-wallpaper-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+.settings-wallpaper-status {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--ink2);
+}
+.settings-wallpaper-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.settings-wallpaper-btn {
+  font-family: var(--pixel);
+  font-size: var(--fs-2xs);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  padding: 5px 10px;
+  color: var(--ink2);
+  background: transparent;
+  border: 1px solid var(--rule2);
+  border-radius: var(--control-radius);
+  cursor: pointer;
+}
+.settings-wallpaper-btn:hover {
+  color: var(--ink);
+  border-color: var(--brand);
+}
+.settings-wallpaper-btn.ghost {
+  color: var(--muted);
+  border-color: transparent;
+}
+.settings-wallpaper-btn.ghost:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.settings-wallpaper-slider {
+  display: grid;
+  grid-template-columns: 118px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--ink2);
+}
+.settings-wallpaper-slider span {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.settings-wallpaper-slider b {
+  font-family: var(--pixel);
+  font-size: var(--fs-2xs);
+  color: var(--brand);
+  letter-spacing: 0.5px;
+}
+.settings-wallpaper-slider input[type="range"] {
+  width: 100%;
+  accent-color: var(--brand);
+  cursor: pointer;
+}
+.settings-wallpaper-slider.disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
 
 /* Settings · runtime dropdown (Ctrl+T default agent). */
 .settings-runtime-picker { position: relative; z-index: 15; }
@@ -4033,12 +4173,14 @@ html[data-theme="quantum"] .app::before {
 }
 
 .settings-segmented {
-  display: inline-flex;
+  display: flex;
+  width: 100%;
   border: 1px solid var(--rule2);
   box-shadow: var(--control-shadow);
 }
 .settings-segmented button {
-  min-width: 54px;
+  flex: 1;
+  min-width: 0;
   margin: 0;
   border: 0 !important;
   border-right: 1px solid var(--rule2) !important;

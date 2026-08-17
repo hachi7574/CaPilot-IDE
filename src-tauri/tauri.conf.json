@@ -28,6 +28,12 @@
         "enable": true,
         "scope": [
           "$HOME/**",
+          "$DESKTOP/**",
+          "$DOCUMENT/**",
+          "$DOWNLOAD/**",
+          "$PICTURE/**",
+          "$PUBLIC/**",
+          "$VIDEO/**",
           "**"
         ]
       }

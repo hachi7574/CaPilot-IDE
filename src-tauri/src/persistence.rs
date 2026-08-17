@@ -269,6 +269,31 @@ pub fn path_is_allowed(path: &Path) -> Result<bool, String> {
             return Ok(true);
         }
     }
+    // Also admit every registered custom project root (picked folder / clone /
+    // worktree). Redundant with the non-system-path rule below for most cases,
+    // but keeps a clear allow when a root is registered and lets callers reason
+    // about "known projects" without scanning the whole drive.
+    {
+        let workspace = workspace_root();
+        if let Ok(entries) = std::fs::read_dir(&workspace) {
+            for entry in entries.flatten() {
+                if !entry.path().is_dir() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') {
+                    continue;
+                }
+                let Some(root) = custom_project_root(&name) else {
+                    continue;
+                };
+                let root = root.canonicalize().unwrap_or(root);
+                if path_is_within(&path, &root) {
+                    return Ok(true);
+                }
+            }
+        }
+    }
     Ok(!is_forbidden_system_path(&path))
 }
 
@@ -533,9 +558,15 @@ pub fn status_file(agent_id: &str) -> PathBuf {
 /// Persist a custom project root (picked folder / git clone) to
 /// `~/CaPilot/workspaces/<name>/project.json`. Written at create/clone time so
 /// the root survives even with zero agents (agent-meta recovery needs one).
+///
+/// Windows `canonicalize()` yields `\\?\C:\...` / `\\?\B:\...`. That form is
+/// fine for our own path checks, but CreateProcess / ConPTY reject it as a
+/// process cwd (`lpCurrentDirectory`) and some tools choke on it in argv/env.
+/// Always store the plain drive path.
 pub fn write_project_root(name: &str, root: &std::path::Path) -> std::io::Result<()> {
     let dir = project_dir(name);
     std::fs::create_dir_all(&dir)?;
+    let root = strip_verbatim_prefix(root);
     std::fs::write(
         dir.join("project.json"),
         serde_json::json!({ "root": root }).to_string(),
@@ -545,7 +576,9 @@ pub fn write_project_root(name: &str, root: &std::path::Path) -> std::io::Result
 fn persisted_project_root(name: &str) -> Option<PathBuf> {
     let data = std::fs::read_to_string(project_dir(name).join("project.json")).ok()?;
     let v: serde_json::Value = serde_json::from_str(&data).ok()?;
-    v.get("root").and_then(|r| r.as_str()).map(PathBuf::from)
+    v.get("root")
+        .and_then(|r| r.as_str())
+        .map(|s| strip_verbatim_prefix(Path::new(s)))
 }
 
 /// Recover a custom-rooted project's real on-disk root from its agent metadata.
@@ -1839,7 +1872,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&outside);
     }
 
-    #[test]
+#[test]
     fn path_is_allowed_accepts_any_local_drive_folder() {
         let _guard = crate::agent_runtime::ENV_LOCK
             .lock()
@@ -1925,5 +1958,55 @@ mod tests {
         assert!(!exe_is_dev_build(Path::new(
             "/opt/CaPilot/capilot-ide"
         )));
+    }
+
+    /// Custom-rooted projects (picked folder / clone) may live outside $HOME
+    /// (e.g. a second drive on Windows). Once registered via project.json they
+    /// must pass `path_is_allowed` so terminals and fs IPC can open there.
+    /// Unregistered non-system paths are also allowed (multi-drive policy).
+    #[test]
+    fn path_is_allowed_accepts_registered_custom_root_outside_home() {
+        let _guard = crate::agent_runtime::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let stamp = format!(
+            "{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let home = std::env::temp_dir().join(format!("capilot-allow-home-{stamp}"));
+        let outside = std::env::temp_dir().join(format!("capilot-allow-out-{stamp}"));
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::env::set_var("HOME", &home);
+        std::env::set_var("USERPROFILE", &home);
+        std::env::set_var("CAPILOT_HOME", &home);
+
+        // Multi-drive policy: unregistered non-system path outside home is allowed.
+        assert!(path_is_allowed(&outside).unwrap());
+
+        // Register it as a custom project root (mirrors create_project / clone).
+        write_project_root("extproj", &outside).unwrap();
+        assert!(path_is_allowed(&outside).unwrap());
+        // Descendants of the custom root are allowed too (file-tree open terminal).
+        let nested = outside.join("src").join("lib.rs");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, "x").unwrap();
+        assert!(path_is_allowed(&nested).unwrap());
+        // Home descendants still allowed.
+        let under_home = home.join("docs");
+        std::fs::create_dir_all(&under_home).unwrap();
+        assert!(path_is_allowed(&under_home).unwrap());
+
+        std::env::remove_var("HOME");
+        std::env::remove_var("USERPROFILE");
+        std::env::remove_var("CAPILOT_HOME");
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 }

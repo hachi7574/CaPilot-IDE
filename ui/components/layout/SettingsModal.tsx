@@ -1,13 +1,43 @@
 import { useEffect, useRef, useState, type UIEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
-import { useStore, FontScale, RuntimeInfo, UsageConfig } from "../../state/store";
+import { open } from "@tauri-apps/plugin-dialog";
+import {
+  useStore,
+  FontScale,
+  RuntimeInfo,
+  UsageConfig,
+  WallpaperMode,
+} from "../../state/store";
 import { THEMES, getTheme, DEFAULT_THEME_ID } from "../../state/themes";
 import { checkForUpdate, downloadAndInstall } from "../../state/update";
 import { Icon, runtimeIcon } from "../Icon";
+import { isShellRuntime, isWindowsHost } from "../../state/shellPath";
 
 interface SettingsModalProps {
   onClose: () => void;
+}
+
+/** True when this runtime is an agent CLI (has models / auth / usage). */
+function isAgentRuntime(id: string): boolean {
+  return !isShellRuntime(id);
+}
+
+/** Sort shells first (powershell/cmd/bash/shell), then agents by name. */
+function runtimeSortKey(rt: RuntimeInfo): [number, string] {
+  switch (rt.id) {
+    case "powershell":
+      return [0, rt.name];
+    case "cmd":
+      return [1, rt.name];
+    case "shell":
+      return [2, rt.name];
+    case "bash-rc":
+    case "bash":
+      return [3, rt.name];
+    default:
+      return [10, rt.name.toLowerCase()];
+  }
 }
 
 /** Adapter defaults, mirrored from the Rust spawn_interactive() implementations.
@@ -21,6 +51,11 @@ const DEFAULT_LAUNCH: Record<string, { command: string; args: string }> = {
   dsh: { command: "dsh", args: "--profile dsh-tui" },
   // pi 每会话的 model/thinking/mode 由适配器在 spawn 时按 flag 追加。
   pi: { command: "pi", args: "" },
+  shell: { command: "shell", args: "" },
+  powershell: { command: "pwsh", args: "-NoLogo" },
+  cmd: { command: "cmd.exe", args: "" },
+  "bash-rc": { command: "bash", args: "" },
+  bash: { command: "bash", args: "--norc" },
 };
 
 export function SettingsModal({ onClose }: SettingsModalProps) {
@@ -31,6 +66,12 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const setFontScale = useStore((s) => s.setFontScale);
   const themeId = useStore((s) => s.themeId);
   const setThemeId = useStore((s) => s.setThemeId);
+  const wallpaperMode = useStore((s) => s.wallpaperMode);
+  const setWallpaperMode = useStore((s) => s.setWallpaperMode);
+  const wallpaperPath = useStore((s) => s.wallpaperPath);
+  const setWallpaperPath = useStore((s) => s.setWallpaperPath);
+  const wallpaperOpacity = useStore((s) => s.wallpaperOpacity);
+  const setWallpaperOpacity = useStore((s) => s.setWallpaperOpacity);
   const soundEnabled = useStore((s) => s.soundEnabled);
   const setSoundEnabled = useStore((s) => s.setSoundEnabled);
   const ctrlTRuntime = useStore((s) => s.ctrlTRuntime);
@@ -40,6 +81,37 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const [runtimeMenuOpen, setRuntimeMenuOpen] = useState(false);
   const runtimePickerRef = useRef<HTMLDivElement>(null);
   const currentTheme = getTheme(themeId) ?? THEMES[0];
+  const themeHasWallpaper = Boolean(currentTheme?.wallpaperUrl);
+  const wallpaperActive =
+    wallpaperMode === "custom"
+      ? Boolean(wallpaperPath)
+      : wallpaperMode === "auto"
+        ? themeHasWallpaper
+        : false;
+  const wallpaperFileLabel = wallpaperPath
+    ? wallpaperPath.replace(/\\/g, "/").split("/").pop() ?? wallpaperPath
+    : null;
+
+  const pickWallpaper = async () => {
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [
+          {
+            name: "Images",
+            extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp"],
+          },
+        ],
+      });
+      if (typeof selected === "string" && selected) {
+        setWallpaperPath(selected);
+        setWallpaperMode("custom");
+      }
+    } catch {
+      // dialog cancelled / unavailable
+    }
+  };
   const [activeSection, setActiveSection] = useState<
     "runtimes" | "appearance" | "sessions" | "updates"
   >("runtimes");
@@ -339,12 +411,24 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     }
   };
 
-  // Agent runtimes only — plain shells (shell / bash*) stay out of this panel.
-  // Show unavailable rows too so a failed/slow probe isn't mistaken for "none
-  // installed" when the new-terminal picker still lists every template.
-  const agentRuntimes = runtimes.filter(
-    (rt) => rt.id !== "shell" && !rt.id.startsWith("bash")
-  );
+  // Show shells + agents. On Windows hide the auto `shell` row (users pick
+  // PowerShell / CMD / Git Bash explicitly). Show unavailable rows so a
+  // failed/slow probe isn't mistaken for "none installed".
+  const listedRuntimes = runtimes
+    .filter((rt) => {
+      if (isWindowsHost() && rt.id === "shell") return false;
+      return true;
+    })
+    .slice()
+    .sort((a, b) => {
+      const [ak, an] = runtimeSortKey(a);
+      const [bk, bn] = runtimeSortKey(b);
+      if (ak !== bk) return ak - bk;
+      return an.localeCompare(bn);
+    });
+  const shellRuntimes = listedRuntimes.filter((rt) => isShellRuntime(rt.id));
+  const agentRuntimes = listedRuntimes.filter((rt) => isAgentRuntime(rt.id));
+  const installedCount = listedRuntimes.filter((rt) => rt.available).length;
   const installedAgents = agentRuntimes.filter((rt) => rt.available);
 
   return (
@@ -380,7 +464,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 onClick={() => jumpToSection("runtimes")}
               >
                 <Icon name="bot" size={14} />
-                <span><b>运行时</b><small>Agent 与用量</small></span>
+                <span><b>运行时</b><small>Shell 与 Agent</small></span>
               </button>
               <button
                 className={activeSection === "appearance" ? "active" : ""}
@@ -419,24 +503,32 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               <b>{getTheme(themeId)?.name ?? DEFAULT_THEME_ID}</b>
               <span>AGENTS</span>
               <b>{installedAgents.length.toString().padStart(2, "0")} ONLINE</b>
+              <span>SHELLS</span>
+              <b>
+                {shellRuntimes
+                  .filter((r) => r.available)
+                  .length.toString()
+                  .padStart(2, "0")}{" "}
+                READY
+              </b>
             </div>
           </aside>
 
           <main className="settings-content" onScroll={syncSectionFromScroll}>
 
-        {/* Installed agents */}
+        {/* Installed runtimes (shells + agents) */}
         <section id="settings-runtimes" className="modal-section settings-panel settings-runtime-panel">
           <div className="settings-section-head">
             <span>RUNTIME BUS</span>
-            <h4>Agent 运行环境</h4>
-            <p>管理已接入的编码终端、启动命令与剩余用量读取。</p>
+            <h4>运行环境</h4>
+            <p>管理系统终端（PowerShell / CMD / Git Bash）与已接入的编码 Agent CLI。</p>
           </div>
           <div className="settings-toolbar">
             <div className="modal-title">
-              已安装{" "}
+              已检测{" "}
               <span className="settings-count">
-                {installedAgents.length}
-                {agentRuntimes.length > 0 ? ` / ${agentRuntimes.length}` : ""}
+                {installedCount}
+                {listedRuntimes.length > 0 ? ` / ${listedRuntimes.length}` : ""}
               </span>
             </div>
             <button className="settings-compact-btn" onClick={reDetect} disabled={scanning}>
@@ -451,14 +543,16 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               <small>{detectError}</small>
             </div>
           )}
-          {!scanning && !detectError && agentRuntimes.length === 0 && (
+          {!scanning && !detectError && listedRuntimes.length === 0 && (
             <div className="settings-empty-runtime">
               <Icon name="plug" size={18} />
-              <span>未检测到 Agent 运行时</span>
-              <small>安装 CLI 后点「重新检测」。新终端模板列表不依赖此处探测。</small>
+              <span>未检测到运行时</span>
+              <small>安装 CLI / shell 后点「重新检测」。</small>
             </div>
           )}
-          {agentRuntimes.map((rt) => (
+          {listedRuntimes.map((rt) => {
+            const shell = isShellRuntime(rt.id);
+            return (
             <div
               key={rt.id}
               className={`settings-runtime${editingId === rt.id ? " expanded" : ""}${
@@ -467,7 +561,14 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             >
               <div className="modal-row settings-runtime-row" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", fontSize: "var(--fs-sm)" }}>
                 <span className="settings-runtime-name">
-                  <Icon name="terminal" size={14} /> {rt.name}
+                  <Icon name={runtimeIcon(rt.id)} size={14} /> {rt.name}
+                  <span
+                    className="settings-runtime-version"
+                    style={{ opacity: 0.55, marginLeft: 6 }}
+                    title={shell ? "系统终端" : "Agent CLI"}
+                  >
+                    {shell ? "shell" : "agent"}
+                  </span>
                   {rt.version && (
                     <span
                       className="settings-runtime-version"
@@ -488,7 +589,11 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                     {rt.available ? (
                       <>
                         <Icon name="check" size={12} style={{ marginRight: 4 }} />
-                        {rt.authenticated ? "已登录" : "已安装"}
+                        {shell
+                          ? "可用"
+                          : rt.authenticated
+                            ? "已登录"
+                            : "已安装"}
                       </>
                     ) : (
                       "未检测到"
@@ -681,7 +786,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 </div>
               )}
             </div>
-          ))}
+            );
+          })}
         </section>
 
         {/* Preferences */}
@@ -756,6 +862,85 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               </div>
             )}
           </div>
+
+          <div className="settings-field-label settings-font-label">
+            <span>背景图片</span>
+            <small>主题内置或自定义本地图片</small>
+          </div>
+          <div className="settings-wallpaper">
+            <div className="settings-segmented" role="radiogroup" aria-label="背景图片来源">
+              {(
+                [
+                  { key: "auto", label: "跟随主题" },
+                  { key: "custom", label: "自定义" },
+                  { key: "off", label: "关闭" },
+                ] as { key: WallpaperMode; label: string }[]
+              ).map((opt) => (
+                <button
+                  key={opt.key}
+                  type="button"
+                  role="radio"
+                  aria-checked={wallpaperMode === opt.key}
+                  className={wallpaperMode === opt.key ? "active" : ""}
+                  onClick={() => setWallpaperMode(opt.key)}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="settings-wallpaper-row">
+              <span className="settings-wallpaper-status">
+                {wallpaperMode === "off" && "背景层已关闭"}
+                {wallpaperMode === "auto" &&
+                  (themeHasWallpaper
+                    ? `使用「${currentTheme.name}」内置背景`
+                    : "当前主题没有内置背景")}
+                {wallpaperMode === "custom" &&
+                  (wallpaperFileLabel
+                    ? `自定义：${wallpaperFileLabel}`
+                    : "尚未选择图片")}
+              </span>
+              <div className="settings-wallpaper-actions">
+                <button
+                  type="button"
+                  className="settings-wallpaper-btn"
+                  onClick={() => void pickWallpaper()}
+                >
+                  选择图片
+                </button>
+                {wallpaperPath && (
+                  <button
+                    type="button"
+                    className="settings-wallpaper-btn ghost"
+                    onClick={() => {
+                      setWallpaperPath(null);
+                      if (wallpaperMode === "custom") setWallpaperMode("auto");
+                    }}
+                  >
+                    清除
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <label className={`settings-wallpaper-slider${wallpaperActive ? "" : " disabled"}`}>
+              <span>
+                透明度
+                <b>{Math.round(wallpaperOpacity * 100)}%</b>
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                disabled={!wallpaperActive}
+                value={Math.round(wallpaperOpacity * 100)}
+                onChange={(e) => setWallpaperOpacity(Number(e.target.value) / 100)}
+              />
+            </label>
+          </div>
+
           <div className="settings-field-label settings-font-label">
             <span>界面字体大小</span>
             <small>终端字号同步调整</small>

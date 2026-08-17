@@ -68,6 +68,9 @@ export function detectShellFlavor(
   if (id === "bash" || id === "bash-rc" || id.startsWith("bash")) {
     return "posix";
   }
+  // Explicit Windows shell runtime ids — prefer id over label.
+  if (id === "powershell" || id === "pwsh") return "powershell";
+  if (id === "cmd") return "cmd";
   if (!isWindowsHost()) return "posix";
   const label = (runtimeName ?? "").toLowerCase();
   if (label.includes("cmd")) return "cmd";
@@ -79,6 +82,21 @@ export function detectShellFlavor(
   // the adapter, so default to its quoting rules (cmd is the rarer fallback).
   if (id === "shell") return "powershell";
   return "posix";
+}
+
+/** True for plain interactive shells (OS shell / PowerShell / cmd / bash) —
+ *  not agent CLIs. Used for command injection after spawn and file-tree actions. */
+export function isShellRuntime(runtime: string | undefined | null): boolean {
+  const id = (runtime ?? "").toLowerCase();
+  return (
+    id === "shell" ||
+    id === "powershell" ||
+    id === "pwsh" ||
+    id === "cmd" ||
+    id === "bash" ||
+    id === "bash-rc" ||
+    id.startsWith("bash")
+  );
 }
 
 /** Quote a path/arg for the target shell. */
