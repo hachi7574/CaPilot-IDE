@@ -1,7 +1,14 @@
 import { useEffect, useRef, useState, type UIEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
-import { useStore, FontScale, RuntimeInfo, UsageConfig } from "../../state/store";
+import { open } from "@tauri-apps/plugin-dialog";
+import {
+  useStore,
+  FontScale,
+  RuntimeInfo,
+  UsageConfig,
+  WallpaperMode,
+} from "../../state/store";
 import { THEMES, getTheme, DEFAULT_THEME_ID } from "../../state/themes";
 import { checkForUpdate, downloadAndInstall } from "../../state/update";
 import { Icon, runtimeIcon } from "../Icon";
@@ -59,6 +66,12 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const setFontScale = useStore((s) => s.setFontScale);
   const themeId = useStore((s) => s.themeId);
   const setThemeId = useStore((s) => s.setThemeId);
+  const wallpaperMode = useStore((s) => s.wallpaperMode);
+  const setWallpaperMode = useStore((s) => s.setWallpaperMode);
+  const wallpaperPath = useStore((s) => s.wallpaperPath);
+  const setWallpaperPath = useStore((s) => s.setWallpaperPath);
+  const wallpaperOpacity = useStore((s) => s.wallpaperOpacity);
+  const setWallpaperOpacity = useStore((s) => s.setWallpaperOpacity);
   const soundEnabled = useStore((s) => s.soundEnabled);
   const setSoundEnabled = useStore((s) => s.setSoundEnabled);
   const ctrlTRuntime = useStore((s) => s.ctrlTRuntime);
@@ -68,6 +81,37 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const [runtimeMenuOpen, setRuntimeMenuOpen] = useState(false);
   const runtimePickerRef = useRef<HTMLDivElement>(null);
   const currentTheme = getTheme(themeId) ?? THEMES[0];
+  const themeHasWallpaper = Boolean(currentTheme?.wallpaperUrl);
+  const wallpaperActive =
+    wallpaperMode === "custom"
+      ? Boolean(wallpaperPath)
+      : wallpaperMode === "auto"
+        ? themeHasWallpaper
+        : false;
+  const wallpaperFileLabel = wallpaperPath
+    ? wallpaperPath.replace(/\\/g, "/").split("/").pop() ?? wallpaperPath
+    : null;
+
+  const pickWallpaper = async () => {
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [
+          {
+            name: "Images",
+            extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp"],
+          },
+        ],
+      });
+      if (typeof selected === "string" && selected) {
+        setWallpaperPath(selected);
+        setWallpaperMode("custom");
+      }
+    } catch {
+      // dialog cancelled / unavailable
+    }
+  };
   const [activeSection, setActiveSection] = useState<
     "runtimes" | "appearance" | "sessions" | "updates"
   >("runtimes");
@@ -818,6 +862,85 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               </div>
             )}
           </div>
+
+          <div className="settings-field-label settings-font-label">
+            <span>背景图片</span>
+            <small>主题内置或自定义本地图片</small>
+          </div>
+          <div className="settings-wallpaper">
+            <div className="settings-segmented" role="radiogroup" aria-label="背景图片来源">
+              {(
+                [
+                  { key: "auto", label: "跟随主题" },
+                  { key: "custom", label: "自定义" },
+                  { key: "off", label: "关闭" },
+                ] as { key: WallpaperMode; label: string }[]
+              ).map((opt) => (
+                <button
+                  key={opt.key}
+                  type="button"
+                  role="radio"
+                  aria-checked={wallpaperMode === opt.key}
+                  className={wallpaperMode === opt.key ? "active" : ""}
+                  onClick={() => setWallpaperMode(opt.key)}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="settings-wallpaper-row">
+              <span className="settings-wallpaper-status">
+                {wallpaperMode === "off" && "背景层已关闭"}
+                {wallpaperMode === "auto" &&
+                  (themeHasWallpaper
+                    ? `使用「${currentTheme.name}」内置背景`
+                    : "当前主题没有内置背景")}
+                {wallpaperMode === "custom" &&
+                  (wallpaperFileLabel
+                    ? `自定义：${wallpaperFileLabel}`
+                    : "尚未选择图片")}
+              </span>
+              <div className="settings-wallpaper-actions">
+                <button
+                  type="button"
+                  className="settings-wallpaper-btn"
+                  onClick={() => void pickWallpaper()}
+                >
+                  选择图片
+                </button>
+                {wallpaperPath && (
+                  <button
+                    type="button"
+                    className="settings-wallpaper-btn ghost"
+                    onClick={() => {
+                      setWallpaperPath(null);
+                      if (wallpaperMode === "custom") setWallpaperMode("auto");
+                    }}
+                  >
+                    清除
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <label className={`settings-wallpaper-slider${wallpaperActive ? "" : " disabled"}`}>
+              <span>
+                透明度
+                <b>{Math.round(wallpaperOpacity * 100)}%</b>
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                disabled={!wallpaperActive}
+                value={Math.round(wallpaperOpacity * 100)}
+                onChange={(e) => setWallpaperOpacity(Number(e.target.value) / 100)}
+              />
+            </label>
+          </div>
+
           <div className="settings-field-label settings-font-label">
             <span>界面字体大小</span>
             <small>终端字号同步调整</small>

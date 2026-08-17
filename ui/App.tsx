@@ -1,4 +1,5 @@
-import { useEffect, useState, type ComponentType } from "react";
+import { useEffect, useMemo, useState, type ComponentType, type CSSProperties } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { LeftSidebar } from "./components/layout/LeftSidebar";
 import { MainArea } from "./components/layout/MainArea";
 import { RightSidebar } from "./components/layout/RightSidebar";
@@ -15,6 +16,10 @@ import { useUsageSync } from "./state/usage";
 import { useContextUsageSync } from "./state/usageContext";
 import { useUpdateSync } from "./state/update";
 import { useStore } from "./state/store";
+import {
+  getTheme,
+  DEFAULT_WALLPAPER_OPACITY,
+} from "./state/themes";
 import "./App.css";
 
 /**
@@ -42,6 +47,51 @@ function DevAnnotationsGate() {
   return <Comp />;
 }
 
+/**
+ * Resolve the active wallpaper URL + paint params.
+ * Priority: mode off → none; custom path → asset URL; auto → theme cartridge.
+ * Opacity comes from the single user preference (defaults match themes.ts).
+ */
+function useWallpaperLayer() {
+  const themeId = useStore((s) => s.themeId);
+  const mode = useStore((s) => s.wallpaperMode);
+  const path = useStore((s) => s.wallpaperPath);
+  const opacity = useStore((s) => s.wallpaperOpacity);
+
+  return useMemo(() => {
+    const theme = getTheme(themeId);
+    let url: string | null = null;
+    let size = theme?.wallpaper?.size ?? "cover";
+    let position = theme?.wallpaper?.position ?? "center";
+
+    if (mode === "custom" && path) {
+      try {
+        url = convertFileSrc(path);
+      } catch {
+        url = null;
+      }
+      // Custom picks always cover the viewport; theme size/position only apply
+      // to the cartridge's own art.
+      size = "cover";
+      position = "center";
+    } else if (mode === "auto") {
+      url = theme?.wallpaperUrl ?? null;
+    }
+
+    if (!url) return null;
+
+    const imgOpacity = Number.isFinite(opacity) ? opacity : DEFAULT_WALLPAPER_OPACITY;
+
+    const style: CSSProperties = {
+      ["--wallpaper-image" as string]: `url("${url.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}")`,
+      ["--wallpaper-size" as string]: size,
+      ["--wallpaper-position" as string]: position,
+      ["--wallpaper-opacity" as string]: String(imgOpacity),
+    };
+    return style;
+  }, [themeId, mode, path, opacity]);
+}
+
 function App() {
   useResourceSync();
   useRuntimeSync();
@@ -55,14 +105,22 @@ function App() {
   const onboarded = useStore((s) => s.onboarded);
   const fontScale = useStore((s) => s.fontScale);
   const themeId = useStore((s) => s.themeId);
+  const wallpaperStyle = useWallpaperLayer();
   // Reflect the chosen font-size preset on <html> so the CSS `html[data-fs=…]`
   // rules can rescale every `--fs-*` token.
   document.documentElement.dataset.fs = fontScale;
   // Theme tokens live in CSS; reflecting the persisted preset here updates the
   // whole shell (and CodeMirror) without changing component structure.
   document.documentElement.dataset.theme = themeId;
+  // Let CSS know a wallpaper is active so shell surfaces can go translucent.
+  if (wallpaperStyle) document.documentElement.dataset.wallpaper = "on";
+  else delete document.documentElement.dataset.wallpaper;
+
   return (
     <div className="app">
+      {wallpaperStyle && (
+        <div className="app-wallpaper" style={wallpaperStyle} aria-hidden="true" />
+      )}
       <div className="app-body">
         <RightSidebar />
         <MainArea />

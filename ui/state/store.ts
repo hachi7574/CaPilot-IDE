@@ -1,6 +1,10 @@
 import { create } from "zustand";
 import { invoke, Channel } from "@tauri-apps/api/core";
-import { THEMES, DEFAULT_THEME_ID } from "./themes";
+import {
+  THEMES,
+  DEFAULT_THEME_ID,
+  DEFAULT_WALLPAPER_OPACITY,
+} from "./themes";
 import { playConfirmationSound } from "./sound";
 
 // ── Types ───────────────────────────────────────────────────────
@@ -21,6 +25,13 @@ export type FontScale = "s" | "m" | "l" | "xl" | "xxl";
 /** Visual theme preset. Every theme keeps the IDE's pixel/terminal structure
  *  while swapping its material, phosphor and syntax-color system. */
 export type ThemeId = string;
+/**
+ * Wallpaper source mode:
+ * - `auto` — use the active theme cartridge's built-in image when present
+ * - `custom` — use the user-picked local image path
+ * - `off` — no wallpaper layer
+ */
+export type WallpaperMode = "auto" | "custom" | "off";
 
 /**
  * Provider's estimate of the CURRENT active-context occupancy for an agent
@@ -752,6 +763,16 @@ interface AppState {
   // Visual theme preset, reflected to <html data-theme="…"> by App.
   themeId: ThemeId;
 
+  /**
+   * Desktop wallpaper overlay. Independent of the color cartridge so a user can
+   * keep a theme's palette while swapping (or disabling) its backdrop art.
+   * Paths are absolute filesystem paths; the UI converts them via convertFileSrc.
+   */
+  wallpaperMode: WallpaperMode;
+  wallpaperPath: string | null;
+  /** Wallpaper image opacity 0–1 (single control; no separate scrim). */
+  wallpaperOpacity: number;
+
   /** Whether the running → other transition chime is enabled (default true). */
   soundEnabled: boolean;
 
@@ -911,6 +932,9 @@ interface AppState {
   setNprojOpen: (open: boolean) => void;
   setFontScale: (scale: FontScale) => void;
   setThemeId: (theme: ThemeId) => void;
+  setWallpaperMode: (mode: WallpaperMode) => void;
+  setWallpaperPath: (path: string | null) => void;
+  setWallpaperOpacity: (opacity: number) => void;
   /** Persist the Ctrl+T runtime preference (localStorage). */
   setCtrlTRuntime: (runtime: string) => void;
   setTodos: (todos: TodoTag[]) => void;
@@ -965,6 +989,48 @@ function loadThemeId(): ThemeId {
     // storage unavailable — use the default
   }
   return DEFAULT_THEME_ID;
+}
+
+const WALLPAPER_MODE_KEY = "capilot.wallpaper.mode";
+const WALLPAPER_PATH_KEY = "capilot.wallpaper.path";
+const WALLPAPER_OPACITY_KEY = "capilot.wallpaper.opacity";
+
+function clamp01(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  return Math.min(1, Math.max(0, n));
+}
+
+function loadWallpaperMode(): WallpaperMode {
+  try {
+    const value = localStorage.getItem(WALLPAPER_MODE_KEY);
+    if (value === "auto" || value === "custom" || value === "off") return value;
+  } catch {
+    // storage unavailable
+  }
+  return "auto";
+}
+
+function loadWallpaperPath(): string | null {
+  try {
+    const value = localStorage.getItem(WALLPAPER_PATH_KEY);
+    if (value && value.trim()) return value;
+  } catch {
+    // storage unavailable
+  }
+  return null;
+}
+
+function loadWallpaperOpacity(): number {
+  try {
+    const raw = localStorage.getItem(WALLPAPER_OPACITY_KEY);
+    if (raw != null) {
+      const n = Number(raw);
+      if (Number.isFinite(n)) return clamp01(n);
+    }
+  } catch {
+    // storage unavailable
+  }
+  return DEFAULT_WALLPAPER_OPACITY;
 }
 
 /** Persisted Ctrl+T runtime preference (default claude). The effective pick is
@@ -1300,6 +1366,9 @@ export const useStore = create<AppState>((set, get) => {
   termTemplates: loadTermTemplates(),
   fontScale: loadFontScale(),
   themeId: loadThemeId(),
+  wallpaperMode: loadWallpaperMode(),
+  wallpaperPath: loadWallpaperPath(),
+  wallpaperOpacity: loadWallpaperOpacity(),
   ctrlTRuntime: loadCtrlTRuntime(),
   soundEnabled: true,
   todos: [],
@@ -2096,6 +2165,35 @@ export const useStore = create<AppState>((set, get) => {
       // ignore storage errors
     }
     set({ themeId });
+  },
+
+  setWallpaperMode: (wallpaperMode) => {
+    try {
+      localStorage.setItem(WALLPAPER_MODE_KEY, wallpaperMode);
+    } catch {
+      // ignore storage errors
+    }
+    set({ wallpaperMode });
+  },
+
+  setWallpaperPath: (wallpaperPath) => {
+    try {
+      if (wallpaperPath) localStorage.setItem(WALLPAPER_PATH_KEY, wallpaperPath);
+      else localStorage.removeItem(WALLPAPER_PATH_KEY);
+    } catch {
+      // ignore storage errors
+    }
+    set({ wallpaperPath });
+  },
+
+  setWallpaperOpacity: (opacity) => {
+    const wallpaperOpacity = clamp01(opacity);
+    try {
+      localStorage.setItem(WALLPAPER_OPACITY_KEY, String(wallpaperOpacity));
+    } catch {
+      // ignore storage errors
+    }
+    set({ wallpaperOpacity });
   },
 
   setCtrlTRuntime: (runtime) => {
