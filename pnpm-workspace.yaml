@@ -1,0 +1,5 @@
+# Project-level pnpm settings (pnpm 11+ no longer reads the "pnpm" field
+# from package.json). allowBuilds lets lifecycle scripts run for packages
+# we trust — esbuild is required by Vite.
+allowBuilds:
+  esbuild: true

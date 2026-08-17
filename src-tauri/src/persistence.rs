@@ -347,10 +347,13 @@ fn is_forbidden_system_path(path: &Path) -> bool {
             "/lib64", "/snap", "/System", "/private/etc", "/private/var/db",
         ];
         // /usr/local is commonly used for user software — allow it by carving out.
-        if path_is_within(path, Path::new("/usr/local")) {
+        // `path` is a PathBuf from strip_verbatim_prefix — borrow for &Path.
+        if path_is_within(&path, Path::new("/usr/local")) {
             return false;
         }
-        DENY_PREFIX.iter().any(|d| path_is_within(path, Path::new(d)))
+        DENY_PREFIX
+            .iter()
+            .any(|d| path_is_within(&path, Path::new(d)))
     }
 }
 
