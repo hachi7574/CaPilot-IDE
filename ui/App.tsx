@@ -1,3 +1,4 @@
+import { useEffect, useState, type ComponentType } from "react";
 import { LeftSidebar } from "./components/layout/LeftSidebar";
 import { MainArea } from "./components/layout/MainArea";
 import { RightSidebar } from "./components/layout/RightSidebar";
@@ -12,9 +13,32 @@ import { useUsageSync } from "./state/usage";
 import { useContextUsageSync } from "./state/usageContext";
 import { useUpdateSync } from "./state/update";
 import { useStore } from "./state/store";
-import { AnnotationLayer } from "./components/annotations/AnnotationLayer";
-import { AnnotationTray } from "./components/annotations/AnnotationTray";
 import "./App.css";
+
+/**
+ * Design-feedback annotation UI is a `tauri dev` tool only.
+ *
+ * Production builds (`pnpm tauri build` / tagged releases) must not ship the
+ * floating tray or pick layer. Vite replaces `import.meta.env.DEV` with the
+ * literal `false` at build time, so the dynamic import below is eliminated
+ * from the production module graph (a static import would still pull the
+ * annotation modules in even behind a dead `&&` branch).
+ */
+function DevAnnotationsGate() {
+  const [Comp, setComp] = useState<ComponentType | null>(null);
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    let cancelled = false;
+    void import("./components/annotations/DevAnnotations").then((m) => {
+      if (!cancelled) setComp(() => m.DevAnnotations);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  if (!import.meta.env.DEV || !Comp) return null;
+  return <Comp />;
+}
 
 function App() {
   useResourceSync();
@@ -43,8 +67,7 @@ function App() {
         <LeftSidebar />
       </div>
       <StatusBar />
-      <AnnotationLayer />
-      <AnnotationTray />
+      <DevAnnotationsGate />
       {!onboarded && <Onboarding />}
     </div>
   );
