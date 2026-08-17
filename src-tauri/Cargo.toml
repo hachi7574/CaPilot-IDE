@@ -1,6 +1,6 @@
 [package]
 name = "capilot-ide"
-version = "0.1.7"
+version = "0.1.8"
 description = "CaPilot IDE — local AI coding workspace"
 authors = ["hachi7574"]
 edition = "2021"
