@@ -8,6 +8,9 @@ use std::sync::OnceLock;
 /// - `"bash"` (norc: true) — minimal shell, skips `~/.bashrc` (clean, fast).
 /// - `"bash-rc"` (norc: false) — full interactive bash that sources the user's
 ///   `~/.bashrc`, so the prompt / aliases / PATH match the system terminal.
+///
+/// On Windows this is **Git Bash** (optional). The default new-terminal entry is
+/// the OS shell (`shell` runtime), not bash — see [`super::shell`].
 pub struct BashAdapter {
     id: &'static str,
     norc: bool,

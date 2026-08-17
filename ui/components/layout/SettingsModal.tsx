@@ -339,10 +339,12 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     }
   };
 
-  // Agent runtimes only — plain shells (bash) stay out of this panel. Show
-  // unavailable rows too so a failed/slow probe isn't mistaken for "none
+  // Agent runtimes only — plain shells (shell / bash*) stay out of this panel.
+  // Show unavailable rows too so a failed/slow probe isn't mistaken for "none
   // installed" when the new-terminal picker still lists every template.
-  const agentRuntimes = runtimes.filter((rt) => !rt.id.startsWith("bash"));
+  const agentRuntimes = runtimes.filter(
+    (rt) => rt.id !== "shell" && !rt.id.startsWith("bash")
+  );
   const installedAgents = agentRuntimes.filter((rt) => rt.available);
 
   return (

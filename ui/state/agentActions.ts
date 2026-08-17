@@ -63,15 +63,25 @@ export async function spawnAgent(
   return info.id;
 }
 
+/** True for plain interactive shells (OS shell / bash) — not agent CLIs. */
+function isShellRuntime(runtime: string): boolean {
+  return (
+    runtime === "shell" ||
+    runtime === "bash" ||
+    runtime === "bash-rc" ||
+    runtime.startsWith("bash")
+  );
+}
+
 /** Spawn a terminal from a new-terminal template (project "+" / tab-bar "+"
- *  picker): bash → plain shell, claude → claude code. Custom quick-start
- *  commands run in a bash terminal after the shell reaches its prompt. */
+ *  picker): shell → OS default terminal, claude → claude code. Custom
+ *  quick-start commands run in the shell after it reaches its prompt. */
 export async function spawnTerminal(
   project: string,
   template: { runtime: string; command: string }
 ): Promise<string> {
   const id = await spawnAgent(project, template.runtime);
-  if (template.command && template.runtime.startsWith("bash")) {
+  if (template.command && isShellRuntime(template.runtime)) {
     // Wait for the shell prompt, then send the command (raw:false appends \r).
     await new Promise((r) => setTimeout(r, 400));
     // The template command is user-intended work, not boot output — end the
@@ -84,9 +94,9 @@ export async function spawnTerminal(
   return id;
 }
 
-/** Spawn a bash terminal whose cwd is an arbitrary directory (e.g. a folder
- *  picked in the file tree). `command` (optional) runs after the shell reaches
- *  its prompt. The session is grouped under `project` for the sidebar. */
+/** Spawn the OS default shell (or bash fallback) whose cwd is an arbitrary
+ *  directory (e.g. a folder picked in the file tree). `command` (optional) runs
+ *  after the shell reaches its prompt. Grouped under `project` in the sidebar. */
 export async function spawnBashAt(
   project: string,
   dir: string,
@@ -94,10 +104,16 @@ export async function spawnBashAt(
 ): Promise<string> {
   const s = useStore.getState();
   const { channel, flush } = createBufferedChannel();
+  // Prefer the OS shell; fall back to bash-rc when shell isn't registered yet
+  // (very old daemon) so file-tree "在此打开终端" still works.
+  const runtime =
+    s.runtimes.find((r) => r.id === "shell")?.available === false
+      ? "bash-rc"
+      : "shell";
   let info: AgentInfo;
   try {
     info = (await invoke("agent_spawn", {
-      runtime: "bash-rc",
+      runtime,
       project,
       projectRoot: dir,
       resumeKey: null,
@@ -116,7 +132,7 @@ export async function spawnBashAt(
     id: info.id,
     type: "agent",
     agentId: info.id,
-    title: info.title || "bash",
+    title: info.title || (runtime === "shell" ? "终端" : "bash"),
   });
   if (command) {
     // Wait for the shell prompt, then send the command (raw:false appends \r).

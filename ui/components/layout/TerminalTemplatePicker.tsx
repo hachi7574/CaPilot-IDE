@@ -6,11 +6,11 @@ import { Icon, runtimeIcon } from "../Icon";
 /**
  * New-terminal template picker for the project "+" / tab-bar "+" buttons.
  *
- * bash (fixed, always first) / installed agent CLIs (Claude / Codex / dsh / Pi)
- * / user-defined quick-start commands. Agent templates are hidden when their
- * runtime is not detected (same source as Settings → 已安装). Right-click a
- * non-fixed template to rename it or edit its launch command; "＋ 添加快速启动"
- * adds a new one (persisted to localStorage).
+ * OS shell (fixed, always first) / optional Git Bash / installed agent CLIs
+ * (Claude / Codex / dsh / Pi) / user-defined quick-start commands. Agent
+ * templates are hidden when their runtime is not detected (same source as
+ * Settings → 已安装). Bash is optional on Windows (hidden when missing).
+ * Right-click a non-fixed template to rename it or edit its launch command.
  */
 export function TerminalTemplatePicker({
   project,
@@ -31,27 +31,30 @@ export function TerminalTemplatePicker({
   const [edit, setEdit] = useState<TermTemplate | null>(null);
   const [adding, setAdding] = useState(false);
 
-// Hide agent templates whose CLI isn't installed. Shell templates (bash /
-  // bash-rc, including user quick-starts) always stay. While the runtime probe
-  // hasn't returned yet, keep agent entries visible to avoid a bash-only flash.
   const availableRuntimeIds = new Set(
     runtimes.filter((r) => r.available).map((r) => r.id)
   );
-  const visibleTemplates = termTemplates.filter((t) => {
-    if (t.fixed || t.runtime === "bash" || t.runtime === "bash-rc") return true;
-    if (runtimes.length === 0) return true;
-    return availableRuntimeIds.has(t.runtime);
-  });
-  // bash / bash-rc share one adapter probe. When missing (common on Windows
-  // without Git Bash on PATH), keep the row clickable so spawn still surfaces
-  // the install hint toast — but mark it so the user knows before clicking.
   const bashAvailable = (() => {
     const hit = runtimes.find(
       (rt) => rt.id === "bash-rc" || rt.id === "bash" || rt.id.startsWith("bash")
     );
-    // Unknown (runtimes not loaded yet) → don't grey out.
+    // Unknown (runtimes not loaded yet) → keep the row (avoid flash).
     return hit ? hit.available : true;
   })();
+  // Fixed OS shell always stays. User quick-starts (runtime shell/bash*) stay.
+  // Optional bash is hidden when the CLI isn't installed (common on Windows
+  // without Git Bash). Agent rows hide when unavailable; while probes are still
+  // empty, keep agents visible to avoid a shell-only flash.
+  const visibleTemplates = termTemplates.filter((t) => {
+    if (t.fixed || t.runtime === "shell") return true;
+    if (t.runtime === "bash" || t.runtime === "bash-rc") {
+      if (runtimes.length === 0) return true;
+      return bashAvailable;
+    }
+    // User quick-starts are stored as shell/bash-rc; anything else is an agent.
+    if (runtimes.length === 0) return true;
+    return availableRuntimeIds.has(t.runtime);
+  });
 
   // Keep the menu fully on-screen: the anchor is the "＋" button's bottom-right
   // corner, which can sit close to the viewport edge. Measure after paint and
@@ -97,15 +100,11 @@ export function TerminalTemplatePicker({
       >
         <div className="tt-label">新建终端</div>
         {visibleTemplates.map((t) => {
-          const isBash = t.runtime.startsWith("bash");
-          const missing = isBash && !bashAvailable;
           return (
             <div
               key={t.id}
-              className={"tt-item" + (missing ? " is-missing" : "")}
+              className="tt-item"
               onClick={() => {
-                // Still attempt spawn when missing — backend returns a
-                // Chinese install hint (Git for Windows / PATH) via toast.
                 spawnTerminal(project, t).catch(console.error);
                 onClose();
               }}
@@ -114,22 +113,13 @@ export function TerminalTemplatePicker({
                 if (t.fixed) return;
                 setEdit(t);
               }}
-              title={
-                missing
-                  ? "未检测到 bash。Windows 请安装 Git for Windows（Git Bash）并重启 CaPilot"
-                  : t.fixed
-                    ? "固定模板"
-                    : "右键编辑 / 重命名"
-              }
+              title={t.fixed ? "固定模板（系统终端）" : "右键编辑 / 重命名"}
             >
               <span className="tt-icon">
                 <Icon name={runtimeIcon(t.runtime)} size={16} />
               </span>
               <span className="tt-name">{t.name}</span>
-              {missing && <span className="tt-cmd">未安装</span>}
-              {!missing && t.command && (
-                <span className="tt-cmd">{t.command}</span>
-              )}
+              {t.command && <span className="tt-cmd">{t.command}</span>}
             </div>
           );
         })}
@@ -170,7 +160,8 @@ export function TerminalTemplatePicker({
               id: `tpl-${Date.now()}`,
               name: nm,
               command: cmd,
-              runtime: "bash-rc",
+              // Quick-starts run inside the OS default shell.
+              runtime: "shell",
             });
             setAdding(false);
           }}
@@ -227,7 +218,7 @@ function TermTemplateModal({
         <div className="ug-nproj-label">启动指令</div>
         <input
           className="nproj-input"
-          placeholder="在 bash 中执行的命令（可留空）"
+          placeholder="在系统终端中执行的命令（可留空）"
           value={cmd}
           onChange={(e) => setCmd(e.target.value)}
           onKeyDown={(e) => {

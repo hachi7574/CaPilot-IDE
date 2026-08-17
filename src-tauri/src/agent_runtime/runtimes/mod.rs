@@ -4,12 +4,14 @@ pub mod codex;
 pub mod dsh;
 pub mod opencode;
 pub mod pi;
+pub mod shell;
 
 use crate::agent_runtime::adapter::AgentRuntimeAdapter;
 
 /// Registry: map a runtime id to its adapter implementation.
 pub fn get_adapter(runtime: &str) -> Box<dyn AgentRuntimeAdapter> {
     match runtime {
+        "shell" => Box::new(shell::ShellAdapter::new()),
         "bash" => Box::new(bash::BashAdapter::new("bash", true)),
         "bash-rc" => Box::new(bash::BashAdapter::new("bash-rc", false)),
         "codex" => Box::new(codex::CodexAdapter::new()),
@@ -21,9 +23,15 @@ pub fn get_adapter(runtime: &str) -> Box<dyn AgentRuntimeAdapter> {
     }
 }
 
-/// All known runtime ids (for detection lists). The minimal `--norc` "bash"
-/// runtime and opencode stay resolvable in `get_adapter` (for resuming older
-/// sessions) but are no longer offered as a new terminal.
+/// All known runtime ids (for detection lists).
+///
+/// - `shell` — OS default interactive terminal (cmd/pwsh on Windows, $SHELL on Unix)
+/// - `bash-rc` — Git Bash / system bash (optional on Windows)
+/// - agent CLIs
+///
+/// The minimal `--norc` "bash" runtime and opencode stay resolvable in
+/// `get_adapter` (for resuming older sessions) but are not offered as new
+/// terminals.
 pub fn known_runtimes() -> &'static [&'static str] {
-    &["claude", "codex", "dsh", "pi", "bash-rc"]
+    &["claude", "codex", "dsh", "pi", "shell", "bash-rc"]
 }

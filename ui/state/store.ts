@@ -983,8 +983,8 @@ function loadCtrlTRuntime(): string {
 }
 
 /** Effective runtime for Ctrl+T: the configured pick when it's installed,
- *  otherwise claude, otherwise bash (`bash-rc`), otherwise null — the caller
- *  shows the "no runtime" hint instead of spawning. */
+ *  otherwise claude, otherwise the OS shell (`shell`), otherwise bash,
+ *  otherwise null — the caller shows the "no runtime" hint instead of spawning. */
 export function resolveCtrlTRuntime(
   configured: string,
   runtimes: RuntimeInfo[]
@@ -994,32 +994,34 @@ export function resolveCtrlTRuntime(
   );
   if (available.has(configured)) return configured;
   if (available.has("claude")) return "claude";
+  if (available.has("shell")) return "shell";
   if (available.has("bash-rc")) return "bash-rc";
   return null;
 }
 
 // ── New-terminal templates ──────────────────────────────────────
-// The project "+" button opens a picker: bash (fixed, always first) / Claude /
-// Codex / dsh / Pi / user-defined quick-start commands. Built-in agent entries
-// stay in the default list so they reappear when the CLI is installed again;
-// TerminalTemplatePicker hides ones whose runtime reports `available: false`.
-// Custom templates persist locally. (opencode was removed as a selectable
-// runtime — see `known_runtimes`; persisted templates are dropped on load.)
+// The project "+" button opens a picker: OS shell (fixed, always first) /
+// optional Git Bash / Claude / Codex / dsh / Pi / user quick-starts.
+// Built-in agent entries stay in the default list so they reappear when the
+// CLI is installed again; TerminalTemplatePicker hides ones whose runtime
+// reports `available: false`. Custom templates persist locally.
+// (opencode was removed as a selectable runtime — see `known_runtimes`.)
 
 /** A new-terminal template shown in the project "+" picker. `command` is run
- *  after the shell starts (bash / bash-rc) / ignored for agent runtimes;
- *  `fixed` (bash) can't be renamed or removed. */
+ *  after the shell starts (shell / bash*) / ignored for agent runtimes;
+ *  `fixed` (OS shell) can't be renamed or removed. */
 export interface TermTemplate {
   id: string;
   name: string;
   command: string;
-  runtime: "bash" | "bash-rc" | "claude" | "codex" | "dsh" | "pi";
+  runtime: "shell" | "bash" | "bash-rc" | "claude" | "codex" | "dsh" | "pi";
   fixed?: boolean;
 }
 
 const TERM_TEMPLATES_KEY = "capilot.termTemplates";
 const DEFAULT_TEMPLATES: TermTemplate[] = [
-  { id: "bash-rc", name: "bash", command: "", runtime: "bash-rc", fixed: true },
+  { id: "shell", name: "终端", command: "", runtime: "shell", fixed: true },
+  { id: "bash-rc", name: "bash", command: "", runtime: "bash-rc" },
   { id: "claude", name: "claude", command: "", runtime: "claude" },
   { id: "codex", name: "codex", command: "", runtime: "codex" },
   { id: "dsh", name: "dsh", command: "", runtime: "dsh" },
@@ -1029,23 +1031,45 @@ function loadTermTemplates(): TermTemplate[] {
   try {
     const raw = localStorage.getItem(TERM_TEMPLATES_KEY);
     const stored: TermTemplate[] = raw ? (JSON.parse(raw) as TermTemplate[]) : [];
-    // Drop the old minimal `--norc` "bash" template (superseded by the full
-    // bash), re-label the old "正常 bash" default to just "bash", and drop
-    // persisted omp / opencode templates (runtimes removed as new terminals).
+    // Migrations:
+    // - drop minimal `--norc` "bash", omp, opencode (runtimes removed as new terminals)
+    // - promote the old fixed bash-rc row to the OS `shell` template
+    // - re-label legacy "正常 bash"
     const list = stored.filter(
       (t) => t.id !== "bash" && t.id !== "omp" && t.id !== "opencode"
     );
     for (const t of list) {
       if (t.id === "bash-rc" && t.name === "正常 bash") t.name = "bash";
+      // Old installs pinned bash as the fixed first template — free it so the
+      // OS shell can take the fixed slot, and keep bash as an optional row.
+      if (t.id === "bash-rc" && t.fixed) {
+        t.fixed = false;
+        if (!t.name || t.name === "终端") t.name = "bash";
+      }
     }
     const ids = new Set(list.map((t) => t.id));
     for (const b of DEFAULT_TEMPLATES) {
       if (!ids.has(b.id)) list.push(b);
     }
-    // Fixed templates (bash) always come first.
-    return list.sort(
-      (a, b) => Number(b.fixed ?? false) - Number(a.fixed ?? false)
-    );
+    // Ensure the OS shell row stays fixed and first even if a stale local
+    // copy lost the flag.
+    for (const t of list) {
+      if (t.id === "shell") {
+        t.fixed = true;
+        t.runtime = "shell";
+        if (!t.name) t.name = "终端";
+      }
+    }
+    // Fixed templates (OS shell) always come first; bash after shell, then agents.
+    return list.sort((a, b) => {
+      const af = Number(b.fixed ?? false) - Number(a.fixed ?? false);
+      if (af !== 0) return af;
+      if (a.id === "shell") return -1;
+      if (b.id === "shell") return 1;
+      if (a.runtime.startsWith("bash") && !b.runtime.startsWith("bash")) return -1;
+      if (b.runtime.startsWith("bash") && !a.runtime.startsWith("bash")) return 1;
+      return 0;
+    });
   } catch {
     return DEFAULT_TEMPLATES;
   }

@@ -62,6 +62,8 @@ IDE 遵循 CaPilot 主仓库的 **LUCY styleguide**（8-bit Pixel × Apple Smoot
 
 > 已落地（2026-08-17）：**Windows agent CLI 解析**（参考 Paseo）。`agent_runtime/executable.rs` 对 bare name 做 `PATH`+`PATHEXT` 解析，`.cmd`/`.bat`（npm 全局 shim）经 `cmd.exe /d /s /c` 包装后再进探测与 PTY（ConPTY 不应用 PATHEXT、也不能直接 CreateProcess 脚本）。`cli_available` / `cli_version` / 各 runtime 的非 PTY `Command` 与 `pty_core::spawn` 共用此路径。bash/Git Bash 仍是可选用户 shell，不再是 agent 启动前提。
 
+> 已落地（2026-08-17）：**默认交互终端 = OS shell**。新 runtime `shell`：Windows 优先 `pwsh` 否则 `ComSpec`/cmd；Unix 用 `$SHELL`/bash/sh。新建终端模板固定第一项为「终端」；`bash-rc`（Git Bash）降为可选（未安装则隐藏）。文件树「在此打开终端」与快速启动走 `shell`。Agent 启动仍不经过 shell。
+
 ### 待开发项
 
 - **编辑器外部改动监视**（notify → 前端刷新）：Git 面板已用 2.5s 前端轮询兜底，编辑器标签页本身仍未监听磁盘改动

@@ -427,12 +427,15 @@ function FilesPanel() {
   const tabs = useStore((s) => s.tabs);
   const agents = useStore((s) => s.agents);
   const rightSidebarOpen = useStore((s) => s.rightSidebarOpen);
-  // Exactly one open bash terminal (agent sessions excluded) → the
-  // "open in current terminal" folder action becomes available.
+  // Exactly one open plain shell (OS shell / bash; agent sessions excluded) →
+  // the "open in current terminal" folder action becomes available.
   const bashIds = tabs
     .filter((t) => t.type === "agent" && t.agentId)
     .map((t) => t.agentId!)
-    .filter((id) => agents.get(id)?.runtime.startsWith("bash"));
+    .filter((id) => {
+      const rt = agents.get(id)?.runtime ?? "";
+      return rt === "shell" || rt.startsWith("bash");
+    });
   const singleBashId = bashIds.length === 1 ? bashIds[0] : null;
 
   useEffect(() => {
