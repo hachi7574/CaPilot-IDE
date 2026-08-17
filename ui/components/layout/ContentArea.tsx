@@ -165,6 +165,48 @@ function SplitView({
   );
 }
 
+/** Splash empty state: logo / title / hint stay up for a few seconds, then
+ *  fade out so the main pane is just the wallpaper surface. Remounting (e.g.
+ *  closing the last tab) restarts the timer. */
+function EmptyState({
+  noProjects,
+  onNewProject,
+}: {
+  noProjects: boolean;
+  onNewProject: () => void;
+}) {
+  const [faded, setFaded] = useState(false);
+
+  useEffect(() => {
+    setFaded(false);
+    const timer = window.setTimeout(() => setFaded(true), 2000);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  return (
+    <div className={`empty-state${faded ? " faded" : ""}`} aria-hidden={faded}>
+      <div className="empty-state-content">
+        <CaPilotLogo className="empty-state-logo" />
+        <h3>CaPilot IDE</h3>
+        {noProjects ? (
+          <>
+            <p className="empty-state-hint">还没有项目 — 先创建一个新项目</p>
+            <button
+              className="empty-state-cta"
+              onClick={onNewProject}
+              tabIndex={faded ? -1 : 0}
+            >
+              <Icon name="folder-plus" size={13} /> 新建项目
+            </button>
+          </>
+        ) : (
+          <p className="empty-state-hint">按 Ctrl+T 开启一个新的 agent 会话</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function ContentArea() {
   const tabs = useStore((s) => s.tabs);
   const agents = useStore((s) => s.agents);
@@ -291,25 +333,16 @@ export function ContentArea() {
 
   // Empty state (no tab to show anywhere). With no projects yet, guide the
   // user to create one first (the sidebar empty row is the same CTA); with
-  // projects but no open tab, keep the Ctrl+T agent-session hint.
+  // projects but no open tab, keep the Ctrl+T agent-session hint. Brand copy
+  // is a brief splash: visible on entry, then fades after a few seconds so
+  // the wallpaper surface stays clean.
   if (!activeTab && !splitTree) {
-    const noProjects = projects.length === 0;
     return (
       <div className="content-area">
-        <div className="empty-state">
-          <CaPilotLogo className="empty-state-logo" />
-          <h3>CaPilot IDE</h3>
-          {noProjects ? (
-            <>
-              <p className="empty-state-hint">还没有项目 — 先创建一个新项目</p>
-              <button className="empty-state-cta" onClick={() => setNprojOpen(true)}>
-                <Icon name="folder-plus" size={13} /> 新建项目
-              </button>
-            </>
-          ) : (
-            <p className="empty-state-hint">按 Ctrl+T 开启一个新的 agent 会话</p>
-          )}
-        </div>
+        <EmptyState
+          noProjects={projects.length === 0}
+          onNewProject={() => setNprojOpen(true)}
+        />
       </div>
     );
   }

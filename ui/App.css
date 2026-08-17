@@ -407,8 +407,22 @@ body::after {
 
 .empty-state {
   flex: 1; display: flex; flex-direction: column; align-items: center;
-  justify-content: center; color: var(--ink2); gap: 16px;
+  justify-content: center; color: var(--ink2);
   background: var(--term-bg);
+}
+/* Brand splash (logo / title / hint). Fades out a few seconds after mount so
+   the empty pane is just the wallpaper surface; the shell keeps layout. */
+.empty-state-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  opacity: 1;
+  transition: opacity .6s var(--ease-apple);
+}
+.empty-state.faded .empty-state-content {
+  opacity: 0;
+  pointer-events: none;
 }
 .empty-state-logo {
   width: 128px; height: 128px;
@@ -3245,17 +3259,16 @@ body::after { content: none; }
   box-shadow: inset 0 1px 0 rgb(var(--brand-rgb) / 0.08);
 }
 
-/* Wallpaper translucency — one shared surface recipe for chrome panels so left,
-   right, empty main area and tab chrome all match. Terminal stays fully opaque
-   (var(--term-bg) / xterm theme). No backdrop-filter (WebKitGTK is expensive). */
+/* Wallpaper translucency — one shared surface recipe painted once per shell
+   column. Nested children must stay transparent so left/right don't stack a
+   second veil (a second mix looks darker and was making the left rail read
+   heavier than the right). Terminal stays fully opaque (var(--term-bg)). */
 html[data-wallpaper="on"] {
   --wallpaper-surface: color-mix(in srgb, var(--bg2) 72%, transparent);
   --wallpaper-chrome: color-mix(in srgb, var(--bg2) 78%, transparent);
 }
 html[data-wallpaper="on"] .left-sidebar,
 html[data-wallpaper="on"] .right-sidebar,
-html[data-wallpaper="on"] .right-panel,
-html[data-wallpaper="on"] .tab-panel,
 html[data-wallpaper="on"] .content-area,
 html[data-wallpaper="on"] .composer {
   background: var(--wallpaper-surface);
@@ -3266,13 +3279,15 @@ html[data-wallpaper="on"] .right-tabs,
 html[data-wallpaper="on"] .statusbar {
   background-color: var(--wallpaper-chrome);
 }
-/* Nested fills stay clear so we don't stack two translucent layers (e.g.
-   empty-state over content-area) and accidentally re-opaque the wallpaper.
-   Terminal host keeps its own solid --term-bg. */
+/* Clear every nested fill so only the outer shell contributes the veil. */
 html[data-wallpaper="on"] .main-area,
 html[data-wallpaper="on"] .content-panel,
 html[data-wallpaper="on"] .pane-shell,
 html[data-wallpaper="on"] .empty-state,
+html[data-wallpaper="on"] .right-panel,
+html[data-wallpaper="on"] .tab-panel,
+html[data-wallpaper="on"] .sidebar-tree,
+html[data-wallpaper="on"] .sidebar-actions,
 html[data-wallpaper="on"] .ov-section,
 html[data-wallpaper="on"] .ov-section-body {
   background: transparent;
