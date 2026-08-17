@@ -492,15 +492,25 @@ async fn agent_spawn(
             // A caller-supplied project root feeds both `create_dir_all` and the
             // spawned shell's cwd — constrain it to $HOME so an arbitrary path
             // can't be created / used as a shell working dir.
-            let home_path = crate::persistence::user_home()?;
+            //
+            // Check both the raw path and the canonical form: Windows
+            // canonicalize() yields `\\?\C:\...` which does not byte-prefix-
+            // match a plain USERPROFILE, and Git Bash HOME can be `/c/Users/...`
+            // while the dialog returns `C:\Users\...`. `path_is_within_home`
+            // normalizes both sides.
             let p = std::path::PathBuf::from(pr);
-            if !p.starts_with(&home_path) {
+            if !crate::persistence::path_is_within_home(&p)? {
                 return Err("project root escapes allowed directories".to_string());
             }
             std::fs::create_dir_all(&p)
                 .map_err(|e| format!("Failed to create project root: {}", e))?;
-            p.canonicalize()
-                .map_err(|e| format!("Invalid project root: {}", e))?
+            let canon = p
+                .canonicalize()
+                .map_err(|e| format!("Invalid project root: {}", e))?;
+            if !crate::persistence::path_is_within_home(&canon)? {
+                return Err("project root escapes allowed directories".to_string());
+            }
+            canon
         }
         None => {
             let dir = agent_dir(&project, &agent_id);
@@ -1966,8 +1976,7 @@ async fn fs_read(path: String) -> Result<String, String> {
     let resolved = std::path::Path::new(&path)
         .canonicalize()
         .map_err(|e| format!("Invalid path: {}", e))?;
-    let home = crate::persistence::user_home()?;
-    if !resolved.starts_with(&home) {
+    if !crate::persistence::path_is_within_home(&resolved)? {
         return Err("Path escapes allowed directories".to_string());
     }
     std::fs::read_to_string(&resolved).map_err(|e| format!("Failed to read file: {}", e))
@@ -1975,9 +1984,6 @@ async fn fs_read(path: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn fs_write(path: String, content: String) -> Result<(), String> {
-    let home = crate::persistence::user_home()?;
-    let home_path = std::path::Path::new(&home);
-
     let raw = std::path::Path::new(&path);
     // Canonicalize the PARENT (which must exist) to resolve any symlinks in the
     // path, then re-join the file name. This prevents symlink traversal when the
@@ -1989,7 +1995,7 @@ async fn fs_write(path: String, content: String) -> Result<(), String> {
     let canonical_parent = parent
         .canonicalize()
         .map_err(|e| format!("Invalid path: {}", e))?;
-    if !canonical_parent.starts_with(home_path) {
+    if !crate::persistence::path_is_within_home(&canonical_parent)? {
         return Err("Path escapes allowed directories".to_string());
     }
     let file_name = raw
@@ -2015,7 +2021,7 @@ async fn fs_write(path: String, content: String) -> Result<(), String> {
             };
             let canonical_target = std::fs::canonicalize(&real)
                 .map_err(|_| "Symlink target could not be resolved".to_string())?;
-            if !canonical_target.starts_with(home_path) {
+            if !crate::persistence::path_is_within_home(&canonical_target)? {
                 return Err("Path escapes allowed directories".to_string());
             }
             return std::fs::write(&canonical_target, &content)
@@ -2026,7 +2032,7 @@ async fn fs_write(path: String, content: String) -> Result<(), String> {
     // If the target already exists and is a regular file, double-check the
     // canonical path stays in HOME.
     if let Ok(canon) = resolved.canonicalize() {
-        if !canon.starts_with(home_path) {
+        if !crate::persistence::path_is_within_home(&canon)? {
             return Err("Path escapes allowed directories".to_string());
         }
     }
@@ -2039,8 +2045,7 @@ async fn fs_list(dir: String) -> Result<Vec<FsEntryBrief>, String> {
     let resolved = std::path::Path::new(&dir)
         .canonicalize()
         .map_err(|e| format!("Invalid path: {}", e))?;
-    let home = crate::persistence::user_home()?;
-    if !resolved.starts_with(&home) {
+    if !crate::persistence::path_is_within_home(&resolved)? {
         return Err("Path escapes allowed directories".to_string());
     }
     let mut entries = Vec::new();
@@ -2097,8 +2102,7 @@ async fn fs_search(
     if !resolved.is_dir() {
         return Err("Search root is not a directory".to_string());
     }
-    let home = crate::persistence::user_home()?;
-    if !resolved.starts_with(&home) {
+    if !crate::persistence::path_is_within_home(&resolved)? {
         return Err("Path escapes allowed directories".to_string());
     }
     let opts = fs_search::SearchOptions {
@@ -2119,16 +2123,13 @@ async fn fs_search(
 /// create through a symlink final component. Mirrors `fs_write`'s pre-write
 /// resolution so new paths get the same traversal defense.
 fn resolve_in_home(raw: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    let home = crate::persistence::user_home()?;
-    let home_path = std::path::Path::new(&home);
-
     let parent = raw
         .parent()
         .ok_or_else(|| "Invalid path: no parent directory".to_string())?;
     let canonical_parent = parent
         .canonicalize()
         .map_err(|e| format!("Invalid path: {}", e))?;
-    if !canonical_parent.starts_with(home_path) {
+    if !crate::persistence::path_is_within_home(&canonical_parent)? {
         return Err("Path escapes allowed directories".to_string());
     }
     let file_name = raw
@@ -2168,11 +2169,10 @@ async fn fs_create_dir(path: String) -> Result<(), String> {
 /// source (and the paste destination, which must exist) of `fs_paste`, where
 /// following a symlink final component to a HOME-internal target is legitimate.
 fn resolve_existing_in_home(raw: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    let home = crate::persistence::user_home()?;
     let resolved = raw
         .canonicalize()
         .map_err(|e| format!("Invalid path: {}", e))?;
-    if !resolved.starts_with(&home) {
+    if !crate::persistence::path_is_within_home(&resolved)? {
         return Err("Path escapes allowed directories".to_string());
     }
     Ok(resolved)
@@ -2295,11 +2295,16 @@ async fn fs_paste(src: String, dest_dir: String, is_move: bool) -> Result<String
 #[tauri::command]
 async fn fs_delete(path: String) -> Result<(), String> {
     let home = crate::persistence::user_home()?;
-    let home_canon = std::path::Path::new(&home)
-        .canonicalize()
-        .unwrap_or_else(|_| std::path::Path::new(&home).to_path_buf());
+    let home_canon = crate::persistence::strip_verbatim_prefix(
+        &home
+            .canonicalize()
+            .unwrap_or_else(|_| home.clone()),
+    );
     let resolved = resolve_existing_in_home(std::path::Path::new(&path))?;
-    if resolved == home_canon {
+    let resolved_cmp = crate::persistence::strip_verbatim_prefix(&resolved);
+    if crate::persistence::path_is_within(&resolved_cmp, &home_canon)
+        && crate::persistence::path_is_within(&home_canon, &resolved_cmp)
+    {
         return Err("不能删除主目录".to_string());
     }
     if resolved.is_dir() {
@@ -2321,8 +2326,6 @@ async fn fs_rename(src: String, new_name: String) -> Result<String, String> {
     if name.is_empty() || name.contains('/') || name == "." || name == ".." {
         return Err("名称不能为空、包含 / 或为 . / ..".to_string());
     }
-    let home = crate::persistence::user_home()?;
-    let home_path = std::path::Path::new(&home);
     let raw = std::path::Path::new(&src);
     let parent = raw
         .parent()
@@ -2330,7 +2333,7 @@ async fn fs_rename(src: String, new_name: String) -> Result<String, String> {
     let canonical_parent = parent
         .canonicalize()
         .map_err(|e| format!("无效路径: {}", e))?;
-    if !canonical_parent.starts_with(home_path) {
+    if !crate::persistence::path_is_within_home(&canonical_parent)? {
         return Err("路径越界".to_string());
     }
     let file_name = raw
@@ -2338,7 +2341,14 @@ async fn fs_rename(src: String, new_name: String) -> Result<String, String> {
         .ok_or_else(|| "无效路径：无文件名".to_string())?;
     let resolved = canonical_parent.join(file_name);
     // Renaming $HOME itself would otherwise surface as a confusing escape error.
-    if resolved == home_path {
+    let home = crate::persistence::user_home()?;
+    let home_canon = crate::persistence::strip_verbatim_prefix(
+        &home.canonicalize().unwrap_or_else(|_| home.clone()),
+    );
+    let resolved_cmp = crate::persistence::strip_verbatim_prefix(&resolved);
+    if crate::persistence::path_is_within(&resolved_cmp, &home_canon)
+        && crate::persistence::path_is_within(&home_canon, &resolved_cmp)
+    {
         return Err("不能重命名主目录".to_string());
     }
     // symlink_metadata so a dangling symlink can still be renamed.

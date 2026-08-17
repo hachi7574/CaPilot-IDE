@@ -42,14 +42,15 @@ pub fn validate_repo(repo: &str) -> Result<PathBuf, String> {
         .canonicalize()
         .map_err(|error| format!("Invalid repo path: {error}"))?;
     #[cfg(test)]
-    let test_root_allowed = resolved.starts_with(std::env::temp_dir());
+    let test_root_allowed =
+        crate::persistence::path_is_within(&resolved, &std::env::temp_dir());
     #[cfg(not(test))]
     let test_root_allowed = false;
     if !resolved.is_dir()
         || (!test_root_allowed
             && !allowed_roots()
                 .iter()
-                .any(|root| resolved.starts_with(root)))
+                .any(|root| crate::persistence::path_is_within(&resolved, root)))
     {
         return Err("repo path is outside CaPilot project roots".to_string());
     }
@@ -122,8 +123,7 @@ pub fn clone_into(url: &str, target: &Path) -> Result<Output, String> {
     let parent = parent
         .canonicalize()
         .map_err(|error| format!("invalid clone parent: {error}"))?;
-    let home = crate::persistence::user_home()?;
-    if !parent.is_dir() || !parent.starts_with(&home) {
+    if !parent.is_dir() || !crate::persistence::path_is_within_home(&parent)? {
         return Err("clone target is outside the user home".to_string());
     }
     let name = target

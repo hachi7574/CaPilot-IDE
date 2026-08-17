@@ -95,31 +95,141 @@ pub fn worktree_id(repo: &str, path: &std::path::Path) -> String {
 
 /// Resolve the current user's home directory cross-platform.
 ///
-/// Order:
-/// 1. `HOME` — Unix default; also honored when tests / Git Bash set it on Windows
-/// 2. `USERPROFILE` — Windows default
-/// 3. `HOMEDRIVE` + `HOMEPATH` — Windows fallback
+/// - **Unix**: `HOME`.
+/// - **Windows**: prefer `USERPROFILE` / `HOMEDRIVE`+`HOMEPATH`. Git Bash often
+///   sets `HOME` to an MSYS path (`/c/Users/...`) that will not prefix-match the
+///   Win32 paths returned by the file dialog / `canonicalize()` (`C:\Users\...`),
+///   which previously made every custom project root look like an escape.
+///   `HOME` is only accepted on Windows when it already looks like a native path
+///   (tests point it at a temp dir under `C:\...`).
 ///
 /// Production code must use this instead of bare `std::env::var("HOME")`.
-/// Windows GUI processes typically have no `HOME`, only `USERPROFILE`.
 pub fn user_home() -> Result<PathBuf, String> {
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() {
-            return Ok(PathBuf::from(home));
+    #[cfg(windows)]
+    {
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            if !profile.is_empty() {
+                return Ok(PathBuf::from(profile));
+            }
         }
-    }
-    if let Ok(profile) = std::env::var("USERPROFILE") {
-        if !profile.is_empty() {
-            return Ok(PathBuf::from(profile));
+        if let (Ok(drive), Ok(path)) = (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
+            let combined = format!("{drive}{path}");
+            if !combined.is_empty() {
+                return Ok(PathBuf::from(combined));
+            }
         }
-    }
-    if let (Ok(drive), Ok(path)) = (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
-        let combined = format!("{drive}{path}");
-        if !combined.is_empty() {
-            return Ok(PathBuf::from(combined));
+        if let Ok(home) = std::env::var("HOME") {
+            if !home.is_empty() && looks_like_native_windows_path(&home) {
+                return Ok(PathBuf::from(home));
+            }
         }
+        return Err("user home directory is not set (USERPROFILE/HOME)".into());
     }
-    Err("user home directory is not set (HOME/USERPROFILE)".into())
+    #[cfg(not(windows))]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            if !home.is_empty() {
+                return Ok(PathBuf::from(home));
+            }
+        }
+        // Rare non-Windows hosts that only expose the Windows-style vars.
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            if !profile.is_empty() {
+                return Ok(PathBuf::from(profile));
+            }
+        }
+        Err("user home directory is not set (HOME/USERPROFILE)".into())
+    }
+}
+
+/// `true` when `s` looks like a Win32 path (`C:\...`, `\\server\share`, …)
+/// rather than an MSYS/Cygwin home (`/c/Users/...`, `/home/...`).
+#[cfg(windows)]
+fn looks_like_native_windows_path(s: &str) -> bool {
+    let b = s.as_bytes();
+    // Drive-letter path: "C:\" or "C:/"
+    if b.len() >= 3
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b[2] == b'\\' || b[2] == b'/')
+    {
+        return true;
+    }
+    // UNC / extended: "\\server\share" or "\\?\C:\..."
+    s.starts_with(r"\\") || s.starts_with("//")
+}
+
+/// Strip a Windows extended-length/`verbatim` prefix (`\\?\C:\...`, `\\?\UNC\...`)
+/// so prefix checks against a plain `USERPROFILE` succeed. No-op on other forms.
+pub fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        if let Some(unc) = rest.strip_prefix("UNC\\") {
+            return PathBuf::from(format!(r"\\{unc}"));
+        }
+        if let Some(unc) = rest.strip_prefix("UNC/") {
+            return PathBuf::from(format!(r"\\{unc}"));
+        }
+        return PathBuf::from(rest);
+    }
+    if let Some(rest) = s.strip_prefix("//?/") {
+        if let Some(unc) = rest.strip_prefix("UNC/") {
+            return PathBuf::from(format!("//{unc}"));
+        }
+        return PathBuf::from(rest);
+    }
+    path.to_path_buf()
+}
+
+/// `true` when `path` is `root` or a descendant of `root`.
+///
+/// Unlike bare [`Path::starts_with`], this:
+/// - strips Windows `\\?\` verbatim prefixes on both sides (Win32
+///   `canonicalize()` emits them; env-derived homes usually don't);
+/// - compares case-insensitively on Windows (NTFS default).
+///
+/// Does **not** resolve symlinks — callers that need that should
+/// `canonicalize` first, then call this.
+pub fn path_is_within(path: &Path, root: &Path) -> bool {
+    let path = strip_verbatim_prefix(path);
+    let root = strip_verbatim_prefix(root);
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        fn win_lower_components(p: &Path) -> Vec<Vec<u16>> {
+            p.components()
+                .map(|c| {
+                    c.as_os_str()
+                        .encode_wide()
+                        .map(|u| {
+                            // ASCII-fold is enough for drive letters + typical user paths;
+                            // full Unicode case fold is unnecessary for home-prefix checks.
+                            if (b'A' as u16..=b'Z' as u16).contains(&u) {
+                                u + (b'a' as u16 - b'A' as u16)
+                            } else {
+                                u
+                            }
+                        })
+                        .collect()
+                })
+                .collect()
+        }
+        let path_c = win_lower_components(&path);
+        let root_c = win_lower_components(&root);
+        path_c.starts_with(&root_c)
+    }
+    #[cfg(not(windows))]
+    {
+        path.starts_with(&root)
+    }
+}
+
+/// Best-effort: canonicalize `user_home()` when it exists, then
+/// [`path_is_within`]. Used by every IPC surface that scopes paths to $HOME.
+pub fn path_is_within_home(path: &Path) -> Result<bool, String> {
+    let home = user_home()?;
+    let home = home.canonicalize().unwrap_or(home);
+    Ok(path_is_within(path, &home))
 }
 
 /// Like [`user_home`], but falls back to a writable temp dir instead of erroring.
@@ -1423,5 +1533,96 @@ mod tests {
         // Idempotent: a second pass repairs nothing.
         assert_eq!(repair_agent_meta(&db).unwrap(), 0);
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn strip_verbatim_prefix_handles_drive_and_unc() {
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\?\C:\Users\hachi\proj")),
+            PathBuf::from(r"C:\Users\hachi\proj")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\?\UNC\server\share\dir")),
+            PathBuf::from(r"\\server\share\dir")
+        );
+        // Non-verbatim paths are unchanged.
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"C:\Users\hachi")),
+            PathBuf::from(r"C:\Users\hachi")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(Path::new("/home/hachi")),
+            PathBuf::from("/home/hachi")
+        );
+    }
+
+    #[test]
+    fn path_is_within_basic_hierarchy() {
+        assert!(path_is_within(
+            Path::new("/home/hachi/Documents/repo"),
+            Path::new("/home/hachi")
+        ));
+        assert!(path_is_within(
+            Path::new("/home/hachi"),
+            Path::new("/home/hachi")
+        ));
+        // Sibling of home must not match (component-wise, not string prefix).
+        assert!(!path_is_within(
+            Path::new("/home/hachi2/repo"),
+            Path::new("/home/hachi")
+        ));
+        assert!(!path_is_within(
+            Path::new("/var/tmp"),
+            Path::new("/home/hachi")
+        ));
+    }
+
+    /// Windows spawn failure: canonicalize() returns `\\?\C:\…` while
+    /// USERPROFILE is a plain drive path. Both forms must match after strip +
+    /// case-fold. Only meaningful on Windows path semantics.
+    #[cfg(windows)]
+    #[test]
+    fn path_is_within_windows_verbatim_and_case() {
+        let home = Path::new(r"C:\Users\hachi");
+        let canon_child = Path::new(r"\\?\C:\Users\hachi\Documents\repo");
+        assert!(path_is_within(canon_child, home));
+        // Case-insensitive drive / user segment.
+        assert!(path_is_within(
+            Path::new(r"c:\users\HACHI\Documents"),
+            home
+        ));
+        assert!(!path_is_within(
+            Path::new(r"C:\Users\hachi2\repo"),
+            home
+        ));
+        assert!(!path_is_within(Path::new(r"C:\Windows"), home));
+        assert!(!path_is_within(Path::new(r"\\?\D:\other"), home));
+    }
+
+    #[test]
+    fn path_is_within_home_accepts_descendant() {
+        let _guard = crate::agent_runtime::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = std::env::temp_dir().join(format!(
+            "capilot-path-home-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+        let child = home.join("Documents").join("repo");
+        std::fs::create_dir_all(&child).unwrap();
+        assert!(path_is_within_home(&child).unwrap());
+        assert!(path_is_within_home(&home).unwrap());
+        // Outside home.
+        let outside = std::env::temp_dir().join(format!(
+            "capilot-path-outside-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&outside).unwrap();
+        assert!(!path_is_within_home(&outside).unwrap());
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 }
