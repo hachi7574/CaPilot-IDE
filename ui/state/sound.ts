@@ -20,9 +20,18 @@ export interface SoundConfig {
   waveform: OscillatorType;
 }
 
-/** Per-theme chime map. Currently every theme resolves to the default
- *  confirmation sound; entries here are how a theme gets its own voice. */
-const THEME_SOUNDS: Record<string, SoundConfig> = {};
+/** Per-theme chime map. Missing ids fall back to the default confirmation
+ *  sound; entries here give a theme its own voice. */
+const THEME_SOUNDS: Record<string, SoundConfig> = {
+  // 神秘蓝鲸 — slightly lower, longer pair (deep-water ping).
+  "blue-whale": {
+    notes: [523.25, 698.46],
+    starts: [0, 0.11],
+    durations: [0.16, 0.3],
+    gain: 0.15,
+    waveform: "sine",
+  },
+};
 
 /** Default confirmation chime — confirmation-001. */
 const CONFIRMATION_SOUND: SoundConfig = {
