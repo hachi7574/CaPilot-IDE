@@ -329,7 +329,8 @@ const cssVar = (name: string, fallback: string): string => {
 };
 
 /** Read the current CSS palette into xterm, whose canvas renderer cannot use
- *  CSS variables directly. Called both at construction and on theme changes. */
+ *  CSS variables directly. Called both at construction and on theme changes.
+ *  Terminal stays opaque — wallpaper only shows through chrome panels. */
 const readTerminalTheme = () => ({
   background: cssVar("--term-bg", "#0D1117"),
   foreground: cssVar("--pl-fg", "#ABB2BF"),

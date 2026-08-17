@@ -27,7 +27,13 @@
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "$HOME/**"
+          "$HOME/**",
+          "$DESKTOP/**",
+          "$DOCUMENT/**",
+          "$DOWNLOAD/**",
+          "$PICTURE/**",
+          "$PUBLIC/**",
+          "$VIDEO/**"
         ]
       }
     }
