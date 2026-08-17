@@ -197,10 +197,16 @@ export function LeftSidebar() {
       .catch(console.error);
   }, [setProjects, setProjectRoots, setFocusedProject]);
 
-  // Close the context menu on outside click / Escape.
+  // Close the context menu on outside click / Escape. The timestamp guard
+  // ignores events fired within 150 ms of opening — some compositors
+  // (WebKitGTK) synthesize a click right after the contextmenu, which would
+  // otherwise close the menu instantly.
   useEffect(() => {
     if (!ctx) return;
-    const close = () => setCtx(null);
+    const openedAt = Date.now();
+    const close = () => {
+      if (Date.now() - openedAt > 150) setCtx(null);
+    };
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
     window.addEventListener("click", close);
     window.addEventListener("contextmenu", close);
@@ -816,7 +822,9 @@ export function LeftSidebar() {
                 });
               })()}
               {/* Drop-to-bottom zone: dropping a project onto the blank area
-                  below the list moves it to the end. */}
+                  below the list moves it to the end. Right-click opens the
+                  blank-space menu (新建项目) — same entry point as the "+"
+                  button and the empty-list row. */}
               <div
                 className={`proj-dropzone${draggedProj ? " dragging" : ""}`}
                 onDragOver={(e) => {
@@ -831,6 +839,11 @@ export function LeftSidebar() {
                   const last = projects[projects.length - 1];
                   if (from && last && from !== last) moveProject(from, last);
                   setDraggedProj(null);
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setCtx({ x: e.clientX, y: e.clientY });
                 }}
               />
             </div>
@@ -885,6 +898,7 @@ export function LeftSidebar() {
           onSpawnInProject={spawnInProject}
           onRenameProject={setRenameTarget}
           onSleepProject={sleepProject}
+          onNewProject={() => setNprojOpen(true)}
           onRenameAgent={(id) => {
             setRenameAgentId(id);
             setCtx(null);
@@ -1305,6 +1319,7 @@ function ContextMenu({
   onSpawnInProject,
   onRenameProject,
   onSleepProject,
+  onNewProject,
   onRenameAgent,
 }: {
   ctx: CtxState;
@@ -1312,19 +1327,42 @@ function ContextMenu({
   onSpawnInProject?: (project: string) => void;
   onRenameProject?: (project: string) => void;
   onSleepProject?: (project: string) => void;
+  onNewProject?: () => void;
   onRenameAgent?: (agentId: string) => void;
 }) {
-  // All hooks must run unconditionally (Rules of Hooks). The project branch
-  // below early-returns, so any hook call after it would change the hook count
-  // between renders (project menu → agent menu) and make React throw "Rendered
-  // more hooks than during the previous render". Compute the agent-derived
-  // values up here even though the project branch doesn't use them.
+  // All hooks must run unconditionally (Rules of Hooks). The project / blank
+  // branches below early-return, so any hook call after them would change the
+  // hook count between renders (project menu → agent menu) and make React throw
+  // "Rendered more hooks than during the previous render". Compute the
+  // agent-derived values up here even though the other branches don't use them.
   const agent = useStore((s) => s.agents.get(ctx.agentId ?? ""));
   const allAgents = useStore((s) => s.agents);
   const runtimes = useStore((s) => s.runtimes);
   const addAgent = useStore((s) => s.addAgent);
   const worktrees = useStore((s) => s.worktrees);
   const projectRoots = useStore((s) => s.projectRoots);
+
+  // ── Blank-space context (sidebar dropzone below the project list) ──
+  if (!ctx.project && !ctx.agentId) {
+    return (
+      <div
+        className="ctx-menu"
+        style={{ position: "fixed", left: ctx.x, top: ctx.y, zIndex: 1000 }}
+        onClick={(e) => e.stopPropagation()}
+        onContextMenu={(e) => e.stopPropagation()}
+      >
+        <div
+          className="ctx-item"
+          onClick={() => {
+            onNewProject?.();
+            onClose();
+          }}
+        >
+          <Icon name="folder-plus" size={13} /> 新建项目
+        </div>
+      </div>
+    );
+  }
 
   // ── Project context ───────────────────────────────────────────
   if (ctx.project) {
