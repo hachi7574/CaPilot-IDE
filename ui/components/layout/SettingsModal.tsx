@@ -37,6 +37,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const setCtrlTRuntime = useStore((s) => s.setCtrlTRuntime);
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const themePickerRef = useRef<HTMLDivElement>(null);
+  const [runtimeMenuOpen, setRuntimeMenuOpen] = useState(false);
+  const runtimePickerRef = useRef<HTMLDivElement>(null);
   const currentTheme = getTheme(themeId) ?? THEMES[0];
   const [activeSection, setActiveSection] = useState<
     "runtimes" | "appearance" | "sessions" | "updates"
@@ -63,7 +65,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     }
     // The final panel is shorter than the viewport on some window sizes, so it
     // can never reach the 72px threshold. Reaching the scroll bottom still
-    // means the firmware/update section is the user's current destination.
+    // means the update section is the user's current destination.
     if (container.scrollTop + container.clientHeight >= container.scrollHeight - 2) {
       visible = "updates";
     }
@@ -77,11 +79,15 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
         setThemeMenuOpen(false);
         return;
       }
+      if (runtimeMenuOpen) {
+        setRuntimeMenuOpen(false);
+        return;
+      }
       onClose();
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [onClose, themeMenuOpen]);
+  }, [onClose, themeMenuOpen, runtimeMenuOpen]);
 
   useEffect(() => {
     if (!themeMenuOpen) return;
@@ -93,6 +99,17 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     document.addEventListener("pointerdown", closeThemeMenu);
     return () => document.removeEventListener("pointerdown", closeThemeMenu);
   }, [themeMenuOpen]);
+
+  useEffect(() => {
+    if (!runtimeMenuOpen) return;
+    const closeRuntimeMenu = (event: PointerEvent) => {
+      if (!runtimePickerRef.current?.contains(event.target as Node)) {
+        setRuntimeMenuOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", closeRuntimeMenu);
+    return () => document.removeEventListener("pointerdown", closeRuntimeMenu);
+  }, [runtimeMenuOpen]);
 
   // App self-update slice.
   const currentVersion = useStore((s) => s.currentVersion);
@@ -752,39 +769,83 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             <span>Ctrl+T 新建终端</span>
             <small>快捷键创建的 Agent 运行时</small>
           </div>
-          <div className="settings-help-text">
-            默认为 Claude；未安装时自动回退到 Bash，若一个运行时都没有则 Ctrl+T 会给出提示。
-          </div>
-          <div className="settings-choice-list" role="listbox" aria-label="Ctrl+T 新建终端运行时">
-            {runtimes.filter((rt) => rt.available).map((rt) => {
-              const active = ctrlTRuntime === rt.id;
-              return (
+          {(() => {
+            const availableRuntimes = runtimes.filter((rt) => rt.available);
+            const currentRuntime =
+              availableRuntimes.find((rt) => rt.id === ctrlTRuntime) ?? availableRuntimes[0] ?? null;
+            return (
+              <div className="settings-runtime-picker" ref={runtimePickerRef}>
                 <button
-                  key={rt.id}
                   type="button"
-                  role="option"
-                  aria-selected={active}
-                  className={active ? "active" : ""}
-                  onClick={() => setCtrlTRuntime(rt.id)}
+                  className="settings-runtime-trigger"
+                  aria-label="Ctrl+T 新建终端运行时"
+                  aria-haspopup="listbox"
+                  aria-expanded={runtimeMenuOpen}
+                  aria-controls="settings-runtime-menu"
+                  disabled={availableRuntimes.length === 0}
+                  onClick={() => setRuntimeMenuOpen((open) => !open)}
                 >
-                  <span className="settings-choice-icon">
-                    <Icon name={runtimeIcon(rt.id)} size={14} />
+                  <span className="settings-runtime-current">
+                    {currentRuntime ? (
+                      <>
+                        <span className="settings-runtime-current-icon">
+                          <Icon name={runtimeIcon(currentRuntime.id)} size={14} />
+                        </span>
+                        <span className="settings-runtime-current-copy">
+                          <b>{currentRuntime.name}</b>
+                          <small>{currentRuntime.id}</small>
+                        </span>
+                      </>
+                    ) : (
+                      <span className="settings-runtime-current-copy">
+                        <b>无可用运行时</b>
+                        <small>请先在运行时面板安装</small>
+                      </span>
+                    )}
                   </span>
-                  <span className="settings-choice-copy">
-                    <b>{rt.name}</b>
-                    <small>{rt.id}</small>
-                  </span>
-                  <span className="settings-choice-state">{active ? "ACTIVE" : "SET"}</span>
+                  <span className="settings-theme-chevron" aria-hidden="true" />
                 </button>
-              );
-            })}
-          </div>
+
+                {runtimeMenuOpen && availableRuntimes.length > 0 && (
+                  <div
+                    className="settings-runtime-menu"
+                    id="settings-runtime-menu"
+                    role="listbox"
+                    aria-label="Ctrl+T 新建终端运行时"
+                  >
+                    {availableRuntimes.map((rt) => {
+                      const selected = rt.id === (currentRuntime?.id ?? ctrlTRuntime);
+                      return (
+                        <button
+                          key={rt.id}
+                          type="button"
+                          role="option"
+                          aria-selected={selected}
+                          className={`settings-runtime-option${selected ? " active" : ""}`}
+                          onClick={() => {
+                            setCtrlTRuntime(rt.id);
+                            setRuntimeMenuOpen(false);
+                          }}
+                        >
+                          <span className="settings-runtime-option-icon">
+                            <Icon name={runtimeIcon(rt.id)} size={14} />
+                          </span>
+                          <span className="settings-runtime-option-copy">
+                            <b>{rt.name}</b>
+                            <small>{rt.id}</small>
+                          </span>
+                          {selected && <span className="settings-runtime-option-state">ACTIVE</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
           <div className="settings-field-label">
             <span>终端自然退出后</span>
             <small>适用于 exit、任务完成与 Ctrl+D</small>
-          </div>
-          <div className="settings-help-text">
-            进程自然退出后（终端里 exit / 任务跑完 / Ctrl+D，不是点 × 关闭）
           </div>
           <div className="settings-choice-grid">
             <button
@@ -850,127 +911,78 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
         {/* About / Updates */}
         <section id="settings-updates" className="modal-section settings-panel settings-update-panel">
           <div className="settings-section-head">
-            <span>FIRMWARE CHANNEL</span>
+            <span>UPDATES</span>
             <h4>关于与更新</h4>
-            <p>检查新版本并管理启动时更新策略。</p>
-          </div>
-          <div className="settings-version-plate">
-            <div className="settings-version-mark">C</div>
-            <div>
-              <b>CaPilot IDE</b>
-              <span>VERSION {currentVersion ?? "…"}</span>
-            </div>
-            <small>LOCAL AI CODING WORKSPACE</small>
           </div>
 
-          {/* Version check row */}
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+          <div className="settings-update-row">
+            <div className="settings-update-identity">
+              <b>CaPilot IDE</b>
+              <span>v{currentVersion ?? "…"}</span>
+            </div>
             <button
+              type="button"
+              className="settings-update-check"
               onClick={() => checkForUpdate()}
               disabled={updateStatus === "checking" || updateDownloading}
-              style={{
-                display: "flex", alignItems: "center", gap: 4,
-                fontFamily: "var(--pixel)",
-                fontSize: "var(--fs-2xs)",
-                padding: "4px 12px",
-                border: "1px solid var(--rule2)",
-                color: "var(--ink2)",
-                background: "transparent",
-                borderRadius: 6,
-                cursor: updateStatus === "checking" || updateDownloading ? "default" : "pointer",
-              }}
             >
               <Icon name="refresh-cw" size={11} />
               {updateStatus === "checking" ? "检查中…" : "检查更新"}
             </button>
-            {updateStatus === "available" && updateLatest && (
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: "var(--fs-xs)", color: "var(--success)" }}>
-                <Icon name="circle-dot" size={12} />
-                发现新版本 v{updateLatest}
-              </span>
-            )}
-            {updateStatus === "up-to-date" && (
-              <span style={{ fontSize: "var(--fs-xs)", color: "var(--ink2)" }}>已是最新版本</span>
-            )}
-            {updateStatus === "error" && updateError && (
-              <span style={{ fontSize: "var(--fs-xs)", color: "var(--warn)" }}>{updateError}</span>
-            )}
           </div>
 
-          {/* Release notes + install */}
+          {updateStatus === "up-to-date" && (
+            <div className="settings-update-status">已是最新版本</div>
+          )}
+          {updateStatus === "error" && updateError && (
+            <div className="settings-update-status is-warn">{updateError}</div>
+          )}
+          {updateStatus === "available" && updateLatest && (
+            <div className="settings-update-status is-ok">发现新版本 v{updateLatest}</div>
+          )}
+
           {updateStatus === "available" && (
-            <>
+            <div className="settings-update-actions">
               {updateNotes && (
-                <details style={{ marginTop: 8, fontSize: "var(--fs-xs)", color: "var(--ink2)" }}>
-                  <summary style={{ cursor: "pointer", userSelect: "none" }}>发布说明</summary>
-                  <pre style={{ whiteSpace: "pre-wrap", fontFamily: "var(--mono)", fontSize: "var(--fs-2xs)", color: "var(--ink2)", background: "var(--bg)", border: "1px solid var(--rule)", borderRadius: 6, padding: 8, marginTop: 6, maxHeight: 140, overflowY: "auto" }}>
-                    {updateNotes}
-                  </pre>
+                <details className="settings-update-notes">
+                  <summary>发布说明</summary>
+                  <pre>{updateNotes}</pre>
                 </details>
               )}
-              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+              <div className="settings-update-install-row">
                 <button
+                  type="button"
+                  className="settings-update-install"
                   onClick={() => downloadAndInstall()}
                   disabled={!updateInstallable || updateDownloading}
-                  style={{
-                    display: "flex", alignItems: "center", gap: 4,
-                    fontFamily: "var(--pixel)",
-                    fontSize: "var(--fs-2xs)",
-                    padding: "6px 14px",
-                    border: `1px solid ${updateInstallable ? "var(--brand)" : "var(--rule2)"}`,
-                    color: updateInstallable ? "var(--brand)" : "var(--ink2)",
-                    background: updateInstallable ? "rgb(var(--brand-rgb) / .08)" : "transparent",
-                    borderRadius: 6,
-                    cursor: updateInstallable && !updateDownloading ? "pointer" : "default",
-                  }}
                 >
                   <Icon name="download" size={12} />
                   {updateDownloading ? "下载中…" : "下载并安装"}
                 </button>
                 {!updateInstallable && (
-                  <span style={{ fontSize: "var(--fs-2xs)", color: "var(--warn)" }}>
-                    开发构建不支持自动安装
-                  </span>
+                  <span className="settings-update-status is-warn">开发构建不支持自动安装</span>
                 )}
               </div>
               {updateDownloading && updateProgress != null && (
-                <div style={{ marginTop: 10 }}>
-                  <div style={{ height: 6, background: "var(--rule2)", borderRadius: 3, overflow: "hidden" }}>
+                <div className="settings-update-progress">
+                  <div className="settings-update-progress-track">
                     <div
-                      style={{
-                        height: "100%",
-                        width: `${Math.round(updateProgress * 100)}%`,
-                        background: "var(--brand)",
-                        transition: "width 0.2s ease",
-                      }}
+                      className="settings-update-progress-bar"
+                      style={{ width: `${Math.round(updateProgress * 100)}%` }}
                     />
                   </div>
-                  <div style={{ fontSize: "var(--fs-2xs)", color: "var(--ink2)", marginTop: 4, fontFamily: "var(--mono)" }}>
-                    {Math.round(updateProgress * 100)}%
-                  </div>
+                  <span>{Math.round(updateProgress * 100)}%</span>
                 </div>
               )}
-              <div style={{ fontSize: "var(--fs-2xs)", color: "var(--ink2)", marginTop: 8 }}>
-                安装完成后应用将自动重启，正在运行的会话会保留在侧栏，重启后可继续或恢复。
-              </div>
-            </>
+            </div>
           )}
 
-          {/* Startup auto-check toggle */}
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12, borderTop: "1px solid var(--rule)", paddingTop: 10 }}>
-            <span style={{ fontSize: "var(--fs-sm)", color: "var(--ink2)" }}>启动时自动检查更新</span>
+          <div className="settings-update-toggle">
+            <span>启动时自动检查更新</span>
             <button
+              type="button"
               onClick={() => setAutoCheckUpdate(!autoCheckUpdate)}
-              style={{
-                fontFamily: "var(--pixel)",
-                fontSize: "var(--fs-2xs)",
-                padding: "4px 12px",
-                border: `1px solid ${autoCheckUpdate ? "var(--brand)" : "var(--rule2)"}`,
-                color: autoCheckUpdate ? "var(--brand)" : "var(--ink2)",
-                background: autoCheckUpdate ? "rgb(var(--brand-rgb) / .08)" : "transparent",
-                borderRadius: 6,
-                cursor: "pointer",
-              }}
+              className={autoCheckUpdate ? "active" : ""}
             >
               {autoCheckUpdate ? "已开启" : "已关闭"}
             </button>

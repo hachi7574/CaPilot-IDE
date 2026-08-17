@@ -42,7 +42,7 @@ IDE 遵循 CaPilot 主仓库的 **LUCY styleguide**（8-bit Pixel × Apple Smoot
 - 字体内嵌于 `public/fonts/`：`JetBrainsMono-{Regular,Bold}.ttf`、`FusionPixel-Prop-zh_hans.ttf`（12px 比例）、`Tektur-{Regular,Medium}.ttf`
 - logo 在 `public/logo.png`（源文件见 `ui/assets/logo/`，UI 经 `public/` 引用）
 - 颜色令牌定义在 `ui/App.css :root`（`@font-face` 引用 `/fonts/*.ttf`，全本地、无 Google Fonts）
-- 应用图标统一放在 `ui/assets/app-icon/`（由 `tauri.conf.json` `bundle.icon` 以 `../ui/assets/app-icon/*` 引用）
+- 应用图标统一放在 `ui/assets/app-icon/`（由 `tauri.conf.json` `bundle.icon` 以 `../ui/assets/app-icon/*` 引用）。源图为 quantum 风格 `icon.png`（512）。Linux/deb 使用常见 hicolor 尺寸 `16/24/32/48/64/128/256/512` PNG（桌面项 `Icon=capilot-ide`）；macOS 用 `icon.icns`，Windows 用 `icon.ico`。换源图后从 `icon.png` 重导出各尺寸（`pnpm tauri icon` 可重生 icns/ico），再重建 deb。
 
 **同步规则：** `docs/styleguide/` 与 `ui/assets/`（原 `docs/Assets/`）是主仓库 `Doc/styleguide/`、`Doc/Assets/` 的复制品，**改设计需两边同步**。
 

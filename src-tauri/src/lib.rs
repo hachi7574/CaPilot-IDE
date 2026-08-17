@@ -1721,8 +1721,10 @@ async fn ci_status(tag: Option<String>) -> Result<ci::CiStatus, String> {
 }
 
 /// Download and install the pending update, streaming 0..1 progress through
-/// `on_progress`. `install()` relaunches the app, so on success this command
-/// typically never returns a value to the frontend — the process restarts first.
+/// `on_progress`. The updater plugin only relaunches the process on Windows
+/// (the NSIS installer's `/UPDATE` mode + `process::exit`); on Linux/macOS it
+/// swaps the binary in place and returns, so the app restarts explicitly here
+/// to actually run the new build.
 #[tauri::command]
 async fn update_download_and_install(
     app: tauri::AppHandle,
@@ -1764,7 +1766,12 @@ async fn update_download_and_install(
     update
         .install(bytes)
         .map_err(|e| format!("安装失败: {e}"))?;
-    Ok(())
+
+    // On Linux/macOS install() only replaced the on-disk binary; the running
+    // process is still the old build. Restart so the new version actually runs.
+    // On Windows this line is unreachable — the NSIS installer relaunches and
+    // the updater calls process::exit before install() returns.
+    app.restart();
 }
 
 // ── Runtime commands ────────────────────────────────────────────

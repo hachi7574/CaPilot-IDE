@@ -1436,10 +1436,11 @@ body::after {
 
 .onboarding-header {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 16px;
-  padding-bottom: 16px;
+  gap: 14px;
+  padding-bottom: 18px;
   border-bottom: 2px solid var(--rule);
   margin-bottom: 18px;
   position: relative;
@@ -1466,13 +1467,15 @@ body::after {
 }
 
 .onboarding-logo {
-  width: 72px;
-  height: 72px;
+  width: 128px;
+  height: 128px;
+  object-fit: contain;
+  display: block;
 }
 
 .onboarding-header h2 {
   font-family: var(--pixel-body);
-  font-size: calc(var(--fs-xl) * 1.4);
+  font-size: calc(var(--fs-xl) * 1.5);
   font-weight: 700;
   color: var(--brand);
   letter-spacing: 1px;
@@ -3632,51 +3635,57 @@ html[data-theme="quantum"] .app::before {
 }
 .settings-theme-option.active .settings-theme-option-state { color: var(--brand); }
 
-/* Settings · choice list (session runtime selector, mirrors color cartridge). */
-.settings-choice-list {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  background: var(--bg);
-  border: 1px solid var(--rule2);
-  border-radius: var(--control-radius);
-  box-shadow: var(--control-shadow);
-}
-.settings-choice-list button {
+/* Settings · runtime dropdown (Ctrl+T default agent). */
+.settings-runtime-picker { position: relative; z-index: 15; }
+.settings-runtime-trigger {
   width: 100%;
   min-height: 44px;
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) 48px;
+  grid-template-columns: minmax(0, 1fr) 12px;
   align-items: center;
-  gap: 10px;
-  padding: 6px 10px !important;
-  color: var(--ink2);
+  gap: 12px;
+  padding: 8px 11px !important;
+  color: var(--ink);
   text-align: left;
-  background: transparent !important;
-  border: 0 !important;
-  border-bottom: 1px solid var(--rule) !important;
-  border-radius: 0 !important;
+  background: var(--bg) !important;
+  border: 1px solid var(--rule2) !important;
+  border-radius: var(--control-radius) !important;
+  box-shadow: var(--control-shadow);
   cursor: pointer;
 }
-.settings-choice-list button:last-child { border-bottom: 0 !important; }
-.settings-choice-list button:hover { color: var(--ink); background: var(--bg3) !important; }
-.settings-choice-list button.active {
-  color: var(--brand);
-  background: rgb(var(--brand-rgb) / .08) !important;
-  box-shadow: inset 3px 0 0 var(--brand);
+.settings-runtime-trigger:hover,
+.settings-runtime-trigger[aria-expanded="true"] { border-color: var(--brand) !important; }
+.settings-runtime-trigger[aria-expanded="true"] {
+  box-shadow: inset 3px 0 0 var(--brand), var(--control-shadow);
 }
-.settings-choice-icon {
+.settings-runtime-trigger:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.settings-runtime-current {
+  min-width: 0;
   display: flex;
   align-items: center;
-  justify-content: center;
+  gap: 10px;
 }
-.settings-choice-copy {
+.settings-runtime-current-icon,
+.settings-runtime-option-icon {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  color: var(--ink2);
+  flex: none;
+}
+.settings-runtime-current-copy,
+.settings-runtime-option-copy {
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
-.settings-choice-copy b {
+.settings-runtime-current-copy b,
+.settings-runtime-option-copy b {
   overflow: hidden;
   font-family: var(--pixel-body);
   font-size: var(--fs-md);
@@ -3685,7 +3694,8 @@ html[data-theme="quantum"] .app::before {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.settings-choice-copy small {
+.settings-runtime-current-copy small,
+.settings-runtime-option-copy small {
   overflow: hidden;
   font-family: var(--mono);
   font-size: var(--fs-2xs);
@@ -3693,14 +3703,48 @@ html[data-theme="quantum"] .app::before {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.settings-choice-state {
+.settings-runtime-menu {
+  position: absolute;
+  top: calc(100% + 5px);
+  right: 0;
+  left: 0;
+  z-index: 40;
+  max-height: min(280px, calc(100vh - 210px));
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--term-bg);
+  border: 1px solid var(--brand);
+  box-shadow: var(--panel-shadow);
+}
+.settings-runtime-option {
+  width: 100%;
+  min-height: 40px;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 48px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px !important;
+  color: var(--ink2);
+  text-align: left;
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  cursor: pointer;
+}
+.settings-runtime-option:hover { color: var(--ink); background: var(--bg3) !important; }
+.settings-runtime-option.active {
+  color: var(--brand);
+  background: rgb(var(--brand-rgb) / .08) !important;
+  box-shadow: inset 3px 0 0 var(--brand);
+}
+.settings-runtime-option.active .settings-runtime-option-icon { color: var(--brand); }
+.settings-runtime-option-state {
   font-family: var(--mono);
   font-size: 9px;
   letter-spacing: .7px;
-  color: var(--muted);
+  color: var(--brand);
   text-align: right;
 }
-.settings-choice-list button.active .settings-choice-state { color: var(--brand); }
 
 /* ── Settings control cartridge ──────────────────────────────── */
 
@@ -4137,31 +4181,139 @@ html[data-theme="quantum"] .app::before {
 .settings-action-copy b { font-family: var(--pixel); font-size: var(--fs-xs); font-weight: 400; color: var(--ink); }
 .settings-action-copy small { font-family: var(--mono); font-size: var(--fs-2xs); color: var(--muted); }
 
-.settings-version-plate {
-  display: grid;
-  grid-template-columns: 42px 1fr auto;
+/* Settings · about / updates — compact identity + actions. */
+.settings-update-panel .settings-section-head p { display: none; }
+.settings-update-row {
+  display: flex;
   align-items: center;
-  gap: 11px;
-  padding: 10px;
-  border: 1px solid var(--rule2);
-  background: var(--bg);
+  justify-content: space-between;
+  gap: 12px;
 }
-.settings-version-mark {
-  width: 42px;
-  height: 42px;
-  display: grid;
-  place-items: center;
+.settings-update-identity {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.settings-update-identity b {
   font-family: var(--pixel-body);
-  font-size: var(--fs-xl);
-  color: var(--accent-ink);
-  background: var(--brand);
-  box-shadow: inset -3px -3px 0 rgb(var(--black-rgb) / .25);
+  font-size: var(--fs-md);
+  font-weight: 400;
+  color: var(--ink);
 }
-.settings-version-plate > div:nth-child(2) { display: flex; flex-direction: column; gap: 2px; }
-.settings-version-plate b { font-family: var(--pixel-body); font-size: var(--fs-md); color: var(--ink); }
-.settings-version-plate span,
-.settings-version-plate small { font-family: var(--mono); font-size: var(--fs-2xs); color: var(--muted); }
-.settings-version-plate small { letter-spacing: .7px; }
+.settings-update-identity span {
+  font-family: var(--mono);
+  font-size: var(--fs-2xs);
+  color: var(--muted);
+}
+.settings-update-check,
+.settings-update-install,
+.settings-update-toggle button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--pixel);
+  font-size: var(--fs-2xs);
+  padding: 4px 12px !important;
+  border: 1px solid var(--rule2) !important;
+  color: var(--ink2);
+  background: transparent !important;
+  border-radius: 6px !important;
+  cursor: pointer;
+}
+.settings-update-check:hover:not(:disabled),
+.settings-update-install:hover:not(:disabled),
+.settings-update-toggle button:hover {
+  color: var(--ink);
+  border-color: var(--brand) !important;
+}
+.settings-update-check:disabled,
+.settings-update-install:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.settings-update-install:not(:disabled) {
+  border-color: var(--brand) !important;
+  color: var(--brand);
+  background: rgb(var(--brand-rgb) / .08) !important;
+}
+.settings-update-status {
+  margin-top: 8px;
+  font-family: var(--mono);
+  font-size: var(--fs-2xs);
+  color: var(--ink2);
+}
+.settings-update-status.is-ok { color: var(--success); }
+.settings-update-status.is-warn { color: var(--warn); }
+.settings-update-actions { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.settings-update-notes {
+  font-size: var(--fs-xs);
+  color: var(--ink2);
+}
+.settings-update-notes summary {
+  cursor: pointer;
+  user-select: none;
+}
+.settings-update-notes pre {
+  white-space: pre-wrap;
+  font-family: var(--mono);
+  font-size: var(--fs-2xs);
+  color: var(--ink2);
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 8px;
+  margin-top: 6px;
+  max-height: 140px;
+  overflow-y: auto;
+}
+.settings-update-install-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.settings-update-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.settings-update-progress-track {
+  flex: 1;
+  height: 6px;
+  background: var(--rule2);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.settings-update-progress-bar {
+  height: 100%;
+  background: var(--brand);
+  transition: width 0.2s ease;
+}
+.settings-update-progress span {
+  font-family: var(--mono);
+  font-size: var(--fs-2xs);
+  color: var(--ink2);
+  min-width: 2.5em;
+}
+.settings-update-toggle {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--rule);
+}
+.settings-update-toggle > span {
+  font-size: var(--fs-sm);
+  color: var(--ink2);
+}
+.settings-update-toggle button.active {
+  border-color: var(--brand) !important;
+  color: var(--brand);
+  background: rgb(var(--brand-rgb) / .08) !important;
+}
 
 .settings-modal button { transition: color .12s steps(2, end), border-color .12s steps(2, end), background .12s steps(2, end); }
 .settings-modal button:focus-visible { outline-color: var(--warn); }
@@ -4187,10 +4339,9 @@ html[data-theme="quantum"] .app::before {
   .settings-theme-option-state { display: none; }
   .settings-theme-option-palette > small { font-size: 7px; letter-spacing: -.45px; }
   .settings-choice-grid { grid-template-columns: 1fr; }
-  .settings-choice-list button { grid-template-columns: 24px minmax(0, 1fr); gap: 8px; }
-  .settings-choice-state { display: none; }
+  .settings-runtime-option { grid-template-columns: 24px minmax(0, 1fr); gap: 8px; }
+  .settings-runtime-option-state { display: none; }
   .settings-segmented { width: 100%; }
   .settings-segmented button { min-width: 0; flex: 1; padding-inline: 4px !important; }
-  .settings-version-plate { grid-template-columns: 42px 1fr; }
-  .settings-version-plate > small { grid-column: 1 / -1; }
+  .settings-update-row { flex-wrap: wrap; }
 }
