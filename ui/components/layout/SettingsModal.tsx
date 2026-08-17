@@ -5,9 +5,32 @@ import { useStore, FontScale, RuntimeInfo, UsageConfig } from "../../state/store
 import { THEMES, getTheme, DEFAULT_THEME_ID } from "../../state/themes";
 import { checkForUpdate, downloadAndInstall } from "../../state/update";
 import { Icon, runtimeIcon } from "../Icon";
+import { isShellRuntime, isWindowsHost } from "../../state/shellPath";
 
 interface SettingsModalProps {
   onClose: () => void;
+}
+
+/** True when this runtime is an agent CLI (has models / auth / usage). */
+function isAgentRuntime(id: string): boolean {
+  return !isShellRuntime(id);
+}
+
+/** Sort shells first (powershell/cmd/bash/shell), then agents by name. */
+function runtimeSortKey(rt: RuntimeInfo): [number, string] {
+  switch (rt.id) {
+    case "powershell":
+      return [0, rt.name];
+    case "cmd":
+      return [1, rt.name];
+    case "shell":
+      return [2, rt.name];
+    case "bash-rc":
+    case "bash":
+      return [3, rt.name];
+    default:
+      return [10, rt.name.toLowerCase()];
+  }
 }
 
 /** Adapter defaults, mirrored from the Rust spawn_interactive() implementations.
@@ -21,6 +44,11 @@ const DEFAULT_LAUNCH: Record<string, { command: string; args: string }> = {
   dsh: { command: "dsh", args: "--profile dsh-tui" },
   // pi 每会话的 model/thinking/mode 由适配器在 spawn 时按 flag 追加。
   pi: { command: "pi", args: "" },
+  shell: { command: "shell", args: "" },
+  powershell: { command: "pwsh", args: "-NoLogo" },
+  cmd: { command: "cmd.exe", args: "" },
+  "bash-rc": { command: "bash", args: "" },
+  bash: { command: "bash", args: "--norc" },
 };
 
 export function SettingsModal({ onClose }: SettingsModalProps) {
@@ -339,12 +367,24 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     }
   };
 
-  // Agent runtimes only — plain shells (shell / bash*) stay out of this panel.
-  // Show unavailable rows too so a failed/slow probe isn't mistaken for "none
-  // installed" when the new-terminal picker still lists every template.
-  const agentRuntimes = runtimes.filter(
-    (rt) => rt.id !== "shell" && !rt.id.startsWith("bash")
-  );
+  // Show shells + agents. On Windows hide the auto `shell` row (users pick
+  // PowerShell / CMD / Git Bash explicitly). Show unavailable rows so a
+  // failed/slow probe isn't mistaken for "none installed".
+  const listedRuntimes = runtimes
+    .filter((rt) => {
+      if (isWindowsHost() && rt.id === "shell") return false;
+      return true;
+    })
+    .slice()
+    .sort((a, b) => {
+      const [ak, an] = runtimeSortKey(a);
+      const [bk, bn] = runtimeSortKey(b);
+      if (ak !== bk) return ak - bk;
+      return an.localeCompare(bn);
+    });
+  const shellRuntimes = listedRuntimes.filter((rt) => isShellRuntime(rt.id));
+  const agentRuntimes = listedRuntimes.filter((rt) => isAgentRuntime(rt.id));
+  const installedCount = listedRuntimes.filter((rt) => rt.available).length;
   const installedAgents = agentRuntimes.filter((rt) => rt.available);
 
   return (
@@ -380,7 +420,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 onClick={() => jumpToSection("runtimes")}
               >
                 <Icon name="bot" size={14} />
-                <span><b>运行时</b><small>Agent 与用量</small></span>
+                <span><b>运行时</b><small>Shell 与 Agent</small></span>
               </button>
               <button
                 className={activeSection === "appearance" ? "active" : ""}
@@ -419,24 +459,32 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               <b>{getTheme(themeId)?.name ?? DEFAULT_THEME_ID}</b>
               <span>AGENTS</span>
               <b>{installedAgents.length.toString().padStart(2, "0")} ONLINE</b>
+              <span>SHELLS</span>
+              <b>
+                {shellRuntimes
+                  .filter((r) => r.available)
+                  .length.toString()
+                  .padStart(2, "0")}{" "}
+                READY
+              </b>
             </div>
           </aside>
 
           <main className="settings-content" onScroll={syncSectionFromScroll}>
 
-        {/* Installed agents */}
+        {/* Installed runtimes (shells + agents) */}
         <section id="settings-runtimes" className="modal-section settings-panel settings-runtime-panel">
           <div className="settings-section-head">
             <span>RUNTIME BUS</span>
-            <h4>Agent 运行环境</h4>
-            <p>管理已接入的编码终端、启动命令与剩余用量读取。</p>
+            <h4>运行环境</h4>
+            <p>管理系统终端（PowerShell / CMD / Git Bash）与已接入的编码 Agent CLI。</p>
           </div>
           <div className="settings-toolbar">
             <div className="modal-title">
-              已安装{" "}
+              已检测{" "}
               <span className="settings-count">
-                {installedAgents.length}
-                {agentRuntimes.length > 0 ? ` / ${agentRuntimes.length}` : ""}
+                {installedCount}
+                {listedRuntimes.length > 0 ? ` / ${listedRuntimes.length}` : ""}
               </span>
             </div>
             <button className="settings-compact-btn" onClick={reDetect} disabled={scanning}>
@@ -451,14 +499,16 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               <small>{detectError}</small>
             </div>
           )}
-          {!scanning && !detectError && agentRuntimes.length === 0 && (
+          {!scanning && !detectError && listedRuntimes.length === 0 && (
             <div className="settings-empty-runtime">
               <Icon name="plug" size={18} />
-              <span>未检测到 Agent 运行时</span>
-              <small>安装 CLI 后点「重新检测」。新终端模板列表不依赖此处探测。</small>
+              <span>未检测到运行时</span>
+              <small>安装 CLI / shell 后点「重新检测」。</small>
             </div>
           )}
-          {agentRuntimes.map((rt) => (
+          {listedRuntimes.map((rt) => {
+            const shell = isShellRuntime(rt.id);
+            return (
             <div
               key={rt.id}
               className={`settings-runtime${editingId === rt.id ? " expanded" : ""}${
@@ -467,7 +517,14 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             >
               <div className="modal-row settings-runtime-row" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", fontSize: "var(--fs-sm)" }}>
                 <span className="settings-runtime-name">
-                  <Icon name="terminal" size={14} /> {rt.name}
+                  <Icon name={runtimeIcon(rt.id)} size={14} /> {rt.name}
+                  <span
+                    className="settings-runtime-version"
+                    style={{ opacity: 0.55, marginLeft: 6 }}
+                    title={shell ? "系统终端" : "Agent CLI"}
+                  >
+                    {shell ? "shell" : "agent"}
+                  </span>
                   {rt.version && (
                     <span
                       className="settings-runtime-version"
@@ -488,7 +545,11 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                     {rt.available ? (
                       <>
                         <Icon name="check" size={12} style={{ marginRight: 4 }} />
-                        {rt.authenticated ? "已登录" : "已安装"}
+                        {shell
+                          ? "可用"
+                          : rt.authenticated
+                            ? "已登录"
+                            : "已安装"}
                       </>
                     ) : (
                       "未检测到"
@@ -681,7 +742,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 </div>
               )}
             </div>
-          ))}
+            );
+          })}
         </section>
 
         {/* Preferences */}

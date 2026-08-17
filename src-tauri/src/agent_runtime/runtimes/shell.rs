@@ -1,10 +1,16 @@
-//! Default interactive system shell (not Git Bash).
+//! Interactive system shells (not Git Bash — see [`super::bash`]).
 //!
-//! - **Unix**: `$SHELL` when set and runnable, else `bash`, else `/bin/sh`
-//! - **Windows**: `pwsh` (PowerShell 7+) when on PATH, else `ComSpec` / `cmd.exe`
+//! Runtime ids:
+//! - **`shell`** — OS default (auto): `$SHELL` on Unix; on Windows
+//!   `pwsh` → Windows PowerShell → `ComSpec`/`cmd.exe`. Kept for older
+//!   sessions and as a generic fallback.
+//! - **`powershell`** — PowerShell 7+ (`pwsh`) when present, else Windows
+//!   PowerShell 5.1. Windows-only in the new-terminal picker.
+//! - **`cmd`** — `cmd.exe` via `ComSpec` / System32. Windows-only in the
+//!   new-terminal picker.
 //!
 //! Agent CLIs do **not** go through this adapter — they spawn via
-//! [`crate::agent_runtime::executable`]. This runtime is only the user's
+//! [`crate::agent_runtime::executable`]. These runtimes are only the user's
 //! terminal tab (project "+", file-tree "在此打开终端", quick-start commands).
 
 use crate::agent_runtime::adapter::{
@@ -13,16 +19,62 @@ use crate::agent_runtime::adapter::{
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-pub struct ShellAdapter;
+/// Which binary family this adapter resolves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellKind {
+    /// Auto-detect the platform default interactive shell.
+    Auto,
+    /// PowerShell 7+ or Windows PowerShell 5.1 only.
+    PowerShell,
+    /// cmd.exe only.
+    Cmd,
+}
+
+pub struct ShellAdapter {
+    id: &'static str,
+    kind: ShellKind,
+}
 
 impl ShellAdapter {
+    /// Auto OS shell (`shell` runtime id).
     pub fn new() -> Self {
-        Self
+        Self {
+            id: "shell",
+            kind: ShellKind::Auto,
+        }
     }
 
-    fn resolve() -> Option<ResolvedShell> {
-        static CACHED: OnceLock<Option<ResolvedShell>> = OnceLock::new();
-        CACHED.get_or_init(resolve_shell).clone()
+    /// Explicit PowerShell (`powershell` runtime id).
+    pub fn powershell() -> Self {
+        Self {
+            id: "powershell",
+            kind: ShellKind::PowerShell,
+        }
+    }
+
+    /// Explicit cmd.exe (`cmd` runtime id).
+    pub fn cmd() -> Self {
+        Self {
+            id: "cmd",
+            kind: ShellKind::Cmd,
+        }
+    }
+
+    fn resolve(&self) -> Option<ResolvedShell> {
+        match self.kind {
+            ShellKind::Auto => {
+                static CACHED: OnceLock<Option<ResolvedShell>> = OnceLock::new();
+                CACHED.get_or_init(resolve_shell_auto).clone()
+            }
+            ShellKind::PowerShell => {
+                static CACHED: OnceLock<Option<ResolvedShell>> = OnceLock::new();
+                CACHED.get_or_init(resolve_powershell).clone()
+            }
+            ShellKind::Cmd => {
+                static CACHED: OnceLock<Option<ResolvedShell>> = OnceLock::new();
+                CACHED.get_or_init(resolve_cmd).clone()
+            }
+        }
     }
 }
 
@@ -36,12 +88,13 @@ struct ResolvedShell {
     label: &'static str,
 }
 
-fn resolve_shell() -> Option<ResolvedShell> {
+fn resolve_shell_auto() -> Option<ResolvedShell> {
     crate::agent_runtime::adapter::ensure_cli_path();
 
     #[cfg(windows)]
     {
-        return resolve_shell_windows();
+        // Prefer PowerShell when present; fall back to cmd.
+        resolve_powershell().or_else(resolve_cmd)
     }
     #[cfg(not(windows))]
     {
@@ -49,51 +102,107 @@ fn resolve_shell() -> Option<ResolvedShell> {
     }
 }
 
-#[cfg(windows)]
-fn resolve_shell_windows() -> Option<ResolvedShell> {
-    // Prefer PowerShell 7+ when the user installed it — closer to a modern
-    // interactive shell than Windows PowerShell 5.1 / cmd.
-    if let Some(pwsh) = resolve_on_path(&["pwsh.exe", "pwsh"]) {
-        return Some(ResolvedShell {
-            program: pwsh,
-            args: vec!["-NoLogo".into()],
-            label: "PowerShell",
-        });
-    }
+/// PowerShell 7+ (`pwsh`) then Windows PowerShell 5.1.
+fn resolve_powershell() -> Option<ResolvedShell> {
+    crate::agent_runtime::adapter::ensure_cli_path();
 
-    // ComSpec is the documented default interactive shell for the machine.
-    let comspec = std::env::var_os("ComSpec")
-        .or_else(|| std::env::var_os("COMSPEC"))
-        .map(PathBuf::from)
-        .filter(|p| p.as_os_str().len() > 0);
-
-    if let Some(cmd) = comspec {
-        if cmd.is_file() || bare_runs(&cmd) {
+    #[cfg(windows)]
+    {
+        // Prefer PowerShell 7+ when the user installed it — closer to a modern
+        // interactive shell than Windows PowerShell 5.1. Must resolve to a
+        // real on-disk binary: a bare `pwsh.exe` that is not on PATH is not a
+        // hit (CreateProcess error 2).
+        if let Some(pwsh) = resolve_on_path(&["pwsh.exe", "pwsh"]) {
             return Some(ResolvedShell {
-                program: cmd,
-                // Interactive ConPTY session — no /C or /K; bare cmd.exe is the
-                // usual interactive host (same as Windows Terminal default).
-                args: vec![],
-                label: "cmd",
+                program: pwsh,
+                args: vec!["-NoLogo".into()],
+                label: "PowerShell",
             });
         }
-    }
 
-    // Last resort hard paths (stripped env on desktop shortcuts).
-    for candidate in [
-        r"C:\Windows\System32\cmd.exe",
-        r"C:\WINDOWS\system32\cmd.exe",
-    ] {
-        let p = PathBuf::from(candidate);
-        if p.is_file() {
+        // Windows PowerShell 5.1 ships with Windows. Prefer the absolute
+        // System32 path so a stripped PATH (daemon DETACHED_PROCESS) still
+        // finds it.
+        for candidate in [
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe",
+        ] {
+            let p = PathBuf::from(candidate);
+            if p.is_file() {
+                return Some(ResolvedShell {
+                    program: p,
+                    args: vec!["-NoLogo".into()],
+                    label: "Windows PowerShell",
+                });
+            }
+        }
+        if let Some(ps) = resolve_on_path(&["powershell.exe", "powershell"]) {
             return Some(ResolvedShell {
-                program: p,
-                args: vec![],
-                label: "cmd",
+                program: ps,
+                args: vec!["-NoLogo".into()],
+                label: "Windows PowerShell",
             });
         }
+        return None;
     }
-    None
+    #[cfg(not(windows))]
+    {
+        // Rare but useful when pwsh is installed on macOS/Linux.
+        if let Some(pwsh) = resolve_on_path_unix(&["pwsh"]) {
+            return Some(ResolvedShell {
+                program: pwsh,
+                args: vec!["-NoLogo".into()],
+                label: "PowerShell",
+            });
+        }
+        None
+    }
+}
+
+/// cmd.exe via ComSpec / System32 hard paths.
+fn resolve_cmd() -> Option<ResolvedShell> {
+    crate::agent_runtime::adapter::ensure_cli_path();
+
+    #[cfg(windows)]
+    {
+        // ComSpec is the documented default interactive shell for the machine.
+        let comspec = std::env::var_os("ComSpec")
+            .or_else(|| std::env::var_os("COMSPEC"))
+            .map(PathBuf::from)
+            .filter(|p| p.as_os_str().len() > 0);
+
+        if let Some(cmd) = comspec {
+            if cmd.is_file() || bare_runs(&cmd) {
+                return Some(ResolvedShell {
+                    program: cmd,
+                    // Interactive ConPTY session — no /C or /K; bare cmd.exe is
+                    // the usual interactive host (same as Windows Terminal).
+                    args: vec![],
+                    label: "cmd",
+                });
+            }
+        }
+
+        // Last resort hard paths (stripped env on desktop shortcuts).
+        for candidate in [
+            r"C:\Windows\System32\cmd.exe",
+            r"C:\WINDOWS\system32\cmd.exe",
+        ] {
+            let p = PathBuf::from(candidate);
+            if p.is_file() {
+                return Some(ResolvedShell {
+                    program: p,
+                    args: vec![],
+                    label: "cmd",
+                });
+            }
+        }
+        return None;
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
 }
 
 #[cfg(not(windows))]
@@ -130,14 +239,33 @@ fn resolve_shell_unix() -> Option<ResolvedShell> {
     None
 }
 
-fn missing_shell_message() -> String {
-    #[cfg(windows)]
-    {
-        "未检测到系统 shell（cmd / PowerShell）。请确认 ComSpec 指向有效的 cmd.exe。".to_string()
-    }
-    #[cfg(not(windows))]
-    {
-        "未检测到系统 shell。请设置 $SHELL 或安装 bash。".to_string()
+fn missing_shell_message(kind: ShellKind) -> String {
+    match kind {
+        ShellKind::PowerShell => {
+            #[cfg(windows)]
+            {
+                "未检测到 PowerShell。请确认已安装 PowerShell 7（pwsh）或系统自带的 Windows PowerShell。"
+                    .to_string()
+            }
+            #[cfg(not(windows))]
+            {
+                "未检测到 PowerShell（pwsh）。".to_string()
+            }
+        }
+        ShellKind::Cmd => {
+            "未检测到 cmd.exe。请确认 ComSpec 指向有效的 cmd.exe。".to_string()
+        }
+        ShellKind::Auto => {
+            #[cfg(windows)]
+            {
+                "未检测到系统 shell（cmd / PowerShell）。请确认 ComSpec 指向有效的 cmd.exe。"
+                    .to_string()
+            }
+            #[cfg(not(windows))]
+            {
+                "未检测到系统 shell。请设置 $SHELL 或安装 bash。".to_string()
+            }
+        }
     }
 }
 
@@ -172,6 +300,12 @@ fn bare_runs(path: &Path) -> bool {
 fn resolve_on_path(names: &[&str]) -> Option<PathBuf> {
     for name in names {
         if let Some(r) = crate::agent_runtime::executable::resolve_executable(name) {
+            // Only accept a real filesystem hit. A bare unresolved name must not
+            // become the interactive shell — ConPTY can't PATH-search the way
+            // cmd.exe does and fails with error 2.
+            if !r.path.is_file() {
+                continue;
+            }
             if !r.needs_cmd_wrap {
                 // Prefer real PE binaries for the interactive shell itself.
                 return Some(r.path);
@@ -183,20 +317,34 @@ fn resolve_on_path(names: &[&str]) -> Option<PathBuf> {
     None
 }
 
+#[cfg(not(windows))]
+fn resolve_on_path_unix(names: &[&str]) -> Option<PathBuf> {
+    for name in names {
+        if crate::agent_runtime::adapter::cli_available(name) {
+            return Some(PathBuf::from(name));
+        }
+    }
+    None
+}
+
 impl AgentRuntimeAdapter for ShellAdapter {
     fn id(&self) -> &str {
-        "shell"
+        self.id
     }
 
     fn name(&self) -> &str {
-        match Self::resolve() {
+        match self.resolve() {
             Some(r) => r.label,
-            None => "Shell",
+            None => match self.kind {
+                ShellKind::PowerShell => "PowerShell",
+                ShellKind::Cmd => "CMD",
+                ShellKind::Auto => "Shell",
+            },
         }
     }
 
     fn is_available(&self) -> bool {
-        Self::resolve().is_some()
+        self.resolve().is_some()
     }
 
     fn is_authenticated(&self) -> bool {
@@ -204,7 +352,7 @@ impl AgentRuntimeAdapter for ShellAdapter {
     }
 
     fn version(&self) -> Option<String> {
-        let r = Self::resolve()?;
+        let r = self.resolve()?;
         let prog = r.program.to_str()?;
         // Best-effort; cmd's version line is noisy — surface the label instead.
         if r.label == "cmd" {
@@ -226,15 +374,17 @@ impl AgentRuntimeAdapter for ShellAdapter {
     }
 
     fn preflight(&self) -> Option<String> {
-        if Self::resolve().is_some() {
+        if self.resolve().is_some() {
             None
         } else {
-            Some(missing_shell_message())
+            Some(missing_shell_message(self.kind))
         }
     }
 
     fn spawn_interactive(&self, _session: &AgentSession) -> Result<(String, Vec<String>), String> {
-        let r = Self::resolve().ok_or_else(missing_shell_message)?;
+        let r = self
+            .resolve()
+            .ok_or_else(|| missing_shell_message(self.kind))?;
         let cmd = r
             .program
             .to_str()
@@ -262,10 +412,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_finds_a_shell() {
+    fn resolve_auto_finds_a_shell() {
         assert!(
-            ShellAdapter::resolve().is_some(),
+            ShellAdapter::new().resolve().is_some(),
             "CI/dev hosts must have a system shell"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn resolve_powershell_or_cmd_on_windows() {
+        // At least one of the explicit Windows shells must resolve.
+        assert!(
+            ShellAdapter::powershell().resolve().is_some()
+                || ShellAdapter::cmd().resolve().is_some(),
+            "Windows CI/dev hosts must have PowerShell or cmd"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn resolve_cmd_finds_cmd_on_windows() {
+        assert!(
+            ShellAdapter::cmd().resolve().is_some(),
+            "Windows always ships cmd.exe"
         );
     }
 

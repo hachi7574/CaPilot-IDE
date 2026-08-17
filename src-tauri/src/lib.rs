@@ -492,16 +492,19 @@ async fn agent_spawn(
     let cwd = match &project_root {
         Some(pr) => {
             // A caller-supplied project root feeds both `create_dir_all` and the
-            // spawned shell's cwd — constrain it to $HOME so an arbitrary path
-            // can't be created / used as a shell working dir.
+            // spawned shell's cwd — constrain it to allowed roots ($HOME + every
+            // registered custom project root) so an arbitrary path can't be
+            // created / used as a shell working dir. Custom roots may live
+            // outside $HOME (e.g. a folder on `B:\`); those are registered via
+            // `create_project` / `git_clone` and recovered from `project.json`.
             //
             // Check both the raw path and the canonical form: Windows
             // canonicalize() yields `\\?\C:\...` which does not byte-prefix-
             // match a plain USERPROFILE, and Git Bash HOME can be `/c/Users/...`
-            // while the dialog returns `C:\Users\...`. `path_is_within_home`
+            // while the dialog returns `C:\Users\...`. `path_is_allowed`
             // normalizes both sides.
             let p = std::path::PathBuf::from(pr);
-            if !crate::persistence::path_is_within_home(&p)? {
+            if !crate::persistence::path_is_allowed(&p)? {
                 return Err("project root escapes allowed directories".to_string());
             }
             std::fs::create_dir_all(&p)
@@ -509,10 +512,12 @@ async fn agent_spawn(
             let canon = p
                 .canonicalize()
                 .map_err(|e| format!("Invalid project root: {}", e))?;
-            if !crate::persistence::path_is_within_home(&canon)? {
+            if !crate::persistence::path_is_allowed(&canon)? {
                 return Err("project root escapes allowed directories".to_string());
             }
-            canon
+            // CreateProcess/ConPTY reject the Windows extended-length form
+            // (`\\?\B:\...`) as a process cwd — strip it before spawn.
+            crate::persistence::strip_verbatim_prefix(&canon)
         }
         None => {
             let dir = agent_dir(&project, &agent_id);
@@ -1121,6 +1126,9 @@ fn create_project(name: String, path: Option<String>) -> Result<String, String> 
             return Err("所选文件夹不存在或不是目录".to_string());
         }
         let canonical = dir.canonicalize().map_err(|e| format!("无效路径: {}", e))?;
+        // CreateProcess/ConPTY and many CLIs reject `\\?\...` paths. Persist and
+        // return the plain drive form (path checks strip it on both sides too).
+        let canonical = persistence::strip_verbatim_prefix(&canonical);
         // Per-agent metadata lives under the workspace layout (created by
         // agent_spawn), never inside the picked folder. git init is best-effort
         // (the Git panel depends on a repo).
@@ -2036,7 +2044,7 @@ async fn fs_read(path: String) -> Result<String, String> {
     let resolved = std::path::Path::new(&path)
         .canonicalize()
         .map_err(|e| format!("Invalid path: {}", e))?;
-    if !crate::persistence::path_is_within_home(&resolved)? {
+    if !crate::persistence::path_is_allowed(&resolved)? {
         return Err("Path escapes allowed directories".to_string());
     }
     std::fs::read_to_string(&resolved).map_err(|e| format!("Failed to read file: {}", e))
@@ -2055,7 +2063,7 @@ async fn fs_write(path: String, content: String) -> Result<(), String> {
     let canonical_parent = parent
         .canonicalize()
         .map_err(|e| format!("Invalid path: {}", e))?;
-    if !crate::persistence::path_is_within_home(&canonical_parent)? {
+    if !crate::persistence::path_is_allowed(&canonical_parent)? {
         return Err("Path escapes allowed directories".to_string());
     }
     let file_name = raw
@@ -2064,9 +2072,10 @@ async fn fs_write(path: String, content: String) -> Result<(), String> {
     let resolved = canonical_parent.join(file_name);
 
     // Reject symlink final components (including DANGLING ones — a dangling
-    // symlink outside HOME would otherwise be followed by fs::write after the
-    // canonicalize() checks pass). Resolve the link target and verify it stays
-    // in HOME; if the target is itself a symlink or escapes, refuse.
+    // symlink outside allowed roots would otherwise be followed by fs::write
+    // after the canonicalize() checks pass). Resolve the link target and
+    // verify it stays allowed; if the target is itself a symlink or escapes,
+    // refuse.
     if let Ok(meta) = std::fs::symlink_metadata(&resolved) {
         if meta.file_type().is_symlink() {
             let target = std::fs::read_link(&resolved)
@@ -2081,7 +2090,7 @@ async fn fs_write(path: String, content: String) -> Result<(), String> {
             };
             let canonical_target = std::fs::canonicalize(&real)
                 .map_err(|_| "Symlink target could not be resolved".to_string())?;
-            if !crate::persistence::path_is_within_home(&canonical_target)? {
+            if !crate::persistence::path_is_allowed(&canonical_target)? {
                 return Err("Path escapes allowed directories".to_string());
             }
             return std::fs::write(&canonical_target, &content)
@@ -2090,9 +2099,9 @@ async fn fs_write(path: String, content: String) -> Result<(), String> {
     }
 
     // If the target already exists and is a regular file, double-check the
-    // canonical path stays in HOME.
+    // canonical path stays under an allowed root.
     if let Ok(canon) = resolved.canonicalize() {
-        if !crate::persistence::path_is_within_home(&canon)? {
+        if !crate::persistence::path_is_allowed(&canon)? {
             return Err("Path escapes allowed directories".to_string());
         }
     }
@@ -2105,7 +2114,7 @@ async fn fs_list(dir: String) -> Result<Vec<FsEntryBrief>, String> {
     let resolved = std::path::Path::new(&dir)
         .canonicalize()
         .map_err(|e| format!("Invalid path: {}", e))?;
-    if !crate::persistence::path_is_within_home(&resolved)? {
+    if !crate::persistence::path_is_allowed(&resolved)? {
         return Err("Path escapes allowed directories".to_string());
     }
     let mut entries = Vec::new();
@@ -2162,7 +2171,7 @@ async fn fs_search(
     if !resolved.is_dir() {
         return Err("Search root is not a directory".to_string());
     }
-    if !crate::persistence::path_is_within_home(&resolved)? {
+    if !crate::persistence::path_is_allowed(&resolved)? {
         return Err("Path escapes allowed directories".to_string());
     }
     let opts = fs_search::SearchOptions {
@@ -2189,7 +2198,7 @@ fn resolve_in_home(raw: &std::path::Path) -> Result<std::path::PathBuf, String> 
     let canonical_parent = parent
         .canonicalize()
         .map_err(|e| format!("Invalid path: {}", e))?;
-    if !crate::persistence::path_is_within_home(&canonical_parent)? {
+    if !crate::persistence::path_is_allowed(&canonical_parent)? {
         return Err("Path escapes allowed directories".to_string());
     }
     let file_name = raw
@@ -2225,14 +2234,15 @@ async fn fs_create_dir(path: String) -> Result<(), String> {
     std::fs::create_dir(&resolved).map_err(|e| format!("Failed to create directory: {}", e))
 }
 
-/// Canonicalize an existing path and require it stays under $HOME. Used for the
-/// source (and the paste destination, which must exist) of `fs_paste`, where
-/// following a symlink final component to a HOME-internal target is legitimate.
+/// Canonicalize an existing path and require it stays under an allowed root
+/// ($HOME or a registered custom project root). Used for the source (and the
+/// paste destination, which must exist) of `fs_paste`, where following a
+/// symlink final component to an allowed-internal target is legitimate.
 fn resolve_existing_in_home(raw: &std::path::Path) -> Result<std::path::PathBuf, String> {
     let resolved = raw
         .canonicalize()
         .map_err(|e| format!("Invalid path: {}", e))?;
-    if !crate::persistence::path_is_within_home(&resolved)? {
+    if !crate::persistence::path_is_allowed(&resolved)? {
         return Err("Path escapes allowed directories".to_string());
     }
     Ok(resolved)
@@ -2393,7 +2403,7 @@ async fn fs_rename(src: String, new_name: String) -> Result<String, String> {
     let canonical_parent = parent
         .canonicalize()
         .map_err(|e| format!("无效路径: {}", e))?;
-    if !crate::persistence::path_is_within_home(&canonical_parent)? {
+    if !crate::persistence::path_is_allowed(&canonical_parent)? {
         return Err("路径越界".to_string());
     }
     let file_name = raw
@@ -3229,6 +3239,8 @@ async fn git_clone(
     let parent = std::path::Path::new(&parent_dir)
         .canonicalize()
         .map_err(|e| format!("无效的父目录: {}", e))?;
+    // CreateProcess/git reject `\\?\...` paths as a working directory.
+    let parent = persistence::strip_verbatim_prefix(&parent);
     if !parent.is_dir() {
         return Err("父目录不存在或不是目录".to_string());
     }

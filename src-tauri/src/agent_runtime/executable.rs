@@ -43,8 +43,11 @@ pub fn resolve_executable(name: &str) -> Option<ResolvedExe> {
         return None;
     }
 
-    // Absolute / relative path with a separator or known extension: trust the
-    // caller and only classify whether it needs a cmd wrap.
+    // Absolute / relative path with a separator: trust the caller and only
+    // classify whether it needs a cmd wrap. Bare names like `pwsh.exe` are
+    // NOT paths — they must go through PATH+PATHEXT search below. Treating
+    // them as paths previously made a missing PowerShell 7 look "resolved"
+    // and ConPTY then failed with CreateProcess error 2.
     if looks_like_path(name) {
         let path = PathBuf::from(name);
         if path.is_file() || cfg!(not(windows)) {
@@ -55,8 +58,8 @@ pub fn resolve_executable(name: &str) -> Option<ResolvedExe> {
                 path,
             });
         }
-        // Windows path that does not exist yet — still return it so callers can
-        // surface a path-specific error; probe will fail.
+        // Windows path-with-separator that does not exist yet — still return it
+        // so callers can surface a path-specific error; probe will fail.
         if path.extension().is_some() {
             return Some(ResolvedExe {
                 needs_cmd_wrap: needs_cmd_wrap(&path),
@@ -145,15 +148,12 @@ pub fn run_cli(name: &str, args: &[&str], timeout: Duration) -> Option<std::proc
 // ── internals ───────────────────────────────────────────────────────────
 
 fn looks_like_path(name: &str) -> bool {
+    // Separators (or a Windows drive-absolute form) mean the caller named a
+    // filesystem location. A bare `tool.exe` is a PATH lookup key, not a path —
+    // CreateProcess still needs PATHEXT/PATH resolution for those.
     name.contains('/')
         || name.contains('\\')
-        || Path::new(name).extension().is_some_and(|ext| {
-            let e = ext.to_string_lossy();
-            e.eq_ignore_ascii_case("exe")
-                || e.eq_ignore_ascii_case("cmd")
-                || e.eq_ignore_ascii_case("bat")
-                || e.eq_ignore_ascii_case("com")
-        })
+        || Path::new(name).is_absolute()
 }
 
 fn needs_cmd_wrap(path: &Path) -> bool {
@@ -225,20 +225,29 @@ fn resolve_bare_windows(name: &str) -> Option<ResolvedExe> {
         })
         .collect();
 
-    // Also try the bare name (no extension) first — covers real .exe renames
-    // and Unix-style shims that somehow landed on a Windows PATH.
+    // Match cmd.exe / CreateProcess PATHEXT order: try `name.COM`, `name.EXE`,
+    // `name.BAT`, `name.CMD`, … BEFORE the extensionless `name`.
+    //
+    // npm global installs on Windows drop three siblings in %APPDATA%\npm:
+    //   claude       ← Unix `#!/bin/sh` shim (NOT a PE)
+    //   claude.cmd   ← real Windows entry
+    //   claude.ps1
+    // Preferring the bare name first made Settings report Claude as missing:
+    // CreateProcess on the sh script fails with ERROR_BAD_EXE_FORMAT (193),
+    // and cli_available() treated that as "not installed".
     let mut names: Vec<String> = Vec::with_capacity(exts.len() + 1);
-    names.push(name.to_string());
-    for ext in &exts {
-        // Avoid `claude.exe.exe` if the user already typed an extension.
-        if name
-            .rsplit(['/', '\\'])
-            .next()
-            .is_some_and(|base| base.contains('.'))
-        {
-            break;
+    let already_has_ext = name
+        .rsplit(['/', '\\'])
+        .next()
+        .is_some_and(|base| base.contains('.'));
+    if already_has_ext {
+        names.push(name.to_string());
+    } else {
+        for ext in &exts {
+            names.push(format!("{name}{ext}"));
         }
-        names.push(format!("{name}{ext}"));
+        // Bare name last — only useful for true extensionless PE renames.
+        names.push(name.to_string());
     }
 
     let path_var = std::env::var_os("PATH").unwrap_or_default();
@@ -248,18 +257,18 @@ fn resolve_bare_windows(name: &str) -> Option<ResolvedExe> {
         }
         for n in &names {
             let candidate = dir.join(n);
-            if candidate.is_file() {
-                return Some(ResolvedExe {
-                    needs_cmd_wrap: needs_cmd_wrap(&candidate),
-                    path: candidate,
-                });
+            if let Some(resolved) = accept_windows_candidate(&candidate) {
+                return Some(resolved);
             }
         }
     }
 
     // WinGet per-user packages (npm-less CLIs sometimes land here).
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        let packages = PathBuf::from(local).join("Microsoft").join("WinGet").join("Packages");
+        let packages = PathBuf::from(local)
+            .join("Microsoft")
+            .join("WinGet")
+            .join("Packages");
         if packages.is_dir() {
             if let Ok(entries) = std::fs::read_dir(&packages) {
                 for entry in entries.flatten() {
@@ -269,11 +278,8 @@ fn resolve_bare_windows(name: &str) -> Option<ResolvedExe> {
                     }
                     for n in &names {
                         let candidate = dir.join(n);
-                        if candidate.is_file() {
-                            return Some(ResolvedExe {
-                                needs_cmd_wrap: needs_cmd_wrap(&candidate),
-                                path: candidate,
-                            });
+                        if let Some(resolved) = accept_windows_candidate(&candidate) {
+                            return Some(resolved);
                         }
                     }
                 }
@@ -281,7 +287,77 @@ fn resolve_bare_windows(name: &str) -> Option<ResolvedExe> {
         }
     }
 
+    // npm global prefix (normally already on PATH, but desktop-launched apps
+    // sometimes miss %APPDATA%\npm even when `npm i -g` put shims there).
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let npm = PathBuf::from(appdata).join("npm");
+        if npm.is_dir() {
+            for n in &names {
+                let candidate = npm.join(n);
+                if let Some(resolved) = accept_windows_candidate(&candidate) {
+                    return Some(resolved);
+                }
+            }
+        }
+    }
+
     None
+}
+
+/// Accept a PATH hit only when CreateProcess/ConPTY can actually launch it.
+/// Skips npm's extensionless Unix shims (`#!/bin/sh`) that sit next to `.cmd`.
+#[cfg(windows)]
+fn accept_windows_candidate(candidate: &Path) -> Option<ResolvedExe> {
+    if !candidate.is_file() {
+        return None;
+    }
+    if needs_cmd_wrap(candidate) {
+        return Some(ResolvedExe {
+            needs_cmd_wrap: true,
+            path: candidate.to_path_buf(),
+        });
+    }
+    // Extensionless or .exe/.com: reject obvious non-PE scripts so the search
+    // continues to `name.cmd` in the same directory.
+    if is_unix_script_shim(candidate) {
+        return None;
+    }
+    Some(ResolvedExe {
+        needs_cmd_wrap: false,
+        path: candidate.to_path_buf(),
+    })
+}
+
+/// `true` when `path` looks like a text script with a shebang (npm's bare
+/// `claude` shim), which CreateProcess cannot run (Win32 error 193).
+#[cfg(windows)]
+fn is_unix_script_shim(path: &Path) -> bool {
+    // .cmd/.bat are handled via needs_cmd_wrap; never classify them as unix.
+    if needs_cmd_wrap(path) {
+        return false;
+    }
+    // Real PE binaries start with "MZ". Shebang scripts start with "#!".
+    let mut buf = [0u8; 2];
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    use std::io::Read;
+    match f.read(&mut buf) {
+        Ok(2) if &buf == b"#!" => true,
+        Ok(2) if &buf == b"MZ" => false,
+        // No PE header and not shebang — if it has no Windows executable
+        // extension, treat as non-launchable so PATHEXT siblings can win.
+        Ok(_) => path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_none_or(|e| {
+                !(e.eq_ignore_ascii_case("exe")
+                    || e.eq_ignore_ascii_case("com")
+                    || e.eq_ignore_ascii_case("cmd")
+                    || e.eq_ignore_ascii_case("bat"))
+            }),
+        _ => false,
+    }
 }
 
 /// `cmd.exe /d /s /c "<quoted script> <quoted args…>"`
@@ -348,7 +424,9 @@ pub fn quote_cmd_arg(arg: &str) -> String {
     out
 }
 
-fn hide_windows_console(cmd: &mut Command) {
+/// Suppress the extra console window flash when spawning short-lived probe
+/// children from a GUI / DETACHED_PROCESS host on Windows.
+pub fn hide_windows_console(cmd: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -427,8 +505,99 @@ mod tests {
     fn looks_like_path_rules() {
         assert!(looks_like_path(r"C:\foo\claude.cmd"));
         assert!(looks_like_path("/usr/bin/claude"));
-        assert!(looks_like_path("claude.exe"));
+        assert!(looks_like_path(r".\tools\claude.exe"));
+        // Bare names — with or without extension — are PATH lookup keys, not
+        // filesystem paths. `pwsh.exe` must search PATH, not be trusted as-is.
+        assert!(!looks_like_path("claude.exe"));
         assert!(!looks_like_path("claude"));
         assert!(!looks_like_path("opencode"));
+        assert!(!looks_like_path("pwsh.exe"));
+    }
+
+    /// npm on Windows writes a Unix `#!/bin/sh` shim next to `name.cmd`. The
+    /// resolver must prefer the .cmd (CreateProcess-launchable) over the bare
+    /// script, otherwise Settings reports the CLI as missing (error 193).
+    #[cfg(windows)]
+    #[test]
+    fn windows_prefers_cmd_over_unix_npm_shim() {
+        let _guard = crate::agent_runtime::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "capilot-npm-shim-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Extensionless Unix shim (what npm actually writes).
+        std::fs::write(
+            dir.join("fakectl"),
+            "#!/bin/sh\nexec node \"$(dirname \"$0\")/cli.js\" \"$@\"\n",
+        )
+        .unwrap();
+        // Real Windows entry.
+        std::fs::write(
+            dir.join("fakectl.cmd"),
+            "@ECHO off\r\necho fakectl-ok\r\n",
+        )
+        .unwrap();
+
+        // Prepend our dir so the search hits it first; keep the rest of PATH.
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let mut new_path = dir.as_os_str().to_owned();
+        new_path.push(";");
+        new_path.push(&old_path);
+        std::env::set_var("PATH", &new_path);
+
+        // Bust the process-wide resolve cache for this name.
+        if let Ok(mut cache) = resolve_cache().lock() {
+            cache.remove("fakectl");
+        }
+
+        let resolved = resolve_executable("fakectl").expect("should find fakectl.cmd");
+        assert!(
+            resolved
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.eq_ignore_ascii_case("fakectl.cmd")),
+            "expected fakectl.cmd, got {:?}",
+            resolved.path
+        );
+        assert!(resolved.needs_cmd_wrap);
+
+        // Cleanup.
+        std::env::set_var("PATH", old_path);
+        if let Ok(mut cache) = resolve_cache().lock() {
+            cache.remove("fakectl");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn is_unix_script_shim_detects_shebang() {
+        let dir = std::env::temp_dir().join(format!(
+            "capilot-shebang-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let shim = dir.join("tool");
+        std::fs::write(&shim, "#!/usr/bin/env node\nconsole.log(1)\n").unwrap();
+        assert!(is_unix_script_shim(&shim));
+        let cmd = dir.join("tool.cmd");
+        std::fs::write(&cmd, "@echo hi\r\n").unwrap();
+        assert!(!is_unix_script_shim(&cmd));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

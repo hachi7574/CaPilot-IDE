@@ -314,7 +314,11 @@ impl PtyCore {
         for arg in &launch_args {
             command.arg(arg);
         }
-        command.cwd(cwd);
+        // Windows canonicalize() yields `\\?\C:\...`. CreateProcessW rejects that
+        // form for lpCurrentDirectory (error 2 / "file not found"), so always
+        // strip the extended-length prefix before handing cwd to ConPTY.
+        let cwd_for_spawn = crate::persistence::strip_verbatim_prefix(cwd);
+        command.cwd(&cwd_for_spawn);
         for (k, v) in env_overrides {
             command.env(k, v);
         }

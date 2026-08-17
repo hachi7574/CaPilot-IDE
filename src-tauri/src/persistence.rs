@@ -232,6 +232,51 @@ pub fn path_is_within_home(path: &Path) -> Result<bool, String> {
     Ok(path_is_within(path, &home))
 }
 
+/// Roots the IDE may open terminals in / read-write via IPC:
+/// `$HOME` plus every registered custom project root (picked folder / clone /
+/// worktree). Custom roots may live outside `$HOME` (e.g. `B:\repos\app` on
+/// Windows) — `create_project` / `git_clone` persist them in `project.json`,
+/// and agents must be allowed to use those paths as cwd.
+pub fn allowed_path_roots() -> Result<Vec<PathBuf>, String> {
+    let home = user_home()?;
+    let home = home.canonicalize().unwrap_or(home);
+    let mut roots = vec![home];
+
+    let workspace = workspace_root();
+    if let Ok(entries) = std::fs::read_dir(&workspace) {
+        for entry in entries.flatten() {
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            let Some(root) = custom_project_root(&name) else {
+                continue;
+            };
+            // Prefer the real on-disk form; fall back to the persisted string so a
+            // momentarily-missing folder still matches prefix checks.
+            let root = root.canonicalize().unwrap_or(root);
+            if !roots
+                .iter()
+                .any(|r| path_is_within(&root, r) && path_is_within(r, &root))
+            {
+                roots.push(root);
+            }
+        }
+    }
+    Ok(roots)
+}
+
+/// `true` when `path` is under `$HOME` or any registered custom project root.
+/// Prefer this over [`path_is_within_home`] for agent cwd and filesystem IPC —
+/// custom-rooted projects are intentionally allowed outside the home directory.
+pub fn path_is_allowed(path: &Path) -> Result<bool, String> {
+    let roots = allowed_path_roots()?;
+    Ok(roots.iter().any(|root| path_is_within(path, root)))
+}
+
 /// Like [`user_home`], but falls back to a writable temp dir instead of erroring.
 /// Used for layout helpers that historically defaulted to `/tmp` on Unix.
 pub fn user_home_or_tmp() -> PathBuf {
@@ -318,9 +363,15 @@ pub fn status_file(agent_id: &str) -> PathBuf {
 /// Persist a custom project root (picked folder / git clone) to
 /// `~/CaPilot/workspaces/<name>/project.json`. Written at create/clone time so
 /// the root survives even with zero agents (agent-meta recovery needs one).
+///
+/// Windows `canonicalize()` yields `\\?\C:\...` / `\\?\B:\...`. That form is
+/// fine for our own path checks, but CreateProcess / ConPTY reject it as a
+/// process cwd (`lpCurrentDirectory`) and some tools choke on it in argv/env.
+/// Always store the plain drive path.
 pub fn write_project_root(name: &str, root: &std::path::Path) -> std::io::Result<()> {
     let dir = project_dir(name);
     std::fs::create_dir_all(&dir)?;
+    let root = strip_verbatim_prefix(root);
     std::fs::write(
         dir.join("project.json"),
         serde_json::json!({ "root": root }).to_string(),
@@ -330,7 +381,9 @@ pub fn write_project_root(name: &str, root: &std::path::Path) -> std::io::Result
 fn persisted_project_root(name: &str) -> Option<PathBuf> {
     let data = std::fs::read_to_string(project_dir(name).join("project.json")).ok()?;
     let v: serde_json::Value = serde_json::from_str(&data).ok()?;
-    v.get("root").and_then(|r| r.as_str()).map(PathBuf::from)
+    v.get("root")
+        .and_then(|r| r.as_str())
+        .map(|s| strip_verbatim_prefix(Path::new(s)))
 }
 
 /// Recover a custom-rooted project's real on-disk root from its agent metadata.
@@ -1624,5 +1677,55 @@ mod tests {
         assert!(!path_is_within_home(&outside).unwrap());
         let _ = std::fs::remove_dir_all(&home);
         let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// Custom-rooted projects (picked folder / clone) may live outside $HOME
+    /// (e.g. a second drive on Windows). Once registered via project.json they
+    /// must pass `path_is_allowed` so terminals and fs IPC can open there.
+    #[test]
+    fn path_is_allowed_accepts_registered_custom_root_outside_home() {
+        let _guard = crate::agent_runtime::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let stamp = format!(
+            "{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let home = std::env::temp_dir().join(format!("capilot-allow-home-{stamp}"));
+        let outside = std::env::temp_dir().join(format!("capilot-allow-out-{stamp}"));
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::env::set_var("HOME", &home);
+
+        // Unregistered path outside home is rejected.
+        assert!(!path_is_allowed(&outside).unwrap());
+
+        // Register it as a custom project root (mirrors create_project / clone).
+        write_project_root("extproj", &outside).unwrap();
+        assert!(path_is_allowed(&outside).unwrap());
+        // Descendants of the custom root are allowed too (file-tree open terminal).
+        let nested = outside.join("src").join("lib.rs");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, "x").unwrap();
+        assert!(path_is_allowed(&nested).unwrap());
+        // Unrelated outside path still rejected.
+        let other = std::env::temp_dir().join(format!("capilot-allow-other-{stamp}"));
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(!path_is_allowed(&other).unwrap());
+        // Home descendants still allowed.
+        let under_home = home.join("docs");
+        std::fs::create_dir_all(&under_home).unwrap();
+        assert!(path_is_allowed(&under_home).unwrap());
+
+        std::env::remove_var("HOME");
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&outside);
+        let _ = std::fs::remove_dir_all(&other);
     }
 }

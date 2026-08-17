@@ -72,7 +72,14 @@ export function Icon({ name, size = 16, className, style }: IconProps) {
 
 /** Icon name per agent runtime (brand marks, not the robot emoji). */
 export function runtimeIcon(runtime: string): string {
-  if (runtime === 'shell' || runtime === 'cmd' || runtime === 'powershell') return 'terminal';
+  if (
+    runtime === 'shell' ||
+    runtime === 'cmd' ||
+    runtime === 'powershell' ||
+    runtime === 'pwsh'
+  ) {
+    return 'terminal';
+  }
   if (runtime.startsWith('bash')) return 'gnubash';
   switch (runtime) {
     case 'claude': return 'claude';

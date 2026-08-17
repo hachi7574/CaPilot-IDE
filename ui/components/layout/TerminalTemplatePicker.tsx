@@ -1,20 +1,24 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { useStore, TermTemplate } from "../../state/store";
 import { spawnTerminal } from "../../state/agentActions";
-import { detectShellFlavor, isWindowsHost } from "../../state/shellPath";
+import {
+  detectShellFlavor,
+  isShellRuntime,
+  isWindowsHost,
+} from "../../state/shellPath";
 import { Icon, runtimeIcon } from "../Icon";
 
 /**
  * New-terminal template picker for the project "+" / tab-bar "+" buttons.
  *
- * OS shell (fixed, always first) / optional Git Bash / installed agent CLIs
- * (Claude / Codex / dsh / Pi) / user-defined quick-start commands. Agent
- * templates are hidden when their runtime is not detected (same source as
- * Settings → 已安装). Bash is optional on Windows (hidden when missing).
- * Right-click a non-fixed template to rename it or edit its launch command.
+ * On Windows: PowerShell / CMD / Git Bash (when installed) / agent CLIs /
+ * user-defined quick-start commands. On Unix: OS shell / bash / agents /
+ * quick-starts. Agent templates are hidden when their runtime is not detected
+ * (same source as Settings → 已安装). Right-click a non-fixed template to
+ * rename it or edit its launch command.
  *
- * Quick-start commands are typed into the OS default shell after it reaches
- * its prompt — so the command line must match that shell (PowerShell / cmd on
+ * Quick-start commands are typed into the chosen shell after it reaches its
+ * prompt — so the command line must match that shell (PowerShell / cmd on
  * Windows, $SHELL on Unix). See the modal hint below.
  */
 export function TerminalTemplatePicker({
@@ -39,24 +43,24 @@ export function TerminalTemplatePicker({
   const availableRuntimeIds = new Set(
     runtimes.filter((r) => r.available).map((r) => r.id)
   );
-  const bashAvailable = (() => {
-    const hit = runtimes.find(
-      (rt) => rt.id === "bash-rc" || rt.id === "bash" || rt.id.startsWith("bash")
-    );
+  const runtimeAvailable = (id: string): boolean => {
+    const hit = runtimes.find((rt) => rt.id === id);
     // Unknown (runtimes not loaded yet) → keep the row (avoid flash).
     return hit ? hit.available : true;
-  })();
-  // Fixed OS shell always stays. User quick-starts (runtime shell/bash*) stay.
-  // Optional bash is hidden when the CLI isn't installed (common on Windows
-  // without Git Bash). Agent rows hide when unavailable; while probes are still
-  // empty, keep agents visible to avoid a shell-only flash.
+  };
+  // Fixed OS shell always stays. User quick-starts stay.
+  // Optional shells (bash / powershell / cmd) hide when missing.
+  // Agent rows hide when unavailable; while probes are still empty, keep
+  // agents visible to avoid a shell-only flash.
   const visibleTemplates = termTemplates.filter((t) => {
-    if (t.fixed || t.runtime === "shell") return true;
-    if (t.runtime === "bash" || t.runtime === "bash-rc") {
+    if (t.fixed) return true;
+    // User quick-starts with a command always show (they target a shell).
+    if (t.command && isShellRuntime(t.runtime)) return true;
+    if (isShellRuntime(t.runtime)) {
       if (runtimes.length === 0) return true;
-      return bashAvailable;
+      return runtimeAvailable(t.runtime);
     }
-    // User quick-starts are stored as shell/bash-rc; anything else is an agent.
+    // Agent rows.
     if (runtimes.length === 0) return true;
     return availableRuntimeIds.has(t.runtime);
   });
@@ -85,6 +89,16 @@ export function TerminalTemplatePicker({
     setPos({ left, top });
     // Re-measure when the filtered list shrinks (runtime probe resolves mid-open).
   }, [anchor.x, anchor.y, visibleTemplates.length]);
+
+  /** Default runtime for new quick-starts. */
+  const quickStartRuntime = (): TermTemplate["runtime"] => {
+    if (isWindowsHost()) {
+      if (runtimeAvailable("powershell")) return "powershell";
+      if (runtimeAvailable("cmd")) return "cmd";
+      return "powershell";
+    }
+    return "shell";
+  };
 
   return (
     <>
@@ -138,6 +152,7 @@ export function TerminalTemplatePicker({
           title="编辑终端模板"
           name={edit.name}
           command={edit.command}
+          runtime={edit.runtime}
           canDelete={!edit.fixed}
           onSave={(nm, cmd) => {
             updateTermTemplate(edit.id, { name: nm, command: cmd });
@@ -159,14 +174,15 @@ export function TerminalTemplatePicker({
           title="添加快速启动"
           name=""
           command=""
+          runtime={quickStartRuntime()}
           canDelete={false}
           onSave={(nm, cmd) => {
             addTermTemplate({
               id: `tpl-${Date.now()}`,
               name: nm,
               command: cmd,
-              // Quick-starts run inside the OS default shell.
-              runtime: "shell",
+              // Quick-starts run inside the preferred OS shell.
+              runtime: quickStartRuntime(),
             });
             setAdding(false);
           }}
@@ -182,6 +198,7 @@ function TermTemplateModal({
   title,
   name,
   command,
+  runtime,
   canDelete,
   onSave,
   onDelete,
@@ -190,6 +207,7 @@ function TermTemplateModal({
   title: string;
   name: string;
   command: string;
+  runtime: string;
   canDelete: boolean;
   onSave: (name: string, command: string) => void;
   onDelete?: () => void;
@@ -197,14 +215,19 @@ function TermTemplateModal({
 }) {
   const [nm, setNm] = useState(name);
   const [cmd, setCmd] = useState(command);
-  const shellRt = useStore((s) => s.runtimes.find((r) => r.id === "shell"));
-  const flavor = detectShellFlavor("shell", shellRt?.name);
+  const shellRt = useStore((s) => s.runtimes.find((r) => r.id === runtime));
+  const flavor = detectShellFlavor(runtime, shellRt?.name);
   const shellHint = (() => {
     if (flavor === "powershell") {
-      return "命令会注入到 PowerShell（系统默认终端）。示例：pnpm dev  或  python .\\script.py";
+      return "命令会注入到 PowerShell。示例：pnpm dev  或  python .\\script.py";
     }
     if (flavor === "cmd") {
       return "命令会注入到 cmd.exe。示例：pnpm dev  或  python script.py";
+    }
+    if (runtime === "bash-rc" || runtime.startsWith("bash")) {
+      return isWindowsHost()
+        ? "命令会注入到 Git Bash。示例：pnpm dev  或  python ./script.py"
+        : "命令会注入到 bash。可留空只开终端。";
     }
     if (isWindowsHost()) {
       return "命令会注入到系统终端。Windows 上默认是 PowerShell/cmd，语法勿按 bash 写（无 && 链式时请用 ; 或分别启动）。";
@@ -216,7 +239,7 @@ function TermTemplateModal({
       ? "PowerShell 命令（可留空）— 例: pnpm dev"
       : flavor === "cmd"
         ? "cmd 命令（可留空）— 例: pnpm dev"
-        : "在系统终端中执行的命令（可留空）";
+        : "在终端中执行的命令（可留空）";
 
   const submit = () => {
     const trimmed = nm.trim();

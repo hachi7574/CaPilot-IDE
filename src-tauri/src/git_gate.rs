@@ -22,13 +22,23 @@ static GATE: LazyLock<GitGate> = LazyLock::new(|| GitGate {
 });
 
 fn allowed_roots() -> Vec<PathBuf> {
+    // Workspace layout + every registered custom project root. Intentionally
+    // narrower than `path_is_allowed` (which also admits all of $HOME) — git
+    // ops should stay scoped to CaPilot projects, not arbitrary home paths.
     let workspace = crate::persistence::workspace_root();
     let mut roots = workspace.canonicalize().into_iter().collect::<Vec<_>>();
     if let Ok(entries) = std::fs::read_dir(&workspace) {
         for entry in entries.flatten().filter(|entry| entry.path().is_dir()) {
             let name = entry.file_name().to_string_lossy().into_owned();
             if let Some(root) = crate::persistence::custom_project_root(&name) {
-                if let Ok(root) = root.canonicalize() {
+                // Keep non-canonical form as a fallback so a briefly-missing
+                // folder still prefix-matches (mirrors path_is_allowed).
+                let root = root.canonicalize().unwrap_or(root);
+                if !roots
+                    .iter()
+                    .any(|r| crate::persistence::path_is_within(&root, r)
+                        && crate::persistence::path_is_within(r, &root))
+                {
                     roots.push(root);
                 }
             }
