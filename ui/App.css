@@ -4167,3 +4167,126 @@ html[data-theme="quantum"] .app::before {
   .settings-segmented button { min-width: 0; flex: 1; padding-inline: 4px !important; }
   .settings-update-row { flex-wrap: wrap; }
 }
+
+
+/* ── In-app update prompt (top-right, above chrome) ─────────────── */
+.update-prompt {
+  position: fixed;
+  top: 40px;
+  right: 14px;
+  z-index: 5500;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: min(380px, calc(100vw - 28px));
+  padding: 12px 12px 12px 14px;
+  background: var(--bg2);
+  border: 1px solid var(--brand);
+  border-radius: var(--panel-radius, 0);
+  box-shadow: var(--panel-shadow, 4px 4px 0 #02070A), 0 12px 32px rgb(var(--black-rgb) / 0.45);
+  color: var(--ink);
+  pointer-events: auto;
+  animation: update-prompt-in 0.22s var(--ease-apple, cubic-bezier(0.25, 0.1, 0.25, 1));
+}
+@keyframes update-prompt-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.update-prompt-icon {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--brand);
+  background: var(--brand-dim);
+  border: 1px solid var(--brand);
+}
+.update-prompt-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.update-prompt-title {
+  font-family: var(--pixel);
+  font-size: var(--fs-2xs);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--brand);
+  line-height: 1.4;
+}
+.update-prompt-current {
+  color: var(--ink2);
+  font-family: var(--mono);
+  font-size: var(--fs-2xs);
+  letter-spacing: 0;
+  text-transform: none;
+  margin-left: 6px;
+}
+.update-prompt-notes {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--ink2);
+  line-height: 1.45;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.update-prompt-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+.update-prompt-progress-track {
+  flex: 1;
+  height: 6px;
+  background: var(--bg);
+  border: 1px solid var(--rule2);
+  overflow: hidden;
+}
+.update-prompt-progress-bar {
+  height: 100%;
+  background: var(--brand);
+  transition: width 0.15s linear;
+}
+.update-prompt-progress span {
+  font-family: var(--mono);
+  font-size: var(--fs-2xs);
+  color: var(--ink2);
+  min-width: 2.5em;
+  text-align: right;
+}
+.update-prompt-actions {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-self: stretch;
+}
+.update-prompt-install,
+.update-prompt-later {
+  padding: 6px 10px;
+  border: 1px solid var(--rule2);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  border-radius: var(--control-radius, 0);
+  box-shadow: var(--control-shadow, none);
+  transition: all 0.15s var(--ease-apple, cubic-bezier(0.25, 0.1, 0.25, 1));
+  white-space: nowrap;
+}
+.update-prompt-install {
+  background: var(--brand-dim);
+  color: var(--accent-ink);
+  border-color: var(--brand);
+}
+.update-prompt-install:hover:not(:disabled) { background: var(--brand); }
+.update-prompt-install:disabled { opacity: 0.45; cursor: not-allowed; }
+.update-prompt-later {
+  background: var(--bg);
+  color: var(--ink2);
+}
+.update-prompt-later:hover:not(:disabled) {
+  border-color: var(--ink2);
+  color: var(--ink);
+}
+.update-prompt-later:disabled { opacity: 0.45; cursor: not-allowed; }

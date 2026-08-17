@@ -776,6 +776,8 @@ interface AppState {
   /** Latest version already surfaced via notification this session (dedup —
    *  a fresh update is announced once per app launch, not every check). */
   updateNotifiedVersion: string | null;
+  /** Version the user dismissed on the in-app update prompt this session. */
+  updatePromptDismissedVersion: string | null;
   /** Whether the app auto-checks for updates on startup (default true). */
   autoCheckUpdate: boolean;
 
@@ -1158,6 +1160,7 @@ export const useStore = create<AppState>((set, get) => {
   updateProgress: null,
   updateInstallable: false,
   updateNotifiedVersion: null,
+  updatePromptDismissedVersion: null,
   autoCheckUpdate: true,
   ciStatus: null,
   ciPolling: false,

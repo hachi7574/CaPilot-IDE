@@ -87,8 +87,8 @@ export async function checkForUpdate(opts: CheckOptions = {}): Promise<void> {
       updateError: null,
     });
 
-    // Announce a freshly-discovered update once per app launch (dedup by
-    // version so re-checks don't spam the notification).
+    // Secondary system notification (often silent on Linux/Wayland). The
+    // primary surface is the in-app UpdatePrompt, which watches updateStatus.
     if (
       opts.notifyOnFound &&
       res.available &&
@@ -98,7 +98,7 @@ export async function checkForUpdate(opts: CheckOptions = {}): Promise<void> {
       useStore.setState({ updateNotifiedVersion: res.latestVersion });
       notify(
         "CaPilot 有新版本",
-        `v${res.latestVersion} 已可用，可在 设置 → 关于 中升级。`
+        `v${res.latestVersion} 已可用 — 可在应用内提示中升级，或打开 设置 → 关于。`
       );
     }
   } catch (e) {

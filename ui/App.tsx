@@ -3,6 +3,7 @@ import { LeftSidebar } from "./components/layout/LeftSidebar";
 import { MainArea } from "./components/layout/MainArea";
 import { RightSidebar } from "./components/layout/RightSidebar";
 import { StatusBar } from "./components/layout/StatusBar";
+import { UpdatePrompt } from "./components/layout/UpdatePrompt";
 import { Onboarding } from "./components/onboarding/Onboarding";
 import { useResourceSync } from "./state/resource";
 import { useRuntimeSync } from "./state/runtime";
@@ -67,6 +68,7 @@ function App() {
         <LeftSidebar />
       </div>
       <StatusBar />
+      <UpdatePrompt />
       <DevAnnotationsGate />
       {!onboarded && <Onboarding />}
     </div>
