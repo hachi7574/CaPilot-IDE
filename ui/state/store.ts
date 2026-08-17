@@ -992,9 +992,11 @@ export function resolveCtrlTRuntime(
 
 // ── New-terminal templates ──────────────────────────────────────
 // The project "+" button opens a picker: bash (fixed, always first) / Claude /
-// Codex / dsh / user-defined quick-start commands. Custom templates persist
-// locally. (opencode was removed as a selectable runtime — see
-// `known_runtimes`; persisted templates are dropped on load.)
+// Codex / dsh / Pi / user-defined quick-start commands. Built-in agent entries
+// stay in the default list so they reappear when the CLI is installed again;
+// TerminalTemplatePicker hides ones whose runtime reports `available: false`.
+// Custom templates persist locally. (opencode was removed as a selectable
+// runtime — see `known_runtimes`; persisted templates are dropped on load.)
 
 /** A new-terminal template shown in the project "+" picker. `command` is run
  *  after the shell starts (bash / bash-rc) / ignored for agent runtimes;
