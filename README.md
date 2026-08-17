@@ -12,6 +12,17 @@ CaPilot IDE is a lightweight desktop workspace for running AI coding CLIs in rea
 - **Terminal:** xterm.js
 - **State:** zustand
 
+## Install (prebuilt)
+
+Download the latest release from [GitHub Releases](https://github.com/hachi7574/CaPilot-IDE/releases/latest).
+
+| Platform | Asset |
+| --- | --- |
+| Linux | `CaPilot_*_amd64.deb` or `.AppImage` |
+| Windows | `CaPilot_*_x64-setup.exe` |
+
+**Supported platforms: Linux and Windows only.** macOS is not shipped (no Apple Developer ID signing / notarization).
+
 ## Development
 
 ### Prerequisites

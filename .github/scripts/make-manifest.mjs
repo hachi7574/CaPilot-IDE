@@ -73,11 +73,7 @@ const candidates = {
   "linux-x86_64-appimage": [/\.AppImage$/],
   "linux-x86_64": [/\.AppImage$/],
   "windows-x86_64": [/-setup\.exe$/, /\.msi$/],
-  // Tauri names single-arch macOS updater artifacts without an arch suffix
-  // (`CaPilot.app.tar.gz`), so prefer an explicit aarch64 suffix when present,
-  // then fall back to the bare name.
-  "darwin-aarch64": [/aarch64\.app\.tar\.gz$/, /\.app\.tar\.gz$/],
-  "darwin-x86_64": [/x86_64\.app\.tar\.gz$/],
+  // macOS / darwin intentionally omitted — CaPilot does not ship mac builds.
   "linux-aarch64-deb": [/aarch64\.deb$/],
   "linux-aarch64-appimage": [/aarch64\.AppImage$/],
 };

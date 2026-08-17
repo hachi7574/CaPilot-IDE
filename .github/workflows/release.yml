@@ -1,9 +1,10 @@
 name: Release
 
 # Tag-triggered release pipeline:
-# builds + signs the Linux/Windows/macOS bundles, uploads them to the GitHub
+# builds + signs the Linux/Windows bundles, uploads them to the GitHub
 # release for the tag, then assembles the updater `latest.json` manifest from
 # the build-time `.sig` files and uploads that too.
+# macOS is intentionally unsupported (no Apple Developer ID / notarization).
 
 on:
   push:
@@ -35,8 +36,6 @@ jobs:
             os: ubuntu-22.04
           - platform: windows
             os: windows-latest
-          - platform: macos
-            os: macos-14
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -52,7 +51,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       # Warm cargo cache shared across runs (keyed on Cargo.lock + rustc).
       # Without this every tag run recompiles the whole Tauri dependency tree
-      # in release mode on all three platforms — the long pole (~7min/job).
+      # in release mode on both platforms — the long pole (~7min/job).
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
@@ -106,8 +105,6 @@ jobs:
             src-tauri/target/release/bundle/appimage/*
             src-tauri/target/release/bundle/deb/*
             src-tauri/target/release/bundle/nsis/*
-            src-tauri/target/release/bundle/macos/*
-            src-tauri/target/release/bundle/dmg/*.dmg
 
   # Runs after every platform upload finished. Reads each platform's `.sig`
   # content (produced at build time) and writes the static latest.json the app

@@ -34,7 +34,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["deb", "appimage", "nsis"],
     "createUpdaterArtifacts": true,
     "category": "DeveloperTool",
     "shortDescription": "CaPilot IDE — 本地 AI 编程工作区",
@@ -51,7 +51,6 @@
       "../ui/assets/app-icon/256x256.png",
       "../ui/assets/app-icon/512x512.png",
       "../ui/assets/app-icon/128x128@2x.png",
-      "../ui/assets/app-icon/icon.icns",
       "../ui/assets/app-icon/icon.ico"
     ],
     "linux": {

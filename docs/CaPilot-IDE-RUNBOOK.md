@@ -42,7 +42,7 @@ IDE 遵循 CaPilot 主仓库的 **LUCY styleguide**（8-bit Pixel × Apple Smoot
 - 字体内嵌于 `public/fonts/`：`JetBrainsMono-{Regular,Bold}.ttf`、`FusionPixel-Prop-zh_hans.ttf`（12px 比例）、`Tektur-{Regular,Medium}.ttf`
 - logo 在 `public/logo.png`（源文件见 `ui/assets/logo/`，UI 经 `public/` 引用）
 - 颜色令牌定义在 `ui/App.css :root`（`@font-face` 引用 `/fonts/*.ttf`，全本地、无 Google Fonts）
-- 应用图标统一放在 `ui/assets/app-icon/`（由 `tauri.conf.json` `bundle.icon` 以 `../ui/assets/app-icon/*` 引用）。源图为 quantum 风格 `icon.png`（512）。Linux/deb 使用常见 hicolor 尺寸 `16/24/32/48/64/128/256/512` PNG（桌面项 `Icon=capilot-ide`）；macOS 用 `icon.icns`，Windows 用 `icon.ico`。换源图后从 `icon.png` 重导出各尺寸（`pnpm tauri icon` 可重生 icns/ico），再重建 deb。
+- 应用图标统一放在 `ui/assets/app-icon/`（由 `tauri.conf.json` `bundle.icon` 以 `../ui/assets/app-icon/*` 引用）。源图为 quantum 风格 `icon.png`（512）。Linux/deb 使用常见 hicolor 尺寸 `16/24/32/48/64/128/256/512` PNG（桌面项 `Icon=capilot-ide`）；Windows 用 `icon.ico`。换源图后从 `icon.png` 重导出各尺寸（`pnpm tauri icon` 可重生 ico），再重建 deb。**发布平台仅 Linux + Windows**（CI / bundle targets 不含 macOS）。
 
 **同步规则：** `docs/styleguide/` 与 `ui/assets/`（原 `docs/Assets/`）是主仓库 `Doc/styleguide/`、`Doc/Assets/` 的复制品，**改设计需两边同步**。
 
@@ -57,6 +57,8 @@ IDE 遵循 CaPilot 主仓库的 **LUCY styleguide**（8-bit Pixel × Apple Smoot
 > 已解决（2026-08-06）：「会话 permissionMode 未持久化」已在会话生命周期改造中一并完成 —— mode/speed/model 持久化进 `sessions` 表，Composer 三设置跟随当前会话。
 
 > 已解决（2026-08-15）：OpenCode 常驻 PTY 重挂载后滚轮失效 / 任意区域切 prompt 历史。修复约束与协议记录见 `ai-runtime-references.md` 的 “TUI 鼠标协议”，回归命令为 `pnpm test:terminal-mouse`。
+
+> 已决定（2026-08-17）：**取消 macOS 官方支持与发布**。Release CI 只构建 Linux/Windows；bundle targets 为 `deb` / `appimage` / `nsis`；updater `latest.json` 不再包含 `darwin-*`。源码里少量 `#[cfg(target_os = "macos")]` 路径保留无害，但无预编译包、无签名流程。
 
 ### 待开发项
 

@@ -113,8 +113,8 @@ scoping:
    An empty `pubkey` means signature verification is skipped — never ship that.
 2. **CSP**: apply the hardened CSP above; remove `'unsafe-eval'` and Google Fonts origins; keep
    any dev-only eval allowance in `devCsp`. Re-test `pnpm tauri dev` HMR.
-3. **Code signing**: macOS Developer ID + notarization; Windows Authenticode; Linux GPG-sign
-   deb/rpm.
+3. **Code signing**: Windows Authenticode; Linux GPG-sign deb/rpm. (macOS is not a supported
+   release target — no Developer ID / notarization pipeline.)
 4. **Dev-only surfaces**: disable devtools in release builds; ensure `withGlobalTauri` stays
    `false`; never point `frontendDist` at remote content.
 5. **Fix `fs_write`** symlink/TOCTOU issue (§3); prefer `tauri-plugin-fs` with `$HOME` scope.
