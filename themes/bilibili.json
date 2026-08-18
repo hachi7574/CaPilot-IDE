@@ -4,6 +4,9 @@
   "note": "小电视粉 · 樱花粉白",
   "swatches": ["#FFEBF2", "#FB7299", "#FF8FB0", "#00AEEC"],
   "colorScheme": "light",
+  "wallpaper": {
+    "file": "千夏.png"
+  },
   "vars": {
     "--bg": "#FFF5F8",
     "--bg2": "#FFEBF2",

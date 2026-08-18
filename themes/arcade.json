@@ -4,6 +4,9 @@
   "note": "品红摇杆 · 赛博投币厅",
   "swatches": ["#0E0716", "#402052", "#F06AC7", "#55E6D2"],
   "colorScheme": "dark",
+  "wallpaper": {
+    "file": "柚叶.jpg"
+  },
   "vars": {
     "--bg": "#0E0716", "--bg2": "#160B21", "--bg3": "#22122F", "--bg4": "#342044",
     "--ink": "#F9EAF7", "--ink2": "#D4B7D3", "--muted": "#896F90",
