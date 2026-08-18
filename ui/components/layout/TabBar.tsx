@@ -17,6 +17,7 @@ import {
 import { TerminalTemplatePicker } from "./TerminalTemplatePicker";
 import { RenameAgentModal } from "./RenameAgentModal";
 import { Icon, runtimeIcon } from "../Icon";
+import { useT } from "../../i18n";
 
 function projectOf(cwd: string): string {
   const m = cwd.match(/workspaces\/([^/]+)/);
@@ -25,20 +26,20 @@ function projectOf(cwd: string): string {
   return parts[parts.length - 1] || cwd;
 }
 
-/** Agent status → colored text shown in the tab bar (the runtime logo replaces
- *  the old claude/codex text). `st-<key>` classes carry the color. `dormant`
- *  is derived (no live PTY — restored after restart / sleepProject / killed);
- *  it is never persisted. */
-const STATUS_TEXT = {
-  idle: "空闲",
-  running: "运行中",
-  waiting_input: "待确认",
-  awaiting_choice: "待选择",
-  busy: "运行中",
-  done: "待处理",
-  failed: "异常",
-  dormant: "休眠中",
-} as const;
+/** Agent status keys shown in the tab bar (the runtime logo replaces the old
+ *  claude/codex text). `st-<key>` classes carry the color. `dormant` is derived
+ *  (no live PTY — restored after restart / sleepProject / killed); it is never
+ *  persisted. Labels come from `status.*` via `t()` so they follow locale. */
+const STATUS_KEYS = [
+  "idle",
+  "running",
+  "waiting_input",
+  "awaiting_choice",
+  "busy",
+  "done",
+  "failed",
+  "dormant",
+] as const;
 
 /** Runtimes whose backend adapter installs lifecycle status hooks (claude's
  *  `--settings`, codex's per-session config profile, opencode's status
@@ -93,6 +94,15 @@ function tabProject(
 }
 
 export function TabBar() {
+  const t = useT();
+  // Built inside the component so status labels re-render on locale change.
+  const STATUS_TEXT = useMemo(
+    () =>
+      Object.fromEntries(
+        STATUS_KEYS.map((k) => [k, t(`status.${k}`)])
+      ) as Record<(typeof STATUS_KEYS)[number], string>,
+    [t]
+  );
   const tabs = useStore((s) => s.tabs);
   const activeTabId = useStore((s) => s.activeTabId);
   const agents = useStore((s) => s.agents);
@@ -518,7 +528,7 @@ export function TabBar() {
           : false;
         const completed = status === "idle" && hasUnread;
         const statusLabel = completed
-          ? "已完成"
+          ? t("status.completed")
           : (STATUS_TEXT[status as keyof typeof STATUS_TEXT] ?? status);
         const statusClass = completed ? "st-completed" : `st-${status}`;
         // Agent records are the live source of truth for terminal names. A
@@ -601,9 +611,9 @@ export function TabBar() {
               title={
                 tab.type === "agent" && tab.agentId
                   ? agent?.status === "done"
-                    ? "关闭（已结束，可从侧栏找回）"
-                    : "关闭并终止"
-                  : "关闭标签"
+                    ? t("tabBar.closeEnded")
+                    : t("tabBar.closeAndKill")
+                  : t("tabBar.closeTab")
               }
             >
               ×
@@ -611,7 +621,7 @@ export function TabBar() {
           </div>
         );
       })}
-      <button className="tab-add" title="新建终端" onClick={openPicker}>
+      <button className="tab-add" title={t("tabBar.newTerminal")} onClick={openPicker}>
         +
       </button>
       {/* Spacer keeps window controls pinned to the trailing edge while tabs
@@ -623,21 +633,21 @@ export function TabBar() {
           <span
             className="sidebar-btn win-btn"
             onClick={() => void appWindow.minimize()}
-            title="最小化"
+            title={t("tabBar.minimize")}
           >
             <Icon name="minus" size={14} />
           </span>
           <span
             className="sidebar-btn win-btn"
             onClick={() => void appWindow.toggleMaximize()}
-            title={winMaximized ? "还原" : "最大化"}
+            title={winMaximized ? t("tabBar.restore") : t("tabBar.maximize")}
           >
             <Icon name={winMaximized ? "copy" : "square"} size={13} />
           </span>
           <span
             className="sidebar-btn win-btn win-close"
             onClick={() => void appWindow.close()}
-            title="关闭"
+            title={t("common.close")}
           >
             <Icon name="x" size={14} />
           </span>
@@ -658,7 +668,7 @@ export function TabBar() {
                 setTabMenu(null);
               }}
             >
-              <Icon name="pencil" size={13} /> 重命名
+              <Icon name="pencil" size={13} /> {t("tabBar.rename")}
             </div>
           )}
           {tabMenuTab?.type === "agent" && <div className="ctx-sep" />}
@@ -669,7 +679,7 @@ export function TabBar() {
               setTabMenu(null);
             }}
           >
-            <Icon name="x" size={13} /> 关闭
+            <Icon name="x" size={13} /> {t("common.close")}
           </div>
           <div
             className="ctx-item"
@@ -678,7 +688,7 @@ export function TabBar() {
               setTabMenu(null);
             }}
           >
-            <Icon name="x" size={13} /> 关闭其它
+            <Icon name="x" size={13} /> {t("tabBar.closeOther")}
           </div>
           <div
             className="ctx-item"
@@ -687,7 +697,7 @@ export function TabBar() {
               setTabMenu(null);
             }}
           >
-            <Icon name="file-text" size={13} /> 关闭所有文件
+            <Icon name="file-text" size={13} /> {t("tabBar.closeAllFiles")}
           </div>
         </div>
       )}

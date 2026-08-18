@@ -9,6 +9,7 @@ import { Icon } from "../Icon";
 import { CaPilotLogo } from "../CaPilotLogo";
 import { spawnAgent } from "../../state/agentActions";
 import { notify } from "../../state/notify";
+import { useT, t as tStatic } from "../../i18n";
 
 type DropEdge = "left" | "right" | "top" | "bottom" | null;
 
@@ -21,13 +22,14 @@ function Panel({
   /** True for the panel of the active tab (drives F1 terminal-focus gating). */
   active?: boolean;
 }) {
+  const t = useT();
   return (
     <div className="content-panel">
       {tab.type === "agent" && tab.agentId && (
         <XTermPanel agentId={tab.agentId} active={active} />
       )}
       {tab.type === "agent" && !tab.agentId && (
-        <div className="panel-placeholder">会话未启动 — 在输入框发消息自动创建</div>
+        <div className="panel-placeholder">{t("content.sessionNotStarted")}</div>
       )}
       {tab.type === "editor" && tab.filePath && (
         <EditorPanel filePath={tab.filePath} active={active} />
@@ -175,6 +177,7 @@ function EmptyState({
   noProjects: boolean;
   onNewProject: () => void;
 }) {
+  const t = useT();
   const [faded, setFaded] = useState(false);
 
   useEffect(() => {
@@ -190,17 +193,17 @@ function EmptyState({
         <h3>CaPilot IDE</h3>
         {noProjects ? (
           <>
-            <p className="empty-state-hint">还没有项目 — 先创建一个新项目</p>
+            <p className="empty-state-hint">{t("content.noProjects")}</p>
             <button
               className="empty-state-cta"
               onClick={onNewProject}
               tabIndex={faded ? -1 : 0}
             >
-              <Icon name="folder-plus" size={13} /> 新建项目
+              <Icon name="folder-plus" size={13} /> {t("content.newProject")}
             </button>
           </>
         ) : (
-          <p className="empty-state-hint">按 Ctrl+T 开启一个新的 agent 会话</p>
+          <p className="empty-state-hint">{t("content.ctrlTHint")}</p>
         )}
       </div>
     </div>
@@ -274,8 +277,8 @@ export function ContentArea() {
       const runtime = resolveCtrlTRuntime(st.ctrlTRuntime, st.runtimes);
       if (!runtime) {
         notify(
-          "无法新建终端",
-          "未检测到可用的 Agent 运行时。请在设置 → 运行时 中检测安装或登录后重试。"
+          tStatic("content.cannotCreateTerminal"),
+          tStatic("content.noRuntimeBody")
         );
         return;
       }

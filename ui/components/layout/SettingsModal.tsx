@@ -13,6 +13,7 @@ import { THEMES, getTheme, DEFAULT_THEME_ID } from "../../state/themes";
 import { checkForUpdate, downloadAndInstall } from "../../state/update";
 import { Icon, runtimeIcon } from "../Icon";
 import { isShellRuntime, isWindowsHost } from "../../state/shellPath";
+import { useT, LOCALES, themeLabel, type Locale } from "../../i18n";
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -59,6 +60,9 @@ const DEFAULT_LAUNCH: Record<string, { command: string; args: string }> = {
 };
 
 export function SettingsModal({ onClose }: SettingsModalProps) {
+  const t = useT();
+  const locale = useStore((s) => s.locale);
+  const setLocale = useStore((s) => s.setLocale);
   const runtimes = useStore((s) => s.runtimes);
   const setRuntimes = useStore((s) => s.setRuntimes);
   const setOnboarded = useStore((s) => s.setOnboarded);
@@ -81,6 +85,11 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const [runtimeMenuOpen, setRuntimeMenuOpen] = useState(false);
   const runtimePickerRef = useRef<HTMLDivElement>(null);
   const currentTheme = getTheme(themeId) ?? THEMES[0];
+  const currentThemeLabel =
+    themeLabel(locale, currentTheme.id) ?? {
+      name: currentTheme.name,
+      note: currentTheme.note,
+    };
   const themeHasWallpaper = Boolean(currentTheme?.wallpaperUrl);
   const wallpaperActive =
     wallpaperMode === "custom"
@@ -444,19 +453,19 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           <div className="settings-title-lockup">
             <span className="settings-kicker">CAPILOT // CONTROL CARTRIDGE</span>
             <h3 id="settings-title">
-              <Icon name="settings" size={18} /> 系统设置
+              <Icon name="settings" size={18} /> {t("settings.title")}
             </h3>
           </div>
           <div className="settings-header-meta">
             <span>BUILD {currentVersion ?? "DEV"}</span>
-            <button className="modal-close settings-close" onClick={onClose} aria-label="关闭设置">
+            <button className="modal-close settings-close" onClick={onClose} aria-label={t("settings.closeAria")}>
               <Icon name="x" size={15} />
             </button>
           </div>
         </header>
 
         <div className="settings-layout">
-          <aside className="settings-rail" aria-label="设置分区">
+          <aside className="settings-rail" aria-label={t("settings.railAria")}>
             <div className="settings-rail-label">DIAGNOSTIC BUS</div>
             <nav className="settings-nav">
               <button
@@ -464,21 +473,21 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 onClick={() => jumpToSection("runtimes")}
               >
                 <Icon name="bot" size={14} />
-                <span><b>运行时</b><small>Shell 与 Agent</small></span>
+                <span><b>{t("settings.navRuntimes")}</b><small>{t("settings.navRuntimesSub")}</small></span>
               </button>
               <button
                 className={activeSection === "appearance" ? "active" : ""}
                 onClick={() => jumpToSection("appearance")}
               >
                 <Icon name="paintbrush" size={14} />
-                <span><b>外观</b><small>主题与字号</small></span>
+                <span><b>{t("settings.navAppearance")}</b><small>{t("settings.navAppearanceSub")}</small></span>
               </button>
               <button
                 className={activeSection === "sessions" ? "active" : ""}
                 onClick={() => jumpToSection("sessions")}
               >
                 <Icon name="square-terminal" size={14} />
-                <span><b>会话</b><small>退出与引导</small></span>
+                <span><b>{t("settings.navSessions")}</b><small>{t("settings.navSessionsSub")}</small></span>
               </button>
               <button
                 className={
@@ -489,11 +498,11 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               >
                 <Icon name="download" size={14} />
                 <span>
-                  <b>更新</b>
+                  <b>{t("settings.navUpdates")}</b>
                   <small>
                     {updateStatus === "available" && updateLatest
-                      ? `可更新 v${updateLatest}`
-                      : "版本与安装"}
+                      ? t("settings.navUpdatesAvailable", { version: updateLatest })
+                      : t("settings.navUpdatesSub")}
                   </small>
                 </span>
               </button>
@@ -520,12 +529,12 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
         <section id="settings-runtimes" className="modal-section settings-panel settings-runtime-panel">
           <div className="settings-section-head">
             <span>RUNTIME BUS</span>
-            <h4>运行环境</h4>
-            <p>管理系统终端（PowerShell / CMD / Git Bash）与已接入的编码 Agent CLI。</p>
+            <h4>{t("settings.runtimeBus")}</h4>
+            <p>{t("settings.runtimeDesc")}</p>
           </div>
           <div className="settings-toolbar">
             <div className="modal-title">
-              已检测{" "}
+              {t("settings.detected")}{" "}
               <span className="settings-count">
                 {installedCount}
                 {listedRuntimes.length > 0 ? ` / ${listedRuntimes.length}` : ""}
@@ -533,21 +542,21 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             </div>
             <button className="settings-compact-btn" onClick={reDetect} disabled={scanning}>
               <Icon name="refresh-cw" size={11} />
-              {scanning ? "检测中…" : "重新检测"}
+              {scanning ? t("common.scanning") : t("common.redetect")}
             </button>
           </div>
           {detectError && (
             <div className="settings-empty-runtime" role="alert">
               <Icon name="triangle-alert" size={18} />
-              <span>检测失败</span>
+              <span>{t("settings.detectFailed")}</span>
               <small>{detectError}</small>
             </div>
           )}
           {!scanning && !detectError && listedRuntimes.length === 0 && (
             <div className="settings-empty-runtime">
               <Icon name="plug" size={18} />
-              <span>未检测到运行时</span>
-              <small>安装 CLI / shell 后点「重新检测」。</small>
+              <span>{t("settings.noRuntimes")}</span>
+              <small>{t("settings.noRuntimesHint")}</small>
             </div>
           )}
           {listedRuntimes.map((rt) => {
@@ -565,7 +574,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                   <span
                     className="settings-runtime-version"
                     style={{ opacity: 0.55, marginLeft: 6 }}
-                    title={shell ? "系统终端" : "Agent CLI"}
+                    title={shell ? t("settings.systemTerminal") : t("settings.agentCli")}
                   >
                     {shell ? "shell" : "agent"}
                   </span>
@@ -590,13 +599,13 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                       <>
                         <Icon name="check" size={12} style={{ marginRight: 4 }} />
                         {shell
-                          ? "可用"
+                          ? t("common.available")
                           : rt.authenticated
-                            ? "已登录"
-                            : "已安装"}
+                            ? t("common.loggedIn")
+                            : t("common.installed")}
                       </>
                     ) : (
-                      "未检测到"
+                      t("common.notDetected")
                     )}
                   </span>
                   <button
@@ -608,7 +617,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                       border: `1px solid ${editingId === rt.id ? "var(--brand)" : "var(--rule2)"}`,
                       color: editingId === rt.id ? "var(--brand)" : "var(--ink2)",
                     }}
-                    title="点击展开/收起启动命令配置（收起即保存）"
+                    title={t("settings.gearTitle")}
                   >
                     <Icon name="settings" size={12} />
                   </button>
@@ -618,26 +627,26 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 <div style={{ padding: "0 0 10px", display: "flex", flexDirection: "column", gap: 6 }}>
                   <div>
                     <div style={{ fontSize: "var(--fs-2xs)", color: "var(--ink2)", marginBottom: 2 }}>
-                      启动命令
+                      {t("settings.launchCommand")}
                     </div>
                     <input
                       className="modal-text-input"
                       value={editCmd}
                       onChange={(e) => setEditCmd(e.target.value)}
                       onKeyDown={(e) => { if (e.key === "Enter") saveOverride(); }}
-                      placeholder={`例如 ${rt.id}`}
+                      placeholder={t("settings.launchCmdPlaceholder", { id: rt.id })}
                     />
                   </div>
                   <div>
                     <div style={{ fontSize: "var(--fs-2xs)", color: "var(--ink2)", marginBottom: 2 }}>
-                      命令参数
+                      {t("settings.launchArgs")}
                     </div>
                     <input
                       className="modal-text-input"
                       value={editArgs}
                       onChange={(e) => setEditArgs(e.target.value)}
                       onKeyDown={(e) => { if (e.key === "Enter") saveOverride(); }}
-                      placeholder="留空使用默认参数（空格分隔）"
+                      placeholder={t("settings.launchArgsPlaceholder")}
                     />
                   </div>
                   <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
@@ -645,20 +654,20 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                       onClick={saveOverride}
                       style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-2xs)", padding: "4px 12px", border: "1px solid var(--brand)", color: "var(--brand)", background: "rgb(var(--brand-rgb) / .08)", borderRadius: 6, cursor: "pointer" }}
                     >
-                      保存
+                      {t("common.save")}
                     </button>
                     <button
                       onClick={() => setEditingId(null)}
                       style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-2xs)", padding: "4px 12px", border: "1px solid var(--rule2)", color: "var(--ink2)", background: "transparent", borderRadius: 6, cursor: "pointer" }}
                     >
-                      取消
+                      {t("common.cancel")}
                     </button>
                     {overrides[rt.id] && (
                       <button
                         onClick={() => resetOverride(rt.id)}
                         style={{ fontFamily: "var(--pixel)", fontSize: "var(--fs-2xs)", padding: "4px 12px", border: "1px solid var(--rule2)", color: "var(--warn)", background: "transparent", borderRadius: 6, cursor: "pointer" }}
                       >
-                        恢复默认
+                        {t("common.resetDefault")}
                       </button>
                     )}
                   </div>
@@ -667,12 +676,12 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                   {(rt.id === "codex" || rt.id === "opencode") && (
                     <div style={{ borderTop: "1px solid var(--rule)", marginTop: 10, paddingTop: 8 }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 4, fontFamily: "var(--pixel)", fontSize: "var(--fs-2xs)", color: "var(--ink2)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
-                        <Icon name="activity" size={11} /> 用量统计（剩余用量）
+                        <Icon name="activity" size={11} /> {t("settings.usageStats")}
                       </div>
 
                       {/* Enable toggle */}
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, fontSize: "var(--fs-2xs)", color: "var(--ink2)" }}>
-                        <span>启用：状态栏显示剩余用量</span>
+                        <span>{t("settings.usageEnable")}</span>
                         <button
                           onClick={() => persistUsageEnabled(rt.id, !usageEnabled[rt.id])}
                           style={{
@@ -686,7 +695,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                             cursor: "pointer",
                           }}
                         >
-                          {usageEnabled[rt.id] ? "已启用" : "已停用"}
+                          {usageEnabled[rt.id] ? t("common.enabled") : t("common.disabled")}
                         </button>
                       </div>
 
@@ -695,7 +704,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                         <>
                           <div style={{ marginBottom: 6 }}>
                             <div style={{ fontSize: "var(--fs-2xs)", color: "var(--ink2)", marginBottom: 2 }}>
-                              opencode.ai 登录 Cookie（以 auth= 开头）
+                              {t("settings.opencodeCookie")}
                             </div>
                             <input
                               className="modal-text-input"
@@ -705,12 +714,12 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                                 setUsageCookie(e.target.value);
                                 updateUsageConfig("opencode", { auth_cookie: e.target.value });
                               }}
-                              placeholder="浏览器登录 opencode.ai 后复制 auth cookie"
+                              placeholder={t("settings.opencodeCookiePh")}
                             />
                           </div>
                           <div style={{ marginBottom: 6 }}>
                             <div style={{ fontSize: "var(--fs-2xs)", color: "var(--ink2)", marginBottom: 2 }}>
-                              Workspace ID（可留空自动探测）
+                              {t("settings.workspaceId")}
                             </div>
                             <input
                               className="modal-text-input"
@@ -719,7 +728,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                                 setUsageWorkspace(e.target.value);
                                 updateUsageConfig("opencode", { workspace_id: e.target.value });
                               }}
-                              placeholder="https://opencode.ai/workspace/<id>/go 中的 <id>"
+                              placeholder={t("settings.workspaceIdPh")}
                             />
                           </div>
                         </>
@@ -728,9 +737,9 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                       {/* codex: no config (auth auto-discovered) */}
                       {rt.id === "codex" && (
                         <div style={{ fontSize: "var(--fs-2xs)", color: "var(--ink2)", marginBottom: 8 }}>
-                          自动读取 ~/.codex/auth.json 登录态，无需配置。
-                          当前：<span style={{ color: rt.authenticated ? "var(--success)" : "var(--warn)" }}>
-                            {rt.authenticated ? "已登录" : "未登录"}
+                          {t("settings.codexAuthHint")}
+                          {t("settings.current")}<span style={{ color: rt.authenticated ? "var(--success)" : "var(--warn)" }}>
+                            {rt.authenticated ? t("common.loggedIn") : t("common.notLoggedIn")}
                           </span>
                         </div>
                       )}
@@ -753,7 +762,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                           }}
                         >
                           <Icon name="refresh-cw" size={11} />
-                          {checkingId === rt.id ? "检查中…" : "检查可用性"}
+                          {checkingId === rt.id ? t("common.checking") : t("settings.checkAvailability")}
                         </button>
                         {(() => {
                           const uc = usageChecks[rt.id];
@@ -776,8 +785,17 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                       {/* Live status-bar summary */}
                       {usageState[rt.id]?.available && (
                         <div style={{ fontSize: "var(--fs-2xs)", color: "var(--ink2)" }}>
-                          状态栏显示：{usageState[rt.id].windows
-                            .map((w) => `${w.label} ${w.remaining_pct != null ? `剩余 ${Math.round(w.remaining_pct)}%` : ""}`.trim())
+                          {t("settings.statusBarShows")}
+                          {usageState[rt.id].windows
+                            .map((w) =>
+                              `${w.label} ${
+                                w.remaining_pct != null
+                                  ? t("settings.remaining", {
+                                      pct: Math.round(w.remaining_pct),
+                                    })
+                                  : ""
+                              }`.trim()
+                            )
                             .join(" · ")}
                         </div>
                       )}
@@ -794,28 +812,52 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
         <section id="settings-appearance" className="modal-section settings-panel settings-appearance-panel">
           <div className="settings-section-head">
             <span>DISPLAY CARTRIDGES</span>
-            <h4>外观与显示</h4>
-            <p>选择整套终端材质与语法色，并调整界面信息密度。</p>
+            <h4>{t("settings.appearanceTitle")}</h4>
+            <p>{t("settings.appearanceDesc")}</p>
           </div>
+
           <div className="settings-field-label">
-            <span>主题风格</span>
-            <small>即时应用 · 自动保存</small>
+            <span>{t("language.label")}</span>
+            <small>{t("language.hint")}</small>
+          </div>
+          <div className="settings-segmented" role="radiogroup" aria-label={t("language.label")}>
+            {LOCALES.map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                role="radio"
+                aria-checked={locale === opt.id}
+                className={locale === opt.id ? "active" : ""}
+                onClick={() => setLocale(opt.id as Locale)}
+              >
+                {opt.nativeLabel}
+              </button>
+            ))}
+          </div>
+
+          <div className="settings-field-label">
+            <span>{t("settings.themeStyle")}</span>
+            <small>{t("settings.themeInstant")}</small>
           </div>
           <div className="settings-theme-picker" ref={themePickerRef}>
             <button
               type="button"
               className="settings-theme-trigger"
-              aria-label="主题风格"
+              aria-label={t("settings.themeStyle")}
               aria-haspopup="listbox"
               aria-expanded={themeMenuOpen}
               aria-controls="settings-theme-menu"
               onClick={() => setThemeMenuOpen((open) => !open)}
             >
               <span className="settings-theme-current">
-                <b>{currentTheme.name}</b>
-                <small>{currentTheme.note}</small>
+                <b>{currentThemeLabel.name}</b>
+                <small>{currentThemeLabel.note}</small>
               </span>
-              <span className="settings-theme-palette" aria-label={`${currentTheme.name}配色`} role="img">
+              <span
+                className="settings-theme-palette"
+                aria-label={t("settings.themePaletteAria", { name: currentThemeLabel.name })}
+                role="img"
+              >
                 {currentTheme.swatches.map((color, index) => (
                   <i key={`${color}-${index}`} style={{ backgroundColor: color }} title={color} />
                 ))}
@@ -824,13 +866,17 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             </button>
 
             {themeMenuOpen && (
-              <div className="settings-theme-menu" id="settings-theme-menu" role="listbox" aria-label="主题风格">
+              <div className="settings-theme-menu" id="settings-theme-menu" role="listbox" aria-label={t("settings.themeStyle")}>
                 <div className="settings-theme-menu-head">
                   <span>COLOR CARTRIDGES</span>
-                  <small>{THEMES.length} 套配色</small>
+                  <small>{t("settings.themeSwatches", { n: THEMES.length })}</small>
                 </div>
                 {THEMES.map((theme) => {
                   const selected = theme.id === themeId;
+                  const label = themeLabel(locale, theme.id) ?? {
+                    name: theme.name,
+                    note: theme.note,
+                  };
                   return (
                     <button
                       key={theme.id}
@@ -852,8 +898,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                         <small>{theme.swatches.join("  ")}</small>
                       </span>
                       <span className="settings-theme-option-copy">
-                        <b>{theme.name}</b>
-                        <small>{theme.note}</small>
+                        <b>{label.name}</b>
+                        <small>{label.note}</small>
                       </span>
                       <span className="settings-theme-option-state">{selected ? "ACTIVE" : "LOAD"}</span>
                     </button>
@@ -864,16 +910,16 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           </div>
 
           <div className="settings-field-label settings-font-label">
-            <span>背景图片</span>
-            <small>主题内置或自定义本地图片</small>
+            <span>{t("settings.wallpaper")}</span>
+            <small>{t("settings.wallpaperHint")}</small>
           </div>
           <div className="settings-wallpaper">
-            <div className="settings-segmented" role="radiogroup" aria-label="背景图片来源">
+            <div className="settings-segmented" role="radiogroup" aria-label={t("settings.wallpaperSource")}>
               {(
                 [
-                  { key: "auto", label: "跟随主题" },
-                  { key: "custom", label: "自定义" },
-                  { key: "off", label: "关闭" },
+                  { key: "auto", label: t("settings.wallpaperAuto") },
+                  { key: "custom", label: t("settings.wallpaperCustom") },
+                  { key: "off", label: t("settings.wallpaperOff") },
                 ] as { key: WallpaperMode; label: string }[]
               ).map((opt) => (
                 <button
@@ -891,15 +937,15 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
 
             <div className="settings-wallpaper-row">
               <span className="settings-wallpaper-status">
-                {wallpaperMode === "off" && "背景层已关闭"}
+                {wallpaperMode === "off" && t("settings.wallpaperOffStatus")}
                 {wallpaperMode === "auto" &&
                   (themeHasWallpaper
-                    ? `使用「${currentTheme.name}」内置背景`
-                    : "当前主题没有内置背景")}
+                    ? t("settings.wallpaperAutoStatus", { name: currentThemeLabel.name })
+                    : t("settings.wallpaperAutoNone"))}
                 {wallpaperMode === "custom" &&
                   (wallpaperFileLabel
-                    ? `自定义：${wallpaperFileLabel}`
-                    : "尚未选择图片")}
+                    ? t("settings.wallpaperCustomStatus", { name: wallpaperFileLabel })
+                    : t("settings.wallpaperCustomNone"))}
               </span>
               <div className="settings-wallpaper-actions">
                 <button
@@ -907,7 +953,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                   className="settings-wallpaper-btn"
                   onClick={() => void pickWallpaper()}
                 >
-                  选择图片
+                  {t("settings.pickImage")}
                 </button>
                 {wallpaperPath && (
                   <button
@@ -918,7 +964,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                       if (wallpaperMode === "custom") setWallpaperMode("auto");
                     }}
                   >
-                    清除
+                    {t("common.clear")}
                   </button>
                 )}
               </div>
@@ -926,7 +972,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
 
             <label className={`settings-wallpaper-slider${wallpaperActive ? "" : " disabled"}`}>
               <span>
-                透明度
+                {t("settings.opacity")}
                 <b>{Math.round(wallpaperOpacity * 100)}%</b>
               </span>
               <input
@@ -942,17 +988,17 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           </div>
 
           <div className="settings-field-label settings-font-label">
-            <span>界面字体大小</span>
-            <small>终端字号同步调整</small>
+            <span>{t("settings.fontSize")}</span>
+            <small>{t("settings.fontSizeHint")}</small>
           </div>
-          <div className="settings-segmented" role="radiogroup" aria-label="界面字体大小">
+          <div className="settings-segmented" role="radiogroup" aria-label={t("settings.fontSizeAria")}>
             {(
               [
-                { key: "s", label: "最小" },
-                { key: "m", label: "小" },
-                { key: "l", label: "中" },
-                { key: "xl", label: "大" },
-                { key: "xxl", label: "最大" },
+                { key: "s", label: t("settings.fontS") },
+                { key: "m", label: t("settings.fontM") },
+                { key: "l", label: t("settings.fontL") },
+                { key: "xl", label: t("settings.fontXl") },
+                { key: "xxl", label: t("settings.fontXxl") },
               ] as { key: FontScale; label: string }[]
             ).map((opt) => (
               <button
@@ -977,11 +1023,11 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             ))}
           </div>
           <div className="settings-field-label">
-            <span>提示音</span>
-            <small>Agent 完成一次任务时的提示音</small>
+            <span>{t("settings.sound")}</span>
+            <small>{t("settings.soundHint")}</small>
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
-            <span style={{ fontSize: "var(--fs-sm)", color: "var(--ink2)" }}>完成提示音</span>
+            <span style={{ fontSize: "var(--fs-sm)", color: "var(--ink2)" }}>{t("settings.soundToggle")}</span>
             <button
               onClick={() => setSoundEnabled(!soundEnabled)}
               style={{
@@ -995,7 +1041,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 cursor: "pointer",
               }}
             >
-              {soundEnabled ? "已开启" : "已关闭"}
+              {soundEnabled ? t("common.on") : t("common.off")}
             </button>
           </div>
         </section>
@@ -1004,12 +1050,12 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
         <section id="settings-sessions" className="modal-section settings-panel settings-session-panel">
           <div className="settings-section-head">
             <span>SESSION LIFECYCLE</span>
-            <h4>会话行为</h4>
-            <p>决定 Agent 自然退出后的保留方式，以及是否重新运行首次引导。</p>
+            <h4>{t("settings.sessionTitle")}</h4>
+            <p>{t("settings.sessionDesc")}</p>
           </div>
           <div className="settings-field-label">
-            <span>Ctrl+T 新建终端</span>
-            <small>快捷键创建的 Agent 运行时</small>
+            <span>{t("settings.ctrlT")}</span>
+            <small>{t("settings.ctrlTHint")}</small>
           </div>
           {(() => {
             const availableRuntimes = runtimes.filter((rt) => rt.available);
@@ -1020,7 +1066,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 <button
                   type="button"
                   className="settings-runtime-trigger"
-                  aria-label="Ctrl+T 新建终端运行时"
+                  aria-label={t("settings.ctrlTAria")}
                   aria-haspopup="listbox"
                   aria-expanded={runtimeMenuOpen}
                   aria-controls="settings-runtime-menu"
@@ -1040,8 +1086,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                       </>
                     ) : (
                       <span className="settings-runtime-current-copy">
-                        <b>无可用运行时</b>
-                        <small>请先在运行时面板安装</small>
+                        <b>{t("settings.noRuntime")}</b>
+                        <small>{t("settings.noRuntimeHint")}</small>
                       </span>
                     )}
                   </span>
@@ -1053,7 +1099,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                     className="settings-runtime-menu"
                     id="settings-runtime-menu"
                     role="listbox"
-                    aria-label="Ctrl+T 新建终端运行时"
+                    aria-label={t("settings.ctrlTAria")}
                   >
                     {availableRuntimes.map((rt) => {
                       const selected = rt.id === (currentRuntime?.id ?? ctrlTRuntime);
@@ -1086,8 +1132,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             );
           })()}
           <div className="settings-field-label">
-            <span>终端自然退出后</span>
-            <small>适用于 exit、任务完成与 Ctrl+D</small>
+            <span>{t("settings.sessionEnd")}</span>
+            <small>{t("settings.sessionEndHint")}</small>
           </div>
           <div className="settings-choice-grid">
             <button
@@ -1104,7 +1150,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               }}
             >
               <Icon name="history" size={14} />
-              <span><b>保留会话</b><small>标记为已结束，仍可从侧栏找回</small></span>
+              <span><b>{t("settings.keepSession")}</b><small>{t("settings.keepSessionHint")}</small></span>
             </button>
             <button
               className={sessionEndMode === "delete" ? "active danger" : "danger"}
@@ -1120,7 +1166,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               }}
             >
               <Icon name="trash-2" size={14} />
-              <span><b>直接删除</b><small>退出后立即清理会话记录</small></span>
+              <span><b>{t("settings.deleteSession")}</b><small>{t("settings.deleteSessionHint")}</small></span>
             </button>
           </div>
         </section>
@@ -1129,7 +1175,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
         <div className="modal-section settings-panel settings-onboarding-panel">
           <div className="settings-action-copy">
             <Icon name="rocket" size={15} />
-            <span><b>首次使用引导</b><small>重新查看运行环境检测与创建会话流程。</small></span>
+            <span><b>{t("settings.onboarding")}</b><small>{t("settings.onboardingHint")}</small></span>
           </div>
           <div>
             <button
@@ -1145,7 +1191,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 cursor: "pointer",
               }}
             >
-              重新显示
+              {t("settings.reshow")}
             </button>
           </div>
         </div>
@@ -1154,16 +1200,16 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
         <section id="settings-updates" className="modal-section settings-panel settings-update-panel">
           <div className="settings-section-head">
             <span>UPDATES</span>
-            <h4>关于与更新</h4>
+            <h4>{t("settings.aboutTitle")}</h4>
           </div>
 
           <div className="settings-update-row">
             <div className="settings-update-identity">
               <b>CaPilot IDE</b>
-              <span>当前 v{currentVersion ?? "…"}</span>
+              <span>{t("settings.currentVersion", { version: currentVersion ?? "…" })}</span>
               {updateStatus === "available" && updateLatest && (
                 <span className="settings-update-badge" role="status">
-                  存在可更新版本 v{updateLatest}
+                  {t("settings.updateAvailableBadge", { version: updateLatest })}
                 </span>
               )}
             </div>
@@ -1174,7 +1220,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               disabled={updateStatus === "checking" || updateDownloading}
             >
               <Icon name="refresh-cw" size={11} />
-              {updateStatus === "checking" ? "检查中…" : "检查更新"}
+              {updateStatus === "checking" ? t("common.checking") : t("settings.checkUpdate")}
             </button>
           </div>
 
@@ -1197,41 +1243,44 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           >
             {updateStatus === "idle" && (
               <>
-                <strong>尚未检查更新</strong>
-                <span>打开本页会自动检查；也可点右上角「检查更新」。</span>
+                <strong>{t("settings.notChecked")}</strong>
+                <span>{t("settings.notCheckedHint")}</span>
               </>
             )}
             {updateStatus === "checking" && (
               <>
-                <strong>正在检查更新…</strong>
+                <strong>{t("settings.checkingUpdate")}</strong>
                 <span>
-                  当前 v{currentVersion ?? "…"} · 正在连接更新服务器
+                  {t("settings.checkingUpdateHint", { version: currentVersion ?? "…" })}
                 </span>
               </>
             )}
             {updateStatus === "up-to-date" && (
               <>
-                <strong>已是最新版本</strong>
+                <strong>{t("settings.upToDate")}</strong>
                 <span>
-                  当前 v{currentVersion ?? "…"}
-                  {updateLatest ? ` · 远端 v${updateLatest}` : ""}
-                  {" · 无需更新"}
+                  {t("settings.upToDateHint", {
+                    version: currentVersion ?? "…",
+                    remote: updateLatest ? ` · remote v${updateLatest}` : "",
+                  })}
                 </span>
               </>
             )}
             {updateStatus === "available" && updateLatest && (
               <>
-                <strong>存在可更新版本</strong>
+                <strong>{t("settings.updateAvailable")}</strong>
                 <span>
-                  当前 v{currentVersion ?? "…"} → 可升级到 v{updateLatest}
-                  {" · 点击下方按钮下载并安装"}
+                  {t("settings.updateAvailableHint", {
+                    current: currentVersion ?? "…",
+                    latest: updateLatest,
+                  })}
                 </span>
               </>
             )}
             {updateStatus === "error" && (
               <>
-                <strong>检查更新失败</strong>
-                <span>{updateError || "未知错误，请稍后重试"}</span>
+                <strong>{t("settings.checkFailed")}</strong>
+                <span>{updateError || t("settings.unknownError")}</span>
               </>
             )}
           </div>
@@ -1239,12 +1288,14 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           {updateStatus === "available" && (
             <div className="settings-update-actions">
               <div className="settings-update-available-callout">
-                已检测到新版本 v{updateLatest}，当前运行的是 v
-                {currentVersion ?? "…"}。可立即下载安装。
+                {t("settings.updateCallout", {
+                  latest: updateLatest,
+                  current: currentVersion ?? "…",
+                })}
               </div>
               {updateNotes && (
                 <details className="settings-update-notes">
-                  <summary>发布说明</summary>
+                  <summary>{t("settings.releaseNotes")}</summary>
                   <pre>{updateNotes}</pre>
                 </details>
               )}
@@ -1257,14 +1308,14 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 >
                   <Icon name="download" size={12} />
                   {updateDownloading
-                    ? "下载中…"
+                    ? t("settings.downloading")
                     : updateLatest
-                      ? `下载并安装 v${updateLatest}`
-                      : "下载并安装"}
+                      ? t("settings.downloadInstallV", { version: updateLatest })
+                      : t("settings.downloadInstall")}
                 </button>
                 {!updateInstallable && (
                   <span className="settings-update-status is-warn">
-                    开发构建不支持自动安装，请使用发布包
+                    {t("settings.devNoAutoInstall")}
                   </span>
                 )}
               </div>
@@ -1282,10 +1333,12 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                     </>
                   ) : (
                     <span>
-                      已下载{" "}
-                      {updateBytesDownloaded != null
-                        ? `${(updateBytesDownloaded / (1024 * 1024)).toFixed(1)} MB`
-                        : "…"}
+                      {t("settings.downloaded", {
+                        size:
+                          updateBytesDownloaded != null
+                            ? `${(updateBytesDownloaded / (1024 * 1024)).toFixed(1)} MB`
+                            : "…",
+                      })}
                     </span>
                   )}
                 </div>
@@ -1294,13 +1347,13 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           )}
 
           <div className="settings-update-toggle">
-            <span>启动时自动检查更新</span>
+            <span>{t("settings.autoCheck")}</span>
             <button
               type="button"
               onClick={() => setAutoCheckUpdate(!autoCheckUpdate)}
               className={autoCheckUpdate ? "active" : ""}
             >
-              {autoCheckUpdate ? "已开启" : "已关闭"}
+              {autoCheckUpdate ? t("common.on") : t("common.off")}
             </button>
           </div>
         </section>

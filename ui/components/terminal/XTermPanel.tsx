@@ -7,6 +7,7 @@ import { SearchAddon } from "@xterm/addon-search";
 import { useStore, AgentInfo, TODO_DRAG_MIME } from "../../state/store";
 import { assignTodoAndSend } from "../../state/agentActions";
 import { pathsFromDataTransfer } from "../../state/dropPaths";
+import { useT } from "../../i18n";
 import { Icon } from "../Icon";
 import {
   canForwardSgrMouse,
@@ -364,6 +365,7 @@ const readTerminalTheme = () => ({
  * effect re-runs and attaches the new channel.
  */
 export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
+  const t = useT();
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -1133,7 +1135,7 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
             ref={searchInputRef}
             className="term-search-input"
             type="text"
-            placeholder="搜索终端…"
+            placeholder={t("terminal.searchPlaceholder")}
             value={searchQuery}
             onChange={(e) => {
               const q = e.target.value;
@@ -1157,12 +1159,12 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
             {searchQuery && searchResults && searchResults.resultCount > 0
               ? `${Math.max(searchResults.resultIndex, 0) + 1}/${searchResults.resultCount}`
               : searchQuery
-                ? "无结果"
+                ? t("terminal.noResults")
                 : ""}
           </span>
           <button
             className="term-search-btn"
-            title="上一个匹配 (Shift+Enter / Shift+F3)"
+            title={t("terminal.prevMatch")}
             onClick={() => runFind(searchQuery, "prev")}
             disabled={!searchQuery}
           >
@@ -1170,7 +1172,7 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
           </button>
           <button
             className="term-search-btn"
-            title="下一个匹配 (Enter / F3)"
+            title={t("terminal.nextMatch")}
             onClick={() => runFind(searchQuery, "next")}
             disabled={!searchQuery}
           >
@@ -1178,7 +1180,7 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
           </button>
           <button
             className="term-search-close"
-            title="关闭搜索 (Esc)"
+            title={t("terminal.closeSearch")}
             onClick={closeSearch}
           >
             ×

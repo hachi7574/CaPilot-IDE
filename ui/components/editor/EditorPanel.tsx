@@ -27,6 +27,7 @@ import { rust } from "@codemirror/lang-rust";
 import { python } from "@codemirror/lang-python";
 import { invoke } from "@tauri-apps/api/core";
 import { useStore } from "../../state/store";
+import { useT } from "../../i18n";
 import { Icon } from "../Icon";
 import { capilotTheme } from "./capilotTheme";
 
@@ -105,6 +106,7 @@ const editorSearchHighlighter = ViewPlugin.fromClass(
 );
 
 export function EditorPanel({ filePath, active = true }: EditorPanelProps) {
+  const t = useT();
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -480,7 +482,7 @@ export function EditorPanel({ filePath, active = true }: EditorPanelProps) {
         <div className="term-search-bar">
           <button
             className={`term-search-repl-toggle${replaceOpen ? " is-open" : ""}`}
-            title="替换模式 (Ctrl+Shift+F)"
+            title={t("editor.replaceMode")}
             onClick={() => setReplaceOpen((v) => !v)}
           >
             {replaceOpen ? (
@@ -495,7 +497,7 @@ export function EditorPanel({ filePath, active = true }: EditorPanelProps) {
                 ref={searchInputRef}
                 className="term-search-input"
                 type="text"
-                placeholder="搜索文本…"
+                placeholder={t("editor.searchPlaceholder")}
                 value={searchQuery}
                 onChange={(e) => {
                   const q = e.target.value;
@@ -520,12 +522,12 @@ export function EditorPanel({ filePath, active = true }: EditorPanelProps) {
                 {searchQuery && searchResults && searchResults.resultCount > 0
                   ? `${Math.max(searchResults.resultIndex, 0) + 1}/${searchResults.resultCount}`
                   : searchQuery
-                    ? "无结果"
+                    ? t("editor.noResults")
                     : ""}
               </span>
               <button
                 className="term-search-btn"
-                title="上一个匹配 (Shift+Enter / Shift+F3)"
+                title={t("editor.prevMatch")}
                 onClick={() => runFind(searchQuery, "prev")}
                 disabled={!searchQuery}
               >
@@ -533,7 +535,7 @@ export function EditorPanel({ filePath, active = true }: EditorPanelProps) {
               </button>
               <button
                 className="term-search-btn"
-                title="下一个匹配 (Enter / F3)"
+                title={t("editor.nextMatch")}
                 onClick={() => runFind(searchQuery, "next")}
                 disabled={!searchQuery}
               >
@@ -541,7 +543,7 @@ export function EditorPanel({ filePath, active = true }: EditorPanelProps) {
               </button>
               <button
                 className="term-search-close"
-                title="关闭搜索 (Esc)"
+                title={t("editor.closeSearch")}
                 onClick={closeSearch}
               >
                 ×
@@ -553,7 +555,7 @@ export function EditorPanel({ filePath, active = true }: EditorPanelProps) {
                 ref={replaceInputRef}
                 className="term-search-input"
                 type="text"
-                placeholder="替换为…"
+                placeholder={t("editor.replacePlaceholder")}
                 value={replaceText}
                 onChange={(e) => {
                   const v = e.target.value;
@@ -574,19 +576,19 @@ export function EditorPanel({ filePath, active = true }: EditorPanelProps) {
               />
               <button
                 className="term-search-btn"
-                title="替换当前匹配并跳到下一个"
+                title={t("editor.replaceNextTitle")}
                 onClick={doReplaceNext}
                 disabled={!searchQuery}
               >
-                替换
+                {t("editor.replace")}
               </button>
               <button
                 className="term-search-btn"
-                title="替换所有匹配"
+                title={t("editor.replaceAllTitle")}
                 onClick={doReplaceAll}
                 disabled={!searchQuery}
               >
-                全部替换
+                {t("editor.replaceAll")}
               </button>
             </div>
           )}

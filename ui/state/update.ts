@@ -3,6 +3,7 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { useStore, UpdateStatus } from "./store";
 import { notify } from "./notify";
+import { t } from "../i18n";
 
 /**
  * App self-update slice.
@@ -127,7 +128,7 @@ export async function checkForUpdate(opts: CheckOptions = {}): Promise<void> {
     checkGeneration += 1;
     useStore.setState({
       updateStatus: "error",
-      updateError: "检查更新超时，请稍后重试",
+      updateError: t("update.checkTimeout"),
       updateCheckedAt: Date.now(),
     });
   }, CHECK_CLIENT_TIMEOUT_MS);
@@ -176,8 +177,8 @@ export async function checkForUpdate(opts: CheckOptions = {}): Promise<void> {
     ) {
       useStore.setState({ updateNotifiedVersion: res.latestVersion });
       notify(
-        "CaPilot 有新版本",
-        `存在可更新版本 v${res.latestVersion} — 可在应用内提示中升级，或打开 设置 → 关于与更新。`
+        t("update.notifyTitle"),
+        t("update.notifyBody", { version: res.latestVersion })
       );
     }
   } catch (e) {

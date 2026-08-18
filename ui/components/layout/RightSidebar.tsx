@@ -24,10 +24,12 @@ import { useFileContentSearch } from "./useFileContentSearch";
 import { TodoPanel } from "./TodoPanel";
 import { CommitGraph, type GitLogEntry } from "./CommitGraph";
 import { Icon } from "../Icon";
+import { useT, getLocale } from "../../i18n";
 
 type RightTab = "overview" | "files" | "git";
 
 export function RightSidebar() {
+  const t = useT();
   const [activeTab, setActiveTab] = useState<RightTab>("overview");
   const rightWidth = useStore((s) => s.rightWidth);
   const setRightWidth = useStore((s) => s.setRightWidth);
@@ -75,21 +77,25 @@ export function RightSidebar() {
               if (activeTab === "overview") toggleTodoScope();
               else setActiveTab("overview");
             }}
-            title={`概览 · ${todoScope === "global" ? "全局" : "当前项目"}`}
+            title={
+              todoScope === "global"
+                ? t("rightSidebar.overviewGlobal")
+                : t("rightSidebar.overviewProject")
+            }
           >
             <Icon name="activity" size={15} />
           </div>
           <div
             className={`right-tab${activeTab === "files" ? " active" : ""}`}
             onClick={() => setActiveTab("files")}
-            title="文件"
+            title={t("rightSidebar.files")}
           >
             <Icon name="file-text" size={15} />
           </div>
           <div
             className={`right-tab${activeTab === "git" ? " active" : ""}`}
             onClick={() => setActiveTab("git")}
-            title="Git"
+            title={t("rightSidebar.git")}
           >
             <Icon name="git" size={15} />
           </div>
@@ -126,7 +132,7 @@ export function RightSidebar() {
       >
         <button
           className="resize-collapse"
-          title={rightSidebarOpen ? "收起侧栏" : "展开侧栏"}
+          title={rightSidebarOpen ? t("rightSidebar.collapse") : t("rightSidebar.expand")}
           onMouseDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
@@ -399,6 +405,7 @@ async function copyText(text: string) {
 }
 
 function FilesPanel() {
+  const t = useT();
   const root = useProjectRoot();
   const [dirs, setDirs] = useState<Map<string, FsEntry[]>>(new Map());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -487,8 +494,8 @@ function FilesPanel() {
 
   useEffect(() => {
     if (filter.trim() === "") return;
-    const t = setTimeout(() => loadTree(root), 200);
-    return () => clearTimeout(t);
+    const timer = setTimeout(() => loadTree(root), 200);
+    return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter, root]);
 
@@ -502,7 +509,7 @@ function FilesPanel() {
   dirsRef.current = dirs;
   useEffect(() => {
     let running = false;
-    const t = setInterval(async () => {
+    const timer = setInterval(async () => {
       if (running) return;
       running = true;
       const snapshot = [...dirsRef.current.keys()];
@@ -535,7 +542,7 @@ function FilesPanel() {
         running = false;
       }
     }, 2000);
-    return () => clearInterval(t);
+    return () => clearInterval(timer);
   }, []);
 
   // Git status for the tree: poll git_status for the project root and cache
@@ -583,8 +590,8 @@ function FilesPanel() {
         running = false;
       }
     };
-    const t = setInterval(() => void tick(), 2000);
-    return () => clearInterval(t);
+    const timer = setInterval(() => void tick(), 2000);
+    return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [root]);
 
@@ -634,8 +641,8 @@ function FilesPanel() {
   // Auto-dismiss the operation notice after 3 s.
   useEffect(() => {
     if (!notice) return;
-    const t = setTimeout(() => setNotice(null), 3000);
-    return () => clearTimeout(t);
+    const timer = setTimeout(() => setNotice(null), 3000);
+    return () => clearTimeout(timer);
   }, [notice]);
 
   const toggleDir = (dir: string) => {
@@ -680,7 +687,7 @@ function FilesPanel() {
     const name = newName.trim();
     if (!name) return;
     if (name.includes("/") || name.includes("\\") || name === "." || name === "..") {
-      setCreateError("名称不能包含路径分隔符或为 . / ..");
+      setCreateError(t("files.invalidName"));
       return;
     }
     const path = joinPath(creating.dir, name);
@@ -739,7 +746,7 @@ function FilesPanel() {
     try {
       const created = await invoke<string>("fs_paste", { src: clip.path, destDir: dest, isMove });
       const name = baseName(created);
-      setNotice({ text: `已${isMove ? "移动" : "复制"}为 ${name}` });
+      setNotice({ text: isMove ? t("files.movedAs", { name }) : t("files.copiedAs", { name }) });
       loadChildren(dest);
       const srcParent = parentPath(clip.path);
       if (srcParent !== dest) loadChildren(srcParent);
@@ -823,8 +830,8 @@ function FilesPanel() {
    *  Del keyboard shortcut. Clears the tree selection when it targeted `path`. */
   const deletePath = async (path: string) => {
     const name = baseName(path);
-    const ok = await confirm(`确定删除「${name}」？此操作不可撤销。`, {
-      title: "删除",
+    const ok = await confirm(t("files.deleteConfirm", { name }), {
+      title: t("files.deleteTitle"),
       kind: "warning",
     });
     if (!ok) return;
@@ -833,7 +840,7 @@ function FilesPanel() {
       await invoke("fs_delete", { path });
       loadChildren(parent);
       if (selected?.path === path) setSelected(null);
-      setNotice({ text: `已删除 ${name}` });
+      setNotice({ text: t("files.deleted", { name }) });
     } catch (err) {
       setNotice({ text: String(err), err: true });
     }
@@ -868,7 +875,7 @@ function FilesPanel() {
       name === "." ||
       name === ".."
     ) {
-      setRenameError("名称不能为空、包含路径分隔符或为 . / ..");
+      setRenameError(t("files.invalidRename"));
       return;
     }
     const parent = parentPath(renaming);
@@ -911,7 +918,7 @@ function FilesPanel() {
       setRenaming(null);
       setRenameValue("");
       setRenameError("");
-      setNotice({ text: `已重命名为 ${name}` });
+      setNotice({ text: t("files.renamedAs", { name }) });
     } catch (err) {
       setRenameError(String(err));
     }
@@ -933,7 +940,7 @@ function FilesPanel() {
     try {
       const created = await invoke<string>("fs_paste", { src: clip.path, destDir: dest, isMove });
       const name = baseName(created);
-      setNotice({ text: `已${isMove ? "移动" : "复制"}为 ${name}` });
+      setNotice({ text: isMove ? t("files.movedAs", { name }) : t("files.copiedAs", { name }) });
       loadChildren(dest);
       const srcParent = parentPath(clip.path);
       if (srcParent !== dest) loadChildren(srcParent);
@@ -962,13 +969,13 @@ function FilesPanel() {
         e.preventDefault();
         closeMenu();
         setClip({ path: selected.path, mode: "copy" });
-        setNotice({ text: `已复制 ${baseName(selected.path)}` });
+        setNotice({ text: t("files.copied", { name: baseName(selected.path) }) });
       } else if (mod && !e.shiftKey && !e.altKey && k === "x") {
         if (!selected) return;
         e.preventDefault();
         closeMenu();
         setClip({ path: selected.path, mode: "cut" });
-        setNotice({ text: `已剪切 ${baseName(selected.path)}` });
+        setNotice({ text: t("files.cutItem", { name: baseName(selected.path) }) });
       } else if (mod && !e.shiftKey && !e.altKey && k === "v") {
         if (!clip) return;
         e.preventDefault();
@@ -1071,13 +1078,13 @@ function FilesPanel() {
                     onClick={(ev) => ev.stopPropagation()}
                   >
                     <button
-                      title="新建文件"
+                      title={t("files.newFile")}
                       onClick={() => startCreate(path, "file")}
                     >
                       <Icon name="file-plus" size={14} />
                     </button>
                     <button
-                      title="新建文件夹"
+                      title={t("files.newFolder")}
                       onClick={() => startCreate(path, "dir")}
                     >
                       <Icon name="folder-plus" size={14} />
@@ -1127,7 +1134,7 @@ function FilesPanel() {
               <input
                 autoFocus
                 value={newName}
-                placeholder={creating.kind === "dir" ? "文件夹名…" : "文件名…"}
+                placeholder={creating.kind === "dir" ? t("files.folderNamePh") : t("files.fileNamePh")}
                 onChange={(e) => {
                   setNewName(e.target.value);
                   setCreateError("");
@@ -1173,7 +1180,7 @@ function FilesPanel() {
             <input
               ref={searchInputRef}
               type="text"
-              placeholder={searchMode === "content" ? "搜索文件内容…" : "搜索文件名…"}
+              placeholder={searchMode === "content" ? t("files.searchPlaceholder") : t("files.searchNamePlaceholder")}
               value={searchMode === "content" ? fs.query : filter}
               onChange={(e) => {
                 const q = e.target.value;
@@ -1205,16 +1212,16 @@ function FilesPanel() {
           <button
             className={searchMode === "name" ? "active" : ""}
             onClick={() => setSearchMode("name")}
-            title="按文件名过滤（本地）"
+            title={t("files.byNameTitle")}
           >
-            名称
+            {t("files.byName")}
           </button>
           <button
             className={searchMode === "content" ? "active" : ""}
             onClick={() => setSearchMode("content")}
-            title="搜索文件内容"
+            title={t("files.byContentTitle")}
           >
-            内容
+            {t("files.byContent")}
           </button>
         </div>
         {searchMode === "content" && (
@@ -1223,28 +1230,28 @@ function FilesPanel() {
               <button
                 className={`fs-tg${fs.caseSensitive ? " on" : ""}`}
                 onClick={() => contentSearch.setCaseSensitive(!fs.caseSensitive)}
-                title="区分大小写"
+                title={t("files.caseSensitive")}
               >
                 Aa
               </button>
               <button
                 className={`fs-tg${fs.wholeWord ? " on" : ""}`}
                 onClick={() => contentSearch.setWholeWord(!fs.wholeWord)}
-                title="全词匹配"
+                title={t("files.wholeWord")}
               >
                 W
               </button>
               <button
                 className={`fs-tg${fs.useRegex ? " on" : ""}`}
                 onClick={() => contentSearch.setUseRegex(!fs.useRegex)}
-                title="正则表达式"
+                title={t("files.useRegex")}
               >
                 .*
               </button>
             </div>
             <input
               className="fs-filter-input"
-              placeholder="包含文件，如 *.ts, src/**"
+              placeholder={t("files.includePh")}
               value={fs.includePattern}
               onChange={(e) => contentSearch.setIncludePattern(e.target.value)}
               onKeyDown={(e) => {
@@ -1253,7 +1260,7 @@ function FilesPanel() {
             />
             <input
               className="fs-filter-input"
-              placeholder="排除文件，如 dist, *.min.js"
+              placeholder={t("files.excludePh")}
               value={fs.excludePattern}
               onChange={(e) => contentSearch.setExcludePattern(e.target.value)}
               onKeyDown={(e) => {
@@ -1267,15 +1274,17 @@ function FilesPanel() {
         <div className="files-content-search">
           <div className="files-results-summary">
             {fs.loading
-              ? "搜索中…"
+              ? t("files.searching")
               : fs.results
-                ? `${fs.results.totalMatches} 处匹配 · ${fs.results.files.length} 个文件${fs.results.truncated ? " · 已截断" : ""}`
+                ? (fs.results.truncated
+                    ? t("files.matchSummaryTruncated", { matches: fs.results.totalMatches, files: fs.results.files.length })
+                    : t("files.matchSummary", { matches: fs.results.totalMatches, files: fs.results.files.length }))
                 : fs.query.trim() !== ""
-                  ? "无结果"
-                  : "输入内容以搜索"}
+                  ? t("files.noResult")
+                  : t("files.typeToSearch")}
           </div>
           {fs.loading && !fs.results ? (
-            <div className="files-results-loading">搜索中…</div>
+            <div className="files-results-loading">{t("files.searching")}</div>
           ) : fs.results && fs.results.files.length > 0 ? (
             <SearchResultsList
               files={fs.results.files}
@@ -1286,7 +1295,7 @@ function FilesPanel() {
               }
             />
           ) : (
-            !fs.loading && <div className="files-results-loading">{fs.query.trim() ? "无匹配内容" : ""}</div>
+            !fs.loading && <div className="files-results-loading">{fs.query.trim() ? t("files.noContentMatch") : ""}</div>
           )}
         </div>
       ) : (
@@ -1303,26 +1312,26 @@ function FilesPanel() {
             <>
               {singleBashId && (
                 <div className="ctx-item" onClick={doOpenInCurrentTerminal}>
-                  <Icon name="folder-open" size={13} /> 在当前终端中打开此文件夹
+                  <Icon name="folder-open" size={13} /> {t("files.openInCurrentTerminal")}
                 </div>
               )}
               <div className="ctx-item" onClick={doOpenInNewTerminal}>
-                <Icon name="monitor" size={13} /> 在新终端中打开此文件夹
+                <Icon name="monitor" size={13} /> {t("files.openInNewTerminal")}
               </div>
             </>
           )}
           {menu.kind === "file" && fileRunCommand(menu.path) && (
             <div className="ctx-item" onClick={doRunFile}>
-              <Icon name="play" size={13} /> 运行此文件
+              <Icon name="play" size={13} /> {t("files.runFile")}
             </div>
           )}
           {menu.kind !== "file" && (
             <>
               <div className="ctx-item" onClick={() => doNew("file")}>
-                新建文件
+                {t("files.newFile")}
               </div>
               <div className="ctx-item" onClick={() => doNew("dir")}>
-                新建文件夹
+                {t("files.newFolder")}
               </div>
             </>
           )}
@@ -1330,38 +1339,38 @@ function FilesPanel() {
             <>
               <div className="ctx-sep" />
               <div className="ctx-item" onClick={doCopy}>
-                复制
+                {t("files.copy")}
               </div>
               <div className="ctx-item" onClick={doCut}>
-                剪切
+                {t("files.cut")}
               </div>
               {clip && (
                 <div className="ctx-item" onClick={doPaste}>
-                  粘贴
+                  {t("files.paste")}
                 </div>
               )}
               <div className="ctx-sep" />
               <div className="ctx-item" onClick={doCopyPath}>
-                复制路径
+                {t("files.copyPath")}
               </div>
               <div className="ctx-sep" />
               <div className="ctx-item" onClick={() => menu?.path && startRename(menu.path)}>
-                <Icon name="pencil" size={13} /> 重命名
+                <Icon name="pencil" size={13} /> {t("files.rename")}
               </div>
               <div className="ctx-sep" />
               <div className="ctx-item danger" onClick={doDelete}>
-                <Icon name="trash-2" size={13} /> 删除
+                <Icon name="trash-2" size={13} /> {t("files.delete")}
               </div>
             </>
           ) : (
             <>
               <div className="ctx-sep" />
               <div className="ctx-item" onClick={doCopyPath}>
-                复制路径
+                {t("files.copyPath")}
               </div>
               {clip && (
                 <div className="ctx-item" onClick={doPaste}>
-                  粘贴
+                  {t("files.paste")}
                 </div>
               )}
             </>
@@ -1471,6 +1480,7 @@ function InlineMergeDiff({ oldText, newText }: { oldText: string; newText: strin
 }
 
 function GitPanel() {
+  const t = useT();
   const root = useProjectRoot();
   const rightSidebarOpen = useStore((s) => s.rightSidebarOpen);
   const [repoInfo, setRepoInfo] = useState<RepoInfo | null>(null);
@@ -1602,12 +1612,12 @@ function GitPanel() {
           running = false;
         });
     };
-    const t = setInterval(tick, 3000);
+    const timer = setInterval(tick, 3000);
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") tick();
     });
     return () => {
-      clearInterval(t);
+      clearInterval(timer);
       document.removeEventListener("visibilitychange", tick);
     };
   }, []);
@@ -1666,14 +1676,14 @@ function GitPanel() {
       const files = changes.map((e) => e.path);
       if (files.length === 0) return;
       await invoke("git_stage", { repo: root, files });
-    }, "已暂存全部变更");
+    }, t("git.stagedAll"));
 
   const unstageAll = () =>
     runAction(async () => {
       const files = staged.map((e) => e.path);
       if (files.length === 0) return;
       await invoke("git_unstage", { repo: root, files });
-    }, "已取消暂存全部变更");
+    }, t("git.unstagedAll"));
 
   const toggleFile = (e: GitEntry, kind: "staged" | "changes") => {
     const shouldStage = kind === "changes";
@@ -1683,38 +1693,38 @@ function GitPanel() {
         files: [e.path],
       });
       setDiffFor(null);
-    }, shouldStage ? "已暂存" : "已取消暂存");
+    }, shouldStage ? t("git.stagedOk") : t("git.unstagedOk"));
   };
 
   const commit = () =>
     runAction(async () => {
       const m = msg.trim();
-      if (!m) throw new Error("请输入 commit message");
-      if (staged.length === 0) throw new Error("没有已暂存的更改（请先暂存文件）");
+      if (!m) throw new Error(t("git.needMessage"));
+      if (staged.length === 0) throw new Error(t("git.needStaged"));
       await invoke("git_commit", { repo: root, message: m });
       setMsg("");
-    }, "提交成功");
+    }, t("git.commitOk"));
 
   /** Commit then push — one action so a local-only commit can't silently stay
    *  off the remote (VS Code's "Commit & Push"). */
   const commitAndPush = () =>
     runAction(async () => {
       const m = msg.trim();
-      if (!m) throw new Error("请输入 commit message");
-      if (staged.length === 0) throw new Error("没有已暂存的更改（请先暂存文件）");
+      if (!m) throw new Error(t("git.needMessage"));
+      if (staged.length === 0) throw new Error(t("git.needStaged"));
       await invoke("git_commit", { repo: root, message: m });
       await invoke("git_push", { repo: root });
       setMsg("");
-    }, "已提交并推送到远程");
+    }, t("git.commitPushOk"));
 
-  const pull = () => runAction(() => invoke("git_pull", { repo: root }), "Pull 完成");
-  const push = () => runAction(() => invoke("git_push", { repo: root }), "Push 完成");
+  const pull = () => runAction(() => invoke("git_pull", { repo: root }), t("git.pullOk"));
+  const push = () => runAction(() => invoke("git_push", { repo: root }), t("git.pushOk"));
 
   // Not-yet-initialized repo → `git init`, then re-probe + load the panel.
   const initRepo = () =>
     runAction(async () => {
       await invoke("git_init", { repo: root });
-    }, "已初始化 git 仓库");
+    }, t("git.initOk"));
 
   const gitShowSafe = async (rev: string, file: string): Promise<string> => {
     try {
@@ -1771,7 +1781,7 @@ function GitPanel() {
     setFeedback(null);
     try {
       await invoke("git_checkout", { repo: root, branch: name });
-      setFeedback(`已切换到分支 ${name}`);
+      setFeedback(t("git.switchedTo", { name }));
     } catch (e) {
       setFeedback(String(e));
     } finally {
@@ -1817,7 +1827,7 @@ function GitPanel() {
         ok = false;
       }
     }
-    setFeedback(ok ? "已复制到剪贴板" : "复制失败");
+    setFeedback(ok ? t("git.copied") : t("git.copyFailed"));
   };
 
   /** Fetch + open the commit detail modal. */
@@ -1838,13 +1848,13 @@ function GitPanel() {
     setCommitMenu(null);
     const short = c.hash.slice(0, 7);
     const ok = await confirm(
-      `检出到提交 ${short}（游离 HEAD）？\n\n未提交的更改会阻止切换；之后可从分支菜单切回原分支。`,
-      { title: "检出提交", kind: "warning" }
+      t("git.checkoutConfirm", { short }),
+      { title: t("git.checkoutTitle"), kind: "warning" }
     );
     if (!ok) return;
     await runAction(
       () => invoke("git_checkout_commit", { repo: root, hash: c.hash }),
-      `已检出 ${short}（游离 HEAD）`
+      t("git.checkedOut", { short })
     );
   };
 
@@ -1857,10 +1867,10 @@ function GitPanel() {
     try {
       if (startAt) {
         await invoke("git_create_branch", { repo: root, name, startAt });
-        setFeedback(`已创建分支 ${name}`);
+        setFeedback(t("git.createdBranch", { name }));
       } else {
         await invoke("git_switch_new", { repo: root, name });
-        setFeedback(`已创建并切换到分支 ${name}`);
+        setFeedback(t("git.createdAndSwitched", { name }));
       }
     } catch (e) {
       setBranchErr(String(e));
@@ -1876,12 +1886,12 @@ function GitPanel() {
   /** Force-delete a branch (confirm first; the current branch is never offered). */
   const deleteBranch = async (name: string) => {
     const ok = await confirm(
-      `强制删除分支「${name}」？未合并的提交会一并删除（仍可从 reflog 找回）。`,
-      { title: "删除分支", kind: "warning" }
+      t("git.deleteBranchConfirm", { name }),
+      { title: t("git.deleteBranchTitle"), kind: "warning" }
     );
     if (!ok) return;
     setBranchMenuOpen(false);
-    await runAction(() => invoke("git_delete_branch", { repo: root, name }), `已删除分支 ${name}`);
+    await runAction(() => invoke("git_delete_branch", { repo: root, name }), t("git.deletedBranch", { name }));
   };
 
   const openInEditor = (path: string) => {
@@ -1912,25 +1922,25 @@ function GitPanel() {
   /** Discard a single file's unstaged changes (tracked → restore, untracked →
    *  delete). Confirmed first — destructive and not undoable. */
   const discardFile = async (e: GitEntry) => {
-    const ok = await confirm(`放弃「${e.path}」的更改？此操作不可撤销。`, {
-      title: "放弃更改",
+    const ok = await confirm(t("git.discardConfirm", { name: e.path }), {
+      title: t("git.discardChanges"),
       kind: "warning",
     });
     if (!ok) return;
     await runAction(async () => {
       await invoke("git_discard", { repo: root, files: [e.path] });
       setDiffFor(null);
-    }, "已放弃更改");
+    }, t("git.discarded"));
   };
 
   /** Discard all unstaged changes (`git restore .`). Staged changes stay. */
   const discardAll = async () => {
-    const ok = await confirm("放弃所有未暂存的更改？已暂存的更改不受影响。", {
-      title: "放弃全部更改",
+    const ok = await confirm(t("git.discardAllConfirm"), {
+      title: t("git.discardAllTitle"),
       kind: "warning",
     });
     if (!ok) return;
-    await runAction(() => invoke("git_discard_all", { repo: root }), "已放弃全部未暂存更改");
+    await runAction(() => invoke("git_discard_all", { repo: root }), t("git.discardedAll"));
   };
 
   // Ensure the current branch always appears in the branch menu even when the
@@ -1961,17 +1971,17 @@ function GitPanel() {
   //   nothing staged, changes exist → "+暂存全部"  (stage all)
   //   otherwise → "提交"          (commit)
   const canPush = statusHintClickable;
-  const commitButtonLabel = canPush ? "推送" : noStagedWithChanges ? "+暂存全部" : "提交";
+  const commitButtonLabel = canPush ? t("git.push") : noStagedWithChanges ? t("git.stageAllPlus") : t("git.commit");
   const commitButtonEnabled = canPush
     ? !busy
     : noStagedWithChanges
       ? !busy
       : !!msg.trim() && staged.length > 0 && !busy;
   const commitButtonTitle = canPush
-    ? "推送本地提交到远程"
+    ? t("git.pushTitle")
     : noStagedWithChanges
-      ? "暂存全部更改"
-      : "提交已暂存的更改";
+      ? t("git.stageAllTitle")
+      : t("git.commitTitle");
   const onCommitClick = () => {
     if (canPush) return push();
     if (noStagedWithChanges) return stageAll();
@@ -1993,7 +2003,7 @@ function GitPanel() {
           <span className="gv-file-actions">
             <span
               className="gv-file-act"
-              title={isStagedRow ? "取消暂存" : "暂存"}
+              title={isStagedRow ? t("git.unstage") : t("git.stage")}
               onClick={(ev) => {
                 ev.stopPropagation();
                 toggleFile(e, kind);
@@ -2004,7 +2014,7 @@ function GitPanel() {
             {!isStagedRow && (
               <span
                 className="gv-file-discard"
-                title="放弃更改"
+                title={t("git.discardChanges")}
                 onClick={(ev) => {
                   ev.stopPropagation();
                   void discardFile(e);
@@ -2015,13 +2025,13 @@ function GitPanel() {
             )}
             <span
               className="gv-file-diff"
-              title="打开 diff"
+              title={t("git.openDiffTitle")}
               onClick={(ev) => {
                 ev.stopPropagation();
                 toggleDiff(e);
               }}
             >
-              打开diff
+              {t("git.openDiff")}
             </span>
           </span>
         </div>
@@ -2038,20 +2048,16 @@ function GitPanel() {
                     ev.stopPropagation();
                     openDiffInEditor(e.path);
                   }}
-                  title="在编辑器打开 diff 视图"
-                >
-                  打开
-                </span>
+                  title={t("git.openDiffEditor")}
+                >{t("git.open")}</span>
                 <span
                   className="gv-diff-open"
                   onClick={(ev) => {
                     ev.stopPropagation();
                     openInEditor(e.path);
                   }}
-                  title="打开源文件"
-                >
-                  编辑
-                </span>
+                  title={t("git.openSource")}
+                >{t("git.edit")}</span>
               </span>
             </div>
             {diffContent[e.path] ? (
@@ -2060,7 +2066,7 @@ function GitPanel() {
                 newText={diffContent[e.path].new}
               />
             ) : (
-              <div className="gv-diff-loading">加载 diff…</div>
+              <div className="gv-diff-loading">{t("git.loadingDiff")}</div>
             )}
           </div>
         )}
@@ -2097,7 +2103,7 @@ function GitPanel() {
       </div>
       {open &&
         (list.length === 0 ? (
-          <div className="gv-empty">(无)</div>
+          <div className="gv-empty">{t("git.empty")}</div>
         ) : (
           list.map((e) => renderFileRow(e, kind))
         ))}
@@ -2109,12 +2115,12 @@ function GitPanel() {
       {repoInfo && !repoInfo.is_repo ? (
         <div className="gv-scroll">
           <div className="up-git-init">
-            <div className="up-git-init-text">该项目未初始化 git</div>
+            <div className="up-git-init-text">{t("git.noRepoInit")}</div>
             <span
               className={`act-btn up-git-init-btn${busy ? " active" : ""}`}
               onClick={initRepo}
             >
-              {busy ? "初始化中…" : "git init"}
+              {busy ? t("git.initializing") : "git init"}
             </span>
           </div>
         </div>
@@ -2126,7 +2132,7 @@ function GitPanel() {
             <span className="gv-branch-wrap">
               <span
                 className={`gv-branch${branchMenuOpen ? " open" : ""}`}
-                title={branch ? `当前分支: ${branch}（点击管理分支）` : "无分支（点击管理分支）"}
+                title={branch ? t("git.currentBranchManage", { name: branch }) : t("git.noBranchManage")}
                 onClick={() => {
                   setBranchMenuOpen((o) => !o);
                   setMenuOpen(false);
@@ -2134,7 +2140,7 @@ function GitPanel() {
                   setCommitDetail(null);
                 }}
               >
-                <Icon name="git-branch" size={12} /> {branch || "无分支"}
+                <Icon name="git-branch" size={12} /> {branch || t("git.noBranch")}
               </span>
               {branchMenuOpen && (
                 <div
@@ -2142,7 +2148,7 @@ function GitPanel() {
                   onClick={(e) => e.stopPropagation()}
                   onContextMenu={(e) => e.stopPropagation()}
                 >
-                  <div className="gv-menu-label">分支管理</div>
+                  <div className="gv-menu-label">{t("git.branchManage")}</div>
                   {branchPrompt == null ? (
                     <div
                       className="gv-branch-new"
@@ -2152,14 +2158,14 @@ function GitPanel() {
                         setBranchErr("");
                       }}
                     >
-                      <Icon name="plus" size={12} /> 新建分支…
+                      <Icon name="plus" size={12} /> {t("git.newBranch")}
                     </div>
                   ) : (
                     <div className="gv-branch-new-input">
                       <input
                         autoFocus
                         value={branchName}
-                        placeholder="新分支名…"
+                        placeholder={t("git.newBranchPh")}
                         onChange={(e) => {
                           setBranchName(e.target.value);
                           setBranchErr("");
@@ -2174,14 +2180,14 @@ function GitPanel() {
                       {branchErr && <div className="ctx-newbranch-err">{branchErr}</div>}
                     </div>
                   )}
-                  <div className="gv-menu-label">切换分支</div>
+                  <div className="gv-menu-label">{t("git.switchBranch")}</div>
                   <div className="gv-menu-branches">
-                    {branchList.length === 0 && <div className="gv-empty">无分支</div>}
+                    {branchList.length === 0 && <div className="gv-empty">{t("git.noBranch")}</div>}
                     {branchList.map((b) => (
                       <div key={b.name} className="gv-menu-branch-row">
                         <div
                           className={`gv-menu-branch${b.current ? " current" : ""}`}
-                          title={b.current ? `当前分支: ${b.name}` : `切换到 ${b.name}`}
+                          title={b.current ? t("git.currentBranch", { name: b.name }) : t("git.switchTo", { name: b.name })}
                           onClick={() => {
                             setBranchMenuOpen(false);
                             void switchBranch(b.name);
@@ -2197,7 +2203,7 @@ function GitPanel() {
                         {!b.current && (
                           <span
                             className="gv-branch-del"
-                            title="强制删除分支"
+                            title={t("git.forceDeleteBranch")}
                             onClick={(e) => {
                               e.stopPropagation();
                               void deleteBranch(b.name);
@@ -2211,15 +2217,15 @@ function GitPanel() {
                   </div>
                   <div className="gv-menu-sep" />
                   <div className="gv-menu-item" onClick={() => { setBranchMenuOpen(false); pull(); }}>
-                    拉取 (pull)
+                    {t("git.pullParen")}
                   </div>
                   <div className="gv-menu-item" onClick={() => { setBranchMenuOpen(false); push(); }}>
-                    推送 (push)
+                    {t("git.pushParen")}
                   </div>
                 </div>
               )}
             </span>
-            <span className="gv-icon" onClick={refresh} title="刷新">
+            <span className="gv-icon" onClick={refresh} title={t("common.refresh")}>
               <Icon name="rotate-cw" size={14} />
             </span>
             <span
@@ -2228,7 +2234,7 @@ function GitPanel() {
                 setMenuOpen(!menuOpen);
                 setBranchMenuOpen(false);
               }}
-              title="更多"
+              title={t("common.more")}
             >
               <Icon name="ellipsis" size={14} />
             </span>
@@ -2236,17 +2242,17 @@ function GitPanel() {
             {menuOpen && (
               <div className="gv-menu" onClick={(e) => e.stopPropagation()}>
                 <div className="gv-menu-item" onClick={commitAndPush}>
-                  提交并推送
+                  {t("git.commitAndPush")}
                 </div>
                 <div className="gv-menu-item" onClick={pull}>
-                  拉取
+                  {t("git.pull")}
                 </div>
                 <div className="gv-menu-item" onClick={push}>
-                  推送
+                  {t("git.push")}
                 </div>
-                <div className="gv-menu-label">分支管理</div>
+                <div className="gv-menu-label">{t("git.branchManage")}</div>
                 <div className="gv-menu-branches">
-                  {branchList.length === 0 && <div className="gv-empty">无分支</div>}
+                  {branchList.length === 0 && <div className="gv-empty">{t("git.noBranch")}</div>}
                   {branchList.map((b) => (
                     <div
                       key={b.name}
@@ -2267,13 +2273,13 @@ function GitPanel() {
                 </div>
                 <div className="gv-menu-sep" />
                 <div className="gv-menu-item" onClick={stageAll}>
-                  全部暂存
+                  {t("git.stageAll")}
                 </div>
                 <div className="gv-menu-item" onClick={unstageAll}>
-                  全部取消暂存
+                  {t("git.unstageAll")}
                 </div>
                 <div className="gv-menu-item gv-menu-danger" onClick={discardAll}>
-                  全部放弃更改
+                  {t("git.discardAll")}
                 </div>
               </div>
             )}
@@ -2283,7 +2289,7 @@ function GitPanel() {
           <div className="gv-commit">
             <textarea
               className="gv-commit-input"
-              placeholder="Commit message…  (Ctrl+Enter 提交)"
+              placeholder={t("git.commitMessagePh")}
               rows={2}
               value={msg}
               onChange={(e) => setMsg(e.target.value)}
@@ -2302,8 +2308,8 @@ function GitPanel() {
           </div>
 
           {noRemote && (
-            <div className="up-git-hint" title="未配置远程仓库">
-              <Icon name="circle-slash" size={12} /> 无远程仓库（Pull / Push 不可用）
+            <div className="up-git-hint" title={t("git.noRemoteTitle")}>
+              <Icon name="circle-slash" size={12} /> {t("git.noRemote")}
             </div>
           )}
 
@@ -2312,18 +2318,18 @@ function GitPanel() {
 
           {/* Staged / Changes groups */}
           {renderGroup(
-            "暂存的更改",
+            t("git.stagedChanges"),
             staged,
-            "全部取消暂存",
+            t("git.unstageAll"),
             unstageAll,
             stagedOpen,
             setStagedOpen,
             "staged"
           )}
           {renderGroup(
-            "更改",
+            t("git.changes"),
             changes,
-            "全部暂存",
+            t("git.stageAll"),
             stageAll,
             changesOpen,
             setChangesOpen,
@@ -2343,12 +2349,12 @@ function GitPanel() {
           <div className="gv-group gg-log" style={{ flexGrow: logOpen ? 1 : 0, flexShrink: logOpen ? 1 : 0 }}>
             <div className="gv-group-header gg-log-head" onClick={() => setLogOpen(!logOpen)}>
               <span className="gv-arrow">{logOpen ? <Icon name="chevron-down" size={12} /> : <Icon name="chevron-right" size={12} />}</span>
-              <span className="gv-group-title">提交历史</span>
+              <span className="gv-group-title">{t("git.history")}</span>
             </div>
             {logOpen && (
               <div className="gg-log-body">
                 {log.length === 0 ? (
-                  <div className="gg-log-empty">暂无提交记录</div>
+                  <div className="gg-log-empty">{t("git.noCommits")}</div>
                 ) : (
                   <CommitGraph log={log} currentBranch={branch} menuOpen={!!commitMenu} onCommitContextMenu={openCommitMenu} />
                 )}
@@ -2374,7 +2380,7 @@ function GitPanel() {
               setCommitMenu(null);
             }}
           >
-            <Icon name="copy" size={13} /> 复制提交哈希
+            <Icon name="copy" size={13} /> {t("git.copyHash")}
           </div>
           <div
             className="ctx-item"
@@ -2383,14 +2389,14 @@ function GitPanel() {
               setCommitMenu(null);
             }}
           >
-            <Icon name="clipboard" size={13} /> 复制提交信息
+            <Icon name="clipboard" size={13} /> {t("git.copyMessage")}
           </div>
           <div className="ctx-sep" />
           <div className="ctx-item" onClick={() => viewCommitDetail(commitMenu.commit)}>
-            <Icon name="eye" size={13} /> 查看提交详情
+            <Icon name="eye" size={13} /> {t("git.viewDetail")}
           </div>
           <div className="ctx-item" onClick={() => checkoutCommit(commitMenu.commit)}>
-            <Icon name="git-pull-request" size={13} /> 检出此提交（游离 HEAD）
+            <Icon name="git-pull-request" size={13} /> {t("git.checkoutDetached")}
           </div>
           <div className="ctx-sep" />
           {branchPrompt?.startAt === commitMenu.commit.hash ? (
@@ -2398,7 +2404,7 @@ function GitPanel() {
               <input
                 autoFocus
                 value={branchName}
-                placeholder="新分支名…"
+                placeholder={t("git.newBranchPh")}
                 onChange={(e) => {
                   setBranchName(e.target.value);
                   setBranchErr("");
@@ -2421,7 +2427,7 @@ function GitPanel() {
                 setBranchErr("");
               }}
             >
-              <Icon name="git-branch" size={13} /> 从此提交新建分支…
+              <Icon name="git-branch" size={13} /> {t("git.newBranchFrom")}
             </div>
           )}
         </div>
@@ -2432,21 +2438,21 @@ function GitPanel() {
         <div className="gv-detail-backdrop" onClick={() => setCommitDetail(null)}>
           <div className="gv-detail" onClick={(e) => e.stopPropagation()}>
             {commitDetail === "loading" ? (
-              <div className="gv-detail-loading">加载中…</div>
+              <div className="gv-detail-loading">{t("common.loading")}</div>
             ) : (
               <>
                 <div className="gv-detail-head">
                   <span className="gv-detail-hash">{commitDetail.hash.slice(0, 7)}</span>
                   <span
                     className="gv-detail-icon"
-                    title="复制完整哈希"
+                    title={t("git.copyFullHash")}
                     onClick={() => copyText(commitDetail.hash)}
                   >
                     <Icon name="copy" size={14} />
                   </span>
                   <span
                     className="gv-detail-icon gv-detail-close"
-                    title="关闭"
+                    title={t("common.close")}
                     onClick={() => setCommitDetail(null)}
                   >
                     <Icon name="x" size={14} />
@@ -2456,14 +2462,14 @@ function GitPanel() {
                 <div className="gv-detail-meta">
                   {commitDetail.author}
                   {commitDetail.email ? ` <${commitDetail.email}>` : ""} ·{" "}
-                  {new Date(commitDetail.ts * 1000).toLocaleString("zh-CN")}
+                  {new Date(commitDetail.ts * 1000).toLocaleString(getLocale() === "zh" ? "zh-CN" : "en-US")}
                 </div>
                 {commitDetail.body && (
                   <pre className="gv-detail-body">{commitDetail.body}</pre>
                 )}
                 <div className="gv-detail-files">
                   {commitDetail.files.length === 0 ? (
-                    <div className="gv-detail-files-empty">（无文件改动）</div>
+                    <div className="gv-detail-files-empty">{t("git.noFileChanges")}</div>
                   ) : (
                     commitDetail.files.map((f) => (
                       <div key={f.path} className="gv-detail-file">

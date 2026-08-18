@@ -7,6 +7,7 @@ import {
   AnnotElementInfo,
   AnnotIntent,
 } from "../../state/annotations";
+import { useT } from "../../i18n";
 
 /** uid for a new annotation (crypto.randomUUID with a fallback). */
 function uid(): string {
@@ -252,6 +253,7 @@ function CommentPopup({
   onAdd: (text: string, intent: AnnotIntent) => void;
   onCancel: () => void;
 }) {
+  const t = useT();
   const [text, setText] = useState("");
   const [intent, setIntent] = useState<AnnotIntent>("change");
   // Local position so dragging can move the popup; seeded from the click point.
@@ -264,8 +266,8 @@ function CommentPopup({
   // pointer semantics — grabbing those doesn't start a drag). Pointer capture
   // keeps the drag alive even when the cursor leaves the box.
   const startDrag = (e: React.PointerEvent<HTMLDivElement>) => {
-    const t = e.target as HTMLElement | null;
-    if (t?.closest("textarea, button")) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest("textarea, button")) return;
     e.stopPropagation();
     e.preventDefault();
     const el = e.currentTarget;
@@ -306,8 +308,8 @@ function CommentPopup({
       onPointerUp={endDrag}
       onPointerCancel={endDrag}
     >
-      <div className="annot-popup-head" title="拖动弹窗可移动位置">
-        <span className="annot-popup-title">元素评论</span>
+      <div className="annot-popup-head" title={t("annotations.popupDrag")}>
+        <span className="annot-popup-title">{t("annotations.popupTitle")}</span>
         <span className="annot-popup-el" title={info.selector}>
           {info.component ? `${info.component} · ` : ""}
           {info.tag}
@@ -317,7 +319,7 @@ function CommentPopup({
       <textarea
         className="annot-popup-text"
         autoFocus
-        placeholder="例如：这个卡片间距太大了，帮我调小"
+        placeholder={t("annotations.popupPlaceholder")}
         value={text}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
@@ -333,31 +335,31 @@ function CommentPopup({
           className={`annot-intent-btn${intent === "change" ? " active" : ""}`}
           onClick={() => setIntent("change")}
         >
-          改变 (change)
+          {t("annotations.change")}
         </button>
         <button
           className={`annot-intent-btn question${intent === "question" ? " active" : ""}`}
           onClick={() => setIntent("question")}
         >
-          疑问 (question)
+          {t("annotations.question")}
         </button>
         <button
           className={`annot-intent-btn error${intent === "error" ? " active" : ""}`}
           onClick={() => setIntent("error")}
         >
-          错误 (error)
+          {t("annotations.error")}
         </button>
       </div>
       <div className="annot-popup-actions">
         <button className="annot-popup-cancel" onClick={onCancel}>
-          取消
+          {t("common.cancel")}
         </button>
         <button
           className="annot-popup-add"
           onClick={() => onAdd(text, intent)}
           disabled={!text.trim()}
         >
-          添加
+          {t("annotations.add")}
         </button>
       </div>
     </div>

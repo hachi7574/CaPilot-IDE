@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useStore, CiJob } from "../../state/store";
+import { useT } from "../../i18n";
 import { Icon } from "../Icon";
 
 /**
@@ -7,10 +8,10 @@ import { Icon } from "../Icon";
  *
  * Polls `ci_status` (GitHub Actions) every few seconds while open and shows the
  * overall progress bar plus one row per job (version-check / build×platform /
- * manifest). Clicking a running build's "在 GitHub 查看" opens the run in a
- * browser via the opener plugin.
+ * manifest).
  */
 export function CiProgressModal({ onClose }: { onClose: () => void }) {
+  const t = useT();
   const ciStatus = useStore((s) => s.ciStatus);
   const ciPolling = useStore((s) => s.ciPolling);
   const pollCiStatus = useStore((s) => s.pollCiStatus);
@@ -38,11 +39,11 @@ export function CiProgressModal({ onClose }: { onClose: () => void }) {
   const runState = run
     ? run.status === "completed"
       ? run.conclusion === "success"
-        ? { label: "构建完成", color: "var(--success)" }
-        : { label: "构建失败", color: "var(--danger)" }
+        ? { label: t("ci.buildDone"), color: "var(--success)" }
+        : { label: t("ci.buildFailed"), color: "var(--danger)" }
       : run.status === "in_progress"
-        ? { label: "构建中…", color: "var(--warn)" }
-        : { label: "排队中…", color: "var(--ink2)" }
+        ? { label: t("ci.building"), color: "var(--warn)" }
+        : { label: t("ci.queued"), color: "var(--ink2)" }
     : null;
 
   return (
@@ -51,27 +52,27 @@ export function CiProgressModal({ onClose }: { onClose: () => void }) {
         <div className="ci-head">
           <span className="ci-title">
             <Icon name="loader-circle" size={14} style={{ marginRight: 6 }} />
-            CI 构建进度
+            {t("ci.title")}
           </span>
-          <button className="ci-close" onClick={onClose} title="关闭">
+          <button className="ci-close" onClick={onClose} title={t("common.close")}>
             <Icon name="close" size={13} />
           </button>
         </div>
 
         {ciStatus?.error && !run && (
           <div className="ci-error">
-            无法查询 CI 状态：{ciStatus.error}
+            {t("ci.queryFailed", { error: ciStatus.error })}
             <button
               className="ci-retry"
               onClick={pollCiStatus}
               disabled={ciPolling}
             >
-              重试
+              {t("ci.retry")}
             </button>
           </div>
         )}
 
-        {!ciStatus && !ciPolling && <div className="ci-empty">暂无数据</div>}
+        {!ciStatus && !ciPolling && <div className="ci-empty">{t("ci.noData")}</div>}
 
         {run && (
           <>
@@ -97,7 +98,7 @@ export function CiProgressModal({ onClose }: { onClose: () => void }) {
 
             <div className="ci-jobs">
               {run.jobs.length === 0 && (
-                <div className="ci-empty">还没有 job 记录（构建尚未启动）</div>
+                <div className="ci-empty">{t("ci.noJobs")}</div>
               )}
               {run.jobs.map((job) => (
                 <CiJobRow key={job.id} job={job} />
@@ -107,7 +108,11 @@ export function CiProgressModal({ onClose }: { onClose: () => void }) {
             <div className="ci-foot">
               <span className="ci-foot-title">{run.title}</span>
               <span className="ci-foot-since">
-                {since ? `刷新于 ${new Date(since).toLocaleTimeString()}` : ""}
+                {since
+                  ? t("ci.refreshedAt", {
+                      time: new Date(since).toLocaleTimeString(),
+                    })
+                  : ""}
               </span>
             </div>
           </>
@@ -118,18 +123,19 @@ export function CiProgressModal({ onClose }: { onClose: () => void }) {
 }
 
 function CiJobRow({ job }: { job: CiJob }) {
+  const t = useT();
   const done = job.status === "completed";
   const running = job.status === "in_progress";
   const ok = done && job.conclusion === "success";
   const fail = done && job.conclusion !== "success";
   const color = fail ? "var(--danger)" : ok ? "var(--success)" : running ? "var(--warn)" : "var(--ink2)";
   const state = fail
-    ? "失败"
+    ? t("ci.jobFailed")
     : ok
-      ? "完成"
+      ? t("ci.jobDone")
       : running
-        ? "运行中"
-        : "等待中";
+        ? t("ci.jobRunning")
+        : t("ci.jobWaiting");
   return (
     <div className="ci-job">
       <Icon

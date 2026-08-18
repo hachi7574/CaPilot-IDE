@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useT } from "../../i18n";
 
 interface PermissionConfirmationDialogProps {
   modeLabel: string;
@@ -16,6 +17,7 @@ export function PermissionConfirmationDialog({
   onConfirm,
   onCancel,
 }: PermissionConfirmationDialogProps) {
+  const t = useT();
   const [confirmFocused, setConfirmFocused] = useState(false);
   const cancelRef = useRef<HTMLButtonElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
@@ -53,7 +55,7 @@ export function PermissionConfirmationDialog({
         aria-labelledby="permission-confirm-title"
       >
         <div id="permission-confirm-title" className="permission-confirm-title">
-          启用 {modeLabel}？
+          {t("permission.enableTitle", { mode: modeLabel })}
         </div>
         <div className="permission-confirm-actions">
           <button
@@ -63,7 +65,7 @@ export function PermissionConfirmationDialog({
             onFocus={() => setConfirmFocused(false)}
             onClick={onCancel}
           >
-            取消
+            {t("permission.cancel")}
           </button>
           <button
             ref={confirmRef}
@@ -72,7 +74,7 @@ export function PermissionConfirmationDialog({
             onFocus={() => setConfirmFocused(true)}
             onClick={onConfirm}
           >
-            启用
+            {t("permission.enable")}
           </button>
         </div>
       </section>

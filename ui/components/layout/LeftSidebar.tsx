@@ -13,6 +13,7 @@ import { SettingsModal } from "./SettingsModal";
 import { TerminalTemplatePicker } from "./TerminalTemplatePicker";
 import { RenameAgentModal } from "./RenameAgentModal";
 import { Icon, runtimeIcon } from "../Icon";
+import { useT, t } from "../../i18n";
 
 /** Derive the workspace project name from an agent cwd. Prefers the
  *  `workspaces/<name>` segment; for custom-rooted projects falls back to the
@@ -38,12 +39,12 @@ function fmtAge(ts: number | undefined): string {
   if (ts === undefined) return "—";
   const diff = Math.max(0, Date.now() - ts);
   const s = Math.floor(diff / 1000);
-  if (s < 60) return "刚刚";
+  if (s < 60) return t("leftSidebar.justNow");
   const m = Math.floor(s / 60);
-  if (m < 60) return `${m}分钟`;
+  if (m < 60) return t("leftSidebar.minutesAgo", { n: m });
   const h = Math.floor(m / 60);
-  if (h < 24) return `${h}小时`;
-  return `${Math.floor(h / 24)}天`;
+  if (h < 24) return t("leftSidebar.hoursAgo", { n: h });
+  return t("leftSidebar.daysAgo", { n: Math.floor(h / 24) });
 }
 
 /** Derive a project name from a git clone URL (last path segment, strip .git).
@@ -88,6 +89,7 @@ interface CtxState {
 }
 
 export function LeftSidebar() {
+  const t = useT();
   const leftSidebarOpen = useStore((s) => s.leftSidebarOpen);
   const toggleLeftSidebar = useStore((s) => s.toggleLeftSidebar);
   const agents = useStore((s) => s.agents);
@@ -394,7 +396,7 @@ export function LeftSidebar() {
     path?: string
   ): Promise<string | null> => {
     const trimmed = name.trim();
-    if (!trimmed) return "请输入项目名称";
+    if (!trimmed) return t("leftSidebar.enterProjectName");
     try {
       if (path) {
         const root = await invoke<string>("create_project", { name: trimmed, path });
@@ -420,7 +422,7 @@ export function LeftSidebar() {
         await spawnAgent(trimmed);
       } catch (e) {
         console.error("自动打开终端失败:", e);
-        setNprojError(`项目已创建，但自动打开终端失败：${String(e)}`);
+        setNprojError(t("leftSidebar.autoOpenFailed", { err: String(e) }));
       }
       return null;
     } catch (e) {
@@ -449,16 +451,19 @@ export function LeftSidebar() {
     const trimmedUrl = url.trim();
     const trimmedName = name.trim();
     if (!trimmedUrl) {
-      setNprojError("请输入 Git 仓库地址");
-      return "请输入 Git 仓库地址";
+      const msg = t("leftSidebar.enterGitUrl");
+      setNprojError(msg);
+      return msg;
     }
     if (!trimmedName) {
-      setNprojError("请输入项目名称");
-      return "请输入项目名称";
+      const msg = t("leftSidebar.enterProjectName");
+      setNprojError(msg);
+      return msg;
     }
     if (!parentDir) {
-      setNprojError("请选择父目录");
-      return "请选择父目录";
+      const msg = t("leftSidebar.pickParentDirRequired");
+      setNprojError(msg);
+      return msg;
     }
     const cloneId =
       typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
@@ -511,8 +516,9 @@ export function LeftSidebar() {
     base: string
   ): Promise<string | null> => {
     if (!repo) {
-      setNprojError("请选择源仓库");
-      return "请选择源仓库";
+      const msg = t("leftSidebar.pickSourceRepoRequired");
+      setNprojError(msg);
+      return msg;
     }
     try {
       await invoke("worktree_create", {
@@ -561,7 +567,7 @@ export function LeftSidebar() {
       >
         <button
           className="resize-collapse"
-          title={leftSidebarOpen ? "收起侧栏" : "展开侧栏"}
+          title={leftSidebarOpen ? t("leftSidebar.collapse") : t("leftSidebar.expand")}
           onMouseDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
@@ -581,10 +587,10 @@ export function LeftSidebar() {
                 open. When collapsed they move to the tab bar (see TabBar) so
                 the frameless chrome stays reachable without a 44px rail. */}
             <div className="sidebar-actions" data-tauri-drag-region>
-              <span className="sidebar-btn" onClick={() => setSettingsOpen(true)} title="设置">
+              <span className="sidebar-btn" onClick={() => setSettingsOpen(true)} title={t("leftSidebar.settings")}>
                 <Icon name="settings" size={16} />
               </span>
-              <span className="sidebar-btn" onClick={() => setNprojOpen(true)} title="新建项目">
+              <span className="sidebar-btn" onClick={() => setNprojOpen(true)} title={t("leftSidebar.newProject")}>
                 +
               </span>
               <span className="win-drag" data-tauri-drag-region aria-hidden />
@@ -592,21 +598,21 @@ export function LeftSidebar() {
               <span
                 className="sidebar-btn win-btn"
                 onClick={() => void appWindow.minimize()}
-                title="最小化"
+                title={t("tabBar.minimize")}
               >
                 <Icon name="minus" size={14} />
               </span>
               <span
                 className="sidebar-btn win-btn"
                 onClick={() => void appWindow.toggleMaximize()}
-                title={winMaximized ? "还原" : "最大化"}
+                title={winMaximized ? t("tabBar.restore") : t("tabBar.maximize")}
               >
                 <Icon name={winMaximized ? "copy" : "square"} size={13} />
               </span>
               <span
                 className="sidebar-btn win-btn win-close"
                 onClick={() => void appWindow.close()}
-                title="关闭"
+                title={t("common.close")}
               >
                 <Icon name="x" size={14} />
               </span>
@@ -624,9 +630,9 @@ export function LeftSidebar() {
                       className="nproj-empty-row"
                       onClick={() => setNprojOpen(true)}
                       role="button"
-                      title="添加新项目"
+                      title={t("leftSidebar.addNewProject")}
                     >
-                      <span className="nproj-empty-add">+</span> 添加新项目
+                      <span className="nproj-empty-add">+</span> {t("leftSidebar.addNewProject")}
                     </div>
                   );
                 }
@@ -689,7 +695,7 @@ export function LeftSidebar() {
                         {hasAgents ? (
                           <span
                             className="pj-arrow"
-                            title="展开 / 折叠"
+                            title={t("leftSidebar.expandCollapse")}
                             onClick={(e) => {
                               e.stopPropagation();
                               toggleProj(name);
@@ -709,7 +715,10 @@ export function LeftSidebar() {
                         {wt && (
                           <span
                             className="wt-badge"
-                            title={`隔离工作区 · 分支 ${wt.branch} · 根 ${wt.path}`}
+                            title={t("leftSidebar.worktreeBadge", {
+                              branch: wt.branch,
+                              path: wt.path,
+                            })}
                           >
                             <Icon name="git-branch" size={9} /> {wt.branch}
                           </span>
@@ -717,15 +726,15 @@ export function LeftSidebar() {
                         {cloningNames.has(name) && (
                           <span
                             className="proj-cloning"
-                            title="克隆进行中，完成后自动打开终端"
+                            title={t("leftSidebar.cloningTitle")}
                           >
-                            <Icon name="refresh-cw" size={10} /> 正在克隆中
+                            <Icon name="refresh-cw" size={10} /> {t("leftSidebar.cloning")}
                           </span>
                         )}
                         {!cloningNames.has(name) && (
                           <button
                             className="um-new-term"
-                            title="新建终端"
+                            title={t("leftSidebar.newTerminal")}
                             onClick={(e) => {
                               e.stopPropagation();
                               const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -756,7 +765,7 @@ export function LeftSidebar() {
                           <span className="tm-time">{fmtAge(a.createdAt)}</span>
                           <button
                             className="tm-close"
-                            title="关闭并终止"
+                            title={t("leftSidebar.closeAndKill")}
                             onClick={(e) => {
                               e.stopPropagation();
                               closeAgentAction(a.id);
@@ -771,7 +780,11 @@ export function LeftSidebar() {
                           <div
                             className="term-ended-head"
                             onClick={() => toggleEnded(name)}
-                            title={endedOpen.has(name) ? "收起已结束" : "展开已结束"}
+                            title={
+                              endedOpen.has(name)
+                                ? t("leftSidebar.collapseEnded")
+                                : t("leftSidebar.expandEnded")
+                            }
                           >
                             <span className="pj-arrow">
                               {endedOpen.has(name) ? (
@@ -780,10 +793,12 @@ export function LeftSidebar() {
                                 <Icon name="chevron-right" size={10} />
                               )}
                             </span>
-                            <span className="tm-name">已结束 ({endedAgents.length})</span>
+                            <span className="tm-name">
+                              {t("leftSidebar.endedCount", { n: endedAgents.length })}
+                            </span>
                             <button
                               className="tm-close"
-                              title="清理全部已结束会话"
+                              title={t("leftSidebar.clearAllEnded")}
                               onClick={(e) => {
                                 e.stopPropagation();
                                 void Promise.all(
@@ -791,7 +806,7 @@ export function LeftSidebar() {
                                 );
                               }}
                             >
-                              清理
+                              {t("leftSidebar.clear")}
                             </button>
                           </div>
                           {endedOpen.has(name) &&
@@ -826,7 +841,7 @@ export function LeftSidebar() {
                                 <span className="tm-time">{fmtAge(a.createdAt)}</span>
                                 <button
                                   className="tm-close"
-                                  title="删除已结束会话"
+                                  title={t("leftSidebar.deleteEnded")}
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     closeAgentAction(a.id);
@@ -945,6 +960,7 @@ function NewProjectModal({
   onGitClone: (url: string, name: string, parentDir: string) => Promise<string | null>;
   onWorktreeCreate: (repo: string, name: string, base: string) => Promise<string | null>;
 }) {
+  const t = useT();
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [gitUrl, setGitUrl] = useState("");
@@ -1032,7 +1048,7 @@ function NewProjectModal({
       const selected = await open({ directory: true, multiple: false });
       if (typeof selected === "string" && selected) {
         const createdName =
-          selected.split(/[\\/]/).filter(Boolean).pop() ?? "项目";
+          selected.split(/[\\/]/).filter(Boolean).pop() ?? t("leftSidebar.defaultFolderName");
         const err = await onCreate(createdName, selected);
         closeOnSuccess(err);
       }
@@ -1085,17 +1101,17 @@ function NewProjectModal({
     <div className="nproj-overlay" onClick={onClose}>
       <div className="nproj-card" onClick={(e) => e.stopPropagation()}>
         <div className="nproj-title">
-          <Icon name="folder-plus" size={16} /> 新建项目
+          <Icon name="folder-plus" size={16} /> {t("leftSidebar.newProject")}
         </div>
 
         <div className="ug-nproj-method">
           <div className="ug-nproj-label">
-            <Icon name="folder-plus" size={12} /> 新建文件夹
+            <Icon name="folder-plus" size={12} /> {t("leftSidebar.newFolder")}
           </div>
           <input
             ref={inputRef}
             className="nproj-input"
-            placeholder="项目名称（如 my-project）"
+            placeholder={t("leftSidebar.projectNamePh")}
             value={name}
             onChange={(e) => setName(e.target.value)}
             onKeyDown={(e) => {
@@ -1106,30 +1122,30 @@ function NewProjectModal({
           {error && <div className="nproj-error">{error}</div>}
           <div className="nproj-actions">
             <button className="nproj-btn" onClick={onClose}>
-              取消
+              {t("common.cancel")}
             </button>
             <button
               className="nproj-btn primary"
               onClick={submit}
               disabled={busy || !name.trim()}
             >
-              {busy ? "创建中…" : "创建"}
+              {busy ? t("leftSidebar.creating") : t("common.create")}
             </button>
           </div>
         </div>
 
         <div className="ug-nproj-method">
           <div className="ug-nproj-label">
-            <Icon name="folder-open" size={12} /> 或选择现有文件夹
+            <Icon name="folder-open" size={12} /> {t("leftSidebar.orPickFolder")}
           </div>
           <button className="ug-nproj-folder" onClick={pickFolder} disabled={busy}>
-            <Icon name="folder-open" size={13} /> 选择现有文件夹…
+            <Icon name="folder-open" size={13} /> {t("leftSidebar.pickExistingFolder")}
           </button>
         </div>
 
         <div className="ug-nproj-method">
           <div className="ug-nproj-label">
-            <Icon name="refresh-cw" size={12} /> 从 Git 克隆
+            <Icon name="refresh-cw" size={12} /> {t("leftSidebar.fromGitClone")}
           </div>
           <input
             className="nproj-input"
@@ -1147,7 +1163,7 @@ function NewProjectModal({
               onClick={pickParentDir}
               disabled={busy}
             >
-              <Icon name="folder-open" size={13} /> 选择父目录…
+              <Icon name="folder-open" size={13} /> {t("leftSidebar.pickParentDir")}
             </button>
             {parentDir ? (
               <span className="un-git-parent" title={parentDir}>
@@ -1157,7 +1173,7 @@ function NewProjectModal({
           </div>
           <input
             className="nproj-input"
-            placeholder="项目名称（默认取仓库名）"
+            placeholder={t("leftSidebar.projectNameDefaultRepo")}
             value={gitName}
             onChange={(e) => setGitName(e.target.value)}
             onKeyDown={(e) => {
@@ -1170,13 +1186,13 @@ function NewProjectModal({
             onClick={cloneSubmit}
             disabled={busy}
           >
-            {busy ? "克隆中…" : "克隆并创建"}
+            {busy ? t("leftSidebar.cloningBusy") : t("leftSidebar.cloneAndCreate")}
           </button>
         </div>
 
         <div className="ug-nproj-method">
           <div className="ug-nproj-label">
-            <Icon name="git-branch" size={12} /> 从仓库创建隔离工作区
+            <Icon name="git-branch" size={12} /> {t("leftSidebar.createWorktreeFrom")}
           </div>
           <select
             className="nproj-input wt-repo-select"
@@ -1184,17 +1200,17 @@ function NewProjectModal({
             onChange={(e) => setWtRepo(e.target.value)}
             disabled={busy}
           >
-            <option value="">选择源仓库…</option>
+            <option value="">{t("leftSidebar.selectSourceRepo")}</option>
             {wtRepos.map((r) => (
               <option key={r.root} value={r.root}>
                 {r.name}
-                {r.branch ? `（${r.branch}）` : ""}
+                {r.branch ? t("leftSidebar.branchParen", { branch: r.branch }) : ""}
               </option>
             ))}
           </select>
           <input
             className="nproj-input"
-            placeholder="工作区名称（用作分支名，必填）"
+            placeholder={t("leftSidebar.worktreeNamePh")}
             value={wtName}
             onChange={(e) => setWtName(e.target.value)}
             onKeyDown={(e) => {
@@ -1204,7 +1220,7 @@ function NewProjectModal({
           />
           <input
             className="nproj-input"
-            placeholder="基础分支（可空 = 当前分支）"
+            placeholder={t("leftSidebar.baseBranchPh")}
             value={wtBase}
             onChange={(e) => setWtBase(e.target.value)}
             onKeyDown={(e) => {
@@ -1217,7 +1233,7 @@ function NewProjectModal({
             onClick={wtSubmit}
             disabled={busy || !wtRepo || !wtName.trim()}
           >
-            {busy ? "创建中…" : "创建隔离工作区"}
+            {busy ? t("leftSidebar.creating") : t("leftSidebar.createWorktreeBtn")}
           </button>
         </div>
       </div>
@@ -1236,6 +1252,7 @@ function RenameProjectModal({
   onClose: () => void;
   onRename: (newName: string) => Promise<string | null>;
 }) {
+  const t = useT();
   const [name, setName] = useState(project);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1260,13 +1277,13 @@ function RenameProjectModal({
     <div className="nproj-overlay" onClick={onClose}>
       <div className="nproj-card" onClick={(e) => e.stopPropagation()}>
         <div className="nproj-title">
-          <Icon name="pencil" size={16} /> 重命名项目
+          <Icon name="pencil" size={16} /> {t("leftSidebar.renameProject")}
         </div>
-        <div className="ug-nproj-label">新项目名称</div>
+        <div className="ug-nproj-label">{t("leftSidebar.newProjectName")}</div>
         <input
           ref={inputRef}
           className="nproj-input"
-          placeholder="项目名称"
+          placeholder={t("leftSidebar.projectName")}
           value={name}
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => {
@@ -1277,14 +1294,14 @@ function RenameProjectModal({
         {error && <div className="nproj-error">{error}</div>}
         <div className="nproj-actions">
           <button className="nproj-btn" onClick={onClose}>
-            取消
+            {t("common.cancel")}
           </button>
           <button
             className="nproj-btn primary"
             onClick={submit}
             disabled={busy || !name.trim() || name.trim() === project}
           >
-            {busy ? "重命名中…" : "重命名"}
+            {busy ? t("leftSidebar.renaming") : t("common.rename")}
           </button>
         </div>
       </div>
@@ -1311,6 +1328,7 @@ function ContextMenu({
   onNewProject?: () => void;
   onRenameAgent?: (agentId: string) => void;
 }) {
+  const t = useT();
   // All hooks must run unconditionally (Rules of Hooks). The project / blank
   // branches below early-return, so any hook call after them would change the
   // hook count between renders (project menu → agent menu) and make React throw
@@ -1339,7 +1357,7 @@ function ContextMenu({
             onClose();
           }}
         >
-          <Icon name="folder-plus" size={13} /> 新建项目
+          <Icon name="folder-plus" size={13} /> {t("leftSidebar.newProject")}
         </div>
       </div>
     );
@@ -1371,7 +1389,7 @@ function ContextMenu({
             onClose();
           }}
         >
-          <Icon name="monitor" size={13} /> 新建终端
+          <Icon name="monitor" size={13} /> {t("leftSidebar.newTerminal")}
         </div>
         {ctx.cwd && (
           <div
@@ -1381,7 +1399,7 @@ function ContextMenu({
               onClose();
             }}
           >
-            <Icon name="folder" size={13} /> 在文件管理器中显示
+            <Icon name="folder" size={13} /> {t("leftSidebar.openInExplorer")}
           </div>
         )}
         {ctx.cwd && (
@@ -1392,7 +1410,7 @@ function ContextMenu({
               onClose();
             }}
           >
-            <Icon name="clipboard" size={13} /> 复制路径
+            <Icon name="clipboard" size={13} /> {t("leftSidebar.copyPath")}
           </div>
         )}
         <div className="ctx-sep" />
@@ -1403,7 +1421,7 @@ function ContextMenu({
             onClose();
           }}
         >
-          <Icon name="moon" size={13} /> 休眠
+          <Icon name="moon" size={13} /> {t("leftSidebar.sleep")}
         </div>
         {/* 重命名项目：功能已实现，暂时隐藏（改 `false` 为 `true` 恢复） */}
         {false && (
@@ -1416,7 +1434,7 @@ function ContextMenu({
                 onClose();
               }}
             >
-              <Icon name="pencil" size={13} /> 重命名项目
+              <Icon name="pencil" size={13} /> {t("leftSidebar.renameProject")}
             </div>
           </>
         )}
@@ -1424,13 +1442,13 @@ function ContextMenu({
         {wt ? (
           <div
             className="ctx-item danger"
-            title="终止会话、删除项目壳并 git worktree remove（保留源仓库）"
+            title={t("leftSidebar.removeWorktreeTitle")}
             onClick={() => {
               useStore.getState().removeWorktree(wt.path);
               onClose();
             }}
           >
-            <Icon name="git-branch" size={13} /> 移除工作区
+            <Icon name="git-branch" size={13} /> {t("leftSidebar.removeWorktree")}
           </div>
         ) : (
           <div
@@ -1441,7 +1459,7 @@ function ContextMenu({
               onClose();
             }}
           >
-            <Icon name="trash-2" size={13} /> 移除项目
+            <Icon name="trash-2" size={13} /> {t("leftSidebar.removeProject")}
           </div>
         )}
       </div>
@@ -1512,11 +1530,11 @@ function ContextMenu({
             onClose();
           }}
         >
-          <Icon name="pencil" size={13} /> 重命名
+          <Icon name="pencil" size={13} /> {t("common.rename")}
         </div>
       )}
       {ctx.agentId && <div className="ctx-sep" />}
-      <div className="ctx-label">切换 runtime</div>
+      <div className="ctx-label">{t("leftSidebar.switchRuntime")}</div>
       {runtimes.map((rt) => (
         <div
           key={rt.id}
@@ -1524,18 +1542,18 @@ function ContextMenu({
           onClick={() => switchRuntime(rt.id)}
         >
           {rt.name}
-          {!rt.available && " (未安装)"}
-          {rt.id === agent?.runtime && " · 当前"}
+          {!rt.available && t("leftSidebar.notInstalled")}
+          {rt.id === agent?.runtime && t("leftSidebar.currentSuffix")}
         </div>
       ))}
       <div className="ctx-sep" />
       <div className="ctx-item danger" onClick={closeAgent}>
-        <Icon name="x" size={13} /> 终止并关闭
+        <Icon name="x" size={13} /> {t("leftSidebar.terminateAndClose")}
       </div>
       {project && projCount === 1 && (
         <div
           className="ctx-item danger"
-          title={projWt ? "终止会话、删除项目壳并 git worktree remove" : undefined}
+          title={projWt ? t("leftSidebar.closeRemoveWorktreeTitle") : undefined}
           onClick={() => {
             // Last terminal of the project — remove the whole project. Worktree
             // projects go through the dedicated remove (kills + closes agents +
@@ -1545,7 +1563,10 @@ function ContextMenu({
             onClose();
           }}
         >
-          <Icon name="trash-2" size={13} /> {projWt ? "关闭并移除工作区" : "关闭并移除项目"}
+          <Icon name="trash-2" size={13} />{" "}
+          {projWt
+            ? t("leftSidebar.closeAndRemoveWorktree")
+            : t("leftSidebar.closeAndRemoveProject")}
         </div>
       )}
     </div>

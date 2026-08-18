@@ -95,6 +95,11 @@ const SOUND_ENABLED_KEY: &str = "sound_enabled";
 /// alphabetically-sorted entry from `list_projects`.
 const FOCUSED_PROJECT_KEY: &str = "focused_project";
 
+/// Settings KV key: UI language (`zh` | `en`). Frontend also mirrors this to
+/// localStorage so the shell can paint in the right language before the backend
+/// is ready; the KV copy is the durable source for future multi-device sync.
+const LOCALE_KEY: &str = "locale";
+
 /// User-configured launch override for one runtime (the adapter's defaults win
 /// unless a field is set to a non-empty string).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1712,6 +1717,7 @@ fn setting_set(
         AUTO_CHECK_UPDATE_KEY,
         SOUND_ENABLED_KEY,
         FOCUSED_PROJECT_KEY,
+        LOCALE_KEY,
     ];
     if !ALLOWED.contains(&key.as_str()) {
         return Err(format!("unknown setting key: {}", key));

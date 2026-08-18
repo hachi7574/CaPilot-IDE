@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useStore, TodoTag, TODO_DRAG_MIME } from "../../state/store";
 import { Icon } from "../Icon";
+import { useT } from "../../i18n";
 
 /** Backend settings KV key holding the persisted todo list (JSON array). */
 const TODOS_KEY = "todos";
@@ -110,6 +111,7 @@ function TodoAdd({
   row?: boolean;
   inputRef?: React.Ref<HTMLInputElement>;
 }) {
+  const t = useT();
   const [value, setValue] = useState("");
   const commit = () => {
     if (value.trim()) onSubmit(value);
@@ -123,7 +125,7 @@ function TodoAdd({
         className={row ? undefined : "todo-edit"}
         autoFocus={autoFocus}
         value={value}
-        placeholder="添加待办…"
+        placeholder={t("todo.placeholder")}
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
@@ -141,6 +143,7 @@ function TodoAdd({
 }
 
 export function TodoPanel() {
+  const t = useT();
   const todos = useStore((s) => s.todos);
   const todoScope = useStore((s) => s.todoScope);
   const focusedProject = useStore((s) => s.focusedProject);
@@ -272,11 +275,11 @@ export function TodoPanel() {
           shows a persistent add row instead of a "暂无" message; the header "+"
           (hover-revealed) stays available either way. */}
       <CollapsibleSection
-        title="待分配"
+        title={t("todo.pending")}
         headerAction={
           <button
             className="ov-add"
-            title="添加待办"
+            title={t("todo.addTodo")}
             onClick={() => {
               // 空列表时下方已有常驻输入行：`+` 聚焦它，而不是叠出第二个输入框.
               if (todoTags.length === 0) {
@@ -327,12 +330,12 @@ export function TodoPanel() {
                 }}
                 onDragEnd={() => setDragId(null)}
                 onDoubleClick={() => setEditingId(tag.id)}
-                title="双击编辑 · 拖拽发送到会话/终端/标签"
+                title={t("todo.dragHint")}
               >
                 <span className="todo-text">{tag.text}</span>
                 <span
                   className="todo-trash"
-                  title="删除"
+                  title={t("common.delete")}
                   onClick={(e) => {
                     e.stopPropagation();
                     deleteTodo(tag.id);
@@ -348,9 +351,9 @@ export function TodoPanel() {
 
       {/* 待处理 — finished tags + in-flight tags whose session is blocked on a
           user choice (待选择). Click opens the session in the terminal area. */}
-      <CollapsibleSection title="待处理">
+      <CollapsibleSection title={t("todo.done")}>
         {waitingTags.length + doneTags.length === 0 ? (
-          <div className="todo-empty">暂无待处理任务</div>
+          <div className="todo-empty">{t("todo.emptyDone")}</div>
         ) : (
           <>
             {waitingTags.map((tag) => (
@@ -358,7 +361,7 @@ export function TodoPanel() {
                 key={tag.id}
                 className="todo-item todo-waiting"
                 onClick={() => tag.agentId && openTodoSession(tag.agentId)}
-                title="会话正在等待你选择 — 点击打开该会话"
+                title={t("todo.waitingHint")}
               >
                 <Icon
                   name="circle-dot"
@@ -371,7 +374,7 @@ export function TodoPanel() {
                 <span className="todo-text">{tag.text}</span>
                 <span
                   className="todo-trash"
-                  title="删除"
+                  title={t("common.delete")}
                   onClick={(e) => {
                     e.stopPropagation();
                     deleteTodo(tag.id);
@@ -388,8 +391,8 @@ export function TodoPanel() {
                 onClick={() => tag.agentId && openTodoSession(tag.agentId)}
                 title={
                   tag.agentId
-                    ? "点击在终端区打开该会话"
-                    : "未关联会话"
+                    ? t("todo.openSession")
+                    : t("todo.noSession")
                 }
               >
                 <Icon
@@ -403,7 +406,7 @@ export function TodoPanel() {
                 <span className="todo-text">{tag.text}</span>
                 <span
                   className="todo-trash"
-                  title="删除"
+                  title={t("common.delete")}
                   onClick={(e) => {
                     e.stopPropagation();
                     deleteTodo(tag.id);

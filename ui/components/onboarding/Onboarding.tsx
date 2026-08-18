@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useStore } from "../../state/store";
 import { spawnAgent } from "../../state/agentActions";
 import { Icon } from "../Icon";
+import { useT } from "../../i18n";
 
 /**
  * First-run onboarding overlay (shown until the user completes it).
@@ -13,6 +14,7 @@ import { Icon } from "../Icon";
  * still proceed and create one later from the sidebar or composer.
  */
 export function Onboarding() {
+  const t = useT();
   const runtimes = useStore((s) => s.runtimes);
   const setOnboarded = useStore((s) => s.setOnboarded);
 
@@ -39,12 +41,12 @@ export function Onboarding() {
       await Promise.race([
         spawnAgent(),
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("创建超时，请重试")), 15000)
+          setTimeout(() => reject(new Error(t("onboarding.createTimeout"))), 15000)
         ),
       ]);
       setOnboarded(true);
     } catch (e) {
-      setAgentErr(`创建失败：${e}。可稍后在左侧栏或底部输入框重试。`);
+      setAgentErr(t("onboarding.createFailed", { err: String(e) }));
       setCreatingAgent(false);
     }
   };
@@ -60,32 +62,30 @@ export function Onboarding() {
             className="onboarding-skip"
             onClick={() => setOnboarded(true)}
           >
-            跳过引导
+            {t("onboarding.skip")}
           </button>
         </div>
 
         {/* Steps */}
         {step === 0 && (
           <div className="onboarding-step">
-            <div className="onboarding-step-title">欢迎使用 CaPilot</div>
+            <div className="onboarding-step-title">{t("onboarding.welcome")}</div>
             <p className="onboarding-step-desc">
-              以 IDE 为中心的本地 AI 编码工作台，可统一启动和管理多种 Agent
-              CLI 会话。跟随引导完成基础设置，即可开始使用。
+              {t("onboarding.welcomeDesc")}
             </p>
           </div>
         )}
 
         {step === 1 && (
           <div className="onboarding-step">
-            <div className="onboarding-step-title">运行环境检测</div>
+            <div className="onboarding-step-title">{t("onboarding.runtimeDetect")}</div>
             <p className="onboarding-step-desc">
-              以下运行时将用于启动 Agent 会话。未登录/未安装的运行时，请按提示
-              安装或登录后回到本应用刷新。
+              {t("onboarding.runtimeDesc")}
             </p>
             <div className="onboarding-runtimes">
               {runtimes.length === 0 && (
                 <div className="onboarding-runtime-row">
-                  <span>正在检测运行时…</span>
+                  <span>{t("onboarding.detecting")}</span>
                 </div>
               )}
               {runtimes.map((rt) => (
@@ -98,16 +98,16 @@ export function Onboarding() {
                     {rt.available ? (
                       rt.authenticated ? (
                         <>
-                          <Icon name="check" size={12} style={{ marginRight: 4 }} /> 已登录
+                          <Icon name="check" size={12} style={{ marginRight: 4 }} /> {t("onboarding.loggedIn")}
                         </>
                       ) : (
                         <>
-                          <Icon name="check" size={12} style={{ marginRight: 4 }} /> 已安装
+                          <Icon name="check" size={12} style={{ marginRight: 4 }} /> {t("onboarding.installed")}
                         </>
                       )
                     ) : (
                       <>
-                        <Icon name="x" size={12} style={{ marginRight: 4 }} /> 未安装
+                        <Icon name="x" size={12} style={{ marginRight: 4 }} /> {t("onboarding.notInstalled")}
                       </>
                     )}
                   </span>
@@ -115,16 +115,16 @@ export function Onboarding() {
               ))}
             </div>
             <div className="onboarding-guide">
-              安装或登录：请参考 <code>docs/</code> 或仓库 README 的运行时配置说明。
+              {t("onboarding.installGuide")}
             </div>
           </div>
         )}
 
         {step === 2 && (
           <div className="onboarding-step">
-            <div className="onboarding-step-title">创建第一个 Agent 会话</div>
+            <div className="onboarding-step-title">{t("onboarding.createSession")}</div>
             <p className="onboarding-step-desc">
-              创建一个 Agent 终端，即可在底部输入框或原生终端界面中开始工作。
+              {t("onboarding.createSessionDesc")}
             </p>
             <div className="onboarding-agent">
               {agentErr && (
@@ -136,16 +136,16 @@ export function Onboarding() {
                 disabled={creatingAgent}
               >
                 {creatingAgent ? (
-                  "正在创建…"
+                  t("onboarding.creating")
                 ) : (
                   <>
                     <Icon name="rocket" size={14} style={{ marginRight: 4 }} />
-                    创建 Agent 会话并开始
+                    {t("onboarding.createAndStart")}
                   </>
                 )}
               </button>
               <div className="onboarding-agent-hint">
-                也可以点击下方「下一步」跳过，稍后从项目侧栏或底部输入框创建。
+                {t("onboarding.createHint")}
               </div>
             </div>
           </div>
@@ -153,10 +153,9 @@ export function Onboarding() {
 
         {step === 3 && (
           <div className="onboarding-step">
-            <div className="onboarding-step-title">准备就绪</div>
+            <div className="onboarding-step-title">{t("onboarding.ready")}</div>
             <p className="onboarding-step-desc">
-              所有基础设置已完成。点击「开始使用」进入 CaPilot IDE；项目旁的
-              「+」可新建终端，底部输入框会向当前 Agent 会话发送消息。
+              {t("onboarding.readyDesc")}
             </p>
           </div>
         )}
@@ -180,7 +179,7 @@ export function Onboarding() {
                   setAgentErr(null);
                 }}
               >
-                上一步
+                {t("onboarding.prev")}
               </button>
             )}
             {isLast ? (
@@ -188,14 +187,14 @@ export function Onboarding() {
                 className="onboarding-btn onboarding-btn-primary"
                 onClick={() => setOnboarded(true)}
               >
-                开始使用
+                {t("onboarding.start")}
               </button>
             ) : (
               <button
                 className="onboarding-btn onboarding-btn-primary"
                 onClick={() => setStep((s) => s + 1)}
               >
-                下一步
+                {t("onboarding.next")}
               </button>
             )}
           </div>

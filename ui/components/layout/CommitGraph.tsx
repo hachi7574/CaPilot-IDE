@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useT, getLocale } from "../../i18n";
 import { layout, type GitLogEntry, type PlacedCommit } from "./commitGraphLayout";
 
 export type { GitLogEntry } from "./commitGraphLayout";
@@ -43,10 +44,11 @@ const PILL_CHAR_W = (() => {
 /** Dot palette per lane column (dark-bg friendly). Values live in CSS :root. */
 const LANE_COLORS = ["var(--lane-0)", "var(--lane-1)", "var(--lane-2)", "var(--lane-3)", "var(--lane-4)", "var(--lane-5)", "var(--lane-6)"];
 
-/** Unix-seconds timestamp → "YYYY/M/D HH:mm" for the hover tooltip. */
+/** Unix-seconds timestamp → locale-aware date/time for the hover tooltip. */
 function fmtTsFull(sec: number): string {
   if (!sec) return "—";
-  return new Date(sec * 1000).toLocaleString("zh-CN", {
+  const locale = getLocale() === "zh" ? "zh-CN" : undefined;
+  return new Date(sec * 1000).toLocaleString(locale, {
     year: "numeric",
     month: "numeric",
     day: "numeric",
@@ -103,6 +105,7 @@ interface CommitGraphProps {
  *   Full hash/subject/author/date show in the custom hover tooltip.
  */
 export function CommitGraph({ log, onCommitContextMenu, menuOpen = false, currentBranch }: CommitGraphProps) {
+  const t = useT();
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerW, setContainerW] = useState(320);
   // Custom hover tooltip (the native SVG <title> renders a huge black GTK box
@@ -218,7 +221,7 @@ export function CommitGraph({ log, onCommitContextMenu, menuOpen = false, curren
 
   return (
     <div className="gg-tree" ref={containerRef}>
-      <svg width={svgW} height={svgH} role="img" aria-label="提交历史树">
+      <svg width={svgW} height={svgH} role="img" aria-label={t("git.commitTreeAria")}>
         {colLines.map((l, i) => (
           <line key={`cl${i}`} x1={l.x} y1={l.y1} x2={l.x} y2={l.y2}
             stroke={l.color} strokeOpacity={0.45} strokeWidth={1.5} strokeLinecap="round" />

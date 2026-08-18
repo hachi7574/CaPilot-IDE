@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { renameAgent } from "../../state/agentActions";
 import { Icon } from "../Icon";
+import { useT } from "../../i18n";
 
 /** Rename a terminal session. Reused by the tab-bar and sidebar right-click
  *  context menus; the backend persists the new title (DB + `.agent-meta.json`)
@@ -14,6 +15,7 @@ export function RenameAgentModal({
   initial: string;
   onClose: () => void;
 }) {
+  const t = useT();
   const [name, setName] = useState(initial);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -42,13 +44,13 @@ export function RenameAgentModal({
     <div className="nproj-overlay" onClick={onClose}>
       <div className="nproj-card" onClick={(e) => e.stopPropagation()}>
         <div className="nproj-title">
-          <Icon name="pencil" size={16} /> 重命名终端
+          <Icon name="pencil" size={16} /> {t("rename.title")}
         </div>
-        <div className="ug-nproj-label">终端名称</div>
+        <div className="ug-nproj-label">{t("rename.label")}</div>
         <input
           ref={inputRef}
           className="nproj-input"
-          placeholder="终端名称"
+          placeholder={t("rename.placeholder")}
           value={name}
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => {
@@ -59,14 +61,14 @@ export function RenameAgentModal({
         {error && <div className="nproj-error">{error}</div>}
         <div className="nproj-actions">
           <button className="nproj-btn" onClick={onClose}>
-            取消
+            {t("common.cancel")}
           </button>
           <button
             className="nproj-btn primary"
             onClick={submit}
             disabled={busy || !name.trim() || name.trim() === initial}
           >
-            {busy ? "重命名中…" : "重命名"}
+            {busy ? t("rename.renaming") : t("rename.rename")}
           </button>
         </div>
       </div>

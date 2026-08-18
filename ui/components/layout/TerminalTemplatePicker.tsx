@@ -7,6 +7,7 @@ import {
   isWindowsHost,
 } from "../../state/shellPath";
 import { Icon, runtimeIcon } from "../Icon";
+import { useT } from "../../i18n";
 
 /**
  * New-terminal template picker for the project "+" / tab-bar "+" buttons.
@@ -32,6 +33,7 @@ export function TerminalTemplatePicker({
   anchor: { x: number; y: number };
   onClose: () => void;
 }) {
+  const t = useT();
   const termTemplates = useStore((s) => s.termTemplates);
   const runtimes = useStore((s) => s.runtimes);
   const addTermTemplate = useStore((s) => s.addTermTemplate);
@@ -52,17 +54,17 @@ export function TerminalTemplatePicker({
   // Optional shells (bash / powershell / cmd) hide when missing.
   // Agent rows hide when unavailable; while probes are still empty, keep
   // agents visible to avoid a shell-only flash.
-  const visibleTemplates = termTemplates.filter((t) => {
-    if (t.fixed) return true;
+  const visibleTemplates = termTemplates.filter((tpl) => {
+    if (tpl.fixed) return true;
     // User quick-starts with a command always show (they target a shell).
-    if (t.command && isShellRuntime(t.runtime)) return true;
-    if (isShellRuntime(t.runtime)) {
+    if (tpl.command && isShellRuntime(tpl.runtime)) return true;
+    if (isShellRuntime(tpl.runtime)) {
       if (runtimes.length === 0) return true;
-      return runtimeAvailable(t.runtime);
+      return runtimeAvailable(tpl.runtime);
     }
     // Agent rows.
     if (runtimes.length === 0) return true;
-    return availableRuntimeIds.has(t.runtime);
+    return availableRuntimeIds.has(tpl.runtime);
   });
 
   // Keep the menu fully on-screen: the anchor is the "＋" button's bottom-right
@@ -117,39 +119,47 @@ export function TerminalTemplatePicker({
         onClick={(e) => e.stopPropagation()}
         onContextMenu={(e) => e.stopPropagation()}
       >
-        <div className="tt-label">新建终端</div>
-        {visibleTemplates.map((t) => {
+        <div className="tt-label">{t("terminalPicker.title")}</div>
+        {visibleTemplates.map((tpl) => {
           return (
             <div
-              key={t.id}
+              key={tpl.id}
               className="tt-item"
               onClick={() => {
-                spawnTerminal(project, t).catch(console.error);
+                spawnTerminal(project, tpl).catch(console.error);
                 onClose();
               }}
               onContextMenu={(e) => {
                 e.preventDefault();
-                if (t.fixed) return;
-                setEdit(t);
+                if (tpl.fixed) return;
+                setEdit(tpl);
               }}
-              title={t.fixed ? "固定模板（系统终端）" : "右键编辑 / 重命名"}
+              title={
+                tpl.fixed
+                  ? t("terminalPicker.fixedTitle")
+                  : t("terminalPicker.editTitle")
+              }
             >
               <span className="tt-icon">
-                <Icon name={runtimeIcon(t.runtime)} size={16} />
+                <Icon name={runtimeIcon(tpl.runtime)} size={16} />
               </span>
-              <span className="tt-name">{t.name}</span>
-              {t.command && <span className="tt-cmd">{t.command}</span>}
+              <span className="tt-name">
+                {tpl.fixed && (tpl.id === "shell" || tpl.name === "终端")
+                  ? t("common.terminal")
+                  : tpl.name}
+              </span>
+              {tpl.command && <span className="tt-cmd">{tpl.command}</span>}
             </div>
           );
         })}
         <div className="tt-sep" />
         <div className="tt-item tt-add" onClick={() => setAdding(true)}>
-          <Icon name="plus" size={12} /> 添加快速启动
+          <Icon name="plus" size={12} /> {t("terminalPicker.addQuickStart")}
         </div>
       </div>
       {edit && (
         <TermTemplateModal
-          title="编辑终端模板"
+          title={t("terminalPicker.editTemplate")}
           name={edit.name}
           command={edit.command}
           runtime={edit.runtime}
@@ -171,7 +181,7 @@ export function TerminalTemplatePicker({
       )}
       {adding && (
         <TermTemplateModal
-          title="添加快速启动"
+          title={t("terminalPicker.addQuickStart")}
           name=""
           command=""
           runtime={quickStartRuntime()}
@@ -213,33 +223,34 @@ function TermTemplateModal({
   onDelete?: () => void;
   onClose: () => void;
 }) {
+  const t = useT();
   const [nm, setNm] = useState(name);
   const [cmd, setCmd] = useState(command);
   const shellRt = useStore((s) => s.runtimes.find((r) => r.id === runtime));
   const flavor = detectShellFlavor(runtime, shellRt?.name);
   const shellHint = (() => {
     if (flavor === "powershell") {
-      return "命令会注入到 PowerShell。示例：pnpm dev  或  python .\\script.py";
+      return t("terminalPicker.hintPs");
     }
     if (flavor === "cmd") {
-      return "命令会注入到 cmd.exe。示例：pnpm dev  或  python script.py";
+      return t("terminalPicker.hintCmd");
     }
     if (runtime === "bash-rc" || runtime.startsWith("bash")) {
       return isWindowsHost()
-        ? "命令会注入到 Git Bash。示例：pnpm dev  或  python ./script.py"
-        : "命令会注入到 bash。可留空只开终端。";
+        ? t("terminalPicker.hintGitBash")
+        : t("terminalPicker.hintBash");
     }
     if (isWindowsHost()) {
-      return "命令会注入到系统终端。Windows 上默认是 PowerShell/cmd，语法勿按 bash 写（无 && 链式时请用 ; 或分别启动）。";
+      return t("terminalPicker.hintWin");
     }
-    return "命令会注入到系统 shell（$SHELL）。可留空只开终端。";
+    return t("terminalPicker.hintShell");
   })();
   const cmdPlaceholder =
     flavor === "powershell"
-      ? "PowerShell 命令（可留空）— 例: pnpm dev"
+      ? t("terminalPicker.cmdPhPs")
       : flavor === "cmd"
-        ? "cmd 命令（可留空）— 例: pnpm dev"
-        : "在终端中执行的命令（可留空）";
+        ? t("terminalPicker.cmdPhCmd")
+        : t("terminalPicker.cmdPh");
 
   const submit = () => {
     const trimmed = nm.trim();
@@ -251,10 +262,10 @@ function TermTemplateModal({
     <div className="nproj-overlay" onClick={onClose}>
       <div className="nproj-card" onClick={(e) => e.stopPropagation()}>
         <div className="nproj-title">{title}</div>
-        <div className="ug-nproj-label">名称</div>
+        <div className="ug-nproj-label">{t("terminalPicker.templateName")}</div>
         <input
           className="nproj-input"
-          placeholder="终端名称"
+          placeholder={t("terminalPicker.namePh")}
           value={nm}
           autoFocus
           onChange={(e) => setNm(e.target.value)}
@@ -263,7 +274,7 @@ function TermTemplateModal({
             if (e.key === "Escape") onClose();
           }}
         />
-        <div className="ug-nproj-label">启动指令</div>
+        <div className="ug-nproj-label">{t("terminalPicker.templateCommand")}</div>
         <input
           className="nproj-input"
           placeholder={cmdPlaceholder}
@@ -283,11 +294,11 @@ function TermTemplateModal({
         <div className="nproj-actions">
           {canDelete && onDelete ? (
             <button className="nproj-btn danger" onClick={onDelete}>
-              删除
+              {t("common.delete")}
             </button>
           ) : (
             <button className="nproj-btn" onClick={onClose}>
-              取消
+              {t("common.cancel")}
             </button>
           )}
           <button
@@ -295,7 +306,7 @@ function TermTemplateModal({
             onClick={submit}
             disabled={!nm.trim()}
           >
-            保存
+            {t("common.save")}
           </button>
         </div>
       </div>

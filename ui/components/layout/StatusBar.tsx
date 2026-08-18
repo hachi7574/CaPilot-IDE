@@ -4,6 +4,7 @@ import { useStore, AgentInfo, ResourcePoint, RuntimeUsage } from "../../state/st
 import { fmtCpu, fmtMem } from "../../state/resource";
 import { checkForUpdate, downloadAndInstall } from "../../state/update";
 import { Icon, runtimeIcon } from "../Icon";
+import { useT } from "../../i18n";
 
 
 /** System-wide CPU/MEM snapshot from the backend `system_stats` command. */
@@ -53,27 +54,33 @@ function formatMemPair(used: number, total: number): string {
 }
 
 /** Compact countdown for the status bar, e.g. "3d" / "5h" / "12m". */
-function formatResetShort(seconds: number): string {
+function formatResetShort(
+  seconds: number,
+  t: (key: string, vars?: Record<string, string | number | null | undefined>) => string
+): string {
   const total = Math.max(0, Math.floor(seconds));
   const d = Math.floor(total / 86400);
   const h = Math.floor((total % 86400) / 3600);
   const m = Math.floor((total % 3600) / 60);
-  if (d > 0) return `${d}d`;
-  if (h > 0) return `${h}h`;
-  if (m > 0) return `${m}m`;
-  return `${total}s`;
+  if (d > 0) return t("statusBar.day", { n: d });
+  if (h > 0) return t("statusBar.hour", { n: h });
+  if (m > 0) return t("statusBar.minute", { n: m });
+  return t("statusBar.second", { n: total });
 }
 
 /** Human countdown for tooltips, e.g. "3天4小时". */
-function formatResetCountdown(seconds: number): string {
+function formatResetCountdown(
+  seconds: number,
+  t: (key: string, vars?: Record<string, string | number | null | undefined>) => string
+): string {
   const total = Math.max(0, Math.floor(seconds));
   const d = Math.floor(total / 86400);
   const h = Math.floor((total % 86400) / 3600);
   const m = Math.floor((total % 3600) / 60);
-  if (d > 0) return `${d}天${h}小时`;
-  if (h > 0) return `${h}小时${m}分`;
-  if (m > 0) return `${m}分钟`;
-  return `${total}秒`;
+  if (d > 0) return t("statusBar.dayHour", { d, h });
+  if (h > 0) return t("statusBar.hourMin", { h, m });
+  if (m > 0) return t("statusBar.minuteFull", { n: m });
+  return t("statusBar.second", { n: total });
 }
 
 /** Seconds remaining until `resets_at` (unix seconds), or null when unknown. */
@@ -83,6 +90,7 @@ function secondsUntilReset(resetsAt: number | null | undefined, nowSec: number):
 }
 
 export function StatusBar() {
+  const t = useT();
   const agents = useStore((s) => s.agents);
   const agentResources = useStore((s) => s.agentResources);
   const usageState = useStore((s) => s.usageState);
@@ -141,7 +149,7 @@ export function StatusBar() {
         className="sb-item resource-item"
         onClick={() => setResourceOpen((o) => !o)}
         style={{ cursor: "pointer", position: "relative" }}
-        title="资源监视（系统 CPU / 内存；点击查看全部 agent 曲线）"
+        title={t("statusBar.resourceTitle")}
       >
         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
           <span className="sb-name">CPU</span>
@@ -206,30 +214,35 @@ function UpdateStatusItem({
   downloading: boolean;
   installable: boolean;
 }) {
+  const t = useT();
   const hasUpdate = status === "available" && !!latest;
   const label = downloading
-    ? "更新中…"
+    ? t("statusBar.updating")
     : hasUpdate
-      ? `可更新 v${latest}`
+      ? t("statusBar.updateAvailable", { version: latest })
       : status === "checking"
-        ? "检查更新…"
+        ? t("statusBar.checkingUpdate")
         : status === "error"
-          ? "更新检查失败"
+          ? t("statusBar.checkFailed")
           : status === "up-to-date"
-            ? `v${currentVersion ?? "…"} · 最新`
+            ? t("statusBar.latest", { version: currentVersion ?? "…" })
             : currentVersion
-              ? `v${currentVersion}`
-              : "版本…";
+              ? t("statusBar.version", { version: currentVersion })
+              : t("statusBar.versionPending");
 
   const title = downloading
-    ? "正在下载并安装更新"
+    ? t("statusBar.downloadingTitle")
     : hasUpdate
-      ? `存在可更新版本 v${latest}（当前 v${currentVersion ?? "…"}）。点击${installable ? "立即更新" : "查看"}。`
+      ? t("statusBar.updateClickTitle", {
+          latest,
+          current: currentVersion ?? "…",
+          action: installable ? t("statusBar.updateNow") : t("statusBar.view"),
+        })
       : status === "error"
-        ? "上次检查失败，点击重试"
+        ? t("statusBar.retryTitle")
         : status === "up-to-date"
-          ? `已是最新版本 v${currentVersion ?? "…"}。点击重新检查。`
-          : "点击检查更新";
+          ? t("statusBar.upToDateTitle", { version: currentVersion ?? "…" })
+          : t("statusBar.clickCheck");
 
   const onClick = (event: MouseEvent) => {
     event.stopPropagation();
@@ -280,6 +293,7 @@ function UsageItem({
   nowSec: number;
   onFetched: (usage: RuntimeUsage) => void;
 }) {
+  const t = useT();
   const [refreshing, setRefreshing] = useState(false);
   const displayName = runtime === "codex" ? "Codex" : "OpenCode";
   // Headline the 7d/weekly window when present (the meaningful quota); codex has
@@ -289,7 +303,7 @@ function UsageItem({
   const resetLeft = secondsUntilReset(primary?.resets_at, nowSec);
   // Prefer real reset countdown ("3d"/"5h"/"12m") over the static window label
   // ("7d") so the bar answers "when does this refill?" at a glance.
-  const resetText = resetLeft != null ? formatResetShort(resetLeft) : null;
+  const resetText = resetLeft != null ? formatResetShort(resetLeft, t) : null;
   const label =
     remaining != null
       ? `${resetText ?? primary.label} ${Math.round(remaining)}%`
@@ -297,14 +311,18 @@ function UsageItem({
 
   // Full breakdown for the tooltip: each window's used/remaining + countdown.
   const lines = usage.windows.map((w) => {
-    const used = w.used_pct != null ? `已用 ${Math.round(w.used_pct)}%` : null;
-    const rem = w.remaining_pct != null ? `剩余 ${Math.round(w.remaining_pct)}%` : null;
+    const used = w.used_pct != null ? t("statusBar.used", { pct: Math.round(w.used_pct) }) : null;
+    const rem = w.remaining_pct != null ? t("statusBar.remaining", { pct: Math.round(w.remaining_pct) }) : null;
     const left = secondsUntilReset(w.resets_at, nowSec);
-    const reset = left != null ? `重置还有 ${formatResetCountdown(left)}` : null;
+    const reset = left != null ? t("statusBar.resetIn", { time: formatResetCountdown(left, t) }) : null;
     return `${w.label} · ${[used, rem].filter(Boolean).join(" / ")}${reset ? ` · ${reset}` : ""}`;
   });
   const plan = usage.plan_type ? `（${usage.plan_type}）` : "";
-  const tooltip = [`${displayName}${plan}`, ...lines, refreshing ? "刷新中…" : "点击立即刷新"].join("\n");
+  const tooltip = [
+    `${displayName}${plan}`,
+    ...lines,
+    refreshing ? t("statusBar.refreshing") : t("statusBar.clickRefresh"),
+  ].join("\n");
 
   const handleRefresh = async (event: MouseEvent) => {
     // Stop the status-bar resource popover / other siblings from reacting.
@@ -328,7 +346,7 @@ function UsageItem({
       onClick={handleRefresh}
       title={tooltip}
       disabled={refreshing}
-      aria-label={`${displayName} 用量，点击刷新`}
+      aria-label={t("statusBar.usageAria", { name: displayName })}
     >
       <Icon
         name={runtime === "codex" ? "openai" : "opencode"}
@@ -355,6 +373,7 @@ function ResourcePopover({
   agentResources: Map<string, ResourcePoint>;
   onClose: () => void;
 }) {
+  const t = useT();
   // Anchor the popover centered above the status-bar item, clamped inside the
   // viewport so a narrow window can't push it off-screen.
   const [pos, setPos] = useState<{ x: number; bottom: number }>(() => measure());
@@ -389,12 +408,12 @@ function ResourcePopover({
       <div className="resource-popover-title">
         <span style={{ display: "inline-flex", alignItems: "center" }}>
           <Icon name="settings" size={13} style={{ marginRight: 4 }} />
-          资源监视
+          {t("statusBar.resourcePopover")}
         </span>
       </div>
       <div className="resource-list">
         {rows.length === 0 && (
-          <div className="resource-empty">没有运行中的 agent</div>
+          <div className="resource-empty">{t("statusBar.noRunningAgents")}</div>
         )}
         {rows.map((a) => {
           const r = agentResources.get(a.id);
