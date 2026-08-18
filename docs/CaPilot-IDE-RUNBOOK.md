@@ -67,11 +67,11 @@ IDE 遵循 CaPilot 主仓库的 **LUCY styleguide**（8-bit Pixel × Apple Smoot
 > 已落地（2026-08-17）：**Windows 进程树回收 + 文件树/快速启动按 shell 语义适配**。`pty_core::kill` / 探测超时走 `process_kill::kill_process_tree`（Windows `taskkill /T /F`，Unix 进程组 SIGKILL），避免 agent 孙进程残留。文件树「运行此文件 / 在当前终端打开」按当前 shell 风味（PowerShell / cmd / POSIX）生成 `cd` 与引号；`.py` 在 Windows 用 `python`，并识别 `.ps1`/`.bat`/`.cmd`。快速启动编辑框提示命令注入的是系统默认 shell（非 bash）。
 
 > 已落地（2026-08-18）：**数据根 + 多盘路径**。
-> - 打包安装：数据目录 = `<安装目录>/data`（用户只选一次安装路径；sessions / workspaces / status / run 都在其下）。首次启动若 `data/` 为空且存在旧版 `~/CaPilot/sessions.db`，会一次性迁移过去。
-> - 开发态（`target/debug|release`）：仍用 `~/CaPilot`，避免污染源码树。
+> - 可写安装目录（便携版 / 当前用户 NSIS / 用户自有 `/opt/...`）：数据目录 = `<安装目录>/data`。首次启动若 `data/` 为空且存在旧版 `~/CaPilot/sessions.db`，会一次性迁移过去。
+> - 不可写安装位置（`deb` → `/usr/bin`、AppImage 只读挂载、Program Files 全用户安装）与开发态（`target/debug|release`）：数据目录 = `~/CaPilot`。**不要**在 `/usr/bin/data` 建目录——0.1.17 曾因此在 deb 安装下 PermissionDenied 直接 panic。
 > - 显式覆盖：环境变量 `CAPILOT_HOME`。
 > - 克隆/打开项目/fs 白名单：允许任意本地盘普通目录；拒绝 `Windows` / `Program Files` / `ProgramData` 等系统路径（不再锁死 `$HOME`）。
-> - NSIS：`installMode: both`（当前用户 / 全部用户可选）。安装目录页为 Tauri NSIS 默认行为，用户只选一次安装路径；应用数据落在 `<安装目录>/data`。
+> - NSIS：`installMode: both`（当前用户 / 全部用户可选）。当前用户安装数据落在 `<安装目录>/data`；全用户安装因目录不可写回退 `~/CaPilot`。
 
 ### 待开发项
 

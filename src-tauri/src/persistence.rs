@@ -15,10 +15,10 @@
 //!
 //! **Where is `data_root`?**
 //! 1. `$CAPILOT_HOME` if set (always wins — portable / CI / tests).
-//! 2. Packaged install: `<install_dir>/data` next to the exe (user only picks the
-//!    install directory once; data lives underneath it).
-//! 3. Dev / unpackaged: `~/CaPilot` (keeps `cargo test` / `tauri dev` off the
-//!    source tree and matches historical layouts).
+//! 2. Packaged install whose install dir is **user-writable**: `<install_dir>/data`
+//!    (portable sticks, per-user NSIS, `/opt/CaPilot` owned by the user).
+//! 3. Otherwise — system packages (`/usr/bin`), AppImage mounts, Program Files,
+//!    and dev/unpackaged builds: `~/CaPilot`.
 
 use crate::lifecycle_journal::{LifecycleEventKind, LifecycleJournal};
 use crate::session_store::{NaturalExit, SessionStore};
@@ -405,13 +405,18 @@ fn exe_is_dev_build(exe: &Path) -> bool {
 ///
 /// Priority:
 /// 1. `$CAPILOT_HOME` — explicit override (portable sticks, CI, tests).
-/// 2. Packaged install — `<dir of exe>/data` so the user only chooses the
-///    install directory once; sessions/workspaces/status/run all live under it.
-/// 3. Dev / unpackaged — `~/CaPilot` (historical default; keeps cargo/tauri
-///    artifacts out of the source tree).
+/// 2. Packaged install in a **user-writable** directory — `<dir of exe>/data`
+///    (portable / per-user NSIS). Sessions, workspaces, status, and run live
+///    underneath it.
+/// 3. Everything else — `~/CaPilot`:
+///    - system packages (`deb` → `/usr/bin`, where creating `data/` is EACCES)
+///    - read-only mounts (AppImage squashfs)
+///    - all-users installs under Program Files
+///    - Cargo/Tauri dev builds (`target/debug|release`)
 ///
-/// On first launch of a packaged build, [`ensure_data_root`] one-shot migrates
-/// a legacy `~/CaPilot` tree into `<install>/data` when the latter is empty.
+/// On first launch of a portable packaged build, [`ensure_data_root`] one-shot
+/// migrates a legacy `~/CaPilot` tree into `<install>/data` when the latter is
+/// empty. System-package installs keep using `~/CaPilot` directly (no migrate).
 pub fn data_root() -> PathBuf {
     if let Ok(home) = std::env::var("CAPILOT_HOME") {
         let t = home.trim();
@@ -423,12 +428,63 @@ pub fn data_root() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if !exe_is_dev_build(&exe) {
             if let Some(dir) = exe.parent() {
-                return dir.join("data");
+                // deb installs land in /usr/bin; AppImage is a read-only mount;
+                // all-users NSIS lands under Program Files. Creating `data/`
+                // next to the exe fails with PermissionDenied there — fall
+                // through to ~/CaPilot instead of panicking at startup.
+                if install_dir_is_user_writable(dir) {
+                    return dir.join("data");
+                }
             }
         }
     }
 
     user_home_or_tmp().join("CaPilot")
+}
+
+/// `true` when CaPilot can create its `data/` tree next to the installed exe.
+///
+/// Probes by creating (and removing) a tiny file. If `dir` itself is not
+/// writable but an existing `dir/data` is, that still counts — upgrades that
+/// already migrated keep working even if the install root later hardens.
+fn install_dir_is_user_writable(dir: &Path) -> bool {
+    if probe_dir_writable(dir) {
+        return true;
+    }
+    let data = dir.join("data");
+    data.is_dir() && probe_dir_writable(&data)
+}
+
+fn probe_dir_writable(dir: &Path) -> bool {
+    use std::fs::OpenOptions;
+    use std::io::ErrorKind;
+    // Unique-ish name so a crashed prior probe can't permanently block us, and
+    // concurrent starts don't thrash each other.
+    let name = format!(
+        ".capilot-write-probe-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let probe = dir.join(name);
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+            // Extremely unlikely collision; treat as writable and clean up.
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 /// Ensure [`data_root`] exists on disk. On a packaged install whose `data/` is
@@ -1951,16 +2007,54 @@ mod tests {
 
     #[test]
     fn exe_is_dev_build_detects_cargo_target() {
-        assert!(exe_is_dev_build(Path::new(
-            r"C:\src\hamlet\src-tauri\target\debug\capilot-ide.exe"
-        )));
-        assert!(exe_is_dev_build(Path::new(
-            "/home/hachi/hamlet/src-tauri/target/release/capilot-ide"
-        )));
-        assert!(!exe_is_dev_build(Path::new(r"D:\Apps\CaPilot\capilot-ide.exe")));
-        assert!(!exe_is_dev_build(Path::new(
-            "/opt/CaPilot/capilot-ide"
-        )));
+        // Path::components only splits on the host separator, so feed each OS
+        // its own shape. (A Windows `\` path is a single Normal component on Unix.)
+        #[cfg(windows)]
+        {
+            assert!(exe_is_dev_build(Path::new(
+                r"C:\src\hamlet\src-tauri\target\debug\capilot-ide.exe"
+            )));
+            assert!(!exe_is_dev_build(Path::new(
+                r"D:\Apps\CaPilot\capilot-ide.exe"
+            )));
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(exe_is_dev_build(Path::new(
+                "/home/hachi/hamlet/src-tauri/target/debug/capilot-ide"
+            )));
+            assert!(exe_is_dev_build(Path::new(
+                "/home/hachi/hamlet/src-tauri/target/release/capilot-ide"
+            )));
+            assert!(!exe_is_dev_build(Path::new("/opt/CaPilot/capilot-ide")));
+            assert!(!exe_is_dev_build(Path::new("/usr/bin/capilot-ide")));
+        }
+    }
+
+    #[test]
+    fn install_dir_writable_probe_accepts_temp_and_rejects_missing() {
+        let stamp = format!(
+            "{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir().join(format!("capilot-writable-{stamp}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(install_dir_is_user_writable(&dir));
+        assert!(!install_dir_is_user_writable(
+            &dir.join("definitely-does-not-exist")
+        ));
+        // Existing data/ subdir counts even if we only probe that path via the
+        // helper's second branch — parent stays writable here, so just ensure
+        // data/ alone is recognized when parent is missing write (simulated by
+        // probing the data path directly).
+        let data = dir.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        assert!(probe_dir_writable(&data));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Custom-rooted projects (picked folder / clone) may live outside $HOME
