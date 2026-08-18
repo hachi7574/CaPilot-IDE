@@ -1,6 +1,7 @@
 import { useStore } from "../../state/store";
 import { downloadAndInstall } from "../../state/update";
 import { Icon } from "../Icon";
+import { useT } from "../../i18n";
 
 /**
  * In-app prompt when a newer release is available.
@@ -10,6 +11,7 @@ import { Icon } from "../Icon";
  * primary surface; the system notification remains a secondary cue.
  */
 export function UpdatePrompt() {
+  const t = useT();
   const status = useStore((s) => s.updateStatus);
   const latest = useStore((s) => s.updateLatest);
   const current = useStore((s) => s.currentVersion);
@@ -42,9 +44,11 @@ export function UpdatePrompt() {
       </div>
       <div className="update-prompt-body">
         <div className="update-prompt-title">
-          存在可更新版本 v{latest}
+          {t("updatePrompt.title", { version: latest })}
           {current ? (
-            <span className="update-prompt-current">（当前 v{current}）</span>
+            <span className="update-prompt-current">
+              {t("updatePrompt.current", { version: current })}
+            </span>
           ) : null}
         </div>
         {notes ? (
@@ -53,7 +57,10 @@ export function UpdatePrompt() {
           </div>
         ) : (
           <div className="update-prompt-notes">
-            当前 v{current ?? "…"} → 可升级到 v{latest}
+            {t("updatePrompt.upgradeLine", {
+              current: current ?? "…",
+              latest,
+            })}
           </div>
         )}
         {pct != null ? (
@@ -68,7 +75,7 @@ export function UpdatePrompt() {
           </div>
         ) : bytesLabel ? (
           <div className="update-prompt-progress">
-            <span>已下载 {bytesLabel}</span>
+            <span>{t("updatePrompt.downloaded", { size: bytesLabel })}</span>
           </div>
         ) : null}
       </div>
@@ -80,11 +87,11 @@ export function UpdatePrompt() {
           disabled={!installable || downloading}
           title={
             installable
-              ? "下载并安装新版本"
-              : "开发构建不支持自动安装，请使用发布包"
+              ? t("updatePrompt.installTitle")
+              : t("updatePrompt.devNoInstall")
           }
         >
-          {downloading ? "下载中…" : "立即更新"}
+          {downloading ? t("updatePrompt.downloading") : t("updatePrompt.updateNow")}
         </button>
         <button
           type="button"
@@ -94,7 +101,7 @@ export function UpdatePrompt() {
           }
           disabled={downloading}
         >
-          稍后
+          {t("updatePrompt.later")}
         </button>
       </div>
     </div>

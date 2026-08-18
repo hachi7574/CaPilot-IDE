@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { t } from "../i18n";
 
 // ── Types ───────────────────────────────────────────────────────
 
@@ -255,29 +256,29 @@ export function resolveBySelector(selector: string): Element | null {
 
 // ── Markdown builders ──────────────────────────────────────────
 
-const INTENT_LABEL: Record<AnnotIntent, string> = {
-  change: "改变 (change)",
-  question: "疑问 (question)",
-  error: "错误 (error)",
-};
+function intentLabel(intent: AnnotIntent): string {
+  return t(`annotations.${intent}`);
+}
 
 /** `## Design Feedback` block for all collected comments. */
 export function buildFeedbackMarkdown(list: Annotation[]): string {
-  const head = ["## Design Feedback", "", "> 页面：CaPilot IDE（本应用自身界面）"];
+  const head = ["## Design Feedback", "", `> ${t("annotations.pageLabel")}`];
   const body = list.map((a, i) => {
     const e = a.element;
     const [firstLine, ...restLines] = a.text.split("\n");
-    const title = firstLine.trim() || "（无描述）";
+    const title = firstLine.trim() || t("annotations.noDescription");
     const rest = restLines.join("\n").trim();
+    const label = intentLabel(a.intent);
+    const unknown = t("annotations.unknownComponent");
     const lines = [
-      `### ${i + 1}. [${INTENT_LABEL[a.intent]}] ${title}`,
-      `- **意图**: ${INTENT_LABEL[a.intent]}`,
-      `- **组件**: \`${e.component || "未知"}\``,
-      `- **元素**: \`<${e.tag}${e.classes.length ? ` class="${e.classes.slice(0, 4).join(" ")}"` : ""}>\``,
-      `- **选择器**: \`${e.selector}\``,
+      `### ${i + 1}. [${label}] ${title}`,
+      `- **${t("annotations.intent")}**: ${label}`,
+      `- **${t("annotations.component")}**: \`${e.component || unknown}\``,
+      `- **${t("annotations.element")}**: \`<${e.tag}${e.classes.length ? ` class="${e.classes.slice(0, 4).join(" ")}"` : ""}>\``,
+      `- **${t("annotations.selector")}**: \`${e.selector}\``,
     ];
     if (e.id) lines.push(`- **id**: \`${e.id}\``);
-    if (e.text) lines.push(`- **文本**: "${e.text}"`);
+    if (e.text) lines.push(`- **${t("annotations.textLabel")}**: "${e.text}"`);
     if (rest) lines.push("", rest);
     return lines.join("\n");
   });
@@ -286,15 +287,18 @@ export function buildFeedbackMarkdown(list: Annotation[]): string {
 
 /** Single element's component info (used when there are no comments). */
 export function buildElementMarkdown(info: AnnotElementInfo): string {
+  const unknown = t("annotations.unknownComponent");
   const lines = [
-    "## 页面元素信息",
-    `- **组件**: \`${info.component || "未知"}\``,
-    `- **标签**: \`<${info.tag}>\``,
+    `## ${t("annotations.elementInfoTitle")}`,
+    `- **${t("annotations.component")}**: \`${info.component || unknown}\``,
+    `- **${t("annotations.tag")}**: \`<${info.tag}>\``,
   ];
-  if (info.classes.length) lines.push(`- **class**: \`${info.classes.join(" ")}\``);
+  if (info.classes.length) {
+    lines.push(`- **${t("annotations.classLabel")}**: \`${info.classes.join(" ")}\``);
+  }
   if (info.id) lines.push(`- **id**: \`${info.id}\``);
-  if (info.text) lines.push(`- **文本**: "${info.text}"`);
-  lines.push(`- **选择器**: \`${info.selector}\``);
+  if (info.text) lines.push(`- **${t("annotations.textLabel")}**: "${info.text}"`);
+  lines.push(`- **${t("annotations.selector")}**: \`${info.selector}\``);
   return lines.join("\n");
 }
 
@@ -374,16 +378,19 @@ export async function captureElementToPng(el: Element): Promise<Blob> {
   img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(data)}`;
   await new Promise<void>((resolve, reject) => {
     img.onload = () => resolve();
-    img.onerror = () => reject(new Error("元素截图渲染失败"));
+    img.onerror = () => reject(new Error(t("annotations.renderFailed")));
   });
   const canvas = document.createElement("canvas");
   canvas.width = w;
   canvas.height = h;
   const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("canvas 不可用");
+  if (!ctx) throw new Error(t("annotations.canvasUnavailable"));
   ctx.drawImage(img, 0, 0, w, h);
   const blob = await new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("PNG 编码失败"))), "image/png");
+    canvas.toBlob(
+      (b) => (b ? resolve(b) : reject(new Error(t("annotations.pngFailed")))),
+      "image/png"
+    );
   });
   return blob;
 }
@@ -405,7 +412,7 @@ export async function copyElementScreenshot(el: Element): Promise<"image" | "dat
     const dataUrl = await new Promise<string>((resolve, reject) => {
       const fr = new FileReader();
       fr.onload = () => resolve(String(fr.result));
-      fr.onerror = () => reject(new Error("读取截图失败"));
+      fr.onerror = () => reject(new Error(t("annotations.readShotFailed")));
       fr.readAsDataURL(blob);
     });
     await copyText(dataUrl);

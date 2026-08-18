@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { useT } from "../../i18n";
 import { Icon } from "../Icon";
 
 interface ImageViewerPanelProps {
@@ -55,6 +56,7 @@ function clampAxis(halfImage: number, halfView: number, value: number): number {
  *    image leaves fit mode at the fitted scale first)
  */
 export function ImageViewerPanel({ filePath }: ImageViewerPanelProps) {
+  const t = useT();
   const src = convertFileSrc(filePath);
   const viewportRef = useRef<HTMLDivElement>(null);
 
@@ -241,7 +243,7 @@ export function ImageViewerPanel({ filePath }: ImageViewerPanelProps) {
       <div className="image-viewer-toolbar">
         <button
           className="image-viewer-btn"
-          title="缩小 (Ctrl+滚轮)"
+          title={t("image.zoomOut")}
           onClick={() => zoomAt(box.w / 2, box.h / 2, 1 / ZOOM_STEP)}
           disabled={!natural}
         >
@@ -250,7 +252,7 @@ export function ImageViewerPanel({ filePath }: ImageViewerPanelProps) {
         <span className="image-viewer-zoom">{zoomPct}%</span>
         <button
           className="image-viewer-btn"
-          title="放大 (Ctrl+滚轮)"
+          title={t("image.zoomIn")}
           onClick={() => zoomAt(box.w / 2, box.h / 2, ZOOM_STEP)}
           disabled={!natural}
         >
@@ -259,7 +261,7 @@ export function ImageViewerPanel({ filePath }: ImageViewerPanelProps) {
         <span className="image-viewer-sep" />
         <button
           className={`image-viewer-btn${!fit && scale === 1 ? " active" : ""}`}
-          title="实际大小 (1:1)"
+          title={t("image.actualSize")}
           onClick={setActualSize}
           disabled={!natural}
         >
@@ -267,11 +269,11 @@ export function ImageViewerPanel({ filePath }: ImageViewerPanelProps) {
         </button>
         <button
           className={`image-viewer-btn${fit ? " active" : ""}`}
-          title="适应窗口 (双击)"
+          title={t("image.fitWindow")}
           onClick={reset}
           disabled={!natural}
         >
-          适应
+          {t("image.fit")}
         </button>
         {natural && (
           <span className="image-viewer-dims">
@@ -292,7 +294,7 @@ export function ImageViewerPanel({ filePath }: ImageViewerPanelProps) {
         {error ? (
           <div className="image-viewer-error">
             <Icon name="triangle-alert" size={28} />
-            <p>无法加载图片</p>
+            <p>{t("image.loadFailed")}</p>
             <code>{filePath}</code>
           </div>
         ) : (

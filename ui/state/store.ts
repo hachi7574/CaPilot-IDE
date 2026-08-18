@@ -6,6 +6,12 @@ import {
   DEFAULT_WALLPAPER_OPACITY,
 } from "./themes";
 import { playConfirmationSound } from "./sound";
+import {
+  type Locale,
+  DEFAULT_LOCALE,
+  isLocale,
+  setI18nLocale,
+} from "../i18n";
 
 // ── Types ───────────────────────────────────────────────────────
 
@@ -760,6 +766,9 @@ interface AppState {
   // UI font size preset ("s" | "m" | "l" | "xl" | "xxl"); base = smallest.
   fontScale: FontScale;
 
+  /** UI language (`zh` default, `en`). Terminal PTY content is never translated. */
+  locale: Locale;
+
   // Visual theme preset, reflected to <html data-theme="…"> by App.
   themeId: ThemeId;
 
@@ -935,6 +944,7 @@ interface AppState {
   setOnboarded: (onboarded: boolean) => void;
   setNprojOpen: (open: boolean) => void;
   setFontScale: (scale: FontScale) => void;
+  setLocale: (locale: Locale) => void;
   setThemeId: (theme: ThemeId) => void;
   setWallpaperMode: (mode: WallpaperMode) => void;
   setWallpaperPath: (path: string | null) => void;
@@ -980,6 +990,18 @@ function loadFontScale(): FontScale {
     // storage unavailable — use base
   }
   return "m";
+}
+
+/** Persisted UI language. Fallback: Chinese (the historical default). */
+const LOCALE_KEY = "capilot.locale";
+function loadLocale(): Locale {
+  try {
+    const v = localStorage.getItem(LOCALE_KEY);
+    if (isLocale(v)) return v;
+  } catch {
+    // storage unavailable
+  }
+  return DEFAULT_LOCALE;
 }
 
 /** Persisted visual theme. The quantum lattice look is the safe migration
@@ -1369,6 +1391,7 @@ export const useStore = create<AppState>((set, get) => {
   nprojOpen: false,
   termTemplates: loadTermTemplates(),
   fontScale: loadFontScale(),
+  locale: loadLocale(),
   themeId: loadThemeId(),
   wallpaperMode: loadWallpaperMode(),
   wallpaperPath: loadWallpaperPath(),
@@ -2176,6 +2199,20 @@ export const useStore = create<AppState>((set, get) => {
     set({ fontScale: scale });
   },
 
+  setLocale: (locale) => {
+    try {
+      localStorage.setItem(LOCALE_KEY, locale);
+    } catch {
+      // ignore storage errors
+    }
+    setI18nLocale(locale);
+    set({ locale });
+    // Best-effort mirror into the settings KV so a future multi-device sync has
+    // a single source; localStorage remains the boot-time source of truth so
+    // the UI language is available before the backend is ready.
+    invoke("setting_set", { key: "locale", value: locale }).catch(() => {});
+  },
+
   setThemeId: (themeId) => {
     try {
       localStorage.setItem(THEME_KEY, themeId);
@@ -2358,3 +2395,7 @@ function notifyAgentTransition(id: string): void {
   if (s.soundEnabled) playConfirmationSound(s.themeId);
   s.flashTab(id);
 }
+
+// Seed the i18n locale bus so imperative `t()` and `useT()` see the persisted
+// preference before any component mounts.
+setI18nLocale(loadLocale());

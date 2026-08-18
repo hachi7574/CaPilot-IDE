@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useStore } from "./store";
 import { spawnAgent } from "./agentActions";
 import { notify } from "./notify";
+import { t } from "../i18n";
 
 /**
  * Reconciles background `git_clone` results with the store.
@@ -50,7 +51,7 @@ export function useCloneEvents() {
             }
             // Auto-open a fresh agent terminal in the clone (best-effort).
             spawnAgent(name).catch((e) =>
-              console.error("自动打开终端失败:", e)
+              console.error(t("clone.autoOpenFailed"), e)
             );
           }
         );
@@ -68,7 +69,7 @@ export function useCloneEvents() {
             // after reload must not delete a project the user may have fixed.
             if (!wasPending) return;
             s.removeProject(name);
-            notify("Git 克隆失败", error);
+            notify(t("clone.failed"), error);
           }
         );
         if (cancelled) {

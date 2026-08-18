@@ -27,6 +27,7 @@ import { PermissionConfirmationDialog } from "./PermissionConfirmationDialog";
 import { ContextWindowMeter } from "./ContextWindowMeter";
 import { CacheHitRate } from "./CacheHitRate";
 import { Icon } from "../Icon";
+import { useT } from "../../i18n";
 
 const DEFAULT_RUNTIME = "claude";
 type ComposerPermissionMode = PermissionMode;
@@ -126,6 +127,7 @@ type ComposerTarget =
   | { kind: "todo" };
 
 export function Composer() {
+  const t = useT();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const atMenuRef = useRef<HTMLDivElement>(null);
   const slashMenuRef = useRef<HTMLDivElement>(null);
@@ -335,10 +337,15 @@ export function Composer() {
   const actualModel = resolveCatalogModel(actualModelId);
   const displayedModelName = actualModelId
     ? (actualModel?.name ?? actualModelId)
-    : (currentModel?.name ?? "选择模型");
+    : (currentModel?.name ?? t("composer.selectModel"));
   const modelButtonTitle = actualModelId
-    ? `实际模型：${displayedModelName}；配置模型：${currentModel?.name ?? shownModel ?? "runtime 默认"}`
-    : `选择模型（当前：${currentModel?.name ?? "runtime 默认"}）`;
+    ? t("composer.actualModel", {
+        actual: displayedModelName,
+        config: currentModel?.name ?? shownModel ?? t("composer.runtimeDefault"),
+      })
+    : t("composer.selectModelCurrent", {
+        name: currentModel?.name ?? t("composer.runtimeDefault"),
+      });
   // Group models by provider so the picker shows one section header per
   // supplier (deepseek-official / opencode-go / anthropic / …) instead of a
   // flat list where the same model name can appear under multiple routes.
@@ -428,13 +435,13 @@ export function Composer() {
       : shownSpeed === "auto" && configRuntimeId === "codex"
       ? (defaultSpeedForCodex
           ? (thinkingOptions.find((option) => option.id === defaultSpeedForCodex)
-              ?.label ?? "思考强度")
-          : "思考强度")
+              ?.label ?? t("composer.thinking"))
+          : t("composer.thinking"))
       : (thinkingOptions.find(
           (option) =>
             option.id ===
             (configRuntimeId === "dsh" ? dshNativeSpeed : shownSpeed)
-        )?.label ?? "思考强度");
+        )?.label ?? t("composer.thinking"));
 
   const applyPermissionMode = useCallback(
     async (mode: ComposerPermissionMode) => {
@@ -1673,16 +1680,16 @@ export function Composer() {
       const selected = await open({
         multiple: false,
         directory: false,
-        title: "选择文件 — 插入 @路径",
+        title: t("composer.pickFileDialog"),
         defaultPath: resolveTargetCwd() ?? undefined,
       });
       if (typeof selected === "string" && selected) {
         appendPaths([selected]);
       }
     } catch (err) {
-      console.error("选择文件失败:", err);
+      console.error("pick file failed:", err);
     }
-  }, [appendPaths, resolveTargetCwd]);
+  }, [appendPaths, resolveTargetCwd, t]);
 
   const handlePasteRef = useCallback(async () => {
     setRefMenuOpen(false);
@@ -2075,7 +2082,7 @@ export function Composer() {
           reopened). */}
       <div
         className={`composer-resize${composerResizing ? " active" : ""}`}
-        title="单击收起/展开 · 拖拽调整高度 · 双击恢复默认高度"
+        title={t("composer.resizeTitle")}
         onMouseDown={(e) => {
           resizeStartRef.current = { x: e.clientX, y: e.clientY };
           startComposerResize(e);
@@ -2096,7 +2103,7 @@ export function Composer() {
       >
         <button
           className="resize-collapse"
-          title={composerOpen ? "收起输入区" : "展开输入区"}
+          title={composerOpen ? t("composer.collapseInput") : t("composer.expandInput")}
           onMouseDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
@@ -2111,15 +2118,15 @@ export function Composer() {
         <span>
           <Icon name="arrow-right" size={12} style={{ marginRight: 4 }} />
           {effectiveTarget?.kind === "todo" ? (
-            <span className="composer-target-todo" title="内容将添加到待分配">
-              待分配
+            <span className="composer-target-todo" title={t("composer.todoTargetTitle")}>
+              {t("composer.todoTarget")}
             </span>
           ) : effectiveTarget?.kind === "agent" ? (
             <>
               agent: {agents.get(effectiveTarget.agentId)?.title ?? "agent"}
             </>
           ) : (
-            "(无标签)"
+            t("composer.noTab")
           )}
         </span>
         <ContextWindowMeter
@@ -2136,25 +2143,25 @@ export function Composer() {
               : undefined
           }
         />
-        {tabs.some((t) => t.type === "agent") && (
+        {tabs.some((tab) => tab.type === "agent") && (
           <span className="composer-target-right">
             {isBangInput && effectiveTarget?.kind !== "todo" && (
               <span className="composer-bang">
                 <Icon name="zap" size={12} style={{ marginRight: 4 }} />
-                终端直发
+                {t("composer.bangDirect")}
               </span>
             )}
             <span
               className="composer-f1-hint"
-              title="Tab 在打开的终端与待分配之间切换发送目标"
+              title={t("composer.tabCycleTitle")}
             >
-              <kbd>Tab</kbd> 切换目标
+              <kbd>Tab</kbd> {t("composer.tabCycle")}
             </span>
             <span
               className="composer-f1-hint"
-              title="F1 在输入框与终端之间切换焦点"
+              title={t("composer.f1Title")}
             >
-              <kbd>F1</kbd> 切换焦点
+              <kbd>F1</kbd> {t("composer.f1Focus")}
             </span>
           </span>
         )}
@@ -2175,8 +2182,8 @@ export function Composer() {
             className="composer-input"
             placeholder={
               effectiveTarget?.kind === "todo"
-                ? "添加待办…（Enter 加入待分配）"
-                : "发消息…（/ 命令 · @ 文件 · ! 终端 · 拖入文件）"
+                ? t("composer.placeholderTodo")
+                : t("composer.placeholder")
             }
             rows={4}
             onKeyDown={handleKeyDown}
@@ -2186,13 +2193,13 @@ export function Composer() {
             className="ul-send-btn"
             title={
               effectiveTarget?.kind === "todo"
-                ? "添加到待分配（Enter）"
-                : "发送消息（Enter）"
+                ? t("composer.sendTodoTitle")
+                : t("composer.sendTitle")
             }
             onClick={() => handleSend()}
             disabled={sendingRef.current || !hasInput}
           >
-            发送
+            {t("composer.send")}
           </button>
         </div>
       </div>
@@ -2257,7 +2264,7 @@ export function Composer() {
                     configRuntime?.name ?? configRuntimeId
                   )}
                 </span>
-                <span>内置命令 / 自定义命令 / 技能</span>
+                <span>{t("composer.slashKinds")}</span>
               </div>
               {slashMenuStack.length > 1 && (
                 <div
@@ -2267,13 +2274,13 @@ export function Composer() {
                   onClick={popSlashLevel}
                 >
                   <Icon name="arrow-left" size={12} style={{ marginRight: 4 }} />
-                  返回
+                  {t("composer.back")}
                 </div>
               )}
               {level.loading ? (
-                <div className="composer-slash-empty">正在读取…</div>
+                <div className="composer-slash-empty">{t("composer.slashLoading")}</div>
               ) : visible.length === 0 ? (
-                <div className="composer-slash-empty">没有匹配的命令或技能</div>
+                <div className="composer-slash-empty">{t("composer.slashEmpty")}</div>
               ) : (
                 visible.map((item, i) => (
                   <div
@@ -2293,7 +2300,7 @@ export function Composer() {
                       )}
                     </span>
                     <span className="composer-slash-description">
-                      {item.description || (item.kind === "skill" ? "加载 Agent 技能" : "运行命令")}
+                      {item.description || (item.kind === "skill" ? t("composer.skillDefault") : t("composer.commandDefault"))}
                     </span>
                     <span className="composer-slash-source">{item.source}</span>
                   </div>
@@ -2308,7 +2315,7 @@ export function Composer() {
         <span className="cmp-pop" ref={refAnchorRef}>
           <span
             className="act-btn"
-            title="插入文件引用 / 最近文件"
+            title={t("composer.insertRefTitle")}
             onClick={() => {
               setModelMenuOpen(false);
               setPermissionMenuOpen(false);
@@ -2320,21 +2327,21 @@ export function Composer() {
           </span>
           {refMenuOpen && (
             <div className="cmp-menu" ref={refMenuRef} role="menu">
-              <div className="cmp-menu-label">插入文件/引用</div>
+              <div className="cmp-menu-label">{t("composer.insertRef")}</div>
               <div className="cmp-menu-item" onClick={handlePickFile}>
                 <span className="cmp-menu-name">
-                  <Icon name="file-text" size={13} style={{ marginRight: 6 }} /> 选择文件…
+                  <Icon name="file-text" size={13} style={{ marginRight: 6 }} /> {t("composer.pickFile")}
                 </span>
               </div>
               <div className="cmp-menu-item" onClick={handlePasteRef}>
                 <span className="cmp-menu-name">
-                  <Icon name="link" size={13} style={{ marginRight: 6 }} /> 粘贴引用/路径
+                  <Icon name="link" size={13} style={{ marginRight: 6 }} /> {t("composer.pasteRef")}
                 </span>
               </div>
               <div className="cmp-menu-sep" />
-              <div className="cmp-menu-label">最近文件（agent cwd）</div>
+              <div className="cmp-menu-label">{t("composer.recentFiles")}</div>
               {recentEntries.length === 0 && (
-                <div className="cmp-menu-empty">暂无文件</div>
+                <div className="cmp-menu-empty">{t("composer.noFiles")}</div>
               )}
               {recentEntries.map((it) => (
                 <div
@@ -2375,10 +2382,10 @@ export function Composer() {
                     onClick={() => setPendingEffortModel(null)}
                   >
                     <span className="cmp-menu-name">
-                      <Icon name="arrow-left" size={13} style={{ marginRight: 6 }} /> 返回
+                      <Icon name="arrow-left" size={13} style={{ marginRight: 6 }} /> {t("composer.back")}
                     </span>
                   </div>
-                  <div className="cmp-menu-label">选择推理强度</div>
+                  <div className="cmp-menu-label">{t("composer.pickEffort")}</div>
                   {pendingEffortOptions.map((option) => (
                     <div
                       key={option.id}
@@ -2401,9 +2408,9 @@ export function Composer() {
                 </>
               ) : (
                 <>
-                  <div className="cmp-menu-label">选择模型</div>
+                  <div className="cmp-menu-label">{t("composer.selectModel")}</div>
                   {models.length === 0 && (
-                    <div className="cmp-menu-empty">无可用模型</div>
+                    <div className="cmp-menu-empty">{t("composer.noModels")}</div>
                   )}
                   {modelsByProvider.map((group, groupIndex) => (
                     <div key={group.provider}>
@@ -2463,7 +2470,7 @@ export function Composer() {
           <>
             <span
               className="act-btn"
-              title="切换思考强度（Ctrl+T）"
+              title={t("composer.thinkingCtrlT")}
               onClick={() => {
                 setRefMenuOpen(false);
                 setModelMenuOpen(false);
@@ -2477,7 +2484,7 @@ export function Composer() {
             </span>
             <span
               className="act-btn"
-              title="切换 OpenCode Build / Plan"
+              title={t("composer.openCodeMode")}
               onClick={() => {
                 setRefMenuOpen(false);
                 setModelMenuOpen(false);
@@ -2495,7 +2502,7 @@ export function Composer() {
           <span className="cmp-pop" ref={thinkingAnchorRef}>
             <span
               className="act-btn"
-              title="选择思考强度"
+              title={t("composer.pickThinking")}
               onClick={() => {
                 setRefMenuOpen(false);
                 setModelMenuOpen(false);
@@ -2508,7 +2515,7 @@ export function Composer() {
             </span>
             {thinkingMenuOpen && (
               <div className="cmp-menu" ref={thinkingMenuRef} role="menu">
-                <div className="cmp-menu-label">思考强度</div>
+                <div className="cmp-menu-label">{t("composer.thinking")}</div>
                 {menuThinkingOptions.map((option) => (
                   <div
                     key={option.id}
@@ -2542,7 +2549,7 @@ export function Composer() {
           <span className="cmp-pop" ref={permissionAnchorRef}>
             <span
               className="act-btn"
-              title="选择权限模式"
+              title={t("composer.pickPermission")}
               onClick={() => {
                 setRefMenuOpen(false);
                 setModelMenuOpen(false);
@@ -2551,11 +2558,11 @@ export function Composer() {
               }}
             >
               <Icon name="shield" size={13} style={{ marginRight: 4 }} />
-              {permissionModes.find((mode) => mode.id === shownMode)?.label ?? "权限"}
+              {permissionModes.find((mode) => mode.id === shownMode)?.label ?? t("composer.permission")}
             </span>
             {permissionMenuOpen && (
               <div className="cmp-menu" ref={permissionMenuRef} role="menu">
-                <div className="cmp-menu-label">权限模式</div>
+                <div className="cmp-menu-label">{t("composer.permissionMode")}</div>
                 {permissionModes.map((mode) => (
                   <div
                     key={mode.id}

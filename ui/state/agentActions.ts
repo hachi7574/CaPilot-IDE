@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useStore, AgentInfo, RestoredSession, createBufferedChannel } from "./store";
 import { notify } from "./notify";
 import { isShellRuntime } from "./shellPath";
+import { t } from "../i18n";
 
 const DEFAULT_RUNTIME = "claude";
 
@@ -50,7 +51,7 @@ export async function spawnAgent(
     // Spawn failures used to be swallowed by caller `.catch(console.error)` —
     // surface the reason (e.g. a dsh pre-flight diagnostic) instead of a
     // silently dead terminal. Re-throw so callers keep their own handling.
-    notify("终端启动失败", typeof e === "string" ? e : String(e));
+    notify(t("agentActions.spawnFailed"), typeof e === "string" ? e : String(e));
     throw e;
   }
   flush(info.id);
@@ -130,7 +131,7 @@ export async function spawnBashAt(
       onData: channel,
     })) as AgentInfo;
   } catch (e) {
-    notify("终端启动失败", typeof e === "string" ? e : String(e));
+    notify(t("agentActions.spawnFailed"), typeof e === "string" ? e : String(e));
     throw e;
   }
   flush(info.id);
@@ -142,7 +143,7 @@ export async function spawnBashAt(
         ? "CMD"
         : runtime === "bash-rc" || runtime.startsWith("bash")
           ? "bash"
-          : "终端";
+          : t("agentActions.terminal");
   s.addTab({
     id: info.id,
     type: "agent",
