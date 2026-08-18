@@ -27,11 +27,12 @@
 
 **Launch**（`claude.rs:178-240`）：
 ```text
-claude --model <id> --permission-mode <native> --allow-dangerously-skip-permissions [--thinking-effort low|medium|high]
+claude --model <id> (--permission-mode <native> --allow-dangerously-skip-permissions | --dangerously-skip-permissions) [--thinking-effort low|medium|high]
 ```
 - 模型：`claude-sonnet-5`（默认）、`claude-opus-5`、`claude-haiku-4-5` —— **hard-code** 在 `claude.rs:91-116`。
-- 权限映射 `ask→manual`、`accept_edits→acceptEdits`、`plan→plan`、`auto→auto`、`yolo→bypassPermissions`（`claude.rs:224-240`）。
-- `--allow-dangerously-skip-permissions` **总是带上**：它让 bypass 进入 live Shift+Tab 环，本身不启用 bypass。
+- 权限映射 `ask→manual`、`accept_edits→acceptEdits`、`plan→plan`、`auto→auto`、`yolo→--dangerously-skip-permissions`（yolo 单独长 flag，不再叠 `--permission-mode bypassPermissions`）。
+- 非 yolo 模式仍带 `--allow-dangerously-skip-permissions`：它让 bypass 进入 live Shift+Tab 环，本身不启用 bypass。
+- Composer / spawn 默认 `permissionMode` 为 `yolo`（全开）；可在 Composer 权限控件下调。
 - 思考强度：`--thinking-effort low|medium|high`（`claude.rs:215-222`）。
 
 **Live 控制（PTY 注入）**：
@@ -54,10 +55,11 @@ claude --model <id> --permission-mode <native> --allow-dangerously-skip-permissi
 
 **Launch**（`codex.rs:309-364`）：
 ```text
-codex [--model <id>] [--ask-for-approval untrusted|never] [--sandbox read-only|workspace-write] | --yolo
+codex [--model <id>] [--ask-for-approval untrusted|never] [--sandbox read-only|workspace-write] | --dangerously-bypass-approvals-and-sandbox
       [-c model_reasoning_effort="low|medium|high|xhigh"] --no-alt-screen
 ```
-- 权限：`ask→--ask-for-approval untrusted --sandbox read-only`；`auto→--ask-for-approval never --sandbox workspace-write`；`yolo→--yolo`（`codex.rs:347-364`）。
+- 权限：`ask→--ask-for-approval untrusted --sandbox read-only`；`auto→--ask-for-approval never --sandbox workspace-write`；`yolo→--dangerously-bypass-approvals-and-sandbox`（Codex 0.147+ 已无短别名 `--yolo`；该 flag 不可与 `--ask-for-approval`/`--sandbox` 同用）。
+- 默认 spawn mode 为 `yolo`。Settings → 已安装 → ⚙ 的 args override 若已含危险/权限 flag，不再重追加 `mode_args`（避免 clap 互斥）。
 - `--no-alt-screen`：让 PTY 滚动条与其他 runtime 一致（`codex.rs:317`）。
 - 推理强度：`-c model_reasoning_effort="<effort>"`（`codex.rs:336-345`）。
 
@@ -74,10 +76,12 @@ codex [--model <id>] [--ask-for-approval untrusted|never] [--sandbox read-only|w
 
 **状态上报（lifecycle hooks，0.147.0 实测）**：
 - codex **没有** claude 的 `--settings` 式按会话注入点；hook 只能从 `$CODEX_HOME/hooks.json`（默认 `~/.codex/hooks.json`）或 config 层的 `[[hooks.<Event>]]` TOML 加载。`-c hooks.file=` 会被静默忽略（`HooksToml` 无 `file` 字段，flatten 结构内联事件）。
-- CaPilot 用 **per-session config profile**：启动前写 `$CODEX_HOME/capilot-<agent_id>.config.toml`，内容是 `[[hooks.<Event>]]` 数组表、每条 `type="command"` 调共享 `~/CaPilot/status/hook.sh`，然后 launch 加 `-p capilot-<id> --dangerously-bypass-hook-trust`。profile 是叠加层——**不动用户真实 `config.toml` / `hooks.json`**；会话删除时清理（`codex.rs` `write_status_profile` / `remove_status_profile`）。
+- CaPilot 用 **per-session config profile**：启动前写 `$CODEX_HOME/capilot-<agent_id>.config.toml`，内容是 `[[hooks.<Event>]]` 数组表、每条 `type="command"` 调共享 status hook，然后 launch 加 `-p capilot-<id> --dangerously-bypass-hook-trust`。profile 是叠加层——**不动用户真实 `config.toml` / `hooks.json`**；会话删除时清理（`codex.rs` `write_status_profile` / `remove_status_profile`）。
+- **Windows hook 命令**（2026-08-18）：不可写裸 `/bin/sh`——Codex hook 子进程 PATH 上通常没有。`status_hooks::resolve_posix_sh()` 解析 Git `sh.exe` 绝对路径，profile/`hooks.json` 写 `"<sh.exe>" "<hook.sh>"`（均绝对、带引号）。侧车路径仍是 `<data_root>/status/<agent_id>.json`（`CAPILOT_STATUS_DIR` 会话 env）。
 - `--dangerously-bypass-hook-trust` 必需：profile hooks 不在用户持久化信任里，该 flag 让本次调用跳过信任提示（脚本是 app 自写，安全）。副作用是启动时 stderr 打一行 warning（去掉 flag 会触发 codex 的**交互式 startup hooks review TUI**，在 PTY 内阻塞会话启动，更糟；`trusted_hash` 预信任方案需复刻 codex 内部 hash，跨版本易碎，未采用）。
 - profile 里 `SessionEnd` 的 hook 必须写 `timeout = 3`：codex 会把 SessionEnd hook 钳制到 3s（默认 1s、上限 3s）并对大于 3s 的声明在启动时告警；其余事件写 `timeout = 5`（hook.sh 是亚毫秒 sh 脚本，3s 绰绰有余）。（`codex.rs` `write_status_profile`，实测 0.147.0）
-- 事件集（codex `HookEventsToml`）：`SessionStart`/`UserPromptSubmit`/`PreToolUse`/`PostToolUse`/`PermissionRequest`/`Stop`/`SessionEnd`（**无** `PostToolUseFailure`/`PostToolBatch`/`StopFailure`）。payload stdin 与 claude 同构（含 `hook_event_name`），hook.sh 零改动复用；hook 进程**不在沙箱内**，可写宿主机侧车 `~/CaPilot/status/<agent_id>.json`（实测 `exec` 全链路：SessionStart→idle、UserPromptSubmit→working、Stop→idle）。
+- 事件集（codex `HookEventsToml`）：`SessionStart`/`UserPromptSubmit`/`PreToolUse`/`PostToolUse`/`PermissionRequest`/`Stop`/`SessionEnd`（**无** `PostToolUseFailure`/`PostToolBatch`/`StopFailure`）。payload stdin 与 claude 同构（含 `hook_event_name`），hook.sh 零改动复用；hook 进程**不在沙箱内**，可写宿主机侧车（实测 `exec` 全链路：SessionStart→idle、UserPromptSubmit→working、Stop→idle）。
+- **前端完成 UX**（2026-08-18）：TabBar 1s 轮询常漏短暂 `working`。`markAgentSubmitted` 开 `turnPending`；`setHookStatus` 在 pending 窗口内看到 terminal idle/dormant（edge 或活动后再安静或 ≥8s）即 chime + tab flash + assigned todo→待处理——不单依赖 `working→idle` 边沿。
 
 ### 2.3 OpenCode（runtime `opencode`）
 
@@ -192,7 +196,7 @@ pi [--provider <p>] [--model <provider/id>] [--thinking off|low|medium|high|xhig
 | 3 | Claude 模型列表 | sonnet-5 / opus-5 / haiku-4-5 | `claude.rs:91-116` | [model-config](https://code.claude.com/docs/en/model-config) |
 | 4 | Claude 项目目录编码 | 非 alnum → `-`，含前导 `/` | `claude.rs:18-23` | 实测 ~/.claude/projects |
 | 5 | Codex 权限选择器顺序 | Read Only → workspace → Full Access | `Composer.tsx:294-317` | [permission-modes](https://learn.chatgpt.com/docs/codex/permission-modes) |
-| 6 | Codex launch 权限/沙箱 flag | `--ask-for-approval untrusted\|never`、`--sandbox read-only\|workspace-write`、`--yolo` | `codex.rs:347-364` | [developer-commands](https://learn.chatgpt.com/docs/codex/developer-commands?surface=cli) |
+| 6 | Codex launch 权限/沙箱 flag | `--ask-for-approval untrusted\|never`、`--sandbox read-only\|workspace-write`、`--dangerously-bypass-approvals-and-sandbox`（yolo） | `codex.rs` `mode_args` | [developer-commands](https://learn.chatgpt.com/docs/codex/developer-commands?surface=cli) |
 | 7 | Codex 推理档位 | low / medium / high / xhigh（catalog 驱动） | `codex.rs:336-345` + `126-156` | catalog `supportedReasoningEfforts` |
 | 8 | OpenCode 命令面板键 | 本项目重绑 `command_list → f12`（默认 ctrl+p） | `opencode.rs:19-57` | [keybinds](https://opencode.ai/docs/keybinds/) |
 | 9 | OpenCode `--auto` / 权限 | `--auto` = auto-approve；无其它模式 flag | `opencode.rs:340-346` | [permissions](https://opencode.ai/docs/permissions/) |
@@ -203,7 +207,7 @@ pi [--provider <p>] [--model <provider/id>] [--thinking off|low|medium|high|xhig
 | 14 | OpenCode catalog 缓存 | 进程内 5min TTL + 落盘 `$XDG_CACHE_HOME/capilot-ide/opencode-model-limits.json`（`provider/model → context`）。进程重启后冷路径先读盘（~0ms），避免首载跑 ~0.7s 的 `models --verbose` 子进程；运行中 TTL 过期仍刷新 CLI 并写回盘 | `opencode.rs` `catalog_limit_context` | 实测：子进程 ~0.66s，DB 查询 ~50ms |
 | 15 | Codex hook 注入方式 | **无** claude 式 `--settings`；`-c hooks.file=` 被忽略（`HooksToml` 无该字段）。按会话用 `-p capilot-<id>` config profile（`$CODEX_HOME/capilot-<id>.config.toml` 内联 `[[hooks.<Event>]]`）+ `--dangerously-bypass-hook-trust`。profile 事件集无 `PostToolUseFailure`/`PostToolBatch`/`StopFailure` | `codex.rs` `write_status_profile`/`spawn_interactive` | 实测 0.147.0（payload 与 claude 同构，hook 进程可写宿主机） |
 | 16 | OpenCode hook 注入方式 | **无** shell hook 面；唯一入口是 JS 插件事件总线。按会话用 `OPENCODE_CONFIG_DIR` 注入插件；插件除生命周期状态外，锁定首次观察到的 root `sessionID` 并写入 Agent 专属侧车，child session 不覆盖。事件字段兼容 v1 `properties` / v2 `data` | `opencode.rs` `STATUS_PLUGIN`/`write_status_plugin`/`launch_env` | 实测 1.18.16 + 本地 plugin SDK 类型 |
-| 17 | **launch override 会丢弃 hook 注入** | Settings → 已安装 → ⚙ 的 args override **整体替换** adapter 参数列表，会把 claude 的 `--settings`、codex 的 `-p` profile 一起丢掉 → hook 永不触发、状态退回 PTY 活动启发式（长工具间隙误报空闲、输入回显误报运行中）。`lib.rs` spawn 在 override 替换 args 后**重追加** `mode_args`+`speed_args`+`status_hook_args` | `lib.rs` spawn（`replaced` 分支）+ adapter `status_hook_args` | 实测 2026-08-13（claude.args=`--model claude-sonnet-5`、codex.args=`--no-alt-screen`） |
+| 17 | **launch override 会丢弃 hook 注入** | Settings → 已安装 → ⚙ 的 args override **整体替换** adapter 参数列表，会把 claude 的 `--settings`、codex 的 `-p` profile 一起丢掉 → hook 永不触发、状态退回 PTY 活动启发式（长工具间隙误报空闲、输入回显误报运行中）。`lib.rs` spawn 在 override 替换 args 后**重追加** `mode_args`（若 args 尚未含权限/危险 flag）+`speed_args`+`status_hook_args` | `lib.rs` `apply_launch_overrides` + adapter `status_hook_args` | 实测 2026-08-13；2026-08-18 补：override 已含 bypass 时跳过 `mode_args`，避免与 codex clap 互斥 |
 | 18 | Claude 上下文占用 + 缓存命中数据源 | 通过 Agent `resume_key` 精确读取 `<project-key>/<session-id>.jsonl`，禁止按 cwd 取最新。跳过 sidechain，并按 assistant `message.id` 去重。used = 最后一个非零 usage 的 input + cache creation + cache read + output；累计命中率分子/分母 = cache read 与 input + cache creation + cache read。`message.model` 只作为实际模型展示 | `claude.rs` `context_usage`/`parse_transcript_usage`/`read_transcript` | 实测 transcript JSONL |
 | 19 | OpenCode TUI 鼠标协议 | SGR 1006；滚轮 `64/65` + 1-based cell 坐标。xterm tracking enable 被剥离以保留文本选择，IDE 用 capture-phase wheel 手工转发并禁用 alternate-buffer 方向键降级；resident PTY 重挂载不得依赖启动帧仍在 replay 中 | `XTermPanel.tsx` + `mouseProtocol.ts` | 实测 OpenCode 1.18.18；`pnpm test:terminal-mouse` |
 | 20 | OpenCode 思考强度键 | `ctrl+t` = `variant_cycle`（默认键）；循环顺序 = catalog `variants` 对象键序，`默认 → 首 → … → 末 → 默认`。Composer 把 opencode 目标的 Ctrl+T 重定向为给 PTY 发 ``，按钮标签读 `model.json` `variant.<provider/model>` | `Composer.tsx` `cycleOpenCodeVariant` + `opencode.rs` `current_variant` | [keybinds](https://opencode.ai/docs/keybinds/) + 源码 `packages/tui/src/context/local.tsx`（1.18.18 实测） |

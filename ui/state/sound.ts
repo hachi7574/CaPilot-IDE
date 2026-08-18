@@ -31,6 +31,14 @@ const THEME_SOUNDS: Record<string, SoundConfig> = {
     gain: 0.15,
     waveform: "sine",
   },
+  // 哔哩粉白 — brighter, short pop (danmaku ping).
+  bilibili: {
+    notes: [783.99, 987.77],
+    starts: [0, 0.08],
+    durations: [0.12, 0.22],
+    gain: 0.14,
+    waveform: "triangle",
+  },
 };
 
 /** Default confirmation chime — confirmation-001. */
@@ -47,11 +55,28 @@ export function soundForTheme(themeId: string): SoundConfig {
 }
 
 let audioCtx: AudioContext | null = null;
+let unlockBound = false;
+
+/** Bind a one-shot user-gesture unlock so the first completion chime is not
+ *  dropped by a still-suspended AudioContext (WebView policy). */
+function ensureAudioUnlock(): void {
+  if (unlockBound || typeof window === "undefined") return;
+  unlockBound = true;
+  const unlock = () => {
+    const ac = audioContext();
+    if (ac && ac.state === "suspended") void ac.resume();
+    window.removeEventListener("pointerdown", unlock, true);
+    window.removeEventListener("keydown", unlock, true);
+  };
+  window.addEventListener("pointerdown", unlock, true);
+  window.addEventListener("keydown", unlock, true);
+}
 
 /** Lazily-created, resumed-on-demand AudioContext (WebKitGTK keeps the context
  *  suspended until a user gesture, so every play attempt resumes it). */
 function audioContext(): AudioContext | null {
   if (typeof window === "undefined") return null;
+  ensureAudioUnlock();
   const Ctor =
     window.AudioContext ??
     (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
@@ -68,10 +93,27 @@ function audioContext(): AudioContext | null {
 }
 
 /** Play the theme-mapped confirmation chime. Safe no-op when Web Audio is
- *  unavailable. */
+ *  unavailable. Resumes a suspended context (WebView keeps it suspended until
+ *  a user gesture has unlocked audio — after first click/key, resume works). */
 export function playConfirmationSound(themeId: string): void {
   const ac = audioContext();
   if (!ac) return;
+  // Fire-and-forget resume; schedule notes on the (possibly still-resuming)
+  // context. After the first user gesture this is already "running".
+  if (ac.state === "suspended") {
+    void ac.resume().then(() => {
+      // If we were suspended at call time, play once resumed so the first
+      // completion after unlock is not silent.
+      if (audioCtx && audioCtx.state === "running") {
+        playNow(audioCtx, themeId);
+      }
+    });
+    return;
+  }
+  playNow(ac, themeId);
+}
+
+function playNow(ac: AudioContext, themeId: string): void {
   const { notes, starts, durations, gain, waveform } = soundForTheme(themeId);
   const t0 = ac.currentTime;
   const master = ac.createGain();

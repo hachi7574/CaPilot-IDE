@@ -420,11 +420,15 @@ impl AgentRuntimeAdapter for ClaudeAdapter {
     }
 
     fn mode_args(&self, mode: &str) -> Vec<String> {
+        // Full bypass is its own flag — do not also pass --permission-mode,
+        // which can fight with --dangerously-skip-permissions on some builds.
+        if mode == "yolo" {
+            return vec!["--dangerously-skip-permissions".to_string()];
+        }
         let native_mode = match mode {
             "accept_edits" => "acceptEdits",
             "plan" => "plan",
             "auto" => "auto",
-            "yolo" => "bypassPermissions",
             _ => "manual",
         };
         vec![
@@ -477,7 +481,6 @@ mod tests {
             ("accept_edits", "acceptEdits"),
             ("plan", "plan"),
             ("auto", "auto"),
-            ("yolo", "bypassPermissions"),
         ] {
             assert_eq!(
                 adapter.mode_args(mode),
@@ -488,6 +491,10 @@ mod tests {
                 ]
             );
         }
+        assert_eq!(
+            adapter.mode_args("yolo"),
+            vec!["--dangerously-skip-permissions".to_string()]
+        );
     }
 
     #[test]

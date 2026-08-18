@@ -1,6 +1,6 @@
 # CaPilot IDE — 运行与维护手册
 
-> **日期:** 2026-08-10
+> **日期:** 2026-08-18
 > **定位:** 项目的「如何跑 / 已知坑 / 文档地图」运行手册。
 > 安全细节见 [security-review.md](security-review.md)。
 
@@ -48,11 +48,20 @@ IDE 遵循 CaPilot 主仓库的 **LUCY styleguide**（8-bit Pixel × Apple Smoot
 
 ## 3. 已知问题与技术债
 
-### 已知技术债（Medium/Low，均未修）
+### 已知技术债
 
-- `.lock().unwrap()` 毒化处理（多处 std Mutex）
-- `git_status` 未跟踪大文件整读入内存（应流式）
-- `Persistence::open` 启动 expect（`$HOME` 不可写会 panic）
+> 已解决（2026-08-18）：**`.lock().unwrap()` 毒化恢复**。
+> - `SessionStore::lock_db` / `Persistence::lock_db`：poisoned mutex 经 `into_inner()` 恢复，避免一次 panic 后所有 DB 命令连环炸。
+> - `db_tolerant()` 改为走 `lock_db()`（毒化时仍可用）。
+> - `lib.rs` 中 sessions DB 的 `db().lock().unwrap()` / `if let Ok(db) = db().lock()` 统一为 `lock_db()`。
+> - 其它热路径 Mutex（`resource` / `output_hub` / `fs_search` / `git_gate` / `pty_core` / `cat_breeds` / status cache）同样 `unwrap_or_else(|p| p.into_inner())`。
+
+> 已解决（2026-08-18）：**`git_status` 未跟踪大文件整读入内存**。
+> - 未跟踪文件的 `+N` 行数已用 `count_lines` 流式按行计数（`BufRead`，上限 1M 行），不再 `read_to_string` 整文件（`lib.rs` `git_status` / `count_lines`）。
+
+> 已解决（2026-08-18）：**`Persistence::open` 启动 expect**。
+> - `run()` 不再 `Persistence::open().expect(...)`；失败时 `eprintln` + `log::error` 后 `std::process::exit(1)`，避免 `$HOME` / data root 不可写时不透明 panic。
+> - 数据根不可写安装位置的回退见同日「数据根 + 多盘路径」条目（`ensure_data_root` / `install_dir_is_user_writable`）。
 
 > 已解决（2026-08-06）：「会话 permissionMode 未持久化」已在会话生命周期改造中一并完成 —— mode/speed/model 持久化进 `sessions` 表，Composer 三设置跟随当前会话。
 
@@ -73,9 +82,50 @@ IDE 遵循 CaPilot 主仓库的 **LUCY styleguide**（8-bit Pixel × Apple Smoot
 > - 克隆/打开项目/fs 白名单：允许任意本地盘普通目录；拒绝 `Windows` / `Program Files` / `ProgramData` 等系统路径（不再锁死 `$HOME`）。
 > - NSIS：`installMode: both`（当前用户 / 全部用户可选）。当前用户安装数据落在 `<安装目录>/data`；全用户安装因目录不可写回退 `~/CaPilot`。
 
+> 已落地（2026-08-18）：**安装包附带官方主题资源**。
+> - `tauri.conf.json` → `bundle.resources` 把仓库根 `themes/` 映射到包内 `$RESOURCE/themes/`（JSON 色板 + `wallpapers/` 壁纸）。
+> - **Windows NSIS / 便携**：`$RESOURCE` 通常即安装目录，装完可在 exe 旁看到 `themes/`。
+> - **Linux deb / AppImage**：资源在包的 resource 树里（常见 `/usr/lib/<app>/…` 或 AppImage 只读镜像内），**不在** `/usr/bin`。
+> - **运行时仍读前端 Vite 内置 bundle**（`ui/state/themes.ts` 的 `import.meta.glob`）；磁盘上的 `themes/` 供检视与后续扩展，升级安装可能覆盖该目录。
+> - 用户自定义主题（未做）：规划路径 `<data_root>/themes/`，与只读官方资源分离，避免 Program Files / deb 不可写。
+
+> 已落地（2026-08-18）：**关闭确认仅在有存活 PTY 时弹出**。
+> - `handleTitlebarClose`（`ui/state/exitDaemon.ts`）：设置仍为「询问」时，若没有任何 live agent PTY（无终端 / 全休眠 / 全 ended），直接关窗，不弹 `ExitDaemonDialog`。
+> - 「存活」判定：`agentChannels` 有 channel 且 agent 状态不是 `done`/`failed`。`sleepProject` 会清 channel，自然退出的 done 会话可能保留死 channel 仅作 scrollback——均不算存活。
+
+> 已落地（2026-08-18）：**默认权限 = 全开 + Codex/Claude 危险 flag 对齐当前 CLI**。
+> - 前端默认 `permissionMode: "yolo"`；Rust `agent_spawn` 缺省 mode 同步为 `yolo`。
+> - Codex yolo：`--dangerously-bypass-approvals-and-sandbox`（0.147+ 已无短别名 `--yolo`；**不可**与 `--ask-for-approval` / `--sandbox` 同用）。
+> - Claude yolo：`--dangerously-skip-permissions`（不再叠 `--permission-mode bypassPermissions`）。
+> - Settings → 已安装 → ⚙ 的 args override 若**已含**危险/权限 flag，`apply_launch_overrides` **不再**重追加 `mode_args`（曾导致 clap 互斥：override 写 bypass + 自动补 ask 参数 → 进程秒退）。
+> - 设置框里的 `DEFAULT_LAUNCH`（如 codex `--no-alt-screen`）只是预填展示，**不是**完整启动 argv；完整参数 = adapter + 当前权限模式 + hook 注入。
+> - 事实表见 `ai-runtime-references.md` §2.1 / §2.2 / 表项 6、17。
+
+> 已落地（2026-08-18）：**Windows status hook 用绝对 sh 路径**。
+> - 现象：Codex 终端 `SessionStart/UserPromptSubmit hook (failed) exit 1`——profile 写 `command = "/bin/sh A:\…\hook.sh"`，Codex hook 子进程 PATH 上没有 `/bin/sh`。
+> - 修复：`status_hooks::resolve_posix_sh()` 在 Windows 解析 Git 的 `sh.exe`；`write_status_profile` / `hooks.json` 均写 **绝对 sh + 绝对 hook.sh**（带引号）。
+> - 相关但非 CaPilot：`~/.codex/config.toml` 里 Codex 桌面版写入的 `[mcp_servers.node_repl]` 若指向已删除的 `cua_node/<旧hash>/…`，会刷 `MCP client for node_repl failed … 系统找不到指定的路径`——删掉该段或改到新 hash 即可；与 hook-trust 黄字（CaPilot 注入 status hook 的预期警告）无关。
+> - Windows 沙箱首次向导（`Set up the Codex agent sandbox` 1/2/3）是 Codex OS 级沙箱安装，与会话权限 flag 不是一层；官方：`[windows] sandbox = "elevated"|"unelevated"`。
+
+> 已落地（2026-08-18）：**Windows WebView2 应用内拖拽**。
+> - 根因：`ui/main.tsx` 无条件 `document dragover/drop preventDefault` 在 WebView2 上会把**应用内** HTML5 DnD 的 `dropEffect` 钉成 `none` → 一拖就 🚫（todo / 文件树 / tab 全挂）。Linux WebKitGTK 仍需要该 preventDefault 才能接住 OS 文件拖入。
+> - 修复：全局监听**仅**对外部文件拖（`types` 含 `Files` 等）`preventDefault`；应用内拖放交给各目标自己的 handler。
+> - **Todo 待分配 tag** 与 **文件树路径**：改为 **pointer 拖拽**（不依赖 HTML5 DnD）。松手时分别命中 `[data-todo-drop-agent]` / `[data-path-drop=composer|terminal]`；路径拖用 `capilot:path-drop` 自定义事件通知 Composer（插 `@路径`）与终端（插 shell-escaped 路径）。
+> - 关键文件：`ui/main.tsx`、`ui/components/layout/TodoPanel.tsx`、`ui/components/layout/RightSidebar.tsx`（FilesPanel）、`ui/state/dropPaths.ts`、`Composer.tsx` / `XTermPanel.tsx` / `LeftSidebar.tsx` / `TabBar.tsx`。
+
+> 已落地（2026-08-18）：**F1 焦点切换 + 完成提示音/闪烁 + todo 自动进待处理**。
+> - **F1**：焦点在终端时 xterm `attachCustomKeyEventHandler` 会吞掉 F1（`return false` → stopPropagation），Composer 冒泡阶段监听收不到。改为 **捕获阶段** `window.addEventListener("keydown", …, true)`（`Composer.tsx`）。
+> - **提示音**：WebView AudioContext 常 `suspended`；`sound.ts` 在首次 pointer/key 解锁，resume 后再播。设置键 `sound_enabled`。
+> - **Tab 闪烁**：`tabFlash` 以 agentId 为键，DOM 以 `tab.id` 注册——解析时同时匹配 `tab.id` 与 `tab.agentId`（`TabBar.tsx`）。
+> - **Todo 卡在 assigned / 无提示音**：完成逻辑原依赖 hook `working→idle`，1s 轮询常漏掉短暂 `working`。新增 `turnPending`（`markAgentSubmitted` 开启）：在提交后窗口内，看到 terminal idle/dormant 且（明确 edge / 提交后有活动再安静 / 或 ≥8s）即完成——移动 assigned→待处理、chime、flash。会话 `done`/`failed` 仍会完成。
+> - 关键：`ui/state/store.ts`（`turnPending` / `setHookStatus` / `notifyAgentTransition`）、`ui/state/sound.ts`、`Composer.tsx`、`TabBar.tsx`。
+
 ### 待开发项
 
 - **编辑器外部改动监视**（notify → 前端刷新）：Git 面板已用 2.5s 前端轮询兜底，编辑器标签页本身仍未监听磁盘改动
+- **运行时磁盘主题**：从 `$RESOURCE/themes` + `<data_root>/themes` 加载/覆盖内置主题（本轮仅分发资源，未接线）
+- **设置页展示完整默认 argv**：Settings → 已安装 → ⚙ 的 `DEFAULT_LAUNCH` 仍是预填片段，易与真实 adapter 启动行混淆
+- **Codex 桌面配置漂移**：用户级 `~/.codex/config.toml` 的 MCP/`notify` 路径随 Codex 桌面升级 hash 变化，CaPilot 不代管；可考虑启动时探测并提示
 
 ## 4. 安全注意事项
 

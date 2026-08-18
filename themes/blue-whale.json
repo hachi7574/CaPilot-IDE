@@ -4,6 +4,9 @@
   "note": "深渊电蓝 · DeepSeek 夜航",
   "swatches": ["#050A14", "#15243A", "#4B8BFF", "#8EC5FF"],
   "colorScheme": "dark",
+  "wallpaper": {
+    "file": "神秘蓝鲸.png"
+  },
   "vars": {
     "--bg": "#050A14",
     "--bg2": "#0A1220",
@@ -25,6 +28,7 @@
     "--danger": "#F07A8A",
     "--accent-ink": "#050A14",
     "--term-bg": "#040912",
+    "--term-veil": "1",
     "--search-match-bg": "#243A60",
     "--brand-selection": "rgb(75 139 255 / 0.28)",
     "--brand-rgb": "75 139 255",

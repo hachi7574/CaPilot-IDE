@@ -1268,10 +1268,15 @@ impl Persistence {
         self.store.db()
     }
 
-    /// Lock the sessions DB, tolerating a poisoned mutex (a panic while holding
-    /// the lock marks it poisoned; `unwrap()` would then panic on every command).
-    /// Returns None only if the lock is currently held by a panicked holder that
-    /// never released — practically never. Callers should fall back gracefully.
+    /// Lock the sessions DB, recovering from a poisoned mutex (see
+    /// [`SessionStore::lock_db`]). Prefer this over `db().lock().unwrap()`.
+    pub fn lock_db(&self) -> std::sync::MutexGuard<'_, SessionsDb> {
+        self.store.lock_db()
+    }
+
+    /// Lock the sessions DB with poison recovery. Always recovers when poisoned
+    /// (see [`SessionStore::lock_db`]); kept for call sites that prefer
+    /// `Option`/`ok_or_else` style. Effectively always `Some`.
     pub fn db_tolerant(&self) -> Option<std::sync::MutexGuard<'_, SessionsDb>> {
         self.store.db_tolerant()
     }

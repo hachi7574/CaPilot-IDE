@@ -177,7 +177,7 @@ impl Drop for SpawnGuard {
 /// only held for the `remove` — the blocking `wait()` runs lock-free so other
 /// PTY ops are never stalled.
 fn reap_and_remove(children: &Arc<Mutex<HashMap<AgentId, PtyChild>>>, id: &AgentId) -> i32 {
-    let pc = children.lock().unwrap().remove(id);
+    let pc = children.lock().unwrap_or_else(|p| p.into_inner()).remove(id);
     if let Some(pc) = pc {
         // Drop the rest of the entry (master, writer, reader handle, slot),
         // then reap the child to avoid a zombie process.
@@ -264,7 +264,7 @@ impl PtyCore {
         // the spawn it was aimed at.
         let token = NEXT_SPAWN_TOKEN.fetch_add(1, Ordering::Relaxed);
         {
-            let mut spawning = self.spawning.lock().unwrap();
+            let mut spawning = self.spawning.lock().unwrap_or_else(|p| p.into_inner());
             if spawning.contains_key(&agent_id) {
                 return Err(AgentError::PtyError(format!(
                     "spawn in progress for agent {}",
@@ -347,8 +347,8 @@ impl PtyCore {
         // (Bug 4 TOCTOU). The entry stores this spawn's token as `generation`,
         // so later readers / stale readers can tell which spawn owns it.
         {
-            let spawning = self.spawning.lock().unwrap();
-            let mut children = self.children.lock().unwrap();
+            let spawning = self.spawning.lock().unwrap_or_else(|p| p.into_inner());
+            let mut children = self.children.lock().unwrap_or_else(|p| p.into_inner());
             if spawning.get(&agent_id) != Some(&token) {
                 if pid != 0 {
                     crate::agent_runtime::process_kill::kill_process_tree(pid);
@@ -453,7 +453,7 @@ impl PtyCore {
         // Attach the reader handle now that the reader is actually running. If
         // the reader already cleaned up (instant EOF), the entry is gone and
         // the handle is simply dropped (detached).
-        if let Some(child) = self.children.lock().unwrap().get_mut(&agent_id) {
+        if let Some(child) = self.children.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&agent_id) {
             child.reader_handle = Some(reader_handle);
         }
 
@@ -479,13 +479,13 @@ impl PtyCore {
         // the map lock before doing the blocking `write_all`. This keeps the
         // global `children` Mutex uncontended (Bug 2).
         let writer = {
-            let children = self.children.lock().unwrap();
+            let children = self.children.lock().unwrap_or_else(|p| p.into_inner());
             let child = children
                 .get(agent_id)
                 .ok_or_else(|| AgentError::AgentNotFound(agent_id.to_string()))?;
             child.writer.clone()
         };
-        let mut writer = writer.lock().unwrap();
+        let mut writer = writer.lock().unwrap_or_else(|p| p.into_inner());
         writer
             .write_all(data)
             .map_err(|e| AgentError::PtyError(e.to_string()))?;
@@ -497,7 +497,7 @@ impl PtyCore {
 
     /// Resize an agent's PTY via the stored master fd (TIOCSWINSZ).
     pub fn resize(&self, agent_id: &str, rows: u16, cols: u16) -> Result<(), AgentError> {
-        let mut children = self.children.lock().unwrap();
+        let mut children = self.children.lock().unwrap_or_else(|p| p.into_inner());
         let child = children
             .get_mut(agent_id)
             .ok_or_else(|| AgentError::AgentNotFound(agent_id.to_string()))?;
@@ -518,12 +518,12 @@ impl PtyCore {
         // Cancel any in-flight spawn for this agent (Bug 4): removing the
         // marker makes that spawn's post-`spawn_command` check fail, so it
         // kills + reaps its own child instead of inserting a stale entry.
-        self.spawning.lock().unwrap().remove(agent_id);
+        self.spawning.lock().unwrap_or_else(|p| p.into_inner()).remove(agent_id);
 
         // Remove the entry up front. The reader (if it wins the race to EOF)
         // will see its own generation is gone and skip `reap_and_remove`
         // (Bug 5), so a subsequent respawn's entry is never torn down.
-        let pc = self.children.lock().unwrap().remove(agent_id);
+        let pc = self.children.lock().unwrap_or_else(|p| p.into_inner()).remove(agent_id);
         if let Some(mut pc) = pc {
             // Detach the reader thread. A `std::thread` cannot be interrupted,
             // so it keeps running until its blocking read returns; the real
@@ -550,7 +550,7 @@ impl PtyCore {
     /// Same semantics as `kill`: intentional teardown, so `on_exit` is
     /// suppressed and the session rows stay `running` (recoverable next launch).
     pub fn kill_all(&self) {
-        let ids: Vec<AgentId> = self.children.lock().unwrap().keys().cloned().collect();
+        let ids: Vec<AgentId> = self.children.lock().unwrap_or_else(|p| p.into_inner()).keys().cloned().collect();
         for id in ids {
             let _ = self.kill(&id);
         }

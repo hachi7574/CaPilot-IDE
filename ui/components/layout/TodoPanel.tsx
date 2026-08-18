@@ -1,11 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { useStore, TodoTag, TODO_DRAG_MIME } from "../../state/store";
+import {
+  useStore,
+  TodoTag,
+  beginTodoDrag,
+  endTodoDrag,
+} from "../../state/store";
+import { assignTodoAndSend } from "../../state/agentActions";
 import { Icon } from "../Icon";
 import { useT } from "../../i18n";
 
 /** Backend settings KV key holding the persisted todo list (JSON array). */
 const TODOS_KEY = "todos";
+
+/** Movement (px) before a press becomes a pointer-drag instead of a click. */
+const POINTER_DRAG_THRESHOLD = 5;
 
 /* ── Collapsible Section ─────────────────────────────────────────
  * Moved here from RightSidebar so TodoPanel owns its only remaining consumer
@@ -158,9 +167,24 @@ export function TodoPanel() {
   const [adding, setAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
+  // Floating ghost for pointer-based tag drag (avoids broken HTML5 DnD on WebView2).
+  const [ghost, setGhost] = useState<{
+    id: string;
+    text: string;
+    x: number;
+    y: number;
+  } | null>(null);
   // The empty-list add row; the header "+" focuses it instead of stacking a
   // second input when no tags exist.
   const addRowRef = useRef<HTMLInputElement>(null);
+  const pointerDragRef = useRef<{
+    id: string;
+    text: string;
+    startX: number;
+    startY: number;
+    active: boolean;
+    pointerId: number;
+  } | null>(null);
 
   // Scope predicate: global view = tags with no project; project view = tags of
   // the focused project.
@@ -247,6 +271,116 @@ export function TodoPanel() {
     setAdding(false);
   };
 
+  /**
+   * Pointer-based tag drag. HTML5 DnD is unreliable on Windows WebView2
+   * (cursor stuck on 🚫 for in-app drags). Tags use pointer events and drop
+   * onto:
+   * - `[data-todo-drop-agent="<id>"]` → assign + send to that session
+   * - `[data-todo-drop="composer"]` → insert tag text into the input (tag stays
+   *   in 待分配; same semantics as the old HTML5 composer drop)
+   */
+  const onTagPointerDown = (
+    e: React.PointerEvent<HTMLDivElement>,
+    tag: TodoTag
+  ) => {
+    if (e.button !== 0) return;
+    if ((e.target as HTMLElement).closest(".todo-trash")) return;
+    e.preventDefault();
+    pointerDragRef.current = {
+      id: tag.id,
+      text: tag.text,
+      startX: e.clientX,
+      startY: e.clientY,
+      active: false,
+      pointerId: e.pointerId,
+    };
+    beginTodoDrag(tag.id);
+    setDragId(tag.id);
+
+    const clearHover = () => {
+      document
+        .querySelectorAll(".todo-drop-hover")
+        .forEach((el) => el.classList.remove("todo-drop-hover"));
+    };
+
+    /** Prefer agent rows; otherwise the composer input surface. */
+    const resolveTodoDropTarget = (clientX: number, clientY: number) => {
+      const under = document.elementFromPoint(clientX, clientY);
+      if (!under) return null;
+      const agentEl = under.closest?.(
+        "[data-todo-drop-agent]"
+      ) as HTMLElement | null;
+      if (agentEl) {
+        const agentId = agentEl.getAttribute("data-todo-drop-agent");
+        if (agentId) return { kind: "agent" as const, el: agentEl, agentId };
+      }
+      const composerEl = under.closest?.(
+        '[data-todo-drop="composer"]'
+      ) as HTMLElement | null;
+      if (composerEl) return { kind: "composer" as const, el: composerEl };
+      return null;
+    };
+
+    const onMove = (ev: PointerEvent) => {
+      const st = pointerDragRef.current;
+      if (!st || st.id !== tag.id) return;
+      const dx = ev.clientX - st.startX;
+      const dy = ev.clientY - st.startY;
+      if (!st.active) {
+        if (Math.hypot(dx, dy) < POINTER_DRAG_THRESHOLD) return;
+        st.active = true;
+        document.body.classList.add("todo-pointer-dragging");
+      }
+      setGhost({ id: st.id, text: st.text, x: ev.clientX, y: ev.clientY });
+      clearHover();
+      const target = resolveTodoDropTarget(ev.clientX, ev.clientY);
+      target?.el.classList.add("todo-drop-hover");
+    };
+
+    const finish = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      document.body.classList.remove("todo-pointer-dragging");
+      clearHover();
+
+      const st = pointerDragRef.current;
+      pointerDragRef.current = null;
+      setGhost(null);
+      setDragId(null);
+      endTodoDrag();
+      if (!st?.active) return;
+
+      const target = resolveTodoDropTarget(ev.clientX, ev.clientY);
+      if (!target) return;
+
+      if (target.kind === "composer") {
+        // Non-destructive: leave the tag in 待分配; Composer inserts the text.
+        window.dispatchEvent(
+          new CustomEvent("capilot:todo-drop", {
+            detail: {
+              kind: "composer",
+              tagId: st.id,
+              text: st.text,
+              clientX: ev.clientX,
+              clientY: ev.clientY,
+            },
+          })
+        );
+        return;
+      }
+
+      void assignTodoAndSend(st.id, target.agentId);
+      const store = useStore.getState();
+      const tab = store.tabs.find((tb) => tb.agentId === target.agentId);
+      if (tab) store.setActiveTab(tab.id);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+  };
+
   /** Open a 待处理 tag's session in the terminal area. Ended sessions reopen
    *  like the sidebar "已结束" click (fresh mount that resumes). */
   const openTodoSession = (agentId: string) => {
@@ -322,13 +456,7 @@ export function TodoPanel() {
               <div
                 key={tag.id}
                 className={`todo-item${dragId === tag.id ? " dragging" : ""}`}
-                draggable
-                onDragStart={(e) => {
-                  e.dataTransfer.setData(TODO_DRAG_MIME, tag.id);
-                  e.dataTransfer.effectAllowed = "copy";
-                  setDragId(tag.id);
-                }}
-                onDragEnd={() => setDragId(null)}
+                onPointerDown={(e) => onTagPointerDown(e, tag)}
                 onDoubleClick={() => setEditingId(tag.id)}
                 title={t("todo.dragHint")}
               >
@@ -419,6 +547,16 @@ export function TodoPanel() {
           </>
         )}
       </CollapsibleSection>
+
+      {ghost && (
+        <div
+          className="todo-drag-ghost"
+          style={{ left: ghost.x + 12, top: ghost.y + 12 }}
+          aria-hidden
+        >
+          {ghost.text}
+        </div>
+      )}
     </div>
   );
 }

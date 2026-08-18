@@ -70,7 +70,7 @@ pub fn validate_repo(repo: &str) -> Result<PathBuf, String> {
 fn wait_for_rate_slot() {
     loop {
         let now = Instant::now();
-        let mut starts = GATE.starts.lock().unwrap();
+        let mut starts = GATE.starts.lock().unwrap_or_else(|p| p.into_inner());
         while starts
             .front()
             .is_some_and(|at| now.duration_since(*at) >= Duration::from_secs(1))

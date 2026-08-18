@@ -12,7 +12,7 @@
     "--primary": "#FFD375", "--primary-dim": "#A46D1F",
     "--ai": "#7ED0C7", "--ai-dim": "#367F79",
     "--success": "#9CCB65", "--warn": "#FFD375", "--danger": "#F07858",
-    "--accent-ink": "#1A0E02", "--term-bg": "#0F0B07", "--search-match-bg": "#4B3215",
+    "--accent-ink": "#1A0E02", "--term-bg": "#0F0B07", "--term-veil": "1", "--search-match-bg": "#4B3215",
     "--brand-selection": "rgba(242, 184, 75, 0.28)",
     "--brand-rgb": "242 184 75", "--success-rgb": "156 203 101", "--warn-rgb": "255 211 117",
     "--danger-rgb": "240 120 88", "--white-rgb": "243 223 192", "--black-rgb": "0 0 0",

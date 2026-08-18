@@ -20,6 +20,9 @@
   /* Shared height of the top bar in the main / left / right panes, so the
      three columns start their content on the same line. */
   --topbar-h: 42px;
+  /* Terminal default-cell veil. Themes may override `--term-veil` (0–1);
+     1 keeps the historic opaque --term-bg. */
+  --term-veil: 1;
 }
 
 /* ── Font scale presets (Settings > 字体大小) ─────────────────────
@@ -345,6 +348,16 @@ body::after {
    every cell, and in the pre-paint window it should look like a standalone
    opencode terminal — xterm.css's opaque `#000` — not the app background). */
 .app .xterm .xterm-viewport { background-color: transparent; }
+/* Terminal default-cell background: apply veil over --term-bg when the
+   wallpaper layer is on. xterm.rows writes its own background onto
+   .xterm-screen (the grid canvas), but the viewport + the container
+   div are the visible border area, so paint the full xterm area. */
+.app .xterm {
+  background-color: var(--term-bg);
+}
+html[data-wallpaper="on"] .app .xterm {
+  background-color: var(--term-bg-veil);
+}
 .app .xterm-runtime-opencode .xterm .xterm-viewport { background-color: #000; }
 
 .tab-status {
@@ -561,9 +574,10 @@ body::after {
   display: flex; align-items: center; gap: 6px;
   padding: 3px 4px; border-radius: 3px; cursor: grab;
   font-family: var(--mono); font-size: var(--fs-xs); color: var(--ink);
+  touch-action: none; /* pointer drag, not scroll/select */
 }
 .todo-item:hover { background: rgb(var(--brand-rgb) / 0.14); }
-.todo-item.dragging { opacity: 0.45; }
+.todo-item.dragging { opacity: 0.45; cursor: grabbing; }
 .todo-text {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
@@ -580,6 +594,62 @@ body::after {
 }
 .todo-item:hover .todo-trash { opacity: 1; }
 .todo-trash:hover { color: var(--danger); background: rgb(var(--danger-rgb) / 0.15); }
+
+/* Pointer-drag ghost (todo tags) — follows cursor outside HTML5 DnD. */
+.todo-drag-ghost {
+  position: fixed;
+  z-index: 10000;
+  pointer-events: none;
+  max-width: 240px;
+  padding: 4px 8px;
+  border: 1px solid var(--brand);
+  border-radius: 3px;
+  background: var(--bg2);
+  box-shadow: var(--panel-shadow);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.95;
+}
+body.todo-pointer-dragging,
+body.todo-pointer-dragging *,
+body.path-pointer-dragging,
+body.path-pointer-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+.todo-drop-hover,
+.path-drop-hover {
+  outline: 1px dashed var(--brand) !important;
+  background: rgb(var(--brand-rgb) / 0.14) !important;
+}
+
+/* File-tree path ghost (same look as todo ghost). */
+.path-drag-ghost {
+  position: fixed;
+  z-index: 10000;
+  pointer-events: none;
+  max-width: 280px;
+  padding: 4px 8px;
+  border: 1px solid var(--brand);
+  border-radius: 3px;
+  background: var(--bg2);
+  box-shadow: var(--panel-shadow);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.95;
+}
+.files-tree .dir,
+.files-tree .file {
+  touch-action: none; /* pointer path-drag, not scroll/select */
+}
 
 /* 待处理 rows — session-name chip + click-to-open */
 .todo-item.todo-done { cursor: pointer; }
@@ -3339,7 +3409,8 @@ body::after { content: none; }
 /* Wallpaper translucency — one shared surface recipe painted once per shell
    column. Nested children must stay transparent so left/right don't stack a
    second veil (a second mix looks darker and was making the left rail read
-   heavier than the right). Terminal stays fully opaque (var(--term-bg)). */
+   heavier than the right). Terminal default cells use `--term-veil` (0–1)
+   over `--term-bg`; 1 is the historic opaque fill. */
 html[data-wallpaper="on"] {
   --wallpaper-surface: color-mix(in srgb, var(--bg2) 72%, transparent);
   --wallpaper-chrome: color-mix(in srgb, var(--bg2) 78%, transparent);
@@ -3528,6 +3599,266 @@ html[data-theme="handheld"] .statusbar {
 }
 
 html[data-theme="handheld"] .term-search-bar { background: var(--bg2); }
+
+html[data-theme="bilibili"] .term-search-bar { background: var(--bg2); }
+
+/* Terminal background — veil over --term-bg when wallpaper is on. */
+html[data-wallpaper="on"] {
+  --term-bg-veil: color-mix(in srgb, var(--term-bg) calc(var(--term-veil, 1) * 100%), transparent);
+}
+.xterm-screen {
+  background: transparent !important;
+}
+.tab-panel,
+.tab-cover,
+.xterm-viewport {
+  background-color: transparent;
+}
+.xterm-screen,
+.term-bg-before::before,
+/* Terminal container (not the .xterm canvas) gets the veil. */
+.terminal > .xterm {
+  background-color: var(--term-bg);
+  transition: background-color .3s var(--ease-apple);
+}
+html[data-wallpaper="on"] .terminal > .xterm {
+  background-color: var(--term-bg-veil);
+}
+html[data-theme="bilibili"] .titlebar,
+html[data-theme="bilibili"] .tab-bar,
+html[data-theme="bilibili"] .right-tabs,
+html[data-theme="bilibili"] .statusbar {
+  background-image: none;
+  box-shadow: inset 0 1px 0 #FFFFFF, 0 1px 0 var(--rule);
+  text-shadow: none;
+}
+
+html[data-theme="bilibili"]:not([data-wallpaper="on"]) .titlebar,
+html[data-theme="bilibili"]:not([data-wallpaper="on"]) .tab-bar,
+html[data-theme="bilibili"]:not([data-wallpaper="on"]) .right-tabs,
+html[data-theme="bilibili"]:not([data-wallpaper="on"]) .statusbar {
+  background-color: var(--bg2);
+}
+
+html[data-theme="bilibili"] .titlebar-logo {
+  text-shadow: none;
+}
+
+html[data-theme="bilibili"]:not([data-wallpaper="on"]) .left-sidebar,
+html[data-theme="bilibili"]:not([data-wallpaper="on"]) .right-sidebar {
+  background: var(--bg2);
+  box-shadow: inset 0 1px 0 var(--rule);
+}
+
+html[data-theme="bilibili"]:not([data-wallpaper="on"]) .composer,
+html[data-theme="bilibili"]:not([data-wallpaper="on"]) .right-panel,
+html[data-theme="bilibili"]:not([data-wallpaper="on"]) .content-area,
+html[data-theme="bilibili"]:not([data-wallpaper="on"]) .empty-state {
+  background-color: var(--bg2);
+  background-image: none;
+}
+
+html[data-theme="bilibili"] .term-search-bar,
+html[data-theme="bilibili"] .ctx-menu,
+html[data-theme="bilibili"] .tt-menu,
+html[data-theme="bilibili"] .cmp-menu,
+html[data-theme="bilibili"] .composer-at-menu,
+html[data-theme="bilibili"] .resource-popover,
+html[data-theme="bilibili"] .gv-menu,
+html[data-theme="bilibili"] .gv-branch-pop,
+html[data-theme="bilibili"] .permission-confirm-dialog,
+html[data-theme="bilibili"] .nproj-card,
+html[data-theme="bilibili"] .onboarding-card,
+html[data-theme="bilibili"] .settings-modal {
+  background: var(--bg2);
+  border-color: var(--rule2);
+  box-shadow: var(--panel-shadow);
+}
+
+html[data-theme="bilibili"] .settings-header,
+html[data-theme="bilibili"] .settings-nav,
+html[data-theme="bilibili"] .settings-rail {
+  background: var(--bg3);
+  border-color: var(--rule2);
+  box-shadow: none;
+}
+
+html[data-theme="bilibili"] .settings-content {
+  background: var(--bg2);
+}
+
+html[data-theme="bilibili"] .settings-nav button:hover,
+html[data-theme="bilibili"] .settings-nav button.active {
+  background: var(--bg4);
+  color: var(--brand);
+}
+
+html[data-theme="bilibili"] .onboarding-overlay,
+html[data-theme="bilibili"] .permission-confirm-overlay,
+html[data-theme="bilibili"] .nproj-overlay,
+html[data-theme="bilibili"] .settings-overlay {
+  background: rgb(42 21 32 / 0.35);
+}
+
+html[data-theme="bilibili"] .sidebar-tree,
+html[data-theme="bilibili"] .sidebar-actions,
+html[data-theme="bilibili"] .ov-section,
+html[data-theme="bilibili"] .tab-panel {
+  background: transparent;
+}
+
+html[data-theme="bilibili"] .composer-input-wrap,
+html[data-theme="bilibili"] .composer-target,
+html[data-theme="bilibili"] .act-mode-group {
+  background: var(--bg);
+  border-color: var(--rule);
+}
+
+html[data-theme="bilibili"] .tab-item:hover,
+html[data-theme="bilibili"] .right-tab:hover,
+html[data-theme="bilibili"] .sidebar-btn:hover,
+html[data-theme="bilibili"] .act-btn:hover,
+html[data-theme="bilibili"] .files-tree .file:hover,
+html[data-theme="bilibili"] .files-tree .dir:hover,
+html[data-theme="bilibili"] .terminal-item:hover {
+  background: var(--bg3);
+}
+
+html[data-theme="bilibili"] .send-btn:hover,
+html[data-theme="bilibili"] .ul-send-btn:hover:not(:disabled) {
+  background: var(--brand);
+  color: var(--accent-ink);
+}
+
+html[data-theme="bilibili"] .tab-item.active {
+  background: var(--bg3);
+  border-top-color: var(--brand);
+  border-bottom-color: var(--bg3);
+  color: var(--brand);
+}
+
+html[data-theme="bilibili"] .right-tab.active {
+  background: var(--bg4);
+  color: var(--brand);
+  text-shadow: none;
+}
+
+html[data-theme="bilibili"] .terminal-item.active,
+html[data-theme="bilibili"] .proj.focused .proj-header,
+html[data-theme="bilibili"] .files-tree .dir.selected,
+html[data-theme="bilibili"] .files-tree .file.selected {
+  background: var(--bg3);
+  box-shadow: inset 3px 0 0 var(--brand);
+}
+
+html[data-theme="bilibili"] .proj.focused {
+  background: var(--bg3);
+}
+
+html[data-theme="bilibili"] .ctx-item:hover,
+html[data-theme="bilibili"] .tt-item:hover,
+html[data-theme="bilibili"] .cmp-menu-item:hover,
+html[data-theme="bilibili"] .composer-at-item:hover,
+html[data-theme="bilibili"] .gv-menu-item:hover,
+html[data-theme="bilibili"] .gv-menu-branch:hover {
+  background: var(--bg3);
+}
+
+html[data-theme="bilibili"] .act-btn.active,
+html[data-theme="bilibili"] .act-mode-btn.active,
+html[data-theme="bilibili"] .send-btn,
+html[data-theme="bilibili"] .fs-tg.on,
+html[data-theme="bilibili"] .empty-state-cta,
+html[data-theme="bilibili"] .onboarding-btn-primary,
+html[data-theme="bilibili"] .nproj-btn.primary,
+html[data-theme="bilibili"] .gv-commit-btn,
+html[data-theme="bilibili"] .permission-confirm-btn.primary {
+  background: var(--bg4);
+  border-color: var(--brand);
+  color: var(--brand);
+}
+
+html[data-theme="bilibili"] .tab-item.active,
+html[data-theme="bilibili"] .act-btn.active,
+html[data-theme="bilibili"] .act-mode-btn.active,
+html[data-theme="bilibili"] .send-btn:hover,
+html[data-theme="bilibili"] .ul-send-btn:hover:not(:disabled),
+html[data-theme="bilibili"] .onboarding-btn-primary:hover,
+html[data-theme="bilibili"] .nproj-btn.primary:hover:not(:disabled),
+html[data-theme="bilibili"] .gv-commit-btn:hover:not(:disabled) {
+  box-shadow: inset 0 -2px 0 var(--brand-dim), 2px 2px 0 var(--rule2);
+}
+
+html[data-theme="bilibili"] .composer-target,
+html[data-theme="bilibili"] .ov-section-header,
+html[data-theme="bilibili"] .git-title,
+html[data-theme="bilibili"] .resource-popover-title,
+html[data-theme="bilibili"] .cmp-menu-label,
+html[data-theme="bilibili"] .ctx-label,
+html[data-theme="bilibili"] .tt-label,
+html[data-theme="bilibili"] .gv-menu-label {
+  text-shadow: none;
+  color: var(--brand-dim);
+}
+
+html[data-theme="bilibili"] ::-webkit-scrollbar-thumb {
+  background: var(--rule2);
+  border-top: 1px solid var(--brand);
+}
+html[data-theme="bilibili"] ::-webkit-scrollbar-thumb:hover {
+  background: var(--brand);
+}
+
+html[data-theme="bilibili"] input,
+html[data-theme="bilibili"] textarea,
+html[data-theme="bilibili"] select {
+  caret-color: var(--brand);
+}
+
+html[data-theme="bilibili"] button:focus-visible,
+html[data-theme="bilibili"] [role="button"]:focus-visible,
+html[data-theme="bilibili"] input:focus-visible,
+html[data-theme="bilibili"] textarea:focus-visible,
+html[data-theme="bilibili"] select:focus-visible {
+  outline-color: var(--brand);
+}
+
+/* Wallpaper on: keep solid pink chrome look via translucent pure colors
+   (no gradient). Nested panels stay transparent so the image shows once. */
+html[data-theme="bilibili"][data-wallpaper="on"] {
+  --wallpaper-surface: rgb(255 235 242 / 0.72);
+  --wallpaper-chrome: rgb(255 214 229 / 0.78);
+}
+
+html[data-theme="bilibili"][data-wallpaper="on"] .left-sidebar,
+html[data-theme="bilibili"][data-wallpaper="on"] .right-sidebar,
+html[data-theme="bilibili"][data-wallpaper="on"] .content-area,
+html[data-theme="bilibili"][data-wallpaper="on"] .composer,
+html[data-theme="bilibili"][data-wallpaper="on"] .right-panel,
+html[data-theme="bilibili"][data-wallpaper="on"] .empty-state {
+  background: var(--wallpaper-surface);
+  background-image: none;
+  box-shadow: none;
+}
+
+html[data-theme="bilibili"][data-wallpaper="on"] .titlebar,
+html[data-theme="bilibili"][data-wallpaper="on"] .tab-bar,
+html[data-theme="bilibili"][data-wallpaper="on"] .right-tabs,
+html[data-theme="bilibili"][data-wallpaper="on"] .statusbar {
+  background-color: var(--wallpaper-chrome);
+  background-image: none;
+}
+
+html[data-theme="bilibili"][data-wallpaper="on"] .main-area,
+html[data-theme="bilibili"][data-wallpaper="on"] .content-panel,
+html[data-theme="bilibili"][data-wallpaper="on"] .pane-shell,
+html[data-theme="bilibili"][data-wallpaper="on"] .tab-panel,
+html[data-theme="bilibili"][data-wallpaper="on"] .sidebar-tree,
+html[data-theme="bilibili"][data-wallpaper="on"] .sidebar-actions,
+html[data-theme="bilibili"][data-wallpaper="on"] .ov-section,
+html[data-theme="bilibili"][data-wallpaper="on"] .ov-section-body {
+  background: transparent;
+}
 
 /* Quantum Grid: a restrained circuit-plane signature for the violet tech theme.
    Anchored to `.app` (not `body`) so it shares the app's stacking context:

@@ -25,6 +25,7 @@
     "--danger": "#F27E9A",
     "--accent-ink": "#0B081A",
     "--term-bg": "#090A17",
+    "--term-veil": "1",
     "--search-match-bg": "#423A72",
     "--brand-selection": "rgb(154 134 255 / 0.27)",
     "--brand-rgb": "154 134 255",

@@ -3,7 +3,7 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { useStore, AgentInfo, AgentStatus, TODO_DRAG_MIME } from "../../state/store";
+import { useStore, AgentInfo, AgentStatus, acceptTodoDragOver, getTodoDragId, isTodoDrag } from "../../state/store";
 import {
   spawnAgent,
   closeAgent as closeAgentAction,
@@ -303,16 +303,13 @@ export function LeftSidebar() {
   // Todo-tag drop target on a terminal row: assign the task + send its text to
   // that session, then focus it. Shared by the live and ended row renderers.
   const onTodoDragOver = (e: React.DragEvent) => {
-    if (e.dataTransfer.types.includes(TODO_DRAG_MIME)) {
-      e.preventDefault();
-      e.stopPropagation();
-    }
+    acceptTodoDragOver(e);
   };
   const onTodoDrop = (e: React.DragEvent, agentId: string, proj: string) => {
-    if (!e.dataTransfer.types.includes(TODO_DRAG_MIME)) return;
+    if (!isTodoDrag(e.dataTransfer)) return;
     e.preventDefault();
     e.stopPropagation();
-    const tagId = e.dataTransfer.getData(TODO_DRAG_MIME);
+    const tagId = getTodoDragId(e.dataTransfer);
     if (tagId) void assignTodoAndSend(tagId, agentId);
     openProjectTerminal(proj, agentId);
   };
@@ -756,6 +753,7 @@ export function LeftSidebar() {
                         <div
                           key={a.id}
                           className={`terminal-item${activeTabId === a.id ? " active" : ""}`}
+                          data-todo-drop-agent={a.id}
                           onClick={() => openProjectTerminal(name, a.id)}
                           onDragOver={onTodoDragOver}
                           onDrop={(e) => onTodoDrop(e, a.id, name)}
@@ -821,6 +819,7 @@ export function LeftSidebar() {
                               <div
                                 key={a.id}
                                 className={`terminal-item term-ended${activeTabId === a.id ? " active" : ""}`}
+                                data-todo-drop-agent={a.id}
                                 onClick={() => {
                                   // Ended sessions never auto-resume; force a
                                   // fresh mount that resumes: drop the dead

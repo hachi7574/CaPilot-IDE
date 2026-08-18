@@ -4,7 +4,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
-import { useStore, AgentInfo, TODO_DRAG_MIME } from "../../state/store";
+import { useStore, AgentInfo, getTodoDragId, isTodoDrag } from "../../state/store";
 import { assignTodoAndSend } from "../../state/agentActions";
 import { pathsFromDataTransfer } from "../../state/dropPaths";
 import { useT } from "../../i18n";
@@ -329,11 +329,20 @@ const cssVar = (name: string, fallback: string): string => {
   return (root ? getComputedStyle(root).getPropertyValue(name).trim() : "") || fallback;
 };
 
+/** Theme `--term-veil` (0–1). 1 is the historic opaque terminal fill. */
+const termVeil = (): number => {
+  const n = parseFloat(cssVar("--term-veil", "1"));
+  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 1;
+};
+
 /** Read the current CSS palette into xterm, whose canvas renderer cannot use
  *  CSS variables directly. Called both at construction and on theme changes.
- *  Terminal stays opaque — wallpaper only shows through chrome panels. */
+ *  When `--term-veil` is below 1 the canvas default cell is transparent so the
+ *  host's color-mix fill (and wallpaper beneath it) can show through.
+ *  allowTransparency stays on so a live theme switch can fade the cell without
+ *  reconstructing the PTY. */
 const readTerminalTheme = () => ({
-  background: cssVar("--term-bg", "#0D1117"),
+  background: termVeil() < 0.999 ? "rgba(0,0,0,0)" : cssVar("--term-bg", "#0D1117"),
   foreground: cssVar("--pl-fg", "#ABB2BF"),
   cursor: cssVar("--pl-cursor", "#5C6370"),
   selectionBackground: cssVar("--pl-selection", "#3A3F4B"),
@@ -510,6 +519,7 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
       fontSize: TERMINAL_FONT_SIZES[fontScale] ?? 13,
       fontFamily: "'JetBrainsMono', ui-monospace, monospace",
       theme: readTerminalTheme(),
+      allowTransparency: true,
       allowProposedApi: true,
     });
 
@@ -1031,6 +1041,30 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     };
   }, [insertPathToPty, isPointInTerminal]);
 
+  // In-app pointer path-drop from the file tree (WebView2-safe).
+  useEffect(() => {
+    if (!active) return;
+    const onPathDrop = (ev: Event) => {
+      const detail = (ev as CustomEvent).detail as
+        | { paths?: string[]; kind?: string; agentId?: string | null }
+        | undefined;
+      if (!detail || detail.kind !== "terminal") return;
+      // Prefer the agent id on the event; fall back to this panel when the
+      // drop target is this terminal (data-todo-drop-agent matches).
+      if (detail.agentId && detail.agentId !== agentId) return;
+      if (!detail.agentId) {
+        // No agent id — only accept if the point is over this terminal.
+        // (resolvePathDropTarget should always set agentId when possible.)
+      }
+      if (Array.isArray(detail.paths) && detail.paths.length) {
+        insertPathToPty(detail.paths);
+      }
+    };
+    window.addEventListener("capilot:path-drop", onPathDrop as EventListener);
+    return () =>
+      window.removeEventListener("capilot:path-drop", onPathDrop as EventListener);
+  }, [active, agentId, insertPathToPty]);
+
   // F1 focus toggle (Composer → terminal). Only the active tab's terminal
   // responds, and only to requests the shared counter hasn't consumed yet — so
   // neither a freshly-mounted panel nor a reactivated resident OpenCode panel
@@ -1056,6 +1090,8 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
   return (
     <div
       ref={containerRef}
+      data-todo-drop-agent={agentId}
+      data-path-drop="terminal"
       className={
         [
           dragHover ? "ug-xterm-drophint" : undefined,
@@ -1073,7 +1109,8 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
         minHeight: 0,
         overflow: "hidden",
         padding: "10px 14px",
-        background: "var(--term-bg)",
+        background:
+          "color-mix(in srgb, var(--term-bg) calc(var(--term-veil, 1) * 100%), transparent)",
         position: "relative",
       }}
       onDragEnter={(e) => {
@@ -1086,6 +1123,16 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
       }}
       onDragOver={(e) => {
         e.preventDefault(); // allow the drop
+        // Todo-tag drop: set matching dropEffect only when we know it's a tag
+        // (in-memory session). Don't force dropEffect for file/path drags —
+        // WebView2 can stick on 🚫 if effectAllowed is still negotiating.
+        if (isTodoDrag(e.dataTransfer)) {
+          try {
+            if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+          } catch {
+            // ignore
+          }
+        }
       }}
       onDragLeave={(e) => {
         e.preventDefault();
@@ -1104,8 +1151,8 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
         }
         // A todo tag dropped onto the terminal assigns the task to this session
         // and sends its text as a prompt.
-        if (e.dataTransfer.types.includes(TODO_DRAG_MIME)) {
-          const tagId = e.dataTransfer.getData(TODO_DRAG_MIME);
+        if (isTodoDrag(e.dataTransfer)) {
+          const tagId = getTodoDragId(e.dataTransfer);
           if (tagId) {
             void assignTodoAndSend(tagId, agentId);
           }

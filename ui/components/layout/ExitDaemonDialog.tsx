@@ -7,9 +7,10 @@ interface ExitDaemonDialogProps {
 }
 
 /**
- * Shown when the user clicks the window × and Settings → exit-daemon mode is
- * still "ask". Two actions + a "remember" checkbox; a note points at Settings
- * for later changes.
+ * Shown when the user clicks the window ×, Settings → exit-daemon mode is still
+ * "ask", and at least one agent still has a live PTY. Empty / all-dormant /
+ * all-ended sessions skip this dialog (see `handleTitlebarClose`). Two actions
+ * + a "remember" checkbox; a note points at Settings for later changes.
  */
 export function ExitDaemonDialog({ onCancel }: ExitDaemonDialogProps) {
   const t = useT();

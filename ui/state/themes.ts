@@ -3,7 +3,9 @@
  * repo-root `themes/` folder via Vite `import.meta.glob`. Each file is a
  * complete visual cartridge: color tokens (plus per-theme radius/shadow)
  * mapped to CSS custom properties, with display metadata for the Settings
- * picker. Layout and type roles stay in `ui/App.css` `:root` so switching a
+ * picker. `--term-veil` (0–1, default 1) fades the terminal default-cell
+ * fill so wallpaper can show through; xterm reads it in XTermPanel.
+ * Layout and type roles stay in `ui/App.css` `:root` so switching a
  * theme never moves the UI.
  *
  * Optional `wallpaper` on a cartridge points at a file under

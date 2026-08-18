@@ -8,7 +8,9 @@ import {
   HookStatus,
   effectiveAgentStatus,
   ACTIVE_WINDOW_MS,
-  TODO_DRAG_MIME,
+  acceptTodoDragOver,
+  getTodoDragId,
+  isTodoDrag,
 } from "../../state/store";
 import {
   closeAgent as closeAgentAction,
@@ -288,25 +290,36 @@ export function TabBar() {
   // Tab-label flash: when `tabFlash` bumps an agent's seq, re-trigger the
   // `.tab-flash` CSS animation (two pulses) on that tab's element. Imperative
   // so the flash never causes a React re-render of the strip.
+  // Keys in `tabFlash` are agent ids; tab elements are keyed by `tab.id`
+  // (usually the same, but resolve via agentId as well for safety).
   const flashSeenRef = useRef<Map<string, number>>(new Map());
   const flashTimerRef = useRef<Map<string, number>>(new Map());
   useEffect(() => {
-    for (const [id, seq] of tabFlash) {
-      const el = tabElsRef.current.get(id);
+    for (const [agentId, seq] of tabFlash) {
+      if (flashSeenRef.current.get(agentId) === seq) continue;
+      flashSeenRef.current.set(agentId, seq);
+      // Prefer exact tab.id match, then any tab whose agentId matches.
+      let el = tabElsRef.current.get(agentId) ?? null;
+      if (!el) {
+        for (const t of tabs) {
+          if (t.agentId === agentId || t.id === agentId) {
+            el = tabElsRef.current.get(t.id) ?? null;
+            if (el) break;
+          }
+        }
+      }
       if (!el) continue;
-      if (flashSeenRef.current.get(id) === seq) continue;
-      flashSeenRef.current.set(id, seq);
       el.classList.remove("tab-flash");
       // Forcing a reflow lets the class re-add restart the animation cleanly.
       void el.offsetWidth;
       el.classList.add("tab-flash");
-      window.clearTimeout(flashTimerRef.current.get(id));
+      window.clearTimeout(flashTimerRef.current.get(agentId));
       flashTimerRef.current.set(
-        id,
-        window.setTimeout(() => el.classList.remove("tab-flash"), 800)
+        agentId,
+        window.setTimeout(() => el!.classList.remove("tab-flash"), 800)
       );
     }
-  }, [tabFlash]);
+  }, [tabFlash, tabs]);
   useEffect(
     () => () => {
       for (const t of flashTimerRef.current.values()) window.clearTimeout(t);
@@ -342,7 +355,7 @@ export function TabBar() {
     e.preventDefault();
     // A todo-tag drag is not a tab reorder — tag drags never set draggedTabId,
     // but keep the strip from rendering a reorder preview just in case.
-    if (e.dataTransfer.types.includes(TODO_DRAG_MIME)) return;
+    if (isTodoDrag(e.dataTransfer)) return;
     if (!draggedTabId) return;
     // The first move past dragstart hides the source tab (its drag image was
     // already snapshotted), leaving only the ghost + the drop-slot gap.
@@ -560,6 +573,7 @@ export function TabBar() {
             className={`tab-item${tab.id === activeTabId ? " active" : ""}${isDragging ? " dragging" : ""}${isDragging && dragHidden ? " drag-hidden" : ""}${status === "done" ? " tab-done" : ""}`}
             style={dx ? { transform: `translateX(${dx}px)` } : undefined}
             draggable
+            data-todo-drop-agent={tab.agentId || undefined}
             onDragStart={(e) => {
               e.dataTransfer.setData("text/plain", tab.id);
               e.dataTransfer.effectAllowed = "copy";
@@ -571,17 +585,14 @@ export function TabBar() {
             // Todo-tag drop target (agent tabs only): assign the task + send its
             // text to the session, then focus the tab.
             onDragOver={(e) => {
-              if (e.dataTransfer.types.includes(TODO_DRAG_MIME)) {
-                e.preventDefault();
-                e.stopPropagation();
-              }
+              acceptTodoDragOver(e);
             }}
             onDrop={(e) => {
-              if (!e.dataTransfer.types.includes(TODO_DRAG_MIME)) return;
+              if (!isTodoDrag(e.dataTransfer)) return;
               e.preventDefault();
               e.stopPropagation();
               if (!tab.agentId) return;
-              const tagId = e.dataTransfer.getData(TODO_DRAG_MIME);
+              const tagId = getTodoDragId(e.dataTransfer);
               if (tagId) void assignTodoAndSend(tagId, tab.agentId);
               setActiveTab(tab.id);
             }}

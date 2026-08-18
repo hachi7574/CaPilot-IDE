@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useStore } from "./store";
 
 /**
  * What happens to the PTY daemon / live agent terminals when the GUI exits.
@@ -41,6 +42,23 @@ export async function saveExitDaemonMode(mode: ExitDaemonMode): Promise<void> {
 }
 
 /**
+ * True when at least one agent still has a live PTY the keep/kill choice
+ * would affect.
+ *
+ * Matches the UI's "connected" signal (`agentChannels`): restored / slept
+ * sessions have no channel (dormant), and natural-exit `done` sessions may
+ * keep a dead channel only for scrollback — neither needs the exit dialog.
+ */
+export function hasLiveAgentPty(): boolean {
+  const s = useStore.getState();
+  for (const [id, agent] of s.agents) {
+    if (agent.status === "done" || agent.status === "failed") continue;
+    if (s.agentChannels.has(id)) return true;
+  }
+  return false;
+}
+
+/**
  * Apply the quit policy and close the window.
  *
  * 1. Stage a one-shot override via `app_prepare_exit` so ExitRequested does
@@ -66,7 +84,9 @@ export async function quitWithDaemonMode(
 /**
  * Shared close-button handler for the titlebar × in LeftSidebar / TabBar.
  *
- * - setting `ask` (default) → caller should open the dialog (returns `"ask"`);
+ * - setting `ask` + live PTYs → caller should open the dialog (returns `"ask"`);
+ * - setting `ask` + nothing live (no terminals / all dormant or ended) → close
+ *   immediately; ExitRequested treats unset/`ask` as detach (returns `"keep"`);
  * - setting `keep`/`kill` → quit immediately with that policy (returns the mode).
  */
 export async function handleTitlebarClose(
@@ -74,6 +94,12 @@ export async function handleTitlebarClose(
 ): Promise<"ask" | "keep" | "kill"> {
   const mode = await loadExitDaemonMode();
   if (mode === "ask") {
+    if (!hasLiveAgentPty()) {
+      // Nothing for keep/kill to decide — skip the chooser. Rust ExitRequested
+      // already detaches on any mode other than "kill", including "ask".
+      await getCurrentWindow().close();
+      return "keep";
+    }
     openAskDialog();
     return "ask";
   }

@@ -427,9 +427,10 @@ fn build_and_spawn(
         created_at: now,
         updated_at: now,
     };
-    if let Ok(db) = persistence.db().lock() {
+    {
+        let db = persistence.lock_db();
         if let Err(e) = db.insert(&record) {
-            log::warn!("failed to persist session {id}: {e}");
+        log::warn!("failed to persist session {id}: {e}");
         }
     }
 
@@ -445,6 +446,12 @@ fn build_and_spawn(
 /// the user's args so lifecycle status keeps reporting. Without them the tab
 /// strip silently falls back to PTY-activity heuristics: a long tool gap reads
 /// as a false 空闲 and input echo reads as a false 运行中.
+///
+/// Exception: if the user's args already carry an exclusive permission flag
+/// (`--dangerously-bypass-approvals-and-sandbox`, `--dangerously-skip-permissions`,
+/// `--yolo`, `--ask-for-approval`, `--permission-mode`), `mode_args` is NOT
+/// re-appended — those flags conflict with / duplicate the adapter's permission
+/// argv on current claude/codex CLIs.
 fn apply_launch_overrides(
     adapter: &dyn AgentRuntimeAdapter,
     session: &AgentSession,
@@ -457,12 +464,28 @@ fn apply_launch_overrides(
         }
         if let Some(a) = ov.args.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             args = a.split_whitespace().map(|t| t.to_string()).collect();
-            args.extend(adapter.mode_args(&session.mode));
+            if !args_already_set_permission(&args) {
+                args.extend(adapter.mode_args(&session.mode));
+            }
             args.extend(adapter.speed_args(&session.speed));
             args.extend(adapter.status_hook_args(&session));
         }
     }
     (cmd, args)
+}
+
+/// `true` when `args` already encodes a permission policy the adapter would
+/// otherwise inject via `mode_args`. Used to avoid clap conflicts like
+/// `--dangerously-bypass-approvals-and-sandbox` + `--ask-for-approval`.
+fn args_already_set_permission(args: &[String]) -> bool {
+    const MARKERS: &[&str] = &[
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--dangerously-skip-permissions",
+        "--yolo",
+        "--ask-for-approval",
+        "--permission-mode",
+    ];
+    args.iter().any(|a| MARKERS.iter().any(|m| a == m))
 }
 
 #[tauri::command]
@@ -556,7 +579,7 @@ async fn agent_spawn(
         None, // genuinely new IDE session: assign a new display title
         model,
         &speed.unwrap_or_else(|| "auto".to_string()),
-        &mode.unwrap_or_else(|| "ask".to_string()),
+        &mode.unwrap_or_else(|| "yolo".to_string()),
         cwd,
         on_data,
     )?;
@@ -588,7 +611,8 @@ async fn agent_spawn(
                     .recover_resume_key(&agent_id, &cwd_for_capture, record.created_at)
                     .or_else(|| adapter.capture_resume_key(&cwd_for_capture));
                 if let Some(key) = key {
-                    if let Ok(db) = persistence.db().lock() {
+                    {
+                        let db = persistence.lock_db();
                         let _ = db.update_resume_key(&agent_id, &key, now_ms());
                     }
                     if let Ok(mut meta) = read_agent_meta(&project, &agent_id) {
@@ -616,7 +640,7 @@ async fn agent_resume(
     cols: Option<u16>,
 ) -> Result<AgentInfo, String> {
     let record = {
-        let db = persistence.db().lock().unwrap();
+        let db = persistence.lock_db();
         db.get(&id).map_err(|e| e.to_string())?
     };
     let Some(rec) = record else {
@@ -699,7 +723,7 @@ async fn agent_context_usage(
     id: String,
 ) -> Result<Option<AgentUsage>, String> {
     let record = {
-        let db = persistence.db().lock().unwrap();
+        let db = persistence.lock_db();
         db.get(&id).map_err(|e| e.to_string())?
     };
     let Some(rec) = record else {
@@ -712,7 +736,7 @@ async fn agent_context_usage(
     // The TTL is short, so this only dedups bursts — it does not throttle the
     // meter's refresh rate.
     {
-        let cache = cache.inner.lock().unwrap();
+        let cache = cache.inner.lock().unwrap_or_else(|p| p.into_inner());
         if let Some((usage, at)) = cache.get(&id) {
             if at.elapsed() < CONTEXT_USAGE_TTL {
                 return Ok(Some(usage.clone()));
@@ -747,7 +771,8 @@ async fn agent_context_usage(
     // Self-heal sessions created by older builds (or a startup capture race)
     // so subsequent polls and future resumes use the exact provider session.
     if let Some(key) = recovered_key {
-        if let Ok(db) = persistence.db().lock() {
+        {
+            let db = persistence.lock_db();
             let _ = db.update_resume_key(&id, &key, now_ms());
         }
         if let Ok(mut meta) = read_agent_meta(&rec.project, &id) {
@@ -758,7 +783,7 @@ async fn agent_context_usage(
     }
 
     {
-        let mut cache = cache.inner.lock().unwrap();
+        let mut cache = cache.inner.lock().unwrap_or_else(|p| p.into_inner());
         match &usage {
             Some(u) => {
                 cache.insert(id.clone(), (u.clone(), Instant::now()));
@@ -805,7 +830,7 @@ async fn agent_status_read(
         return Ok(Some(hook));
     }
     let (runtime, cwd) = {
-        let db = persistence.db().lock().unwrap();
+        let db = persistence.lock_db();
         db.get(&id)
             .ok()
             .flatten()
@@ -825,7 +850,7 @@ async fn agent_status_read(
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
     {
-        let cache = cache.inner.lock().unwrap();
+        let cache = cache.inner.lock().unwrap_or_else(|p| p.into_inner());
         if let Some((cm, cl, ts, status)) = cache.get(&id) {
             if *cm == mtime_ns && *cl == len {
                 return Ok(Some(HookStatus {
@@ -897,15 +922,16 @@ async fn agent_kill(
     // ended naturally is `done` — flipping it back to `idle` would make a
     // finished conversation resurrect as an active tab after a restart (sleep on
     // a project with ended agents would revive them).
-    if let Ok(db) = persistence.db().lock() {
+    {
+        let db = persistence.lock_db();
         let is_done = db
-            .get(&id)
-            .ok()
-            .flatten()
-            .map(|rec| rec.status == "done")
-            .unwrap_or(false);
+        .get(&id)
+        .ok()
+        .flatten()
+        .map(|rec| rec.status == "done")
+        .unwrap_or(false);
         if !is_done {
-            let _ = db.update_status(&id, "idle", now_ms());
+        let _ = db.update_status(&id, "idle", now_ms());
         }
     }
     Ok(())
@@ -933,7 +959,7 @@ async fn agent_switch_runtime(
     on_data: Channel<Vec<u8>>,
 ) -> Result<AgentInfo, String> {
     let record = {
-        let db = persistence.db().lock().unwrap();
+        let db = persistence.lock_db();
         db.get(&id).map_err(|e| e.to_string())?
     };
     let Some(rec) = record else {
@@ -953,9 +979,9 @@ async fn agent_switch_runtime(
 
     bridge.kill(&id).map_err(|e| e.to_string())?;
     {
-        let db = persistence.db().lock().unwrap();
+        let db = persistence.lock_db();
         db.update_runtime(&id, &runtime, now_ms())
-            .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?;
     }
     let project = rec.project.clone();
     if let Ok(mut meta) = read_agent_meta(&project, &id) {
@@ -994,7 +1020,7 @@ async fn agent_refresh_resume_key(
     id: String,
 ) -> Result<Option<String>, String> {
     let rec = {
-        let db = persistence.db().lock().unwrap();
+        let db = persistence.lock_db();
         db.get(&id).map_err(|e| e.to_string())?
     };
     let Some(rec) = rec else {
@@ -1011,7 +1037,8 @@ async fn agent_refresh_resume_key(
         return Ok(Some(key));
     }
     let now = now_ms();
-    if let Ok(db) = persistence.db().lock() {
+    {
+        let db = persistence.lock_db();
         let _ = db.update_resume_key(&id, &key, now);
     }
     if let Ok(mut meta) = read_agent_meta(&rec.project, &id) {
@@ -1037,7 +1064,7 @@ async fn agent_set_session_config(
     // Read the record, validate/normalize the new values (unknown strings keep
     // the stored value rather than clobbering it), and update the DB row.
     let (project, mode, speed, model) = {
-        let db = persistence.db().lock().unwrap();
+        let db = persistence.lock_db();
         let rec = db
             .get(&id)
             .map_err(|e| e.to_string())?
@@ -1090,16 +1117,16 @@ async fn agent_rename(
         return Err("终端名称不能超过 80 个字符".to_string());
     }
     let rec = {
-        let db = persistence.db().lock().unwrap();
+        let db = persistence.lock_db();
         db.get(&id).map_err(|e| e.to_string())?
     };
     let Some(mut rec) = rec else {
         return Err(format!("Session not found: {id}"));
     };
     {
-        let db = persistence.db().lock().unwrap();
+        let db = persistence.lock_db();
         db.update_title(&id, &title, now_ms())
-            .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?;
     }
     // Keep `.agent-meta.json` in sync (mirrors agent_set_session_config).
     if let Ok(mut meta) = read_agent_meta(&rec.project, &id) {
@@ -1115,7 +1142,7 @@ async fn agent_rename(
 async fn sessions_list(
     persistence: tauri::State<'_, Arc<Persistence>>,
 ) -> Result<Vec<AgentSessionRecord>, String> {
-    let db = persistence.db().lock().unwrap();
+    let db = persistence.lock_db();
     db.list_all().map_err(|e| e.to_string())
 }
 
@@ -1688,7 +1715,7 @@ async fn sessions_delete(
 fn load_runtime_overrides(
     persistence: &Arc<Persistence>,
 ) -> HashMap<String, RuntimeOverride> {
-    let db = persistence.db().lock().unwrap();
+    let db = persistence.lock_db();
     match db.get_setting(RUNTIME_OVERRIDES_KEY) {
         Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or_default(),
         _ => HashMap::new(),
@@ -1701,7 +1728,7 @@ fn setting_get(
     persistence: tauri::State<'_, Arc<Persistence>>,
     key: String,
 ) -> Result<Option<String>, String> {
-    let db = persistence.db().lock().unwrap();
+    let db = persistence.lock_db();
     db.get_setting(&key).map_err(|e| e.to_string())
 }
 
@@ -1740,7 +1767,7 @@ fn setting_set(
     } else {
         value
     };
-    let db = persistence.db().lock().unwrap();
+    let db = persistence.lock_db();
     db.set_setting(&key, &value).map_err(|e| e.to_string())
 }
 
@@ -4071,7 +4098,8 @@ fn repair_session_titles(persistence: &Persistence) {
         }
         let title = agent_runtime::cat_breeds::next_breed_excluding(&occupied).to_string();
         occupied.insert(title.clone());
-        if let Ok(db) = persistence.db().lock() {
+        {
+            let db = persistence.lock_db();
             let _ = db.update_title(&session.id, &title, now_ms());
         }
         if let Ok(mut meta) = read_agent_meta(&session.project, &session.id) {
@@ -4084,7 +4112,17 @@ fn repair_session_titles(persistence: &Persistence) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let persistence = Arc::new(Persistence::open().expect("Failed to init persistence"));
+    let persistence = Arc::new(match Persistence::open() {
+        Ok(p) => p,
+        Err(e) => {
+            // $HOME / data root unwritable used to panic here and take down the
+            // whole process with an opaque expect. Surface a clear log line and
+            // exit so install/permission issues are diagnosable (RUNBOOK §3).
+            eprintln!("Failed to init persistence: {e}");
+            log::error!("Failed to init persistence: {e}");
+            std::process::exit(1);
+        }
+    });
     repair_session_titles(&persistence);
     // Hooks are shared by live PTYs across GUI restarts. Refresh the script at
     // startup so already-running Codex sessions begin reporting session_id on

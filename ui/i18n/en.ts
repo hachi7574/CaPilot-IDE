@@ -210,6 +210,10 @@ export const en: ZhMessages = {
       name: "Deep Repair Bay",
       note: "Cold teal phosphor · night bay",
     },
+    bilibili: {
+      name: "Bilibili Pink",
+      note: "TV pink · sakura wash",
+    },
   },
   statusBar: {
     resourceTitle: "Resource monitor (system CPU / memory; click for all agent curves)",

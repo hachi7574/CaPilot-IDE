@@ -25,6 +25,12 @@ import { TodoPanel } from "./TodoPanel";
 import { CommitGraph, type GitLogEntry } from "./CommitGraph";
 import { Icon } from "../Icon";
 import { useT, getLocale } from "../../i18n";
+import {
+  beginPathDrag,
+  endPathDrag,
+  PATH_POINTER_DRAG_THRESHOLD,
+  resolvePathDropTarget,
+} from "../../state/dropPaths";
 
 type RightTab = "overview" | "files" | "git";
 
@@ -457,6 +463,105 @@ function FilesPanel() {
     .map((t) => t.agentId!)
     .filter((id) => isShellRuntime(agents.get(id)?.runtime));
   const singleBashId = bashIds.length === 1 ? bashIds[0] : null;
+
+  // Floating ghost while pointer-dragging a tree path into composer/terminal.
+  const [pathGhost, setPathGhost] = useState<{
+    name: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const pathDragRef = useRef<{
+    path: string;
+    name: string;
+    startX: number;
+    startY: number;
+    active: boolean;
+  } | null>(null);
+  /** Suppress the synthetic click that follows a completed path pointer-drag. */
+  const suppressClickRef = useRef(false);
+
+  /**
+   * Pointer-based path drag (file tree → composer / terminal).
+   * HTML5 DnD is stuck on 🚫 for in-app sources under Windows WebView2.
+   */
+  const onPathPointerDown = (
+    e: React.PointerEvent,
+    path: string,
+    name: string
+  ) => {
+    if (e.button !== 0) return;
+    // Don't start a drag from the inline +/folder action buttons.
+    if ((e.target as HTMLElement).closest(".dir-actions, button, input")) return;
+    // Allow text selection in rename inputs etc.
+    if ((e.target as HTMLElement).closest("input, textarea")) return;
+    e.preventDefault();
+    pathDragRef.current = {
+      path,
+      name,
+      startX: e.clientX,
+      startY: e.clientY,
+      active: false,
+    };
+    beginPathDrag(path, name);
+
+    const onMove = (ev: PointerEvent) => {
+      const st = pathDragRef.current;
+      if (!st || st.path !== path) return;
+      const dx = ev.clientX - st.startX;
+      const dy = ev.clientY - st.startY;
+      if (!st.active) {
+        if (Math.hypot(dx, dy) < PATH_POINTER_DRAG_THRESHOLD) return;
+        st.active = true;
+        document.body.classList.add("path-pointer-dragging");
+      }
+      setPathGhost({ name: st.name, x: ev.clientX, y: ev.clientY });
+      document
+        .querySelectorAll(".path-drop-hover")
+        .forEach((el) => el.classList.remove("path-drop-hover"));
+      const under = document.elementFromPoint(ev.clientX, ev.clientY);
+      const target = under?.closest?.("[data-path-drop]") as HTMLElement | null;
+      target?.classList.add("path-drop-hover");
+    };
+
+    const finish = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      document.body.classList.remove("path-pointer-dragging");
+      document
+        .querySelectorAll(".path-drop-hover")
+        .forEach((el) => el.classList.remove("path-drop-hover"));
+
+      const st = pathDragRef.current;
+      pathDragRef.current = null;
+      setPathGhost(null);
+      endPathDrag();
+      if (!st?.active) return;
+      // A real drag completed — don't let the trailing click open/toggle.
+      suppressClickRef.current = true;
+      window.setTimeout(() => {
+        suppressClickRef.current = false;
+      }, 0);
+
+      const target = resolvePathDropTarget(ev.clientX, ev.clientY);
+      if (!target) return;
+      window.dispatchEvent(
+        new CustomEvent("capilot:path-drop", {
+          detail: {
+            paths: [st.path],
+            kind: target.kind,
+            agentId: target.kind === "terminal" ? target.agentId : null,
+            clientX: ev.clientX,
+            clientY: ev.clientY,
+          },
+        })
+      );
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+  };
 
   useEffect(() => {
     loadChildren(root);
@@ -1057,6 +1162,7 @@ function FilesPanel() {
                   className={`dir${gCls}${isCutSource ? " files-ctx-cut" : ""}${selected?.path === path ? " selected" : ""}`}
                   style={{ paddingLeft: depth * 14 }}
                   onClick={() => {
+                    if (suppressClickRef.current) return;
                     toggleDir(path);
                     setSelected({ path, isDir: true });
                   }}
@@ -1064,11 +1170,7 @@ function FilesPanel() {
                     setSelected({ path, isDir: true });
                     openCtx(ev, "dir", path);
                   }}
-                  draggable
-                  onDragStart={(ev) => {
-                    ev.dataTransfer.setData("text/plain", path);
-                    ev.dataTransfer.effectAllowed = "copy";
-                  }}
+                  onPointerDown={(ev) => onPathPointerDown(ev, path, e.name)}
                   title={path}
                 >
                   <span>{open ? <Icon name="chevron-down" size={12} /> : <Icon name="chevron-right" size={12} />} <Icon name="folder" size={14} /></span>
@@ -1103,18 +1205,20 @@ function FilesPanel() {
               key={path}
               className={`${cls}${gCls}${isCutSource ? " files-ctx-cut" : ""}${selected?.path === path ? " selected" : ""}`}
               style={{ paddingLeft: depth * 14 }}
-              onClick={() => clickFile(path, e.name)}
-              onDoubleClick={() => openFile(path, e.name)}
+              onClick={() => {
+                if (suppressClickRef.current) return;
+                clickFile(path, e.name);
+              }}
+              onDoubleClick={() => {
+                if (suppressClickRef.current) return;
+                openFile(path, e.name);
+              }}
               onContextMenu={(ev) => {
                 setSelected({ path, isDir: false });
                 openCtx(ev, "file", path);
               }}
               title={path}
-              draggable
-              onDragStart={(ev) => {
-                ev.dataTransfer.setData("text/plain", path);
-                ev.dataTransfer.effectAllowed = "copy";
-              }}
+              onPointerDown={(ev) => onPathPointerDown(ev, path, e.name)}
             >
               <Icon name={icon} size={14} />
               <span className="file-label">{e.name}</span>
@@ -1379,6 +1483,15 @@ function FilesPanel() {
       )}
       {notice && (
         <div className={notice.err ? "files-notice err" : "files-notice"}>{notice.text}</div>
+      )}
+      {pathGhost && (
+        <div
+          className="path-drag-ghost"
+          style={{ left: pathGhost.x + 12, top: pathGhost.y + 12 }}
+          aria-hidden
+        >
+          {pathGhost.name}
+        </div>
       )}
     </div>
   );

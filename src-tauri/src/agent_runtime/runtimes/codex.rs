@@ -48,11 +48,12 @@ impl CodexAdapter {
         let Some(profile) = Self::status_profile(agent_id) else {
             return Ok(());
         };
-        let hook_sh = status_dir().join("hook.sh");
-        let hook_sh = hook_sh.to_string_lossy();
-        // TOML basic-string escape for the script path (home dirs are plain, but
-        // escape backslash and quote so an odd HOME can never break the file).
-        let escaped = hook_sh.replace('\\', "\\\\").replace('"', "\\\"");
+        // `<absolute-sh> <absolute-hook.sh>`, both quoted. On Windows this is
+        // Git's sh.exe — a bare `/bin/sh` is not on PATH for Codex hook spawns
+        // and was failing SessionStart/UserPromptSubmit with exit 1.
+        let command = status_hooks::status_hook_command_line();
+        // Whole command sits in a TOML basic string: escape \ and " once more.
+        let escaped_cmd = command.replace('\\', "\\\\").replace('"', "\\\"");
         let mut toml = String::new();
         for event in status_hooks::CODEX_HOOK_EVENTS {
             // Codex clamps SessionEnd hook timeouts to 3s and warns on startup
@@ -64,7 +65,7 @@ impl CodexAdapter {
                 "[[hooks.{event}]]\n\
                  [[hooks.{event}.hooks]]\n\
                  type = \"command\"\n\
-                 command = \"/bin/sh {escaped}\"\n\
+                 command = \"{escaped_cmd}\"\n\
                  timeout = {timeout}\n\n"
             ));
         }
@@ -483,7 +484,7 @@ impl AgentRuntimeAdapter for CodexAdapter {
             PermissionModeInfo {
                 id: "yolo".into(),
                 label: "full access".into(),
-                description: "Codex --yolo：关闭审批和沙箱".into(),
+                description: "Codex --dangerously-bypass-approvals-and-sandbox：关闭审批和沙箱".into(),
                 requires_confirmation: true,
             },
         ]
@@ -631,7 +632,9 @@ impl AgentRuntimeAdapter for CodexAdapter {
                 "--sandbox".into(),
                 "workspace-write".into(),
             ],
-            "yolo" => vec!["--yolo".into()],
+            // Codex 0.147+ dropped the short `--yolo` alias; the exclusive
+            // long form cannot be combined with --ask-for-approval/--sandbox.
+            "yolo" => vec!["--dangerously-bypass-approvals-and-sandbox".into()],
             _ => vec![],
         }
     }
@@ -699,10 +702,16 @@ mod tests {
                 .spawn_interactive(&session(Some("session-id")))
                 .unwrap();
             assert!(args.windows(2).any(|v| v == ["--model", "gpt-5.4"]));
+            // Default session fixture uses mode "ask" (read-only).
             assert!(args
                 .windows(2)
                 .any(|v| v == ["--ask-for-approval", "untrusted"]));
             assert!(args.windows(2).any(|v| v == ["--sandbox", "read-only"]));
+            // yolo uses the exclusive long form (Codex 0.147+; no short --yolo).
+            assert_eq!(
+                adapter.mode_args("yolo"),
+                vec!["--dangerously-bypass-approvals-and-sandbox".to_string()]
+            );
             // Status hooks: the per-session profile is written into $CODEX_HOME
             // and wired via `-p` + the trust bypass flag.
             assert!(args.windows(2).any(|v| v == ["-p", "capilot-test"]));
@@ -713,6 +722,16 @@ mod tests {
             let toml = std::fs::read_to_string(&profile).unwrap();
             assert!(toml.contains("[[hooks.UserPromptSubmit]]"));
             assert!(toml.contains("[[hooks.PermissionRequest]]"));
+            // Hook command must invoke sh + hook.sh with quoted absolute paths
+            // (Windows cannot rely on a bare `/bin/sh` being on PATH).
+            assert!(
+                toml.contains("hook.sh"),
+                "profile must reference hook.sh: {toml}"
+            );
+            assert!(
+                !toml.contains("command = \"/bin/sh "),
+                "profile must not use bare /bin/sh: {toml}"
+            );
             // Codex clamps SessionEnd hook timeouts to 3s and warns on startup
             // when a larger value is declared. Trim each hook block (the format
             // string carries source indentation) and assert the per-event

@@ -11,7 +11,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useStore, TODO_DRAG_MIME, splitLeafTabIds } from "../../state/store";
+import { useStore, getTodoDragId, isTodoDrag, splitLeafTabIds } from "../../state/store";
 import { pathsFromDataTransfer } from "../../state/dropPaths";
 import type {
   PermissionMode,
@@ -1111,10 +1111,16 @@ export function Composer() {
   // composer hides its input (`display:none`, unfocusable), so F1 then routes
   // to the terminal instead of no-oping. Dismiss any open popover first so
   // focus can't straddle the two areas.
+  //
+  // Capture phase is required: when the terminal holds focus, xterm's custom
+  // key handler swallows F1 (return false → stopPropagation) so a bubble-only
+  // window listener never runs.
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent) => {
       if (e.key !== "F1") return;
+      if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
       e.preventDefault();
+      e.stopPropagation();
       const el = textareaRef.current;
       const inputFocused = el !== null && document.activeElement === el;
       const st = useStore.getState();
@@ -1140,8 +1146,8 @@ export function Composer() {
         st.requestFocus("terminal");
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, []);
 
   // ── Text helpers ──────────────────────────────────────────────
@@ -1260,9 +1266,11 @@ export function Composer() {
       }
       // A todo tag dropped into the composer inserts its text at the cursor
       // (non-destructive — the tag stays in 待分配 until assigned to a session).
-      if (e.dataTransfer.types.includes(TODO_DRAG_MIME)) {
-        const tagId = e.dataTransfer.getData(TODO_DRAG_MIME);
-        const tag = useStore.getState().todos.find((t) => t.id === tagId);
+      if (isTodoDrag(e.dataTransfer)) {
+        const tagId = getTodoDragId(e.dataTransfer);
+        const tag = tagId
+          ? useStore.getState().todos.find((t) => t.id === tagId)
+          : undefined;
         if (tag) insertText(tag.text + " ");
         dropHandledRef.current = true;
         dragDepthRef.current = 0;
@@ -1328,6 +1336,43 @@ export function Composer() {
       unlisten?.();
     };
   }, [appendPaths, isPointInComposer]);
+
+  // In-app pointer path-drop from the file tree (WebView2-safe alternative to
+  // HTML5 DnD). FilesPanel dispatches `capilot:path-drop` with kind=composer.
+  useEffect(() => {
+    const onPathDrop = (ev: Event) => {
+      const detail = (ev as CustomEvent).detail as
+        | { paths?: string[]; kind?: string }
+        | undefined;
+      if (!detail || detail.kind !== "composer") return;
+      if (Array.isArray(detail.paths) && detail.paths.length) {
+        appendPaths(detail.paths);
+      }
+    };
+    window.addEventListener("capilot:path-drop", onPathDrop as EventListener);
+    return () =>
+      window.removeEventListener("capilot:path-drop", onPathDrop as EventListener);
+  }, [appendPaths]);
+
+  // In-app pointer todo-drop from 待分配 (WebView2-safe). Inserts tag text at
+  // the cursor; the tag stays in 待分配 until assigned to a session.
+  useEffect(() => {
+    const onTodoDrop = (ev: Event) => {
+      const detail = (ev as CustomEvent).detail as
+        | { kind?: string; tagId?: string; text?: string }
+        | undefined;
+      if (!detail || detail.kind !== "composer") return;
+      const text =
+        (typeof detail.text === "string" && detail.text) ||
+        (detail.tagId
+          ? useStore.getState().todos.find((t) => t.id === detail.tagId)?.text
+          : undefined);
+      if (text) insertText(text + " ");
+    };
+    window.addEventListener("capilot:todo-drop", onTodoDrop as EventListener);
+    return () =>
+      window.removeEventListener("capilot:todo-drop", onTodoDrop as EventListener);
+  }, [insertText]);
 
   // ── `@` file autocomplete (DevPlan §3.2) ──────────────────────
   const resolveTargetCwd = useCallback((): string | null => {
@@ -2170,6 +2215,8 @@ export function Composer() {
       {/* Input area */}
       <div
         ref={composerWrapRef}
+        data-path-drop="composer"
+        data-todo-drop="composer"
         className={`composer-input-wrap${dragHover ? " drop-hint" : ""}`}
         onDragEnter={handleDragEnter}
         onDragOver={handleDragOver}

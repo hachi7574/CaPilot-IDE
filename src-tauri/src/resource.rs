@@ -64,11 +64,11 @@ impl ResourceMonitor {
     /// for `system_stats`, then sample each live agent's process tree. Returns
     /// the batch to emit (empty when no agents are running).
     pub fn tick(&self, bridge: &PtyBridge) -> Vec<AgentResource> {
-        let mut sys = self.sys.lock().unwrap();
+        let mut sys = self.sys.lock().unwrap_or_else(|p| p.into_inner());
 
         sys.refresh_cpu_usage();
         sys.refresh_memory();
-        *self.snapshot.lock().unwrap() = (
+        *self.snapshot.lock().unwrap_or_else(|p| p.into_inner()) = (
             sys.global_cpu_usage(),
             sys.used_memory(),
             sys.total_memory(),
@@ -104,14 +104,14 @@ impl ResourceMonitor {
         let mut agents: Vec<(String, u32, Vec<u32>)> = Vec::with_capacity(pids.len());
         {
             let processes = sys.processes();
-            let mut gens = self.generations.lock().unwrap();
+            let mut gens = self.generations.lock().unwrap_or_else(|p| p.into_inner());
             for (agent_id, generation, pid) in &pids {
                 // A respawned process (new generation) is a fresh incarnation:
                 // drop the old generation's history + tree so its curve restarts
                 // clean and stale pids can't inflate the new sample.
                 if gens.get(agent_id) != Some(generation) {
                     gens.insert(agent_id.clone(), *generation);
-                    self.trees.lock().unwrap().remove(agent_id);
+                    self.trees.lock().unwrap_or_else(|p| p.into_inner()).remove(agent_id);
                 }
                 let root = Pid::from_u32(*pid);
                 agents.push((
@@ -134,7 +134,7 @@ impl ResourceMonitor {
             ProcessRefreshKind::everything().without_tasks(),
         );
 
-        let mut trees = self.trees.lock().unwrap();
+        let mut trees = self.trees.lock().unwrap_or_else(|p| p.into_inner());
         let mut out = Vec::with_capacity(agents.len());
         for (agent_id, root, tree_pids) in agents {
             let (cpu_pct, mem_bytes) = sum_tree(Pid::from_u32(root), sys.processes(), &children);
@@ -150,7 +150,7 @@ impl ResourceMonitor {
 
     /// Cached global CPU/mem from the last sampling tick.
     pub fn snapshot(&self) -> (f32, u64, u64) {
-        *self.snapshot.lock().unwrap()
+        *self.snapshot.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
 

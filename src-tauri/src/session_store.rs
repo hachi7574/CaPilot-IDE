@@ -69,12 +69,24 @@ impl SessionStore {
         &self.db
     }
 
-    /// Lock the sessions DB, tolerating a poisoned mutex (a panic while holding
-    /// the lock marks it poisoned; `unwrap()` would then panic on every
-    /// command). Returns None only if the lock is currently held by a panicked
-    /// holder that never released — practically never.
+    /// Lock the sessions DB, recovering from a poisoned mutex.
+    ///
+    /// A panic while holding the lock marks it poisoned; `unwrap()` would then
+    /// panic on every subsequent command. Recovering via `into_inner()` keeps
+    /// the app usable (the inner `SessionsDb` is still valid).
+    pub fn lock_db(&self) -> std::sync::MutexGuard<'_, SessionsDb> {
+        self.db.lock().unwrap_or_else(|p| {
+            log::warn!("sessions DB mutex was poisoned; recovering lock");
+            p.into_inner()
+        })
+    }
+
+    /// Lock the sessions DB, tolerating a poisoned mutex. Always recovers the
+    /// lock when poisoned (see [`Self::lock_db`]). Returns `None` only if the
+    /// mutex is currently held by another thread (would need try_lock for that;
+    /// this path uses blocking lock so it effectively always returns `Some`).
     pub fn db_tolerant(&self) -> Option<std::sync::MutexGuard<'_, SessionsDb>> {
-        self.db.lock().ok()
+        Some(self.lock_db())
     }
 
     /// Mark a session `done` on natural exit: update the DB row and sync the
@@ -83,17 +95,13 @@ impl SessionStore {
     /// error.
     pub fn mark_done(&self, agent_id: &str) -> NaturalExit {
         let _ = self
-            .db
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .lock_db()
             .update_status(agent_id, "done", now_ms());
         // Keep the per-agent meta in sync (dual-write convention) so a stale
         // `.agent-meta.json` never shows a finished session as running. The
         // project is read fresh so a project rename moves the correct dir.
         let project = self
-            .db
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .lock_db()
             .get(agent_id)
             .ok()
             .flatten()
@@ -114,19 +122,13 @@ impl SessionStore {
     /// Delete a session (natural-exit delete mode): remove the DB row and the
     /// agent dir, when the dir is under the workspace root. Best-effort.
     pub fn delete_session(&self, agent_id: &str) -> NaturalExit {
-        let project = self
-            .db
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        let project = self.lock_db()
             .get(agent_id)
             .ok()
             .flatten()
             .map(|rec| rec.project)
             .unwrap_or_default();
-        let _ = self
-            .db
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        let _ = self.lock_db()
             .delete(agent_id);
         let dir = agent_dir(&project, agent_id);
         if dir.starts_with(workspace_root()) && dir.exists() {
@@ -142,10 +144,7 @@ impl SessionStore {
     /// exited on its own. Re-reads the setting each call so a settings change
     /// applies without a restart.
     pub fn apply_natural_exit(&self, agent_id: &str) -> NaturalExit {
-        let delete = self
-            .db
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        let delete = self.lock_db()
             .get_setting(SESSION_END_MODE_KEY)
             .ok()
             .flatten()
@@ -162,7 +161,7 @@ impl SessionStore {
     /// DB row (source of truth). Idempotent. Returns the number of files
     /// recreated.
     pub fn repair(&self) -> std::io::Result<usize> {
-        let db = self.db.lock().unwrap_or_else(|p| p.into_inner());
+        let db = self.lock_db();
         repair_agent_meta(&db)
     }
 }

@@ -1,4 +1,5 @@
 use crate::persistence::status_dir;
+use std::path::{Path, PathBuf};
 
 /// Environment names the status hook script reads. `CAPILOT_AGENT_ID` is set
 /// per-session on the spawned agent process; the script writes the agent's
@@ -6,6 +7,85 @@ use crate::persistence::status_dir;
 /// an agent run not spawned by CaPilot is never touched.
 pub const HOOK_ENV_AGENT: &str = "CAPILOT_AGENT_ID";
 pub const HOOK_ENV_DIR: &str = "CAPILOT_STATUS_DIR";
+
+/// Absolute path to a POSIX `sh` that can run `hook.sh`.
+///
+/// On Unix this is `/bin/sh` (or `/usr/bin/sh`). On Windows Codex/Claude spawn
+/// hooks outside Git Bash's PATH, so a bare `/bin/sh` fails with "path not
+/// found" / exit 1 — resolve Git's `usr\bin\sh.exe` (or PATH) instead.
+pub fn resolve_posix_sh() -> PathBuf {
+    #[cfg(windows)]
+    {
+        for candidate in windows_sh_candidates() {
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+        // Last resort: keep the historical token so a missing Git install still
+        // produces a readable profile / hooks.json instead of empty command.
+        PathBuf::from("sh.exe")
+    }
+    #[cfg(not(windows))]
+    {
+        for candidate in ["/bin/sh", "/usr/bin/sh"] {
+            let p = PathBuf::from(candidate);
+            if p.is_file() {
+                return p;
+            }
+        }
+        PathBuf::from("/bin/sh")
+    }
+}
+
+#[cfg(windows)]
+fn windows_sh_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    // PATH first (user may have Git usr\bin on PATH).
+    if let Ok(path) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path) {
+            out.push(dir.join("sh.exe"));
+            out.push(dir.join("sh"));
+        }
+    }
+    // Well-known Git for Windows layouts (Program Files + common portable roots).
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for key in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
+        if let Ok(v) = std::env::var(key) {
+            if !v.is_empty() {
+                roots.push(PathBuf::from(v).join("Git"));
+            }
+        }
+    }
+    // Portable installs the user has used before (A:\Git, etc.).
+    for drive in b'A'..=b'Z' {
+        roots.push(PathBuf::from(format!("{}:\\Git", drive as char)));
+    }
+    for root in roots {
+        out.push(root.join("usr\\bin\\sh.exe"));
+        out.push(root.join("bin\\sh.exe"));
+    }
+    // MSYS / Git Bash mount style when launched under a POSIX-like shell.
+    out.push(PathBuf::from("/usr/bin/sh.exe"));
+    out.push(PathBuf::from("/bin/sh.exe"));
+    out.push(PathBuf::from("/bin/sh"));
+    out
+}
+
+/// Shell-escape a path for embedding in a double-quoted hook `command` string
+/// (TOML basic string / JSON string). Wraps in `"…"` and escapes `\` / `"`.
+pub fn quote_cmd_arg(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+/// Full hook invocation: `<sh> <hook.sh>` with both sides absolute + quoted.
+/// Used by codex's per-session TOML profile (`command = "…"`).
+pub fn status_hook_command_line() -> String {
+    let sh = resolve_posix_sh();
+    let script = status_dir().join("hook.sh");
+    format!("{} {}", quote_cmd_arg(&sh), quote_cmd_arg(&script))
+}
 
 /// The status hook script (`~/CaPilot/status/hook.sh`). Reads the hook event
 /// payload on stdin, maps `hook_event_name` to a CaPilot status, and atomically
@@ -111,12 +191,14 @@ pub fn ensure_status_hooks() -> std::io::Result<()> {
     let dir = status_dir();
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join("hook.sh"), STATUS_HOOK_SCRIPT)?;
-    // The `--settings` file must reference the script by absolute path.
+    // The `--settings` file must reference sh + script by absolute path so
+    // Windows hooks don't depend on a Unix `/bin/sh` being on PATH.
+    let sh = resolve_posix_sh();
     let hook_sh = dir.join("hook.sh");
     let handler = serde_json::json!({
         "type": "command",
-        "command": "/bin/sh",
-        "args": [hook_sh]
+        "command": sh.to_string_lossy(),
+        "args": [hook_sh.to_string_lossy()]
     });
     // Every lifecycle event routes to the same status script; a distinct
     // matcher group per event keeps the wiring explicit.
@@ -156,7 +238,7 @@ mod tests {
         std::fs::create_dir_all(base.join("dir")).unwrap();
         let script = base.join("hook.sh");
         std::fs::write(&script, STATUS_HOOK_SCRIPT).unwrap();
-        let mut child = Command::new("/bin/sh")
+        let mut child = Command::new(resolve_posix_sh())
             .arg(&script)
             .env("CAPILOT_AGENT_ID", "test-agent")
             .env("CAPILOT_STATUS_DIR", base.join("dir"))
@@ -228,7 +310,7 @@ mod tests {
         let script = base.join("hook.sh");
         std::fs::write(&script, STATUS_HOOK_SCRIPT).unwrap();
         let run = |payload: &str| {
-            let mut child = Command::new("/bin/sh")
+            let mut child = Command::new(resolve_posix_sh())
                 .arg(&script)
                 .env("CAPILOT_AGENT_ID", "codex-agent")
                 .env("CAPILOT_STATUS_DIR", base.join("dir"))
@@ -294,7 +376,7 @@ mod tests {
         let script = base.join("hook.sh");
         std::fs::write(&script, STATUS_HOOK_SCRIPT).unwrap();
         let run = |payload: &str| {
-            let mut child = Command::new("/bin/sh")
+            let mut child = Command::new(resolve_posix_sh())
                 .arg(&script)
                 .env("CAPILOT_AGENT_ID", "seq-agent")
                 .env("CAPILOT_STATUS_DIR", base.join("dir"))

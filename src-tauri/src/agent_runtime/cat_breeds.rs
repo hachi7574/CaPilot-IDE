@@ -79,7 +79,7 @@ static USED: LazyLock<Mutex<HashSet<usize>>> = LazyLock::new(|| Mutex::new(HashS
 /// duplicate among visible terminals. The in-process set also closes the race
 /// between concurrent spawns whose persistence snapshots were taken together.
 pub fn next_breed_excluding(existing_titles: &HashSet<String>) -> &'static str {
-    let mut used = USED.lock().unwrap();
+    let mut used = USED.lock().unwrap_or_else(|p| p.into_inner());
     if used.len() >= BREEDS.len() {
         used.clear();
     }
@@ -141,7 +141,7 @@ mod tests {
 
         // Persisted names remain excluded even after the in-memory cycle state
         // is cleared, which models an IDE restart.
-        USED.lock().unwrap().clear();
+        USED.lock().unwrap_or_else(|p| p.into_inner()).clear();
         let existing: HashSet<String> = ["布偶".to_string(), "奥西".to_string()]
             .into_iter()
             .collect();

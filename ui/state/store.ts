@@ -405,6 +405,63 @@ export const defaultFileSearchState = (): FileSearchState => ({
 export const TODO_DRAG_MIME = "application/x-capilot-todo";
 
 /**
+ * In-memory todo-tag drag session. Windows WebView2 often fails to expose
+ * custom MIME types on `dataTransfer` during `dragover`, and in-app HTML5
+ * drags stick on 🚫 — so TodoPanel also drives a pointer-based drag that
+ * only uses this session id (no DataTransfer required at drop time).
+ */
+let activeTodoDragId: string | null = null;
+
+export function beginTodoDrag(tagId: string): void {
+  activeTodoDragId = tagId;
+}
+
+export function endTodoDrag(): void {
+  activeTodoDragId = null;
+}
+
+/** True when a todo tag is being dragged (HTML5 MIME and/or pointer session). */
+export function isTodoDrag(dt: DataTransfer | null | undefined): boolean {
+  if (activeTodoDragId) return true;
+  if (!dt) return false;
+  try {
+    return Array.from(dt.types as unknown as ArrayLike<string>).includes(
+      TODO_DRAG_MIME
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Resolve the tag id from the pointer session, falling back to DataTransfer. */
+export function getTodoDragId(dt: DataTransfer | null | undefined): string | null {
+  if (activeTodoDragId) return activeTodoDragId;
+  if (!dt) return null;
+  try {
+    const id = dt.getData(TODO_DRAG_MIME);
+    return id || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Shared dragover handler for todo-tag drop targets (sidebar / tabs / terminal). */
+export function acceptTodoDragOver(e: {
+  dataTransfer: DataTransfer | null;
+  preventDefault: () => void;
+  stopPropagation: () => void;
+}): void {
+  if (!isTodoDrag(e.dataTransfer)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  try {
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+  } catch {
+    // WebView2 may throw while effectAllowed is still negotiating.
+  }
+}
+
+/**
  * One task tag shown in the right sidebar's 概览 tab. Lifecycle:
  * `todo` (待分配, visible) → `assigned` (dropped onto a session, in-flight and
  * invisible) → `done` (待处理/待验收, visible with the session name). `done` is

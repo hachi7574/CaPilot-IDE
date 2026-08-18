@@ -191,6 +191,7 @@ export const zh = {
     "arcade": { name: "霓虹街机", note: "品红摇杆 · 赛博投币厅" },
     "handheld": { name: "荒原掌机", note: "橄榄 LCD · 风化塑料" },
     "field": { name: "深海维修站", note: "冷青磷光 · 深夜机舱" },
+    "bilibili": { name: "哔哩粉白", note: "小电视粉 · 樱花粉白" },
   },
 
   statusBar: {

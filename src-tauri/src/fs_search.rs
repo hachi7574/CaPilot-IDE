@@ -376,7 +376,7 @@ async fn search_rg(opts: &SearchOptions, key: &str) -> Result<SearchResult, Stri
     // old child (its handle is the only one, and we id-check before reaping).
     // The lock guard must not be held across `.await` (MutexGuard isn't Send),
     // so the insert's guard temp is dropped before the kill.
-    let previous = ACTIVE_RG.lock().unwrap().insert(key.to_string(), child);
+    let previous = ACTIVE_RG.lock().unwrap_or_else(|p| p.into_inner()).insert(key.to_string(), child);
     if let Some(mut prev) = previous {
         let _ = prev.kill().await;
         let _ = prev.wait().await;
@@ -445,7 +445,7 @@ async fn search_rg(opts: &SearchOptions, key: &str) -> Result<SearchResult, Stri
 /// newer search replaced it, put the newer child back untouched.
 async fn reap_child(key: &str, my_id: Option<u32>) -> Option<std::process::ExitStatus> {
     let child = {
-        let mut guard = ACTIVE_RG.lock().unwrap();
+        let mut guard = ACTIVE_RG.lock().unwrap_or_else(|p| p.into_inner());
         guard.remove(key)?
     };
     if child.id() == my_id {
@@ -453,7 +453,7 @@ async fn reap_child(key: &str, my_id: Option<u32>) -> Option<std::process::ExitS
         return child.wait().await.ok();
     }
     // A newer search owns the slot now — don't kill it; restore it.
-    ACTIVE_RG.lock().unwrap().insert(key.to_string(), child);
+    ACTIVE_RG.lock().unwrap_or_else(|p| p.into_inner()).insert(key.to_string(), child);
     None
 }
 

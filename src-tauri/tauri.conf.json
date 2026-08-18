@@ -46,6 +46,9 @@
       "appimage",
       "nsis"
     ],
+    "resources": {
+      "../themes/": "themes/"
+    },
     "createUpdaterArtifacts": true,
     "category": "DeveloperTool",
     "shortDescription": "CaPilot IDE — 本地 AI 编程工作区",

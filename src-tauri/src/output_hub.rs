@@ -242,7 +242,7 @@ mod tests {
             Arc::new(RecorderSub { rec: self.clone() })
         }
         fn seqs(&self) -> Vec<u64> {
-            self.seqs.lock().unwrap().clone()
+            self.seqs.lock().unwrap_or_else(|p| p.into_inner()).clone()
         }
         fn count(&self) -> usize {
             self.total.load(Ordering::Relaxed)
@@ -253,7 +253,7 @@ mod tests {
     }
     impl HubSubscriber for RecorderSub {
         fn on_output(&self, chunk: OutputChunk) -> SinkResult {
-            self.rec.seqs.lock().unwrap().push(chunk.seq);
+            self.rec.seqs.lock().unwrap_or_else(|p| p.into_inner()).push(chunk.seq);
             self.rec.total.fetch_add(chunk.data.len(), Ordering::Relaxed);
             Ok(())
         }
