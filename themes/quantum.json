@@ -2,8 +2,14 @@
   "id": "quantum",
   "name": "量子晶格",
   "note": "紫罗兰矩阵 · 精密计算舱",
-  "swatches": ["#080914", "#211D3B", "#9A86FF", "#58C7FF"],
+  "swatches": [
+    "#080914",
+    "#211D3B",
+    "#9A86FF",
+    "#58C7FF"
+  ],
   "colorScheme": "dark",
+  "termVeil": 0,
   "vars": {
     "--bg": "#080914",
     "--bg2": "#0E1020",
@@ -25,7 +31,7 @@
     "--danger": "#F27E9A",
     "--accent-ink": "#0B081A",
     "--term-bg": "#090A17",
-    "--term-veil": "1",
+    "--term-veil": "0",
     "--search-match-bg": "#423A72",
     "--brand-selection": "rgb(154 134 255 / 0.27)",
     "--brand-rgb": "154 134 255",
@@ -70,6 +76,11 @@
     "--panel-radius": "1px",
     "--control-shadow": "inset 0 1px 0 rgb(236 234 255 / 0.08), 2px 2px 0 #050611",
     "--panel-shadow": "0 0 0 1px #050611, 4px 4px 0 #050611, 0 0 18px rgb(154 134 255 / 0.09)",
-    "--shadow-hard": "4px 4px 0 #050611"
+    "--shadow-hard": "4px 4px 0 #050611",
+    "--wallpaper-surface-mix": "0.72",
+    "--wallpaper-chrome-mix": "0.78"
+  },
+  "wallpaper": {
+    "file": "capilot.mp4"
   }
 }

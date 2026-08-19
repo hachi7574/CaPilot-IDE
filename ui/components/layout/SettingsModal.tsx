@@ -9,7 +9,7 @@ import {
   UsageConfig,
   WallpaperMode,
 } from "../../state/store";
-import { THEMES, getTheme, DEFAULT_THEME_ID } from "../../state/themes";
+import { THEMES, getTheme, DEFAULT_THEME_ID, WALLPAPER_IMAGE_EXTS, WALLPAPER_VIDEO_EXTS } from "../../state/themes";
 import { checkForUpdate, downloadAndInstall } from "../../state/update";
 import {
   loadExitDaemonMode,
@@ -83,12 +83,25 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const setWallpaperOpacity = useStore((s) => s.setWallpaperOpacity);
   const soundEnabled = useStore((s) => s.soundEnabled);
   const setSoundEnabled = useStore((s) => s.setSoundEnabled);
+  const themeLabEnabled = useStore((s) => s.themeLabEnabled);
+  const setThemeLabEnabled = useStore((s) => s.setThemeLabEnabled);
   const ctrlTRuntime = useStore((s) => s.ctrlTRuntime);
   const setCtrlTRuntime = useStore((s) => s.setCtrlTRuntime);
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const themePickerRef = useRef<HTMLDivElement>(null);
   const [runtimeMenuOpen, setRuntimeMenuOpen] = useState(false);
   const runtimePickerRef = useRef<HTMLDivElement>(null);
+  const [namePacks, setNamePacks] = useState<
+    { id: string; name: string; note: string; count: number }[]
+  >([]);
+  const [namePackId, setNamePackId] = useState("tica-cats");
+  const [namePackMenuOpen, setNamePackMenuOpen] = useState(false);
+  const namePackPickerRef = useRef<HTMLDivElement>(null);
+  const [namePackPasteOpen, setNamePackPasteOpen] = useState(false);
+  const [namePackDraft, setNamePackDraft] = useState("");
+  const [namePackBusy, setNamePackBusy] = useState(false);
+  const [namePackMsg, setNamePackMsg] = useState<string | null>(null);
+  const [namePackErr, setNamePackErr] = useState<string | null>(null);
   const currentTheme = getTheme(themeId) ?? THEMES[0];
   const currentThemeLabel =
     themeLabel(locale, currentTheme.id) ?? {
@@ -114,7 +127,11 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
         filters: [
           {
             name: "Images",
-            extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp"],
+            extensions: [...WALLPAPER_IMAGE_EXTS],
+          },
+          {
+            name: "Videos",
+            extensions: [...WALLPAPER_VIDEO_EXTS],
           },
         ],
       });
@@ -169,11 +186,19 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
         setRuntimeMenuOpen(false);
         return;
       }
+      if (namePackMenuOpen) {
+        setNamePackMenuOpen(false);
+        return;
+      }
+      if (namePackPasteOpen) {
+        setNamePackPasteOpen(false);
+        return;
+      }
       onClose();
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [onClose, themeMenuOpen, runtimeMenuOpen]);
+  }, [onClose, themeMenuOpen, runtimeMenuOpen, namePackMenuOpen, namePackPasteOpen]);
 
   useEffect(() => {
     if (!themeMenuOpen) return;
@@ -196,6 +221,107 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     document.addEventListener("pointerdown", closeRuntimeMenu);
     return () => document.removeEventListener("pointerdown", closeRuntimeMenu);
   }, [runtimeMenuOpen]);
+
+  useEffect(() => {
+    let cancelled = false;
+    invoke<{
+      packs: { id: string; name: string; note: string; count: number }[];
+      activeId: string;
+    }>("name_packs_list")
+      .then((res) => {
+        if (cancelled) return;
+        setNamePacks(Array.isArray(res.packs) ? res.packs : []);
+        if (res.activeId) setNamePackId(res.activeId);
+      })
+      .catch(() => {
+        if (!cancelled) setNamePacks([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!namePackMenuOpen) return;
+    const closeMenu = (event: PointerEvent) => {
+      if (!namePackPickerRef.current?.contains(event.target as Node)) {
+        setNamePackMenuOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", closeMenu);
+    return () => document.removeEventListener("pointerdown", closeMenu);
+  }, [namePackMenuOpen]);
+
+  const applyImportedPack = (id: string) => {
+    setNamePackId(id);
+    setNamePackMenuOpen(false);
+    setNamePackPasteOpen(false);
+    setNamePackDraft("");
+    setNamePackErr(null);
+    invoke<{
+      packs: { id: string; name: string; note: string; count: number }[];
+      activeId: string;
+    }>("name_packs_list")
+      .then((res) => {
+        const packs = Array.isArray(res.packs) ? res.packs : [];
+        setNamePacks(packs);
+        const active = res.activeId || id;
+        setNamePackId(active);
+        const pack = packs.find((p) => p.id === active);
+        setNamePackMsg(t("settings.namePackImported", { name: pack?.name ?? active }));
+      })
+      .catch(() => {
+        setNamePackMsg(t("settings.namePackImported", { name: id }));
+      });
+  };
+
+  const importNamePackFile = async () => {
+    setNamePackErr(null);
+    setNamePackMsg(null);
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (typeof selected !== "string" || !selected) return;
+      setNamePackBusy(true);
+      const id = await invoke<string>("name_pack_import", {
+        sourcePath: selected,
+        content: null,
+      });
+      applyImportedPack(id);
+    } catch (e) {
+      setNamePackErr(t("settings.namePackImportFailed", { err: String(e) }));
+    } finally {
+      setNamePackBusy(false);
+    }
+  };
+
+  const importNamePackPaste = async () => {
+    const text = namePackDraft.trim();
+    if (!text) return;
+    setNamePackBusy(true);
+    setNamePackErr(null);
+    setNamePackMsg(null);
+    try {
+      const id = await invoke<string>("name_pack_import", {
+        sourcePath: null,
+        content: text,
+      });
+      applyImportedPack(id);
+    } catch (e) {
+      setNamePackErr(t("settings.namePackImportFailed", { err: String(e) }));
+    } finally {
+      setNamePackBusy(false);
+    }
+  };
+
+  const pickNamePack = (id: string) => {
+    setNamePackId(id);
+    setNamePackMenuOpen(false);
+    invoke("setting_set", { key: "name_pack", value: id }).catch(() => {});
+  };
 
   // App self-update slice.
   const currentVersion = useStore((s) => s.currentVersion);
@@ -1057,6 +1183,169 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               {soundEnabled ? t("common.on") : t("common.off")}
             </button>
           </div>
+
+          <div className="settings-field-label">
+            <span>{t("settings.themeLab")}</span>
+            <small>{t("settings.themeLabHint")}</small>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
+            <span style={{ fontSize: "var(--fs-sm)", color: "var(--ink2)" }}>{t("settings.themeLabToggle")}</span>
+            <button
+              onClick={() => setThemeLabEnabled(!themeLabEnabled)}
+              style={{
+                fontFamily: "var(--pixel)",
+                fontSize: "var(--fs-2xs)",
+                padding: "4px 12px",
+                border: `1px solid ${themeLabEnabled ? "var(--brand)" : "var(--rule2)"}`,
+                color: themeLabEnabled ? "var(--brand)" : "var(--ink2)",
+                background: themeLabEnabled ? "rgb(var(--brand-rgb) / .08)" : "transparent",
+                borderRadius: 6,
+                cursor: "pointer",
+              }}
+            >
+              {themeLabEnabled ? t("common.on") : t("common.off")}
+            </button>
+          </div>
+
+          <div className="settings-field-label settings-font-label">
+            <span>{t("settings.namePack")}</span>
+            <small>{t("settings.namePackHint")}</small>
+          </div>
+          {(() => {
+            const current =
+              namePacks.find((p) => p.id === namePackId) ?? namePacks[0] ?? null;
+            return (
+              <div className="settings-runtime-picker" ref={namePackPickerRef}>
+                <button
+                  type="button"
+                  className="settings-runtime-trigger"
+                  aria-label={t("settings.namePack")}
+                  aria-haspopup="listbox"
+                  aria-expanded={namePackMenuOpen}
+                  aria-controls="settings-namepack-menu"
+                  disabled={namePacks.length === 0}
+                  onClick={() => setNamePackMenuOpen((open) => !open)}
+                >
+                  <span className="settings-runtime-current">
+                    <span className="settings-runtime-current-copy">
+                      <b>{current ? current.name : t("settings.namePackEmpty")}</b>
+                      <small>
+                        {current
+                          ? current.note ||
+                            t("settings.namePackCount", { n: current.count })
+                          : t("settings.namePackEmptyHint")}
+                      </small>
+                    </span>
+                  </span>
+                  <span className="settings-theme-chevron" aria-hidden="true" />
+                </button>
+                {namePackMenuOpen && namePacks.length > 0 && (
+                  <div
+                    className="settings-runtime-menu"
+                    id="settings-namepack-menu"
+                    role="listbox"
+                    aria-label={t("settings.namePack")}
+                  >
+                    {namePacks.map((pack) => {
+                      const selected = pack.id === (current?.id ?? namePackId);
+                      return (
+                        <button
+                          key={pack.id}
+                          type="button"
+                          role="option"
+                          aria-selected={selected}
+                          className={`settings-runtime-option${selected ? " active" : ""}`}
+                          onClick={() => pickNamePack(pack.id)}
+                        >
+                          <span className="settings-runtime-option-copy">
+                            <b>{pack.name}</b>
+                            <small>
+                              {pack.note
+                                ? `${pack.note} · ${t("settings.namePackCount", { n: pack.count })}`
+                                : t("settings.namePackCount", { n: pack.count })}
+                            </small>
+                          </span>
+                          {selected && <span className="settings-runtime-option-state">ACTIVE</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+          <div className="settings-wallpaper-row" style={{ marginTop: 8 }}>
+            <div className="settings-wallpaper-actions">
+              <button
+                type="button"
+                className="settings-wallpaper-btn"
+                disabled={namePackBusy}
+                onClick={() => void importNamePackFile()}
+              >
+                {t("settings.namePackImportFile")}
+              </button>
+              <button
+                type="button"
+                className={`settings-wallpaper-btn${namePackPasteOpen ? "" : " ghost"}`}
+                disabled={namePackBusy}
+                onClick={() => setNamePackPasteOpen((open) => !open)}
+              >
+                {t("settings.namePackPaste")}
+              </button>
+            </div>
+          </div>
+          {namePackPasteOpen && (
+            <div className="settings-namepack-paste">
+              <label className="settings-field-label" htmlFor="settings-namepack-draft">
+                <span>{t("settings.namePackPasteTitle")}</span>
+                <small>{t("settings.namePackPasteHint")}</small>
+              </label>
+              <textarea
+                id="settings-namepack-draft"
+                className="modal-text-input"
+                rows={7}
+                spellCheck={false}
+                placeholder={t("settings.namePackPastePh")}
+                value={namePackDraft}
+                onChange={(e) => setNamePackDraft(e.target.value)}
+                style={{ width: "100%", resize: "vertical", fontFamily: "var(--mono)" }}
+              />
+              <div className="settings-wallpaper-actions" style={{ marginTop: 8 }}>
+                <button
+                  type="button"
+                  className="settings-wallpaper-btn"
+                  disabled={namePackBusy || !namePackDraft.trim()}
+                  onClick={() => void importNamePackPaste()}
+                >
+                  {t("settings.namePackSave")}
+                </button>
+                <button
+                  type="button"
+                  className="settings-wallpaper-btn ghost"
+                  onClick={() => {
+                    setNamePackPasteOpen(false);
+                    setNamePackDraft("");
+                  }}
+                >
+                  {t("common.cancel")}
+                </button>
+              </div>
+            </div>
+          )}
+          <p className="settings-help-text">
+            <b>{t("settings.namePackFormatTitle")} · </b>
+            {t("settings.namePackFormat")}
+          </p>
+          {namePackMsg && (
+            <p className="settings-help-text" style={{ color: "var(--success)" }}>
+              {namePackMsg}
+            </p>
+          )}
+          {namePackErr && (
+            <p className="settings-help-text" style={{ color: "var(--danger)" }}>
+              {namePackErr}
+            </p>
+          )}
         </section>
 
         {/* Session end handling */}

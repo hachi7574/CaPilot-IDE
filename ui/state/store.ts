@@ -33,8 +33,8 @@ export type FontScale = "s" | "m" | "l" | "xl" | "xxl";
 export type ThemeId = string;
 /**
  * Wallpaper source mode:
- * - `auto` — use the active theme cartridge's built-in image when present
- * - `custom` — use the user-picked local image path
+ * - `auto` — use the active theme cartridge's built-in still/video when present
+ * - `custom` — use the user-picked local still/video path
  * - `off` — no wallpaper layer
  */
 export type WallpaperMode = "auto" | "custom" | "off";
@@ -836,11 +836,17 @@ interface AppState {
    */
   wallpaperMode: WallpaperMode;
   wallpaperPath: string | null;
-  /** Wallpaper image opacity 0–1 (single control; no separate scrim). */
+  /** Wallpaper still/video opacity 0–1 (single control; no separate scrim). */
   wallpaperOpacity: number;
 
   /** Whether the running → other transition chime is enabled (default true). */
   soundEnabled: boolean;
+
+  /**
+   * Theme Editor floating panel. Off by default in production; Settings →
+   * Appearance toggles it. Independent of the DEV-only annotations tray.
+   */
+  themeLabEnabled: boolean;
 
   /** Runtime spawned by Ctrl+T (preference). The effective pick is resolved by
    *  `resolveCtrlTRuntime` (configured → claude → bash → hint). */
@@ -1010,6 +1016,8 @@ interface AppState {
   setCtrlTRuntime: (runtime: string) => void;
   setTodos: (todos: TodoTag[]) => void;
   addTodo: (text: string) => void;
+  /** Duplicate a tag into the same 待分配 list (same project/global scope). */
+  cloneTodo: (id: string) => void;
   updateTodoText: (id: string, text: string) => void;
   assignTodoToAgent: (
     id: string,
@@ -1022,6 +1030,8 @@ interface AppState {
   setAutoCheckUpdate: (enabled: boolean) => void;
   /** Persist the completion-chime toggle (Settings → 外观与显示). */
   setSoundEnabled: (enabled: boolean) => void;
+  /** Persist Theme Editor visibility (Settings → 外观与显示). */
+  setThemeLabEnabled: (enabled: boolean) => void;
   /** Poll the current version's CI build status (developer tool). */
   pollCiStatus: () => void;
 }
@@ -1077,6 +1087,18 @@ function loadThemeId(): ThemeId {
 const WALLPAPER_MODE_KEY = "capilot.wallpaper.mode";
 const WALLPAPER_PATH_KEY = "capilot.wallpaper.path";
 const WALLPAPER_OPACITY_KEY = "capilot.wallpaper.opacity";
+const THEME_LAB_ENABLED_KEY = "capilot.themeLab.enabled";
+
+function loadThemeLabEnabled(): boolean {
+  try {
+    const v = localStorage.getItem(THEME_LAB_ENABLED_KEY);
+    if (v === "1" || v === "true") return true;
+    if (v === "0" || v === "false") return false;
+  } catch {
+    // storage unavailable — hide by default
+  }
+  return false;
+}
 
 function clamp01(n: number): number {
   if (!Number.isFinite(n)) return 0;
@@ -1455,6 +1477,7 @@ export const useStore = create<AppState>((set, get) => {
   wallpaperOpacity: loadWallpaperOpacity(),
   ctrlTRuntime: loadCtrlTRuntime(),
   soundEnabled: true,
+  themeLabEnabled: loadThemeLabEnabled(),
   todos: [],
   todoScope: "global",
   currentVersion: null,
@@ -2337,6 +2360,15 @@ export const useStore = create<AppState>((set, get) => {
     }).catch(() => {});
   },
 
+  setThemeLabEnabled: (enabled) => {
+    try {
+      localStorage.setItem(THEME_LAB_ENABLED_KEY, enabled ? "1" : "0");
+    } catch {
+      // ignore storage errors
+    }
+    set({ themeLabEnabled: enabled });
+  },
+
   pollCiStatus: () => {
     const s = useStore.getState();
     if (s.ciPolling) return;
@@ -2368,6 +2400,25 @@ export const useStore = create<AppState>((set, get) => {
         agentId: null,
         sessionName: null,
         project,
+        createdAt: Date.now(),
+        doneAt: null,
+      };
+      const todos = [...s.todos, tag];
+      saveTodos(todos);
+      return { todos };
+    }),
+
+  cloneTodo: (id) =>
+    set((s) => {
+      const src = s.todos.find((t) => t.id === id);
+      if (!src) return {};
+      const tag: TodoTag = {
+        id: todoUid(),
+        text: src.text,
+        status: "todo",
+        agentId: null,
+        sessionName: null,
+        project: src.project ?? null,
         createdAt: Date.now(),
         doneAt: null,
       };

@@ -88,6 +88,19 @@ IDE 遵循 CaPilot 主仓库的 **LUCY styleguide**（8-bit Pixel × Apple Smoot
 > - **Linux deb / AppImage**：资源在包的 resource 树里（常见 `/usr/lib/<app>/…` 或 AppImage 只读镜像内），**不在** `/usr/bin`。
 > - **运行时仍读前端 Vite 内置 bundle**（`ui/state/themes.ts` 的 `import.meta.glob`）；磁盘上的 `themes/` 供检视与后续扩展，升级安装可能覆盖该目录。
 > - 用户自定义主题（未做）：规划路径 `<data_root>/themes/`，与只读官方资源分离，避免 Program Files / deb 不可写。
+>
+> 已落地（2026-08-20）：**主题编辑器进入构建版本**。
+> - 浮动主题编辑器不再被 `import.meta.env.DEV` 裁掉；`pnpm tauri build` 会打进生产包。
+> - 设置 → 外观 → 「显示主题编辑器」开关（默认关，写入 `localStorage` `capilot.themeLab.enabled`）。Ctrl+Shift+T 同步翻转该开关。
+> - 标注工具仍仅 `tauri dev`。
+> - 保存：开发态仍覆盖仓库 `themes/<id>.json`；安装包只读 `$RESOURCE/themes/`，写入 `<data_root>/themes/`（运行时目录仍读 Vite 内置 glob，磁盘副本供导出 / 后续热加载）。
+>
+> 已落地（2026-08-20）：**终端随机名称改为 JSON 名称库**。
+> - 仓库根 `name-packs/*.json` 经 `bundle.resources` 打进 `$RESOURCE/name-packs/`（安装目录旁可见）。
+> - 运行时还扫 `<install>/name-packs/` 与 `<data_root>/name-packs/`；同 id 后者覆盖前者，方便用户自己加一份。
+> - 设置 → 外观 → 终端名称库 切换；选中的 id 写入 settings KV `name_pack`（缺省 `tica-cats`）。
+> - 设置里可「导入文件」或「粘贴 JSON」。写入 `<data_root>/name-packs/<id>.json` 并立刻启用。
+> - JSON 形状：`{ "id", "name", "note", "names": ["…"] }`，或裸数组 `["甲","乙"]`（id 取文件名；粘贴时为 `pasted`）。编译期仍内嵌 TICA 列表作回退。
 
 > 已落地（2026-08-18）：**关闭确认仅在有存活 PTY 时弹出**。
 > - `handleTitlebarClose`（`ui/state/exitDaemon.ts`）：设置仍为「询问」时，若没有任何 live agent PTY（无终端 / 全休眠 / 全 ended），直接关窗，不弹 `ExitDaemonDialog`。

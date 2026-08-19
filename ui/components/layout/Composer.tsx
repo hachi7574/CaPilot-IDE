@@ -8,6 +8,7 @@ import {
   DragEvent,
   FormEvent,
 } from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -188,6 +189,7 @@ export function Composer() {
   const thinkingMenuRef = useRef<HTMLDivElement>(null);
   const refAnchorRef = useRef<HTMLSpanElement>(null);
   const refMenuRef = useRef<HTMLDivElement>(null);
+  const [pasteMenu, setPasteMenu] = useState<{ x: number; y: number } | null>(null);
 
   // Stale-response guard for async fs_list fetches in the `@` menu.
   const atReqRef = useRef(0);
@@ -1201,10 +1203,56 @@ export function Composer() {
       el.selectionStart = el.selectionEnd = newPos;
       el.focus();
       resizeTextarea(el);
-      setHasInput(true);
+      setIsBangInput(el.value.trimStart().startsWith("!"));
+      setHasInput(el.value.trim().length > 0);
     },
     [resizeTextarea]
   );
+
+  /** Paste clipboard text, replacing the current selection (right-click menu). */
+  const pasteClipboard = useCallback(async () => {
+    setPasteMenu(null);
+    let text = "";
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      text = "";
+    }
+    const el = textareaRef.current;
+    if (!el) return;
+    if (!text) {
+      el.focus();
+      return;
+    }
+    const start = el.selectionStart ?? el.value.length;
+    const end = el.selectionEnd ?? start;
+    el.value = el.value.slice(0, start) + text + el.value.slice(end);
+    const newPos = start + text.length;
+    el.selectionStart = el.selectionEnd = newPos;
+    el.focus();
+    resizeTextarea(el);
+    setIsBangInput(el.value.trimStart().startsWith("!"));
+    setHasInput(el.value.trim().length > 0);
+  }, [resizeTextarea]);
+
+  // Close the composer paste menu on outside click / Escape. Same 150 ms
+  // compositor-click guard as the sidebar / tab menus.
+  useEffect(() => {
+    if (!pasteMenu) return;
+    const openedAt = Date.now();
+    const close = () => {
+      if (Date.now() - openedAt > 150) setPasteMenu(null);
+    };
+    const onKey = (e: globalThis.KeyboardEvent) => e.key === "Escape" && close();
+    window.addEventListener("click", close);
+    window.addEventListener("contextmenu", close, true);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("contextmenu", close, true);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [pasteMenu]);
 
   /** Append `@<path> ` chips at the end of the message (drag & drop). */
   const appendPaths = useCallback(
@@ -1867,6 +1915,11 @@ export function Composer() {
       // reliably would require wiring into the channel/terminal or a new store
       // flag — both out of scope here. So the fixed heuristic stays.
       await sendPromptToAgent(agentId, agentInput, { waitForTui: justSpawned });
+      // dsh `/model` `/theme` (and similar in-TUI pickers) need terminal focus
+      // immediately after send — otherwise the next keystroke hits Composer.
+      if (configRuntimeId === "dsh" && /^\/(model|theme)\b/.test(agentInput)) {
+        useStore.getState().requestFocus("terminal");
+      }
     } catch (err) {
       console.error("Failed to send to agent:", err);
     } finally {
@@ -1879,6 +1932,7 @@ export function Composer() {
     resizeTextarea,
     pushDraft,
     addTodo,
+    configRuntimeId,
   ]);
 
   // Keep the auto-send bridge fresh whenever `handleSend` is recreated.
@@ -2001,12 +2055,45 @@ export function Composer() {
           cycleSendTarget();
         }
       } else if (e.key === "ArrowUp" && !e.currentTarget.value) {
+        // Don't steal empty-input arrows when a live TUI is attached — dsh
+        // `/model` / `/theme` pickers treat leftover Composer focus + draft
+        // history as "arrows do nothing / picker closes".
+        const liveId =
+          effectiveTarget?.kind === "agent"
+            ? effectiveTarget.agentId
+            : targetAgentId;
+        const st = useStore.getState();
+        const live =
+          !!liveId &&
+          st.agentChannels.has(liveId) &&
+          st.agents.get(liveId)?.status !== "done" &&
+          st.agents.get(liveId)?.status !== "failed";
+        if (live) {
+          e.preventDefault();
+          st.requestFocus("terminal");
+          return;
+        }
         e.preventDefault();
         const draft = navigateDraft(1);
         if (draft !== null) {
           e.currentTarget.value = draft;
         }
       } else if (e.key === "ArrowDown" && !e.currentTarget.value) {
+        const liveId =
+          effectiveTarget?.kind === "agent"
+            ? effectiveTarget.agentId
+            : targetAgentId;
+        const st = useStore.getState();
+        const live =
+          !!liveId &&
+          st.agentChannels.has(liveId) &&
+          st.agents.get(liveId)?.status !== "done" &&
+          st.agents.get(liveId)?.status !== "failed";
+        if (live) {
+          e.preventDefault();
+          st.requestFocus("terminal");
+          return;
+        }
         e.preventDefault();
         const draft = navigateDraft(-1);
         if (draft !== null) {
@@ -2015,8 +2102,17 @@ export function Composer() {
       } else if (e.key === "Escape") {
         // 终端式中断：向目标 agent 的 PTY 发原始 ESC 字节。模型/文件弹出
         // 菜单打开时，这次 Esc 只负责关菜单（窗口级监听），不中断。
+        // 输入区为空时也不发 ESC：dsh 的 Model/Theme picker 把 ESC 当退出。
         e.preventDefault();
-        if (!modelMenuOpen && !permissionMenuOpen && !thinkingMenuOpen && !refMenuOpen) abortAgentOperation();
+        if (
+          !modelMenuOpen &&
+          !permissionMenuOpen &&
+          !thinkingMenuOpen &&
+          !refMenuOpen &&
+          e.currentTarget.value.trim().length > 0
+        ) {
+          abortAgentOperation();
+        }
       }
     },
     [
@@ -2041,6 +2137,8 @@ export function Composer() {
       thinkingMenuOpen,
       refMenuOpen,
       abortAgentOperation,
+      effectiveTarget,
+      targetAgentId,
     ]
   );
 
@@ -2116,7 +2214,24 @@ export function Composer() {
 
   const effH = composerH;
 
+  const pasteMenuEl =
+    pasteMenu &&
+    createPortal(
+      <div
+        className="ctx-menu"
+        style={{ position: "fixed", left: pasteMenu.x, top: pasteMenu.y, zIndex: 1000 }}
+        onClick={(e) => e.stopPropagation()}
+        onContextMenu={(e) => e.stopPropagation()}
+      >
+        <div className="ctx-item" onClick={() => void pasteClipboard()}>
+          <Icon name="clipboard" size={13} /> {t("common.paste")}
+        </div>
+      </div>,
+      document.body
+    );
+
   return (
+    <>
     <div
       ref={composerRef}
       className={`composer${!composerOpen ? " composer-collapsed" : ""}`}
@@ -2222,6 +2337,16 @@ export function Composer() {
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
+        onContextMenu={(e) => {
+          const target = e.target as HTMLElement | null;
+          if (target?.closest("button, .ctx-menu")) return;
+          e.preventDefault();
+          e.stopPropagation();
+          setPasteMenu({
+            x: Math.min(e.clientX, window.innerWidth - 160),
+            y: Math.min(e.clientY, window.innerHeight - 50),
+          });
+        }}
       >
         <div className="ul-composer-input-row">
           <textarea
@@ -2649,5 +2774,7 @@ export function Composer() {
         />
       )}
     </div>
+    {pasteMenuEl}
+    </>
   );
 }

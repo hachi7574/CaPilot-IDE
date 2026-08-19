@@ -5,6 +5,7 @@ import {
   TodoTag,
   beginTodoDrag,
   endTodoDrag,
+  splitLeafTabIds,
 } from "../../state/store";
 import { assignTodoAndSend } from "../../state/agentActions";
 import { Icon } from "../Icon";
@@ -15,6 +16,138 @@ const TODOS_KEY = "todos";
 
 /** Movement (px) before a press becomes a pointer-drag instead of a click. */
 const POINTER_DRAG_THRESHOLD = 5;
+
+/** Same grouping as the left-sidebar tree: persisted project, else cwd. */
+function agentOwningProject(
+  agent: { workspace_id?: string | null; project?: string; cwd: string },
+  roots: Record<string, string>
+): string {
+  if (agent.workspace_id && agent.project) return agent.project;
+  const m = agent.cwd.match(/workspaces\/([^/]+)/);
+  if (m) return m[1]!;
+  for (const [name, root] of Object.entries(roots)) {
+    if (!root) continue;
+    const base = root.endsWith("/") ? root : `${root}/`;
+    if (agent.cwd === root || agent.cwd.startsWith(base)) return name;
+  }
+  const parts = agent.cwd.split("/").filter(Boolean);
+  return parts[parts.length - 1] || agent.cwd;
+}
+
+interface TodoSendSession {
+  agentId: string;
+  title: string;
+}
+
+/** Hover-revealed ⋯ on the left of a 待分配 tag: clone, or send to composer /
+ *  the unique visible terminal / a session in the current overview scope. */
+function TodoTagActions({
+  uniqueVisible,
+  sessions,
+  onClone,
+  onSendComposer,
+  onSendAgent,
+}: {
+  uniqueVisible: TodoSendSession | null;
+  sessions: TodoSendSession[];
+  onClone: () => void;
+  onSendComposer: () => void;
+  onSendAgent: (agentId: string) => void;
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (wrapRef.current?.contains(e.target as Node)) return;
+      setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const close = () => setOpen(false);
+
+  return (
+    <span ref={wrapRef} className={`todo-more${open ? " open" : ""}`}>
+      <button
+        type="button"
+        className="todo-more-btn"
+        title={t("todo.moreActions")}
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          e.preventDefault();
+        }}
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((v) => !v);
+        }}
+      >
+        <Icon name="ellipsis" size={12} />
+      </button>
+      {open && (
+        <div className="todo-more-menu" role="menu">
+          <div
+            className="todo-more-item"
+            role="menuitem"
+            onClick={() => {
+              onClone();
+              close();
+            }}
+          >
+            <Icon name="copy" size={12} /> {t("todo.clone")}
+          </div>
+          <div className="todo-more-sep" />
+          <div className="todo-more-label">{t("todo.sendTo")}</div>
+          <div
+            className="todo-more-item"
+            role="menuitem"
+            onClick={() => {
+              onSendComposer();
+              close();
+            }}
+          >
+            <Icon name="message-square" size={12} /> {t("todo.sendToComposer")}
+          </div>
+          {uniqueVisible && (
+            <div
+              className="todo-more-item"
+              role="menuitem"
+              onClick={() => {
+                onSendAgent(uniqueVisible.agentId);
+                close();
+              }}
+            >
+              <Icon name="square-terminal" size={12} /> {t("todo.sendToCurrent")}
+            </div>
+          )}
+          {sessions.map((session) => (
+            <div
+              key={session.agentId}
+              className="todo-more-item"
+              role="menuitem"
+              onClick={() => {
+                onSendAgent(session.agentId);
+                close();
+              }}
+            >
+              <Icon name="monitor" size={12} /> {session.title}
+            </div>
+          ))}
+        </div>
+      )}
+    </span>
+  );
+}
 
 /* ── Collapsible Section ─────────────────────────────────────────
  * Moved here from RightSidebar so TodoPanel owns its only remaining consumer
@@ -159,8 +292,14 @@ export function TodoPanel() {
   const sessionsRestored = useStore((s) => s.sessionsRestored);
   const hookStatus = useStore((s) => s.hookStatus);
   const addTodo = useStore((s) => s.addTodo);
+  const cloneTodo = useStore((s) => s.cloneTodo);
   const updateTodoText = useStore((s) => s.updateTodoText);
   const deleteTodo = useStore((s) => s.deleteTodo);
+  const agents = useStore((s) => s.agents);
+  const tabs = useStore((s) => s.tabs);
+  const splitTree = useStore((s) => s.splitTree);
+  const activeTabId = useStore((s) => s.activeTabId);
+  const projectRoots = useStore((s) => s.projectRoots);
 
   // Local UI state.
   const [hydrated, setHydrated] = useState(false);
@@ -223,6 +362,59 @@ export function TodoPanel() {
     [todos, hookStatus, inScope]
   );
 
+  // Sessions listed under 发送到 follow the overview scope (global = every live
+  // agent; project = only the focused project's). The extra "当前打开的唯一终端"
+  // row appears only when the content area shows exactly one live agent tab.
+  const sendSessions = useMemo(() => {
+    const out: TodoSendSession[] = [];
+    for (const [id, agent] of agents) {
+      if (agent.status === "done" || agent.status === "failed") continue;
+      if (
+        todoScope === "project" &&
+        agentOwningProject(agent, projectRoots) !== focusedProject
+      ) {
+        continue;
+      }
+      out.push({ agentId: id, title: agent.title || id });
+    }
+    return out;
+  }, [agents, todoScope, focusedProject, projectRoots]);
+
+  const uniqueVisible = useMemo(() => {
+    const visibleIds = splitTree
+      ? splitLeafTabIds(splitTree)
+      : activeTabId
+        ? [activeTabId]
+        : [];
+    const visibleAgents = visibleIds
+      .map((id) => tabs.find((tab) => tab.id === id))
+      .filter((tab) => tab && tab.type === "agent" && !!tab.agentId)
+      .map((tab) => tab!.agentId as string)
+      .filter((id) => {
+        const agent = agents.get(id);
+        return agent && agent.status !== "done" && agent.status !== "failed";
+      });
+    if (visibleAgents.length !== 1) return null;
+    const agentId = visibleAgents[0]!;
+    const agent = agents.get(agentId);
+    return { agentId, title: agent?.title || agentId };
+  }, [splitTree, activeTabId, tabs, agents]);
+
+  const sendTagToComposer = (tag: TodoTag) => {
+    window.dispatchEvent(
+      new CustomEvent("capilot:todo-drop", {
+        detail: { kind: "composer", tagId: tag.id, text: tag.text },
+      })
+    );
+  };
+
+  const sendTagToAgent = (tagId: string, agentId: string) => {
+    void assignTodoAndSend(tagId, agentId);
+    const store = useStore.getState();
+    const tab = store.tabs.find((tb) => tb.agentId === agentId);
+    if (tab) store.setActiveTab(tab.id);
+  };
+
   // Hydrate from the settings KV once session restore has settled, so an
   // assigned tag whose agent no longer exists (deleted while the app was
   // closed) reverts to 待分配 instead of staying stuck invisible.
@@ -284,7 +476,7 @@ export function TodoPanel() {
     tag: TodoTag
   ) => {
     if (e.button !== 0) return;
-    if ((e.target as HTMLElement).closest(".todo-trash")) return;
+    if ((e.target as HTMLElement).closest(".todo-trash, .todo-more")) return;
     e.preventDefault();
     pointerDragRef.current = {
       id: tag.id,
@@ -460,6 +652,13 @@ export function TodoPanel() {
                 onDoubleClick={() => setEditingId(tag.id)}
                 title={t("todo.dragHint")}
               >
+                <TodoTagActions
+                  uniqueVisible={uniqueVisible}
+                  sessions={sendSessions}
+                  onClone={() => cloneTodo(tag.id)}
+                  onSendComposer={() => sendTagToComposer(tag)}
+                  onSendAgent={(agentId) => sendTagToAgent(tag.id, agentId)}
+                />
                 <span className="todo-text">{tag.text}</span>
                 <span
                   className="todo-trash"

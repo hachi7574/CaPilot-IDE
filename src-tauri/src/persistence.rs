@@ -381,7 +381,11 @@ pub fn user_home_or_tmp() -> PathBuf {
 /// (`…/target/debug/capilot-ide` or `…/target/release/…`), i.e. **not** a
 /// user-installed binary. Packaged installs put the exe under the chosen
 /// install directory with no `target/{debug,release}` parent.
-fn exe_is_dev_build(exe: &Path) -> bool {
+///
+/// Used by data-root selection and by the quit path (dev builds default to
+/// killing the PTY daemon so a leftover `target/debug/capilot-ide.exe --daemon`
+/// does not lock the binary / confuse subsequent `tauri dev` runs).
+pub fn exe_is_dev_build(exe: &Path) -> bool {
     let mut comps = exe
         .components()
         .filter_map(|c| match c {

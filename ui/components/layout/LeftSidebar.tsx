@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { invoke, Channel } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { useStore, AgentInfo, AgentStatus, acceptTodoDragOver, getTodoDragId, isTodoDrag } from "../../state/store";
+import { useStore, AgentStatus, acceptTodoDragOver, getTodoDragId, isTodoDrag } from "../../state/store";
 import {
   spawnAgent,
   closeAgent as closeAgentAction,
@@ -1345,8 +1345,6 @@ function ContextMenu({
   // agent-derived values up here even though the other branches don't use them.
   const agent = useStore((s) => s.agents.get(ctx.agentId ?? ""));
   const allAgents = useStore((s) => s.agents);
-  const runtimes = useStore((s) => s.runtimes);
-  const addAgent = useStore((s) => s.addAgent);
   const worktrees = useStore((s) => s.worktrees);
   const projectRoots = useStore((s) => s.projectRoots);
 
@@ -1499,23 +1497,6 @@ function ContextMenu({
   const projRoot = project ? projectRoots[project] : undefined;
   const projWt = projRoot ? worktrees.find((w) => w.path === projRoot) : undefined;
 
-  const switchRuntime = async (runtime: string) => {
-    try {
-      const channel = new Channel<number[]>();
-      channel.onmessage = (data) =>
-        useStore.getState().appendAgentOutput(ctx.agentId ?? "", data);
-      const info = (await invoke("agent_switch_runtime", {
-        id: ctx.agentId,
-        runtime,
-        onData: channel,
-      })) as AgentInfo;
-      addAgent(info, channel);
-    } catch (e) {
-      console.error("runtime switch failed:", e);
-    }
-    onClose();
-  };
-
   const closeAgent = async () => {
     if (!ctx.agentId) return;
     // Same path as the sidebar × button: closes the tab + row immediately,
@@ -1543,19 +1524,6 @@ function ContextMenu({
         </div>
       )}
       {ctx.agentId && <div className="ctx-sep" />}
-      <div className="ctx-label">{t("leftSidebar.switchRuntime")}</div>
-      {runtimes.map((rt) => (
-        <div
-          key={rt.id}
-          className={`ctx-item${rt.id === agent?.runtime ? " current" : ""}`}
-          onClick={() => switchRuntime(rt.id)}
-        >
-          {rt.name}
-          {!rt.available && t("leftSidebar.notInstalled")}
-          {rt.id === agent?.runtime && t("leftSidebar.currentSuffix")}
-        </div>
-      ))}
-      <div className="ctx-sep" />
       <div className="ctx-item danger" onClick={closeAgent}>
         <Icon name="x" size={13} /> {t("leftSidebar.terminateAndClose")}
       </div>

@@ -44,6 +44,11 @@ impl CodexAdapter {
     /// codex supports. The hook script itself is env-gated (no-op when
     /// `CAPILOT_AGENT_ID` is absent), so the same command is safe to run under
     /// any codex invocation. Best-effort: a failed write degrades to no hooks.
+    ///
+    /// Do not overlay `mcp_servers.*` here. Codex profiles replace that table
+    /// instead of deep-merging it, so a stub like `enabled = false` (no
+    /// command/url) becomes an invalid transport and `config/batchWrite`
+    /// (project trust) fails.
     fn write_status_profile(agent_id: &str) -> std::io::Result<()> {
         let Some(profile) = Self::status_profile(agent_id) else {
             return Ok(());
@@ -720,6 +725,10 @@ mod tests {
                 .any(|a| a == "--dangerously-bypass-hook-trust"));
             let profile = CodexAdapter::status_profile("test").unwrap();
             let toml = std::fs::read_to_string(&profile).unwrap();
+            assert!(
+                !toml.contains("[mcp_servers"),
+                "profile must not overlay mcp_servers (table replace breaks transport): {toml}"
+            );
             assert!(toml.contains("[[hooks.UserPromptSubmit]]"));
             assert!(toml.contains("[[hooks.PermissionRequest]]"));
             // Hook command must invoke sh + hook.sh with quoted absolute paths

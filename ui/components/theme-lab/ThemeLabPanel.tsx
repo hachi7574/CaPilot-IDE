@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { invoke } from "@tauri-apps/api/core";
-import { save } from "@tauri-apps/plugin-dialog";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { useStore } from "../../state/store";
 import {
   THEMES,
   getTheme,
   notifyThemeVarsChanged,
+  isWallpaperVideo,
+  WALLPAPER_IMAGE_EXTS,
+  WALLPAPER_VIDEO_EXTS,
   type Theme,
 } from "../../state/themes";
 import {
@@ -14,10 +17,8 @@ import {
   MAX_BODY_HEIGHT,
   MIN_BODY_HEIGHT,
   loadThemeLabBodyHeight,
-  loadThemeLabCollapsed,
   loadThemeLabPos,
   saveThemeLabBodyHeight,
-  saveThemeLabCollapsed,
   saveThemeLabPos,
   type ThemeLabPos,
 } from "../../state/themeLab";
@@ -31,6 +32,7 @@ import {
   toColorInputValue,
   type LabToken,
 } from "./tokens";
+import "./theme-lab.css";
 
 /** Prefer keeping the full panel on-screen; never let it leave the viewport. */
 function clampPos(
@@ -80,9 +82,10 @@ function clampBodyHeight(h: number): number {
 
 function buildExportPayload(
   base: Theme,
-  draft: Record<string, string>
+  draft: Record<string, string>,
+  wallpaper?: Theme["wallpaper"] | null
 ): Record<string, unknown> {
-  const veil = parseFloat(draft["--term-veil"] ?? "1");
+  const veil = parseFloat(draft["--term-veil"] ?? "0");
   const vars = { ...base.vars, ...draft };
   // Prefer numeric top-level termVeil for authors.
   const out: Record<string, unknown> = {
@@ -91,10 +94,11 @@ function buildExportPayload(
     note: base.note,
     swatches: base.swatches,
     colorScheme: base.colorScheme,
-    termVeil: Number.isFinite(veil) ? Math.min(1, Math.max(0, veil)) : 1,
+    termVeil: Number.isFinite(veil) ? Math.min(1, Math.max(0, veil)) : 0,
     vars,
   };
-  if (base.wallpaper) out.wallpaper = base.wallpaper;
+  const wp = wallpaper === undefined ? base.wallpaper : wallpaper;
+  if (wp) out.wallpaper = wp;
   return out;
 }
 
@@ -105,7 +109,18 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
   const wallpaperOpacity = useStore((s) => s.wallpaperOpacity);
   const setWallpaperOpacity = useStore((s) => s.setWallpaperOpacity);
   const wallpaperMode = useStore((s) => s.wallpaperMode);
+  const setWallpaperMode = useStore((s) => s.setWallpaperMode);
+  const setWallpaperPath = useStore((s) => s.setWallpaperPath);
   const locale = useStore((s) => s.locale);
+
+  // Draft wallpaper for the active cartridge. `undefined` = keep base;
+  // `null` = explicitly cleared; object = new/edited file ref.
+  const [wallpaperDraft, setWallpaperDraft] = useState<
+    Theme["wallpaper"] | null | undefined
+  >(undefined);
+  const [wallpaperPreviewUrl, setWallpaperPreviewUrl] = useState<string | null>(
+    null
+  );
 
   const [bodyHeight, setBodyHeight] = useState(() =>
     clampBodyHeight(loadThemeLabBodyHeight())
@@ -113,7 +128,6 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
   const [pos, setPos] = useState<ThemeLabPos>(() =>
     resolveDefaultPos(loadThemeLabPos(), clampBodyHeight(loadThemeLabBodyHeight()))
   );
-  const [collapsed, setCollapsed] = useState(loadThemeLabCollapsed);
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [baseline, setBaseline] = useState<Record<string, string>>({});
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>(() => {
@@ -169,9 +183,15 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
   }, []);
 
   // Seed / re-seed when the active theme cartridge changes.
+  // Also restore wallpaper mode to "auto" so the shell shows that cartridge's
+  // built-in art instead of a leftover custom path from a previous pick.
   useEffect(() => {
     resnap(themeId);
-  }, [themeId, resnap]);
+    setWallpaperDraft(undefined);
+    setWallpaperPreviewUrl(null);
+    setWallpaperPath(null);
+    setWallpaperMode("auto");
+  }, [themeId, resnap, setWallpaperPath, setWallpaperMode]);
 
   // Live-paint draft onto <html>.
   useEffect(() => {
@@ -253,6 +273,8 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
     clearInlineOverrides([...touchedKeysRef.current]);
     touchedKeysRef.current.clear();
     setDraft({ ...baseline });
+    setWallpaperDraft(undefined);
+    setWallpaperPreviewUrl(null);
     notifyThemeVarsChanged();
     flash("ok", t("themeLab.resetDone"));
   }, [baseline, t, flash]);
@@ -381,19 +403,23 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
     document.body.classList.add("tl-resizing");
   };
 
-  const toggleCollapsed = () => {
-    setCollapsed((c) => {
-      const next = !c;
-      saveThemeLabCollapsed(next);
-      return next;
-    });
-  };
+  // ── Export / wallpaper helpers ──────────────────────────────
+  const effectiveWallpaper = useMemo(() => {
+    if (wallpaperDraft === undefined) return theme?.wallpaper ?? null;
+    return wallpaperDraft;
+  }, [theme, wallpaperDraft]);
 
-  // ── Export helpers ──────────────────────────────────────────
   const exportJson = useMemo(() => {
     if (!theme) return "{}";
-    return JSON.stringify(buildExportPayload(theme, draft), null, 2);
-  }, [theme, draft]);
+    const payload = buildExportPayload(theme, draft, effectiveWallpaper);
+    // Final mixed colors are CSS-owned — never write them into a cartridge.
+    const vars = payload.vars as Record<string, string> | undefined;
+    if (vars) {
+      delete vars["--wallpaper-surface"];
+      delete vars["--wallpaper-chrome"];
+    }
+    return JSON.stringify(payload, null, 2);
+  }, [theme, draft, effectiveWallpaper]);
 
   const copyJson = async () => {
     try {
@@ -404,56 +430,139 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
     }
   };
 
-  const downloadJson = () => {
-    const blob = new Blob([exportJson], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${theme?.id ?? "theme"}-lab.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    flash("ok", t("themeLab.downloaded"));
-  };
-
-  const saveToDisk = async (saveAs: boolean) => {
+  /** Overwrite themes/<id>.json in the repo with the current draft (incl. wallpaper). */
+  const saveCartridge = async () => {
+    if (!theme) return;
     try {
-      let path: string | null = null;
-      if (saveAs) {
-        const picked = await save({
-          defaultPath: `${theme?.id ?? "theme"}-lab.json`,
-          filters: [{ name: "Theme JSON", extensions: ["json"] }],
-        });
-        path = typeof picked === "string" ? picked : null;
-      } else {
-        // Overwrite the cartridge in the repo if we can resolve a path via dialog
-        // defaulting to themes/<id>.json name — still goes through save() so the
-        // user confirms the location (dev machines differ).
-        const picked = await save({
-          defaultPath: `themes/${theme?.id ?? "theme"}.json`,
-          filters: [{ name: "Theme JSON", extensions: ["json"] }],
-        });
-        path = typeof picked === "string" ? picked : null;
-      }
-      if (!path) return;
-      await invoke("fs_write", { path, content: exportJson });
+      const path = await invoke<string>("theme_lab_save_cartridge", {
+        id: theme.id,
+        content: exportJson,
+      });
+      // After a successful cartridge write, prefer the theme's own wallpaper
+      // (mode auto). Draft is cleared so dirty drops; the next Vite reload
+      // picks up the new wallpaperUrl from themes/wallpapers/.
+      setWallpaperDraft(undefined);
+      setWallpaperPreviewUrl(null);
+      setWallpaperPath(null);
+      setWallpaperMode("auto");
       flash("ok", t("themeLab.saved", { path }));
     } catch (e) {
       flash("err", t("themeLab.saveFailed", { err: String(e) }));
     }
   };
 
+  /**
+   * Save-as: pick any path (defaults under themes/). When the target looks like
+   * `…/themes/<id>.json`, rewrite the payload `id` to match the basename so the
+   * cartridge stays self-consistent in the catalog.
+   */
+  const saveCartridgeAs = async () => {
+    if (!theme) return;
+    try {
+      const picked = await save({
+        defaultPath: `themes/${theme.id}-copy.json`,
+        filters: [{ name: "Theme JSON", extensions: ["json"] }],
+      });
+      const path = typeof picked === "string" ? picked : null;
+      if (!path) return;
+
+      let content = exportJson;
+      const base = path.replace(/\\/g, "/").split("/").pop() ?? "";
+      const stem = base.replace(/\.json$/i, "");
+      const underThemes = /(?:^|\/)themes\/[^/]+\.json$/i.test(
+        path.replace(/\\/g, "/")
+      );
+      if (underThemes && stem && stem !== theme.id) {
+        try {
+          const parsed = JSON.parse(exportJson) as Record<string, unknown>;
+          parsed.id = stem;
+          content = JSON.stringify(parsed, null, 2);
+        } catch {
+          // keep original payload if parse fails
+        }
+      }
+
+      await invoke("fs_write", { path, content });
+      flash("ok", t("themeLab.savedAs", { path }));
+    } catch (e) {
+      flash("err", t("themeLab.saveFailed", { err: String(e) }));
+    }
+  };
+
+  const pickWallpaper = async () => {
+    if (!theme) return;
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        // Prefer the catalog folder so picking an existing asset is a no-copy
+        // reference (backend returns basename when source is under wallpapers/).
+        defaultPath: "themes/wallpapers",
+        filters: [
+          {
+            name: "Images",
+            extensions: [...WALLPAPER_IMAGE_EXTS],
+          },
+          {
+            name: "Videos",
+            extensions: [...WALLPAPER_VIDEO_EXTS],
+          },
+        ],
+      });
+      if (typeof selected !== "string" || !selected) return;
+      const file = await invoke<string>("theme_lab_import_wallpaper", {
+        themeId: theme.id,
+        sourcePath: selected,
+      });
+      const next = {
+        file,
+        opacity: theme.wallpaper?.opacity,
+        size: theme.wallpaper?.size,
+        position: theme.wallpaper?.position,
+      };
+      setWallpaperDraft(next);
+      // Live preview: prefer the source path (works for both external picks and
+      // files already in themes/wallpapers/). After Save + Vite reload, the
+      // cartridge's bundled wallpaperUrl takes over under mode "auto".
+      try {
+        setWallpaperPreviewUrl(convertFileSrc(selected));
+      } catch {
+        setWallpaperPreviewUrl(null);
+      }
+      // Session preview only — do NOT lock wallpaperMode to "custom", or
+      // switching themes later would keep showing this path. Preview rides on
+      // the editor's own preview strip + a temporary custom path that theme
+      // switches clear.
+      setWallpaperPath(selected);
+      setWallpaperMode("custom");
+      flash("ok", t("themeLab.wallpaperPicked", { file }));
+    } catch (e) {
+      flash("err", t("themeLab.wallpaperPickFailed", { err: String(e) }));
+    }
+  };
+
+  const clearWallpaper = () => {
+    setWallpaperDraft(null);
+    setWallpaperPreviewUrl(null);
+    // Drop any temporary custom preview so the shell goes blank until save
+    // (or until the user switches to another theme with built-in art).
+    setWallpaperPath(null);
+    setWallpaperMode("auto");
+    flash("ok", t("themeLab.wallpaperCleared"));
+  };
+
   const dirty = useMemo(() => {
+    if (wallpaperDraft !== undefined) return true;
     for (const k of Object.keys(draft)) {
       if (draft[k] !== baseline[k]) return true;
     }
     return false;
-  }, [draft, baseline]);
+  }, [draft, baseline, wallpaperDraft]);
 
   const renderTokenRow = (tok: LabToken) => {
     const value = draft[tok.name] ?? "";
     const isDirty = value !== (baseline[tok.name] ?? "");
-    const label =
-      (tok.labelKey && t(`themeLab.token.${tok.labelKey}`)) || tok.name;
+    const label = t(`themeLab.token.${tok.labelKey}`);
 
     return (
       <div className="tl-row" key={tok.name}>
@@ -513,9 +622,7 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
   const panel = (
     <div
       ref={panelRef}
-      className={`tl-panel${collapsed ? " collapsed" : ""}${
-        dragging ? " dragging" : ""
-      }`}
+      className={`tl-panel${dragging ? " dragging" : ""}`}
       style={{ left: pos.x, top: pos.y }}
       data-theme-lab
     >
@@ -525,14 +632,6 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
         title={t("themeLab.dragHint")}
       >
         <span className="tl-title">{t("themeLab.title")}</span>
-        <button
-          type="button"
-          className="tl-head-btn"
-          onClick={toggleCollapsed}
-          title={collapsed ? t("themeLab.expand") : t("themeLab.collapse")}
-        >
-          {collapsed ? "+" : "–"}
-        </button>
         {onHide && (
           <button
             type="button"
@@ -546,9 +645,11 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
         )}
       </div>
 
-      {!collapsed && (
-        <>
-          <div className="tl-body" style={{ height: bodyHeight }}>
+      <div
+        className="tl-body"
+        style={{ maxHeight: bodyHeight }}
+        data-tl-scroll
+      >
             <div className="tl-chips">
               {THEMES.map((th) => {
                 const label = themeLabel(locale, th.id) ?? {
@@ -574,28 +675,57 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
               })}
             </div>
 
-            <div className="tl-wallpaper-row">
-              <label htmlFor="tl-wp-opacity">
-                {t("themeLab.wallpaperOpacity")}
-                {wallpaperMode === "off"
-                  ? ` (${t("themeLab.wallpaperOff")})`
-                  : ""}
-              </label>
-              <input
-                id="tl-wp-opacity"
-                className="tl-range"
-                type="range"
-                min={0}
-                max={1}
-                step={0.01}
-                value={wallpaperOpacity}
-                onChange={(e) =>
-                  setWallpaperOpacity(parseFloat(e.target.value))
-                }
-              />
-              <span className="tl-ratio-val">
-                {wallpaperOpacity.toFixed(2)}
-              </span>
+            <div className="tl-wallpaper-block">
+              <div className="tl-wallpaper-row">
+                <span className="tl-wallpaper-label">
+                  {t("themeLab.wallpaper")}
+                </span>
+                <span
+                  className="tl-wallpaper-file"
+                  title={effectiveWallpaper?.file ?? ""}
+                >
+                  {effectiveWallpaper?.file
+                    ? effectiveWallpaper.file
+                    : t("themeLab.wallpaperNone")}
+                </span>
+              </div>
+              <div className="tl-wallpaper-actions">
+                <button type="button" onClick={() => void pickWallpaper()}>
+                  {t("themeLab.wallpaperPick")}
+                </button>
+                {effectiveWallpaper && (
+                  <button type="button" onClick={clearWallpaper}>
+                    {t("themeLab.wallpaperClear")}
+                  </button>
+                )}
+              </div>
+              {(wallpaperPreviewUrl || theme?.wallpaperUrl) && (
+                isWallpaperVideo(
+                  wallpaperDraft?.file ?? theme?.wallpaper?.file ?? wallpaperPreviewUrl
+                ) ? (
+                  <video
+                    className="tl-wallpaper-preview"
+                    src={wallpaperPreviewUrl || theme?.wallpaperUrl || ""}
+                    muted
+                    loop
+                    playsInline
+                    autoPlay
+                    preload="metadata"
+                    aria-hidden
+                  />
+                ) : (
+                  <div
+                    className="tl-wallpaper-preview"
+                    style={{
+                      // JSON.stringify quotes the URL safely for CSS url("…")
+                      backgroundImage: `url(${JSON.stringify(
+                        wallpaperPreviewUrl || theme?.wallpaperUrl || ""
+                      )})`,
+                    }}
+                    aria-hidden
+                  />
+                )
+              )}
             </div>
 
             {LAB_GROUPS.map((g) => {
@@ -614,6 +744,34 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
                   </button>
                   {open && (
                     <div className="tl-group-body">
+                      {g.id === "layers" && (
+                        <div className="tl-row">
+                          <div className="tl-row-label">
+                            {t("themeLab.wallpaperOpacity")}
+                            {wallpaperMode === "off"
+                              ? ` (${t("themeLab.wallpaperOff")})`
+                              : ""}
+                          </div>
+                          <div className="tl-row-controls">
+                            <input
+                              id="tl-wp-opacity"
+                              className="tl-range"
+                              type="range"
+                              min={0}
+                              max={1}
+                              step={0.01}
+                              value={wallpaperOpacity}
+                              onChange={(e) =>
+                                setWallpaperOpacity(parseFloat(e.target.value))
+                              }
+                              aria-label={t("themeLab.wallpaperOpacity")}
+                            />
+                            <span className="tl-ratio-val">
+                              {wallpaperOpacity.toFixed(2)}
+                            </span>
+                          </div>
+                        </div>
+                      )}
                       {g.tokens.map(renderTokenRow)}
                     </div>
                   )}
@@ -628,17 +786,19 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
               <button type="button" onClick={() => void copyJson()}>
                 {t("themeLab.copy")}
               </button>
-              <button type="button" onClick={downloadJson}>
-                {t("themeLab.download")}
-              </button>
               <button
                 type="button"
                 className="primary"
-                onClick={() => void saveToDisk(false)}
+                onClick={() => void saveCartridge()}
+                title={t("themeLab.saveHint")}
               >
                 {t("themeLab.save")}
               </button>
-              <button type="button" onClick={() => void saveToDisk(true)}>
+              <button
+                type="button"
+                onClick={() => void saveCartridgeAs()}
+                title={t("themeLab.saveAsHint")}
+              >
                 {t("themeLab.saveAs")}
               </button>
             </div>
@@ -648,16 +808,14 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
             <div className="tl-hint">{t("themeLab.hint")}</div>
           </div>
 
-          <div
-            className="tl-resize"
-            onPointerDown={startResize}
-            title={t("themeLab.resizeHint")}
-            role="separator"
-            aria-orientation="horizontal"
-            aria-label={t("themeLab.resizeHint")}
-          />
-        </>
-      )}
+      <div
+        className="tl-resize"
+        onPointerDown={startResize}
+        title={t("themeLab.resizeHint")}
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label={t("themeLab.resizeHint")}
+      />
     </div>
   );
 

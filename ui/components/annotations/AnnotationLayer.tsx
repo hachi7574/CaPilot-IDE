@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   useAnnotations,
   pickElement,
@@ -107,7 +108,18 @@ export function AnnotationLayer() {
       });
     };
 
+    // Some compositors (WebKitGTK) synthesize a `click` after contextmenu;
+    // swallow that so we don't also pick an element on the way out.
+    let suppressClick = false;
+
     const onClick = (e: MouseEvent) => {
+      if (suppressClick) {
+        suppressClick = false;
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      if (e.button !== 0) return;
       const t = e.target as HTMLElement | null;
       if (!t) return;
       if (t.closest("[data-annot-ui]")) return; // our chrome handles its own clicks
@@ -138,13 +150,26 @@ export function AnnotationLayer() {
       else setMode(false);
     };
 
+    // Right-click always leaves annotation mode (and drops a pending comment).
+    // Capture + stop so the click doesn't also open a tab / file-tree / paste
+    // menu underneath.
+    const onContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      suppressClick = true;
+      setPending(null);
+      setMode(false);
+    };
+
     window.addEventListener("mousemove", onMove);
     window.addEventListener("click", onClick, true);
+    window.addEventListener("contextmenu", onContextMenu, true);
     window.addEventListener("keydown", onKey);
     return () => {
       if (raf) cancelAnimationFrame(raf);
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("click", onClick, true);
+      window.removeEventListener("contextmenu", onContextMenu, true);
       window.removeEventListener("keydown", onKey);
       document.body.classList.remove("annot-mode");
     };
@@ -187,7 +212,11 @@ export function AnnotationLayer() {
     };
   }, [annotations]);
 
-  return (
+  // Portal to document.body so the overlay stack shares the same root stacking
+  // context as Theme Lab (also body-portaled). Otherwise highlight/markers
+  // paint under the lab even with a higher z-index, because `.app` creates its
+  // own stacking context.
+  const overlay = (
     <>
       {mode && (
         <div className="annot-layer" data-annot-overlay>
@@ -236,6 +265,9 @@ export function AnnotationLayer() {
       )}
     </>
   );
+
+  if (typeof document === "undefined") return overlay;
+  return createPortal(overlay, document.body);
 }
 
 /* ── Comment popup ────────────────────────────────────────────── */

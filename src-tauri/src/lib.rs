@@ -107,6 +107,10 @@ const FOCUSED_PROJECT_KEY: &str = "focused_project";
 /// is ready; the KV copy is the durable source for future multi-device sync.
 const LOCALE_KEY: &str = "locale";
 
+/// Settings KV key: which JSON name-pack to draw new terminal titles from.
+/// Value is a pack id (`tica-cats`, …). Unknown / unset → default pack.
+const NAME_PACK_KEY: &str = agent_runtime::cat_breeds::NAME_PACK_KEY;
+
 /// User-configured launch override for one runtime (the adapter's defaults win
 /// unless a field is set to a non-empty string).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -383,7 +387,7 @@ fn build_and_spawn(
             .into_iter()
             .map(|record| record.title)
             .collect();
-        agent_runtime::cat_breeds::next_breed_excluding(&existing_titles).to_string()
+        agent_runtime::cat_breeds::next_breed_excluding(&existing_titles)
     });
 
     // Persist metadata + session (best-effort; PTY already running).
@@ -1753,6 +1757,7 @@ fn setting_set(
         EXIT_DAEMON_MODE_KEY,
         FOCUSED_PROJECT_KEY,
         LOCALE_KEY,
+        NAME_PACK_KEY,
     ];
     if !ALLOWED.contains(&key.as_str()) {
         return Err(format!("unknown setting key: {}", key));
@@ -1768,7 +1773,106 @@ fn setting_set(
         value
     };
     let db = persistence.lock_db();
-    db.set_setting(&key, &value).map_err(|e| e.to_string())
+    db.set_setting(&key, &value).map_err(|e| e.to_string())?;
+    if key == NAME_PACK_KEY {
+        agent_runtime::cat_breeds::set_active_id(&value);
+    }
+    Ok(())
+}
+
+/// One JSON name-pack the Settings picker can switch to.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct NamePackListItem {
+    id: String,
+    name: String,
+    note: String,
+    count: usize,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct NamePacksList {
+    packs: Vec<NamePackListItem>,
+    active_id: String,
+}
+
+/// List on-disk name-packs (bundled + `<install>/name-packs` + `<data_root>/name-packs`)
+/// and the currently active id. Rescans so a user-dropped JSON shows up without restart.
+#[tauri::command]
+fn name_packs_list(
+    app: tauri::AppHandle,
+    persistence: tauri::State<'_, Arc<Persistence>>,
+) -> Result<NamePacksList, String> {
+    let resource_dir = app.path().resource_dir().ok();
+    agent_runtime::cat_breeds::refresh_from_disk(resource_dir.as_deref());
+    let saved = {
+        let db = persistence.lock_db();
+        db.get_setting(NAME_PACK_KEY)
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default()
+    };
+    let active_id = if saved.is_empty() {
+        agent_runtime::cat_breeds::active_id()
+    } else {
+        agent_runtime::cat_breeds::set_active_id(&saved)
+    };
+    let packs = agent_runtime::cat_breeds::list_packs()
+        .into_iter()
+        .map(|p| NamePackListItem {
+            id: p.id,
+            name: p.name,
+            note: p.note,
+            count: p.count,
+        })
+        .collect();
+    Ok(NamePacksList { packs, active_id })
+}
+
+/// Import a name-pack from a filesystem JSON file or pasted text.
+/// Writes under `<data_root>/name-packs/<id>.json` and returns the installed id.
+#[tauri::command]
+fn name_pack_import(
+    persistence: tauri::State<'_, Arc<Persistence>>,
+    source_path: Option<String>,
+    content: Option<String>,
+) -> Result<String, String> {
+    let (bytes, stem) = if let Some(raw) = content.filter(|s| !s.trim().is_empty()) {
+        if raw.len() as u64 > 256 * 1024 {
+            return Err("粘贴内容超过 256 KiB".into());
+        }
+        (raw.into_bytes(), "pasted".to_string())
+    } else if let Some(path) = source_path.filter(|s| !s.trim().is_empty()) {
+        let path = std::path::PathBuf::from(path);
+        if !path.is_absolute() {
+            return Err("请选择一个绝对路径的 JSON 文件".into());
+        }
+        if path.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("json")) != Some(true)
+        {
+            return Err("只接受 .json 文件".into());
+        }
+        let meta = std::fs::metadata(&path).map_err(|e| format!("读不到文件: {e}"))?;
+        if !meta.is_file() || meta.len() > 256 * 1024 {
+            return Err("文件太大或不是普通文件（上限 256 KiB）".into());
+        }
+        let bytes = std::fs::read(&path).map_err(|e| format!("读取失败: {e}"))?;
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("imported")
+            .to_string();
+        (bytes, stem)
+    } else {
+        return Err("请选择 JSON 文件或粘贴内容".into());
+    };
+    let id = agent_runtime::cat_breeds::install_user_pack(&bytes, &stem)?;
+    {
+        let db = persistence.lock_db();
+        db.set_setting(NAME_PACK_KEY, &id)
+            .map_err(|e| e.to_string())?;
+    }
+    agent_runtime::cat_breeds::set_active_id(&id);
+    Ok(id)
 }
 
 /// Stage the exit policy for the *next* window close only. Called by the
@@ -2175,6 +2279,227 @@ async fn fs_write(path: String, content: String) -> Result<(), String> {
     }
 
     std::fs::write(&resolved, &content).map_err(|e| format!("Failed to write file: {}", e))
+}
+
+// ── Theme Editor (cartridge write helpers) ──────────────────────
+//
+// The editor ships in production. Writes prefer the source checkout's
+// `themes/` when running from a repo (`pnpm tauri dev` / local cargo), so
+// authors overwrite the cartridge Vite will reload. Packaged installs have
+// a read-only `$RESOURCE/themes/`; those writes land in the user-writable
+// `<data_root>/themes/` overlay instead (create on demand). Runtime catalog
+// is still the Vite glob — disk overlay is for export / a future loader.
+// Writes still go through `path_is_allowed`.
+
+/// Locate a writable `themes/` directory.
+fn resolve_themes_dir() -> Result<std::path::PathBuf, String> {
+    if let Ok(cwd) = std::env::current_dir() {
+        // Try cwd, then parents (tauri dev often starts inside src-tauri/).
+        let mut dir = cwd;
+        for _ in 0..6 {
+            let candidate = dir.join("themes");
+            let looks_like_repo = dir.join("src-tauri").is_dir() || dir.join("ui").is_dir();
+            if candidate.is_dir() && looks_like_repo {
+                return candidate
+                    .canonicalize()
+                    .map_err(|e| format!("themes canonicalize: {e}"));
+            }
+            // Also accept being inside themes/ already, next to a repo marker.
+            if dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.eq_ignore_ascii_case("themes"))
+                && dir.is_dir()
+                && (dir
+                    .parent()
+                    .map(|p| p.join("src-tauri").is_dir() || p.join("ui").is_dir())
+                    .unwrap_or(false))
+            {
+                return dir
+                    .canonicalize()
+                    .map_err(|e| format!("themes canonicalize: {e}"));
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+    }
+
+    // Packaged / no checkout: user overlay under the data root.
+    let user = crate::persistence::data_root().join("themes");
+    std::fs::create_dir_all(&user).map_err(|e| format!("create data themes/: {e}"))?;
+    let user = user
+        .canonicalize()
+        .map_err(|e| format!("themes canonicalize: {e}"))?;
+    if !crate::persistence::path_is_allowed(&user)? {
+        return Err("data_root/themes is outside allowed directories".into());
+    }
+    Ok(user)
+}
+
+/// Theme ids are filesystem basenames: `^[a-z0-9][a-z0-9_-]*$`.
+fn validate_theme_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || id.len() > 64 {
+        return Err("Invalid theme id".into());
+    }
+    let mut chars = id.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        return Err("Invalid theme id".into());
+    }
+    if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_') {
+        return Err("Invalid theme id".into());
+    }
+    Ok(())
+}
+
+/// Sanitize a wallpaper basename: keep the original stem when safe, else a
+/// short hash; always force a known still-image or looping-video extension.
+fn sanitize_wallpaper_name(original: &str, theme_id: &str) -> Result<String, String> {
+    let path = std::path::Path::new(original);
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("png")
+        .to_ascii_lowercase();
+    let allowed = [
+        "png", "jpg", "jpeg", "webp", "gif", "bmp", "mp4", "webm", "mov", "m4v",
+    ];
+    if !allowed.iter().any(|a| *a == ext) {
+        return Err(format!("Unsupported wallpaper extension: .{ext}"));
+    }
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("wallpaper");
+    // Keep CJK / alnum / dash / underscore / space; collapse the rest.
+    let mut clean = String::new();
+    for ch in stem.chars() {
+        if ch.is_alphanumeric() || ch == '-' || ch == '_' || ch == ' ' {
+            clean.push(ch);
+        } else if !clean.ends_with('_') {
+            clean.push('_');
+        }
+    }
+    let clean = clean.trim().trim_matches('_');
+    let base = if clean.is_empty() {
+        format!("{theme_id}-wallpaper")
+    } else {
+        // Cap length so Windows paths stay comfortable.
+        let truncated: String = clean.chars().take(48).collect();
+        truncated
+    };
+    Ok(format!("{base}.{ext}"))
+}
+
+/// Overwrite `themes/<id>.json` with the Theme Lab export payload.
+/// Returns the absolute path written.
+#[tauri::command]
+async fn theme_lab_save_cartridge(id: String, content: String) -> Result<String, String> {
+    validate_theme_id(&id)?;
+    if content.len() > 2 * 1024 * 1024 {
+        return Err("Theme JSON too large".into());
+    }
+    // Cheap sanity: must look like a JSON object.
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with('{') {
+        return Err("Theme payload must be a JSON object".into());
+    }
+    let themes = resolve_themes_dir()?;
+    if !crate::persistence::path_is_allowed(&themes)? {
+        return Err("themes/ is outside allowed directories".into());
+    }
+    let path = themes.join(format!("{id}.json"));
+    // Refuse to follow a symlink out of themes/.
+    if let Ok(meta) = std::fs::symlink_metadata(&path) {
+        if meta.file_type().is_symlink() {
+            return Err("Refusing to overwrite theme via symlink".into());
+        }
+    }
+    std::fs::write(&path, content.as_bytes())
+        .map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Import an image for a cartridge backdrop.
+///
+/// Returns the basename to put in `wallpaper.file`.
+/// - If `source_path` is **already** under `themes/wallpapers/`, no copy is made
+///   — the existing basename is returned as-is (avoids `foo-6ab9966a.jpg` clones).
+/// - Otherwise the file is copied into `themes/wallpapers/` under a sanitized
+///   name. Same-name collisions **overwrite** (or reuse when content is
+///   identical) instead of minting hashed duplicates.
+#[tauri::command]
+async fn theme_lab_import_wallpaper(
+    theme_id: String,
+    source_path: String,
+) -> Result<String, String> {
+    validate_theme_id(&theme_id)?;
+    let src = std::path::Path::new(&source_path)
+        .canonicalize()
+        .map_err(|e| format!("Invalid source wallpaper: {e}"))?;
+    if !crate::persistence::path_is_allowed(&src)? {
+        return Err("Source wallpaper is outside allowed directories".into());
+    }
+    if !src.is_file() {
+        return Err("Source path is not a file".into());
+    }
+    // Bound file size (80 MiB) so a mis-click can't dump a huge asset into the
+    // repo. Stills stay tiny; a short 720p wallpaper loop fits comfortably.
+    let meta = std::fs::metadata(&src).map_err(|e| format!("stat source: {e}"))?;
+    if meta.len() > 80 * 1024 * 1024 {
+        return Err("Wallpaper larger than 80 MiB".into());
+    }
+    let themes = resolve_themes_dir()?;
+    let wallpapers = themes.join("wallpapers");
+    if !wallpapers.is_dir() {
+        std::fs::create_dir_all(&wallpapers)
+            .map_err(|e| format!("create wallpapers/: {e}"))?;
+    }
+    let wallpapers = wallpapers
+        .canonicalize()
+        .map_err(|e| format!("wallpapers canonicalize: {e}"))?;
+    if !crate::persistence::path_is_allowed(&wallpapers)? {
+        return Err("wallpapers/ is outside allowed directories".into());
+    }
+
+    // Already in the catalog folder → just reference it; never clone.
+    if src.starts_with(&wallpapers) {
+        let name = src
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| "Invalid wallpaper basename".to_string())?
+            .to_string();
+        // Still validate extension.
+        let _ = sanitize_wallpaper_name(&name, &theme_id)?;
+        return Ok(name);
+    }
+
+    let original_name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("wallpaper.png");
+    let name = sanitize_wallpaper_name(original_name, &theme_id)?;
+    let dest = wallpapers.join(&name);
+
+    if dest.exists() {
+        // Identical content → reuse; otherwise overwrite in place (no hash clone).
+        let same = std::fs::read(&src)
+            .ok()
+            .zip(std::fs::read(&dest).ok())
+            .is_some_and(|(a, b)| a == b);
+        if same {
+            return Ok(name);
+        }
+        if let Ok(meta_d) = std::fs::symlink_metadata(&dest) {
+            if meta_d.file_type().is_symlink() {
+                return Err("Refusing to overwrite wallpaper via symlink".into());
+            }
+        }
+    }
+
+    std::fs::copy(&src, &dest).map_err(|e| format!("copy wallpaper: {e}"))?;
+    Ok(name)
 }
 
 #[tauri::command]
@@ -4096,7 +4421,7 @@ fn repair_session_titles(persistence: &Persistence) {
         if !duplicate {
             continue;
         }
-        let title = agent_runtime::cat_breeds::next_breed_excluding(&occupied).to_string();
+        let title = agent_runtime::cat_breeds::next_breed_excluding(&occupied);
         occupied.insert(title.clone());
         {
             let db = persistence.lock_db();
@@ -4188,6 +4513,8 @@ pub fn run() {
             sessions_delete,
             setting_get,
             setting_set,
+            name_packs_list,
+            name_pack_import,
             app_prepare_exit,
             update_check,
             update_download_and_install,
@@ -4210,6 +4537,8 @@ pub fn run() {
             slash::agent_list_slash_children,
             fs_read,
             fs_write,
+            theme_lab_save_cartridge,
+            theme_lab_import_wallpaper,
             fs_list,
             fs_search,
             fs_create_file,
@@ -4247,6 +4576,19 @@ pub fn run() {
             // in once so Settings detection and PTY spawns see the same bins as
             // an interactive terminal.
             agent_runtime::adapter::ensure_cli_path();
+            {
+                let resource_dir = app.path().resource_dir().ok();
+                agent_runtime::cat_breeds::refresh_from_disk(resource_dir.as_deref());
+                let saved = app
+                    .state::<Arc<Persistence>>()
+                    .lock_db()
+                    .get_setting(NAME_PACK_KEY)
+                    .ok()
+                    .flatten();
+                if let Some(id) = saved {
+                    agent_runtime::cat_breeds::set_active_id(&id);
+                }
+            }
             // Startup reconciliation of isolation workspaces vs live git state
             // (plan §5): drop DB orphans, adopt hand-created worktrees. Runs
             // off the main thread so a slow `git worktree list` can't block the
@@ -4281,9 +4623,13 @@ pub fn run() {
                 // App quit: honour a one-shot override from the close dialog
                 // (`app_prepare_exit`) first, else Settings → 退出时后台终端
                 // (`exit_daemon_mode`).
-                // - keep (default / ask / unset): DETACH — daemon + agent PTYs
-                //   keep running so a reconnecting GUI can re-attach (§9.4).
-                // - kill: shut the daemon down and kill every live PTY.
+                // - packaged + keep/ask/unset: DETACH — daemon + agent PTYs keep
+                //   running so a reconnecting GUI can re-attach (§9.4).
+                // - packaged + kill, OR any dev build (`target/debug|release`)
+                //   with ask/unset: shut the daemon down and kill every live PTY
+                //   so a leftover `capilot-ide.exe --daemon` does not lock the
+                //   debug binary across `tauri dev` rebuilds.
+                // - sticky "keep" still detaches even in dev (explicit choice).
                 // In-process fallback has no daemon either way, so both paths
                 // tear PTYs down there. The frontend intercepts the close
                 // button when mode is `ask` and only calls window.close() after
@@ -4299,7 +4645,22 @@ pub fn run() {
                             .and_then(|db| db.get_setting(EXIT_DAEMON_MODE_KEY).ok().flatten())
                             .unwrap_or_default()
                     });
-                    if mode == "kill" {
+                    // Dev binaries (`…/target/debug|release/…`) default to kill
+                    // so a detached daemon cannot outlive the GUI and hold a
+                    // lock on the freshly-built exe. Packaged installs keep the
+                    // historical detach-by-default (ask/keep/unset → detach).
+                    // An explicit one-shot override or a sticky "keep"/"kill"
+                    // setting always wins.
+                    let is_dev = std::env::current_exe()
+                        .map(|p| crate::persistence::exe_is_dev_build(&p))
+                        .unwrap_or(false);
+                    let should_kill = match mode.as_str() {
+                        "kill" => true,
+                        "keep" => false,
+                        // "ask" / unset / unknown
+                        _ => is_dev,
+                    };
+                    if should_kill {
                         bridge.kill_all();
                     } else {
                         bridge.detach();

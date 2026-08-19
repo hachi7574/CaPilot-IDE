@@ -1,0 +1,4 @@
+/* Slot wrappers — no layout of their own; panels portal themselves. */
+.dev-tool-slot {
+  display: contents;
+}

@@ -1,0 +1,56 @@
+/* Shared bottom-left dock for hidden dev tools (Theme Lab / Annotations). */
+
+.dev-tools-dock {
+  position: fixed;
+  left: 12px;
+  bottom: 40px; /* above 28px status bar */
+  z-index: 9200;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.dev-tool-chip {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--brand, #9a86ff);
+  background: var(--bg2, #12121a);
+  color: var(--brand, #9a86ff);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: var(--fs-xs, 11px);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  box-shadow: var(--panel-shadow, 0 6px 18px rgb(0 0 0 / 0.4));
+  line-height: 1.2;
+}
+
+.dev-tool-chip:hover {
+  background: var(--bg3, #1a1a28);
+  color: var(--ink, #eee);
+}
+
+.dev-tool-chip-label {
+  white-space: nowrap;
+}
+
+.dev-tool-chip-badge {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--brand, #9a86ff);
+  color: var(--accent-ink, #fff);
+  font-size: 10px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}

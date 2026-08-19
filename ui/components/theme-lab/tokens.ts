@@ -1,6 +1,9 @@
 /**
  * Theme Lab token catalog — which CSS vars the mixer exposes, and how brand
  * colors derive companion rgb / selection tokens.
+ *
+ * Every token has a `labelKey` under `themeLab.token.*` so the Theme Editor
+ * shows human-readable names; the CSS var stays on the row's `title` tooltip.
  */
 
 export type TokenKind = "color" | "ratio" | "text" | "rgb";
@@ -8,8 +11,8 @@ export type TokenKind = "color" | "ratio" | "text" | "rgb";
 export interface LabToken {
   name: string;
   kind: TokenKind;
-  /** i18n key under themeLab.token.* (optional; falls back to bare name). */
-  labelKey?: string;
+  /** i18n key under themeLab.token.* */
+  labelKey: string;
 }
 
 export interface LabGroup {
@@ -43,59 +46,59 @@ export const LAB_GROUPS: LabGroup[] = [
     id: "surf",
     labelKey: "surf",
     tokens: [
-      { name: "--bg", kind: "color" },
-      { name: "--bg2", kind: "color" },
-      { name: "--bg3", kind: "color" },
-      { name: "--bg4", kind: "color" },
-      { name: "--term-bg", kind: "color" },
-      { name: "--rule", kind: "color" },
-      { name: "--rule2", kind: "color" },
-      { name: "--search-match-bg", kind: "color" },
+      { name: "--bg", kind: "color", labelKey: "bg" },
+      { name: "--bg2", kind: "color", labelKey: "bg2" },
+      { name: "--bg3", kind: "color", labelKey: "bg3" },
+      { name: "--bg4", kind: "color", labelKey: "bg4" },
+      { name: "--term-bg", kind: "color", labelKey: "termBg" },
+      { name: "--rule", kind: "color", labelKey: "rule" },
+      { name: "--rule2", kind: "color", labelKey: "rule2" },
+      { name: "--search-match-bg", kind: "color", labelKey: "searchMatchBg" },
     ],
   },
   {
     id: "ink",
     labelKey: "ink",
     tokens: [
-      { name: "--ink", kind: "color" },
-      { name: "--ink2", kind: "color" },
-      { name: "--muted", kind: "color" },
-      { name: "--accent-ink", kind: "color" },
+      { name: "--ink", kind: "color", labelKey: "ink" },
+      { name: "--ink2", kind: "color", labelKey: "ink2" },
+      { name: "--muted", kind: "color", labelKey: "muted" },
+      { name: "--accent-ink", kind: "color", labelKey: "accentInk" },
     ],
   },
   {
     id: "brand",
     labelKey: "brand",
     tokens: [
-      { name: "--brand", kind: "color" },
-      { name: "--brand-dim", kind: "color" },
-      { name: "--primary", kind: "color" },
-      { name: "--primary-dim", kind: "color" },
-      { name: "--ai", kind: "color" },
-      { name: "--ai-dim", kind: "color" },
-      { name: "--success", kind: "color" },
-      { name: "--warn", kind: "color" },
-      { name: "--danger", kind: "color" },
+      { name: "--brand", kind: "color", labelKey: "brand" },
+      { name: "--brand-dim", kind: "color", labelKey: "brandDim" },
+      { name: "--primary", kind: "color", labelKey: "primary" },
+      { name: "--primary-dim", kind: "color", labelKey: "primaryDim" },
+      { name: "--ai", kind: "color", labelKey: "ai" },
+      { name: "--ai-dim", kind: "color", labelKey: "aiDim" },
+      { name: "--success", kind: "color", labelKey: "success" },
+      { name: "--warn", kind: "color", labelKey: "warn" },
+      { name: "--danger", kind: "color", labelKey: "danger" },
     ],
   },
   {
     id: "term",
     labelKey: "term",
     tokens: [
-      { name: "--pl-fg", kind: "color" },
-      { name: "--pl-black", kind: "color" },
-      { name: "--pl-red", kind: "color" },
-      { name: "--pl-green", kind: "color" },
-      { name: "--pl-yellow", kind: "color" },
-      { name: "--pl-blue", kind: "color" },
-      { name: "--pl-magenta", kind: "color" },
-      { name: "--pl-cyan", kind: "color" },
-      { name: "--pl-white", kind: "color" },
-      { name: "--pl-orange", kind: "color" },
-      { name: "--pl-purple", kind: "color" },
-      { name: "--pl-comment", kind: "color" },
-      { name: "--pl-cursor", kind: "color" },
-      { name: "--pl-selection", kind: "color" },
+      { name: "--pl-fg", kind: "color", labelKey: "plFg" },
+      { name: "--pl-black", kind: "color", labelKey: "plBlack" },
+      { name: "--pl-red", kind: "color", labelKey: "plRed" },
+      { name: "--pl-green", kind: "color", labelKey: "plGreen" },
+      { name: "--pl-yellow", kind: "color", labelKey: "plYellow" },
+      { name: "--pl-blue", kind: "color", labelKey: "plBlue" },
+      { name: "--pl-magenta", kind: "color", labelKey: "plMagenta" },
+      { name: "--pl-cyan", kind: "color", labelKey: "plCyan" },
+      { name: "--pl-white", kind: "color", labelKey: "plWhite" },
+      { name: "--pl-orange", kind: "color", labelKey: "plOrange" },
+      { name: "--pl-purple", kind: "color", labelKey: "plPurple" },
+      { name: "--pl-comment", kind: "color", labelKey: "plComment" },
+      { name: "--pl-cursor", kind: "color", labelKey: "plCursor" },
+      { name: "--pl-selection", kind: "color", labelKey: "plSelection" },
     ],
   },
   {
@@ -103,15 +106,19 @@ export const LAB_GROUPS: LabGroup[] = [
     labelKey: "termBright",
     collapsed: true,
     tokens: [
-      { name: "--pl-bright-black", kind: "color" },
-      { name: "--pl-bright-red", kind: "color" },
-      { name: "--pl-bright-green", kind: "color" },
-      { name: "--pl-bright-yellow", kind: "color" },
-      { name: "--pl-bright-blue", kind: "color" },
-      { name: "--pl-bright-magenta", kind: "color" },
-      { name: "--pl-bright-cyan", kind: "color" },
-      { name: "--pl-bright-white", kind: "color" },
-      { name: "--pl-blue-purple", kind: "color" },
+      { name: "--pl-bright-black", kind: "color", labelKey: "plBrightBlack" },
+      { name: "--pl-bright-red", kind: "color", labelKey: "plBrightRed" },
+      { name: "--pl-bright-green", kind: "color", labelKey: "plBrightGreen" },
+      { name: "--pl-bright-yellow", kind: "color", labelKey: "plBrightYellow" },
+      { name: "--pl-bright-blue", kind: "color", labelKey: "plBrightBlue" },
+      {
+        name: "--pl-bright-magenta",
+        kind: "color",
+        labelKey: "plBrightMagenta",
+      },
+      { name: "--pl-bright-cyan", kind: "color", labelKey: "plBrightCyan" },
+      { name: "--pl-bright-white", kind: "color", labelKey: "plBrightWhite" },
+      { name: "--pl-blue-purple", kind: "color", labelKey: "plBluePurple" },
     ],
   },
   {
@@ -119,21 +126,21 @@ export const LAB_GROUPS: LabGroup[] = [
     labelKey: "lanes",
     collapsed: true,
     tokens: [
-      { name: "--lane-0", kind: "color" },
-      { name: "--lane-1", kind: "color" },
-      { name: "--lane-2", kind: "color" },
-      { name: "--lane-3", kind: "color" },
-      { name: "--lane-4", kind: "color" },
-      { name: "--lane-5", kind: "color" },
-      { name: "--lane-6", kind: "color" },
+      { name: "--lane-0", kind: "color", labelKey: "lane0" },
+      { name: "--lane-1", kind: "color", labelKey: "lane1" },
+      { name: "--lane-2", kind: "color", labelKey: "lane2" },
+      { name: "--lane-3", kind: "color", labelKey: "lane3" },
+      { name: "--lane-4", kind: "color", labelKey: "lane4" },
+      { name: "--lane-5", kind: "color", labelKey: "lane5" },
+      { name: "--lane-6", kind: "color", labelKey: "lane6" },
     ],
   },
   {
     id: "scan",
     labelKey: "scan",
     tokens: [
-      { name: "--scan-rgb", kind: "rgb" },
-      { name: "--scan-alpha", kind: "ratio" },
+      { name: "--scan-rgb", kind: "rgb", labelKey: "scanRgb" },
+      { name: "--scan-alpha", kind: "ratio", labelKey: "scanAlpha" },
     ],
   },
   {
@@ -141,14 +148,15 @@ export const LAB_GROUPS: LabGroup[] = [
     labelKey: "shape",
     collapsed: true,
     tokens: [
-      { name: "--control-radius", kind: "text" },
-      { name: "--panel-radius", kind: "text" },
-      { name: "--control-shadow", kind: "text" },
-      { name: "--panel-shadow", kind: "text" },
-      { name: "--shadow-hard", kind: "text" },
+      { name: "--control-radius", kind: "text", labelKey: "controlRadius" },
+      { name: "--panel-radius", kind: "text", labelKey: "panelRadius" },
+      { name: "--control-shadow", kind: "text", labelKey: "controlShadow" },
+      { name: "--panel-shadow", kind: "text", labelKey: "panelShadow" },
+      { name: "--shadow-hard", kind: "text", labelKey: "shadowHard" },
     ],
   },
 ];
+
 
 /** Parse #rgb / #rrggbb / rgb() into [r,g,b] 0–255. */
 export function parseColorToRgb(

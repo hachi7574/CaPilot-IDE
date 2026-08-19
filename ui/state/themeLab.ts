@@ -1,12 +1,10 @@
 /**
- * Dev-only Theme Lab chrome state (position / collapsed / visible / size).
- * Kept out of the main session store — production never imports this module
- * (dynamic import behind import.meta.env.DEV).
+ * Theme Editor chrome state (position / visible / size).
+ * Visibility is owned by the store (`themeLabEnabled`) so Settings can toggle
+ * it; this module only remembers panel geometry.
  */
 
 const POS_KEY = "capilot.themeLab.pos";
-const COLLAPSED_KEY = "capilot.themeLab.collapsed";
-const VISIBLE_KEY = "capilot.themeLab.visible";
 const HEIGHT_KEY = "capilot.themeLab.height";
 
 export interface ThemeLabPos {
@@ -41,32 +39,6 @@ export function loadThemeLabPos(): ThemeLabPos {
 export function saveThemeLabPos(pos: ThemeLabPos): void {
   try {
     localStorage.setItem(POS_KEY, JSON.stringify(pos));
-  } catch {
-    // ignore
-  }
-}
-
-export function loadThemeLabCollapsed(): boolean {
-  return loadJson<boolean>(COLLAPSED_KEY, false) === true;
-}
-
-export function saveThemeLabCollapsed(v: boolean): void {
-  try {
-    localStorage.setItem(COLLAPSED_KEY, JSON.stringify(v));
-  } catch {
-    // ignore
-  }
-}
-
-export function loadThemeLabVisible(): boolean {
-  // Default visible in dev so the tool is discoverable.
-  const v = loadJson<boolean | null>(VISIBLE_KEY, null);
-  return v === null ? true : v === true;
-}
-
-export function saveThemeLabVisible(v: boolean): void {
-  try {
-    localStorage.setItem(VISIBLE_KEY, JSON.stringify(v));
   } catch {
     // ignore
   }

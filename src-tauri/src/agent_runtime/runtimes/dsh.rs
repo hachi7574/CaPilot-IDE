@@ -1111,6 +1111,16 @@ impl AgentRuntimeAdapter for DshAdapter {
                 HOOK_ENV_DIR.to_string(),
                 status_dir().to_string_lossy().into_owned(),
             ),
+            // dsh-tui on win32 enables DECSET 9001 (win32-input-mode) unless it
+            // thinks the host is embedded xterm.js (`TERM_PROGRAM=vscode` and
+            // `TERM_PROGRAM_VERSION` major >= 5). CaPilot's frontend is xterm.js
+            // and only emits classic CSI arrows (`ESC [ A`). Without this hint
+            // the TUI waits for `CSI Vk;Sc;Uc;Kd;Cs;Rc _` records, treats the
+            // leftover `[A`/`[B` as typed text, and arrow keys cannot drive
+            // `/model` / `/theme` pickers. VS Code's own integrated terminal
+            // already sets these; we match that contract.
+            ("TERM_PROGRAM".to_string(), "vscode".to_string()),
+            ("TERM_PROGRAM_VERSION".to_string(), "5.0.0".to_string()),
         ];
         if let Some(key) = &session.resume_key {
             // 0.7.2 renamed the resume env to DSH_TUI_RESUME_SESSION; the
@@ -1312,6 +1322,9 @@ mod tests {
             assert_eq!(get("DSH_CC_RESUME_SESSION").as_deref(), Some("session-abc"));
             assert_eq!(get("CAPILOT_AGENT_ID").as_deref(), Some("test"));
             assert!(get("CAPILOT_STATUS_DIR").is_some());
+            // Host is xterm.js — must opt out of win32-input-mode (see launch_env).
+            assert_eq!(get("TERM_PROGRAM").as_deref(), Some("vscode"));
+            assert_eq!(get("TERM_PROGRAM_VERSION").as_deref(), Some("5.0.0"));
             // A fresh spawn (no resume key) omits both resume env names.
             let fresh_env = adapter.launch_env(&session("auto", None)).unwrap();
             assert!(!fresh_env.iter().any(|(k, _)| k == "DSH_TUI_RESUME_SESSION"));

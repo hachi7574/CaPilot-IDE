@@ -112,30 +112,127 @@ const SEMANTIC_TAGS = new Set([
 /** Container shells that are useless to annotate on their own — keep climbing. */
 const SKIP_CLASSES = new Set([
   "content-panel", "pane-shell", "split-container", "split-pane", "app", "app-body",
+  // Theme Lab layout shells — prefer the token row / chip / control inside.
+  "tl-panel", "tl-body", "tl-group", "tl-group-body", "tl-row-controls",
+  "tl-chips", "tl-actions",
 ]);
+
+/**
+ * Hit-test candidates at (x, y), preferred-first.
+ *
+ * Order matters:
+ *  1. Geometry walk of body-portaled floating panels (`[data-theme-lab]`) when
+ *     the cursor is inside their box — some WebView builds report the app
+ *     shell as the top `elementFromPoint` hit even when a higher z-index
+ *     panel is under the cursor.
+ *  2. `elementsFromPoint` stack (topmost first), then `elementFromPoint`.
+ *
+ * Overlay chrome (`data-annot-*`, dev-tools dock) is filtered later.
+ */
+function hitCandidates(x: number, y: number): Element[] {
+  const list: Element[] = [];
+  const seen = new Set<Element>();
+  const push = (el: Element | null | undefined) => {
+    if (!el || seen.has(el)) return;
+    seen.add(el);
+    list.push(el);
+  };
+
+  // 1) Floating panels first (geometry). Deepest-first so a token row beats
+  //    the panel shell.
+  if (typeof document.querySelectorAll === "function") {
+    const panels = document.querySelectorAll<HTMLElement>("[data-theme-lab]");
+    for (const panel of panels) {
+      const r = panel.getBoundingClientRect();
+      if (x < r.left || x > r.right || y < r.top || y > r.bottom) continue;
+      const all = panel.querySelectorAll<HTMLElement>("*");
+      for (let i = all.length - 1; i >= 0; i -= 1) {
+        const el = all[i];
+        const br = el.getBoundingClientRect();
+        if (br.width < 1 || br.height < 1) continue;
+        if (x >= br.left && x <= br.right && y >= br.top && y <= br.bottom) {
+          push(el);
+        }
+      }
+      push(panel);
+    }
+  }
+
+  // 2) Browser hit-test stack.
+  try {
+    const stacked =
+      typeof document.elementsFromPoint === "function"
+        ? document.elementsFromPoint(x, y)
+        : [];
+    for (const el of stacked) push(el);
+  } catch {
+    // ignore
+  }
+  try {
+    push(document.elementFromPoint(x, y));
+  } catch {
+    // ignore
+  }
+
+  return list;
+}
+
+/** True when this node is annotator chrome and must not be a pick target. */
+function isAnnotChrome(el: Element | null): boolean {
+  if (!el || !(el instanceof Element)) return false;
+  return !!(
+    el.closest("[data-annot-ui]") ||
+    el.closest("[data-annot-overlay]") ||
+    el.closest("[data-dev-tools-dock]")
+  );
+}
+
+/**
+ * Climb from `start` to the nearest element worth annotating.
+ * Returns null when the point is over the annotator's own UI.
+ */
+function climbMeaningful(start: Element | null): HTMLElement | null {
+  let el =
+    start instanceof HTMLElement
+      ? start
+      : (start?.parentElement ?? null);
+  while (el && el !== document.body && el !== document.documentElement) {
+    if (isAnnotChrome(el)) return null;
+    if (isMeaningful(el)) return el;
+    el = el.parentElement;
+  }
+  return null;
+}
 
 /** Climb to the nearest element worth annotating at (x, y). Returns null when
  *  the point is over the annotator's own UI. */
 export function pickElement(x: number, y: number): HTMLElement | null {
-  const raw = document.elementFromPoint(x, y);
-  if (!raw) return null;
-  let el = raw instanceof HTMLElement ? raw : raw.parentElement;
-  while (el && el !== document.body) {
-    if (el.closest("[data-annot-ui]")) return null;
-    if (isMeaningful(el)) return el;
-    el = el.parentElement;
+  const candidates = hitCandidates(x, y);
+  for (const raw of candidates) {
+    // Skip pure overlay / tray / dock chrome entries and keep walking.
+    if (isAnnotChrome(raw)) continue;
+    const hit = climbMeaningful(raw);
+    if (hit) return hit;
   }
-  return el && el !== document.body && isMeaningful(el) ? el : null;
+  return null;
 }
 
 function isMeaningful(el: HTMLElement): boolean {
   const tag = el.tagName.toLowerCase();
-  if (tag === "html" || tag === "body" || tag === "canvas" || tag === "svg" || tag === "path") {
+  if (
+    tag === "html" ||
+    tag === "body" ||
+    tag === "canvas" ||
+    tag === "svg" ||
+    tag === "path"
+  ) {
     return false;
   }
-  if (el.hasAttribute("data-annot-ui")) return false;
+  if (isAnnotChrome(el)) return false;
   const rect = el.getBoundingClientRect();
   if (rect.width < 4 || rect.height < 4) return false;
+  // Theme Lab root is a valid target when hovering empty chrome (title bar).
+  if (el.hasAttribute("data-theme-lab")) return true;
   if (SEMANTIC_TAGS.has(tag)) return true;
   if (el.id) return true;
   for (const c of el.classList) {

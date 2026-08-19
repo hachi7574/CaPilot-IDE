@@ -944,9 +944,11 @@ const EXCLUDED: &[(&str, &[&str])] = &[
         &["resume", "fork", "apps", "plugins", "hooks", "ps"],
     ),
     ("opencode", &["sessions"]),
-    // dsh 的会话恢复走 TUI 内的选择器（`ResumePicker`），Composer 无法枚举
-    // 选项；其余命令是叶子项，选中后发给 PTY 由 TUI 自行展开。
-    ("dsh", &["resume"]),
+    // dsh 的会话恢复 / 模型 / 主题都走 TUI 内选择器（ResumePicker /
+    // ModelPicker / ThemePicker）。Composer 无法枚举选项；从输入区发出后
+    // 焦点仍停在 Composer，方向键会走草稿历史、Esc 会当中断，TUI 选择器
+    // 立刻退出。从菜单排除，让用户只在终端里输入这些命令。
+    ("dsh", &["resume", "model", "theme"]),
 ];
 
 fn child_source(runtime: &str, name: &str) -> ChildSource {
@@ -1711,20 +1713,13 @@ mod tests {
             );
         }
 
-        // `/resume` 走 TUI 内选择器，从 Composer 菜单排除；其余是叶子项。
+        // `/resume` / `/model` / `/theme` 走 TUI 内选择器，从 Composer 菜单排除。
         let menu = discover("dsh", &root);
         assert!(!menu.iter().any(|item| item.invocation == "/resume"));
-        assert!(menu.iter().any(|item| item.invocation == "/model"));
-        let model = menu
-            .iter()
-            .find(|item| item.invocation == "/model")
-            .unwrap();
-        assert!(
-            !model.has_children,
-            "dsh /model opens the TUI's own picker and takes no inline arg"
-        );
-        assert!(!menu.iter().any(|item| item.invocation == "/sessions"));
+        assert!(!menu.iter().any(|item| item.invocation == "/model"));
+        assert!(!menu.iter().any(|item| item.invocation == "/theme"));
         assert!(menu.iter().any(|item| item.invocation == "/compact"));
+        assert!(!menu.iter().any(|item| item.invocation == "/sessions"));
 
         fs::remove_dir_all(&root).unwrap();
     }

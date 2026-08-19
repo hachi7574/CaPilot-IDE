@@ -6,36 +6,37 @@ body.annot-mode *:not([data-annot-ui]) { cursor: crosshair !important; }
 body.annot-mode [data-annot-ui],
 body.annot-mode [data-annot-ui] * { cursor: default !important; }
 
-/* Theme Lab panel sits above the annotation layer (z-index 9200 vs 6000–6200);
-   in annotation mode it keeps normal pointer behaviour so elements inside it
-   can be annotated like any other. */
+/* Overlay stack sits ABOVE Theme Lab (9200) and the shared dev-tools dock
+   (9200) so hover fill / markers / comment popup paint on top of those
+   panels. pointer-events:none on the pick layer keeps elementFromPoint
+   hitting the real Theme Lab / app controls underneath. */
 
 /* Selection layer — full-window, transparent to the mouse so clicks reach the
    elements underneath (the capture-phase handler in AnnotationLayer picks). */
-.annot-layer { position: fixed; inset: 0; z-index: 6000; pointer-events: none; }
+.annot-layer { position: fixed; inset: 0; z-index: 9300; pointer-events: none; }
 
 /* Hover fill: the picked element's whole box is covered by a translucent
    light-purple block, so you can see exactly which component is under the
    cursor; the component name sits in a chip above it. pointer-events: none on
    every piece keeps elementFromPoint hitting the real element below. */
 .annot-highlight {
-  position: fixed; z-index: 6001; pointer-events: none; display: none;
+  position: fixed; z-index: 9301; pointer-events: none; display: none;
   background: rgb(167 139 250 / 0.38);
   outline: 2px solid rgb(196 181 253 / 0.95); outline-offset: -2px;
   border-radius: 2px;
 }
 .annot-name {
-  position: fixed; z-index: 6002; pointer-events: none; display: none;
+  position: fixed; z-index: 9302; pointer-events: none; display: none;
   max-width: 340px; padding: 2px 8px; border-radius: 6px;
   background: var(--brand); color: var(--accent-ink);
   font-family: var(--mono); font-size: var(--fs-2xs); line-height: 1.6;
-  box-shadow: 0 2px 8px rgb(var(--black-rgb) / 0.5);
+  box-shadow: 0 2px 8px rgb(var(--black-rgb) / 0.35);
   border: 1px solid rgb(var(--black-rgb) / 0.35);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
 /* Numbered markers pinned over annotated elements. */
-.annot-markers { position: fixed; inset: 0; z-index: 6100; pointer-events: none; }
+.annot-markers { position: fixed; inset: 0; z-index: 9400; pointer-events: none; }
 .annot-marker {
   position: fixed; width: 18px; height: 18px; border-radius: 9px;
   display: flex; align-items: center; justify-content: center;
@@ -46,9 +47,10 @@ body.annot-mode [data-annot-ui] * { cursor: default !important; }
 .annot-marker-question { background: var(--warn); color: var(--bg); }
 .annot-marker-error { background: var(--danger); color: var(--bg); }
 
-/* Comment popup. */
+/* Comment popup — above Theme Lab (9200) and hover chrome so the form is
+   always reachable after picking a Theme Lab control. */
 .annot-popup {
-  position: fixed; z-index: 6105; width: 320px;
+  position: fixed; z-index: 9500; width: 320px;
   pointer-events: auto;
   background: var(--bg3); border: 1px solid var(--rule2); border-radius: 10px;
   box-shadow: var(--shadow-hard), 0 10px 30px rgb(var(--black-rgb) / 0.5);
@@ -103,21 +105,27 @@ body.annot-mode [data-annot-ui] * { cursor: default !important; }
 }
 .annot-tray-head {
   display: flex; align-items: center; gap: 7px; padding: 8px 12px;
-  cursor: pointer; color: var(--ink2); user-select: none;
+  color: var(--ink2); user-select: none;
   border-bottom: 1px solid var(--rule);
 }
-.annot-tray-head:hover { color: var(--brand); }
 .annot-tray-title {
   font-family: var(--pixel); font-size: var(--fs-2xs); letter-spacing: 2px;
   text-transform: uppercase; color: var(--ink2); flex: 1;
 }
-.annot-tray-head:hover .annot-tray-title { color: var(--brand); }
 .annot-tray-count {
   min-width: 17px; height: 17px; display: flex; align-items: center; justify-content: center;
   background: var(--brand); color: var(--accent-ink); border-radius: 9px;
   font-family: var(--pixel); font-size: 9px; padding: 0 4px;
 }
-.annot-tray-chevron { font-size: var(--fs-xs); color: var(--muted); }
+.annot-tray-hide {
+  flex: none;
+  width: 22px; height: 22px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--rule2); background: var(--bg); color: var(--ink2);
+  border-radius: 6px; cursor: pointer; font-size: 14px; line-height: 1;
+  padding: 0;
+}
+.annot-tray-hide:hover { border-color: var(--brand); color: var(--brand); }
 .annot-tray-toggle {
   display: flex; align-items: center; gap: 4px; padding: 3px 8px;
   border-radius: 6px; cursor: pointer; user-select: none;

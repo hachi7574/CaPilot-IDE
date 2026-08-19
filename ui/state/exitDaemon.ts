@@ -85,8 +85,9 @@ export async function quitWithDaemonMode(
  * Shared close-button handler for the titlebar × in LeftSidebar / TabBar.
  *
  * - setting `ask` + live PTYs → caller should open the dialog (returns `"ask"`);
- * - setting `ask` + nothing live (no terminals / all dormant or ended) → close
- *   immediately; ExitRequested treats unset/`ask` as detach (returns `"keep"`);
+ * - setting `ask` + nothing live → close immediately. Rust ExitRequested then
+ *   kills the daemon on **dev** builds (`target/debug|release`) and detaches on
+ *   packaged installs (returns `"keep"` as the UI path label only);
  * - setting `keep`/`kill` → quit immediately with that policy (returns the mode).
  */
 export async function handleTitlebarClose(
@@ -95,8 +96,8 @@ export async function handleTitlebarClose(
   const mode = await loadExitDaemonMode();
   if (mode === "ask") {
     if (!hasLiveAgentPty()) {
-      // Nothing for keep/kill to decide — skip the chooser. Rust ExitRequested
-      // already detaches on any mode other than "kill", including "ask".
+      // Nothing for keep/kill to decide — skip the chooser. Dev builds still
+      // shut the daemon down in ExitRequested; packaged builds detach.
       await getCurrentWindow().close();
       return "keep";
     }

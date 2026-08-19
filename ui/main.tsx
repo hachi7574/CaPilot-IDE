@@ -34,6 +34,20 @@ document.addEventListener("drop", (e) => {
   if (isExternalFileDrag(e.dataTransfer)) e.preventDefault();
 });
 
+/**
+ * Kill the WebView's native context menu (Reload / Print / Paste / Inspect)
+ * everywhere. Custom menus (tabs, file tree, projects, composer/terminal paste)
+ * call preventDefault themselves and still open — this is the backstop so a
+ * right-click on chrome that has no handler never surfaces the browser menu.
+ */
+document.addEventListener(
+  "contextmenu",
+  (e) => {
+    e.preventDefault();
+  },
+  true
+);
+
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <App />

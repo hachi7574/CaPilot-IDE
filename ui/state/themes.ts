@@ -6,35 +6,64 @@
  * picker.
  *
  * Terminal transparency is first-class:
- *   - `--term-veil` (0–1, default 1) fades the terminal default-cell fill so
+ *   - `--term-veil` (0–1, default 0) fades the terminal default-cell fill so
  *     wallpaper can show through; xterm reads it in XTermPanel.
  *   - optional top-level `termVeil` number is merged into that var at hydrate.
  * Wallpaper shell mixes (when `data-wallpaper=on`):
  *   - `--wallpaper-surface-mix` (default 0.72) / `--wallpaper-chrome-mix` (0.78)
+ *     control alpha only; the final `--wallpaper-surface` / `--wallpaper-chrome`
+ *     colors are owned by the shared CSS recipe (themes must not hardcode them).
+ *   - optional `--wallpaper-surface-base` / `--wallpaper-chrome-base` retint the
+ *     mix (default `--bg2`; bilibili chrome uses `--bg3`).
  * Layout and type roles stay in `ui/App.css` `:root` so switching a theme
  * never moves the UI.
  *
  * Optional `wallpaper` on a cartridge points at a file under
- * `themes/wallpapers/`; the image is resolved to a bundled URL at load time.
- * User-picked wallpapers (Settings) live outside this catalog and override
- * the cartridge image when enabled — see `ui/state/store.ts`.
+ * `themes/wallpapers/` (still image or looping video); the asset is resolved
+ * to a bundled URL at load time. User-picked wallpapers (Settings) live
+ * outside this catalog and override the cartridge file when enabled — see
+ * `ui/state/store.ts`.
  *
- * Dev-only live overrides (Theme Lab) write inline styles on <html> and
+ * Live overrides (Theme Editor) write inline styles on <html> and
  * dispatch `capilot:theme-vars` so xterm re-samples without a full reload.
  */
 
 export interface ThemeWallpaper {
-  /** Basename under `themes/wallpapers/` (e.g. `"whale.jpg"`). */
+  /** Basename under `themes/wallpapers/` (e.g. `"whale.jpg"` / `"loop.mp4"`). */
   file: string;
   /**
-   * Default image opacity 0–1 when the user hasn't overridden it.
+   * Default image/video opacity 0–1 when the user hasn't overridden it.
    * Defaults to 0.55 when omitted.
    */
   opacity?: number;
-  /** CSS background-size. Defaults to `"cover"`. */
+  /** CSS background-size / object-fit. Defaults to `"cover"`. */
   size?: "cover" | "contain";
-  /** CSS background-position. Defaults to `"center"`. */
+  /** CSS background-position / object-position. Defaults to `"center"`. */
   position?: string;
+}
+
+/** Still-image extensions the wallpaper layer paints via CSS `background-image`. */
+export const WALLPAPER_IMAGE_EXTS = [
+  "png",
+  "jpg",
+  "jpeg",
+  "webp",
+  "gif",
+  "bmp",
+] as const;
+
+/** Looping-video extensions the wallpaper layer plays via `<video>`. */
+export const WALLPAPER_VIDEO_EXTS = ["mp4", "webm", "mov", "m4v"] as const;
+
+function wallpaperExt(file: string): string {
+  const base = file.replace(/\\/g, "/").split("/").pop() ?? file;
+  const dot = base.lastIndexOf(".");
+  return dot >= 0 ? base.slice(dot + 1).toLowerCase() : "";
+}
+
+export function isWallpaperVideo(file: string | null | undefined): boolean {
+  if (!file) return false;
+  return (WALLPAPER_VIDEO_EXTS as readonly string[]).includes(wallpaperExt(file));
 }
 
 export interface Theme {
@@ -97,15 +126,20 @@ function resolveWallpaperUrl(file: string): string | undefined {
 function hydrateTheme(raw: Theme): Theme {
   const vars = { ...raw.vars };
 
-  // Terminal veil — top-level termVeil wins, else vars, else opaque default.
+  // Terminal veil — top-level termVeil wins, else vars, else transparent default.
   if (typeof raw.termVeil === "number") {
-    vars["--term-veil"] = String(clamp01(raw.termVeil, 1));
+    vars["--term-veil"] = String(clamp01(raw.termVeil, 0));
   } else {
-    const parsed = parseFloat(vars["--term-veil"] ?? "1");
-    vars["--term-veil"] = String(clamp01(parsed, 1));
+    const parsed = parseFloat(vars["--term-veil"] ?? "0");
+    vars["--term-veil"] = String(clamp01(parsed, 0));
   }
 
   // Wallpaper shell mixes — fill defaults so lab/CSS always have a number.
+  // Themes may set the mix ratios, but must NOT set the final mixed colors
+  // (`--wallpaper-surface` / `--wallpaper-chrome`): those are owned by the
+  // shared CSS recipe so Theme Editor sliders always win.
+  delete vars["--wallpaper-surface"];
+  delete vars["--wallpaper-chrome"];
   if (vars["--wallpaper-surface-mix"] == null) {
     vars["--wallpaper-surface-mix"] = "0.72";
   } else {

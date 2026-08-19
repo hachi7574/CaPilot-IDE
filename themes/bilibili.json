@@ -2,18 +2,21 @@
   "id": "bilibili",
   "name": "哔哩粉白",
   "note": "小电视粉 · 樱花粉白",
-  "swatches": ["#FFEBF2", "#FB7299", "#FF8FB0", "#00AEEC"],
+  "swatches": [
+    "#FFEBF2",
+    "#FB7299",
+    "#FF8FB0",
+    "#00AEEC"
+  ],
   "colorScheme": "light",
-  "wallpaper": {
-    "file": "千夏.png"
-  },
+  "termVeil": 0,
   "vars": {
     "--bg": "#FFF5F8",
     "--bg2": "#FFEBF2",
     "--bg3": "#FFD6E5",
     "--bg4": "#FFC0D6",
-    "--ink": "#2A1520",
-    "--ink2": "#8A5066",
+    "--ink": "#290a1a",
+    "--ink2": "#813b56",
     "--muted": "#B0788C",
     "--rule": "#F3B6CB",
     "--rule2": "#E68AA9",
@@ -26,9 +29,9 @@
     "--success": "#2AC864",
     "--warn": "#FFB027",
     "--danger": "#F85A54",
-    "--accent-ink": "#FFFFFF",
-    "--term-bg": "#1A0F14",
-    "--term-veil": "1",
+    "--accent-ink": "#f6eeee",
+    "--term-bg": "#fbe2e8",
+    "--term-veil": "0",
     "--search-match-bg": "#5A2840",
     "--brand-selection": "rgb(251 114 153 / 0.36)",
     "--brand-rgb": "251 114 153",
@@ -44,15 +47,15 @@
     "--lane-4": "#FFB0C8",
     "--lane-5": "#E85A84",
     "--lane-6": "#FFA0BC",
-    "--pl-fg": "#F8E8EE",
-    "--pl-black": "#120A0E",
+    "--pl-fg": "#870808",
+    "--pl-black": "#450224",
     "--pl-red": "#FF7A75",
     "--pl-green": "#45D87A",
     "--pl-yellow": "#FFC44D",
     "--pl-blue": "#33C0F0",
     "--pl-magenta": "#FB7299",
     "--pl-cyan": "#33D4EC",
-    "--pl-white": "#F8E8EE",
+    "--pl-white": "#771339",
     "--pl-orange": "#FF8C69",
     "--pl-purple": "#E070A0",
     "--pl-blue-purple": "#D080B0",
@@ -73,6 +76,11 @@
     "--panel-radius": "6px",
     "--shadow-hard": "3px 3px 0 rgb(251 114 153 / 0.22)",
     "--control-shadow": "inset 0 1px 0 rgb(255 255 255 / 0.95), 0 1px 3px rgb(251 114 153 / 0.18)",
-    "--panel-shadow": "0 0 0 1px #F3B6CB, 0 4px 16px rgb(251 114 153 / 0.16)"
+    "--panel-shadow": "0 0 0 1px #F3B6CB, 0 4px 16px rgb(251 114 153 / 0.16)",
+    "--wallpaper-surface-mix": "0.57",
+    "--wallpaper-chrome-mix": "0.57"
+  },
+  "wallpaper": {
+    "file": "千夏.png"
   }
 }

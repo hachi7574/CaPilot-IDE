@@ -43,3 +43,7 @@ target/
 reasonix.toml
 .reasonix/
 .claude/
+
+# Source / unused wallpaper loops (720p or stills in the catalog are committed)
+themes/wallpapers/薇薇安.mp4
+themes/wallpapers/青衣.mp4

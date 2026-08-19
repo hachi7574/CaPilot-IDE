@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Terminal } from "@xterm/xterm";
@@ -329,10 +330,10 @@ const cssVar = (name: string, fallback: string): string => {
   return (root ? getComputedStyle(root).getPropertyValue(name).trim() : "") || fallback;
 };
 
-/** Theme `--term-veil` (0–1). 1 is the historic opaque terminal fill. */
+/** Theme `--term-veil` (0–1). 0 lets wallpaper show through; 1 is opaque. */
 const termVeil = (): number => {
-  const n = parseFloat(cssVar("--term-veil", "1"));
-  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 1;
+  const n = parseFloat(cssVar("--term-veil", "0"));
+  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0;
 };
 
 /** Read the current CSS palette into xterm, whose canvas renderer cannot use
@@ -415,6 +416,11 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
   // Nesting counter (dragenter/dragleave fire when crossing xterm child nodes).
   const dragDepthRef = useRef(0);
   const [dragHover, setDragHover] = useState(false);
+  const [pasteMenu, setPasteMenu] = useState<{
+    x: number;
+    y: number;
+    into: "pty" | "search";
+  } | null>(null);
 
   /** Tauri drag-drop positions are physical px; CSS rects are CSS px. */
   const isPointInTerminal = useCallback((pos: { x: number; y: number }) => {
@@ -481,6 +487,66 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     termRef.current?.focus();
   }, []);
 
+  /** Paste clipboard text (right-click menu). PTY path goes through `term.paste`
+   *  so bracketed-paste wrapping still applies; search-bar path replaces the
+   *  query input's current selection. */
+  const pasteClipboard = useCallback(async () => {
+    const into = pasteMenu?.into ?? "pty";
+    setPasteMenu(null);
+    let text = "";
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      text = "";
+    }
+    if (into === "search") {
+      const input = searchInputRef.current;
+      if (!input) return;
+      if (!text) {
+        input.focus();
+        return;
+      }
+      const start = input.selectionStart ?? input.value.length;
+      const end = input.selectionEnd ?? start;
+      const next = input.value.slice(0, start) + text + input.value.slice(end);
+      setSearchQuery(next);
+      runFind(next, "next");
+      requestAnimationFrame(() => {
+        input.focus();
+        const pos = start + text.length;
+        input.setSelectionRange(pos, pos);
+      });
+      return;
+    }
+    const term = termRef.current;
+    if (!text || !term) {
+      term?.focus();
+      return;
+    }
+    term.paste(text);
+    term.focus();
+  }, [pasteMenu, runFind]);
+
+  // Close the terminal paste menu on outside click / Escape. Capture-phase
+  // contextmenu so another custom menu's stopPropagation still dismisses us.
+  // Same 150 ms compositor-click guard as the sidebar / tab menus.
+  useEffect(() => {
+    if (!pasteMenu) return;
+    const openedAt = Date.now();
+    const close = () => {
+      if (Date.now() - openedAt > 150) setPasteMenu(null);
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
+    window.addEventListener("click", close);
+    window.addEventListener("contextmenu", close, true);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("contextmenu", close, true);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [pasteMenu]);
+
   // Opening the bar focuses the query input and selects the old text so typing
   // a new term replaces it (re-search is a single keystroke).
   useEffect(() => {
@@ -536,12 +602,9 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     // "missing letters" in DOM text. Relocated to <head> (document-global CSS).
     relocateXtermStyles(containerRef.current);
 
-    // Keyboard copy: xterm.js maps Ctrl+C to a PTY SIGINT (^C), so the browser's
-    // default Ctrl+Shift+C — which terminals use for copy — is never produced,
-    // and WebKitGTK has no native menu fallback. Intercept the chord and copy the
-    // selection (matches the sidebar's clipboard helper). Plain Ctrl+C (no shift)
-    // is left alone so the PTY still receives SIGINT. Returning false stops the
-    // event reaching xterm's own key handling.
+    // Keyboard copy. xterm.js maps Ctrl+C to PTY SIGINT (^C) and never produces
+    // the browser's default copy; WebView2 / WebKitGTK also have no native menu
+    // fallback. Returning false stops the event reaching xterm's own key handling.
     term.attachCustomKeyEventHandler((ev) => {
       // F1 is reserved for the composer↔terminal focus toggle (handled by a
       // window-level listener). Swallow it here so the PTY never receives the
@@ -570,17 +633,33 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
         setSearchOpen(true);
         return false;
       }
-      if (
-        ev.type === "keydown" &&
-        ev.ctrlKey &&
-        ev.shiftKey &&
-        !ev.altKey &&
-        !ev.metaKey &&
-        ev.key.toLowerCase() === "c"
-      ) {
-        const text = term.hasSelection() ? term.getSelection() : "";
-        if (text) copyText(text);
-        return false; // swallow — don't send ^C
+      // Copy shortcuts. xterm maps Ctrl+C to PTY SIGINT (^C) and never produces
+      // the browser's default copy, and WebView2 / WebKitGTK have no native menu
+      // fallback. Match VS Code / Windows Terminal: Ctrl+C (and Cmd+C / Ctrl+Insert)
+      // copies when there is a selection; Ctrl+C without a selection still sends
+      // SIGINT. Ctrl+Shift+C is the Linux-terminal copy chord and always copies.
+      if (ev.type === "keydown" && !ev.altKey) {
+        const key = ev.key.toLowerCase();
+        const ctrlOnly = ev.ctrlKey && !ev.metaKey;
+        const cmdOnly = ev.metaKey && !ev.ctrlKey;
+        const isCtrlShiftC = ctrlOnly && ev.shiftKey && key === "c";
+        const isCtrlC = ctrlOnly && !ev.shiftKey && key === "c";
+        const isCmdC = cmdOnly && !ev.shiftKey && key === "c";
+        const isCtrlInsert =
+          ctrlOnly && !ev.shiftKey && ev.key === "Insert";
+        if (isCtrlShiftC || isCtrlC || isCmdC || isCtrlInsert) {
+          const hasSel = term.hasSelection();
+          // Bare Ctrl+C with nothing selected is SIGINT — leave it to xterm.
+          if (isCtrlC && !hasSel) return true;
+          if (hasSel) {
+            const text = term.getSelection();
+            if (text) void copyText(text);
+          }
+          // Stop the window-level file-tree Ctrl+C from stealing this chord.
+          ev.preventDefault();
+          ev.stopPropagation();
+          return false;
+        }
       }
       return true;
     });
@@ -1121,6 +1200,7 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
   }, [searchRequest, active]);
 
   return (
+    <>
     <div
       ref={containerRef}
       data-todo-drop-agent={agentId}
@@ -1143,7 +1223,7 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
         overflow: "hidden",
         padding: "10px 14px",
         background:
-          "color-mix(in srgb, var(--term-bg) calc(var(--term-veil, 1) * 100%), transparent)",
+          "color-mix(in srgb, var(--term-bg) calc(var(--term-veil, 0) * 100%), transparent)",
         position: "relative",
       }}
       onDragEnter={(e) => {
@@ -1208,6 +1288,18 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
         // No path at all → leave dragDepthRef/dropHandledRef untouched so the
         // Tauri drag-drop event (which fires next) can still detect the terminal.
       }}
+      onContextMenu={(e) => {
+        const target = e.target as HTMLElement | null;
+        if (target?.closest("button, .ctx-menu")) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const fromSearch = !!target?.closest(".term-search-bar");
+        setPasteMenu({
+          x: Math.min(e.clientX, window.innerWidth - 160),
+          y: Math.min(e.clientY, window.innerHeight - 50),
+          into: fromSearch ? "search" : "pty",
+        });
+      }}
     >
       {searchOpen && (
         <div className="term-search-bar">
@@ -1268,5 +1360,20 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
         </div>
       )}
     </div>
+    {pasteMenu &&
+      createPortal(
+        <div
+          className="ctx-menu"
+          style={{ position: "fixed", left: pasteMenu.x, top: pasteMenu.y, zIndex: 1000 }}
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.stopPropagation()}
+        >
+          <div className="ctx-item" onClick={() => void pasteClipboard()}>
+            <Icon name="clipboard" size={13} /> {t("common.paste")}
+          </div>
+        </div>,
+        document.body
+      )}
+    </>
   );
 }

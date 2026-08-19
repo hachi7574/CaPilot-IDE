@@ -2,12 +2,16 @@
 
 .tl-panel {
   position: fixed;
-  /* Above settings (4000), annotations (6000–6200), update prompt (5500).
-     Below window-edge resize grips (9999) so frameless resize still works. */
+  /* Above settings (4000), annotations tray, update prompt (5500).
+     Below window-edge resize grips (9999) so frameless resize still works.
+     Overlay pick chrome lives at 9300+ (also body-portaled). */
   z-index: 9200;
   width: 388px;
   max-width: calc(100vw - 16px);
+  /* Cap the whole panel so head + scroll body + resize always fit the viewport.
+     Body is the only scroll container — content must never paint over siblings. */
   max-height: calc(100vh - 16px);
+  height: auto;
   display: flex;
   flex-direction: column;
   background: var(--bg2, #12121a);
@@ -39,37 +43,8 @@ body.tl-resizing * {
   user-select: none !important;
 }
 
-/* Collapsed launcher chip — always discoverable when the full panel is hidden. */
-.tl-fab {
-  position: fixed;
-  left: 12px;
-  bottom: 40px; /* above 28px status bar */
-  z-index: 9200;
-  pointer-events: auto;
-  border: 1px solid var(--brand, #9a86ff);
-  background: var(--bg2, #12121a);
-  color: var(--brand, #9a86ff);
-  border-radius: 999px;
-  padding: 6px 12px;
-  font-family: var(--mono, ui-monospace, monospace);
-  font-size: var(--fs-xs, 11px);
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  cursor: pointer;
-  box-shadow: var(--panel-shadow, 0 6px 18px rgb(0 0 0 / 0.4));
-}
-
-.tl-fab:hover {
-  background: var(--bg3, #1a1a28);
-  color: var(--ink, #eee);
-}
-
-.tl-panel.collapsed {
-  width: auto;
-  max-height: none;
-}
-
 .tl-head {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -78,10 +53,6 @@ body.tl-resizing * {
   border-bottom: 1px solid var(--rule, #333);
   cursor: grab;
   touch-action: none;
-}
-
-.tl-panel.collapsed .tl-head {
-  border-bottom: none;
 }
 
 .tl-head:active {
@@ -115,20 +86,39 @@ body.tl-resizing * {
   color: var(--brand, #9a86ff);
 }
 
+/*
+ * Scroll window: preferred height comes from the inline style (user-resized),
+ * but flex + min-height:0 lets the body shrink when the panel hits max-height
+ * so overflowing groups scroll inside instead of painting over each other.
+ */
 .tl-body {
   display: flex;
   flex-direction: column;
   gap: 8px;
   padding: 8px;
+  box-sizing: border-box;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 100%;
   overflow-x: hidden;
   overflow-y: auto;
-  min-height: 0;
-  /* Height is driven by inline style (default 420, user-resizable). */
-  flex: 0 0 auto;
-  box-sizing: border-box;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-gutter: stable;
 }
 
-/* Bottom edge drag-handle — stretch body height. */
+.tl-body::-webkit-scrollbar {
+  width: 6px;
+}
+.tl-body::-webkit-scrollbar-thumb {
+  background: var(--rule2, #555);
+  border-radius: 3px;
+}
+.tl-body::-webkit-scrollbar-thumb:hover {
+  background: var(--brand, #9a86ff);
+}
+
+/* Bottom edge drag-handle — stretch preferred body height. */
 .tl-resize {
   flex: none;
   height: 8px;
@@ -141,11 +131,48 @@ body.tl-resizing * {
   border-top: 1px solid var(--rule, #333);
 }
 .tl-resize:hover,
-.tl-panel:not(.collapsed) .tl-resize:active {
+.tl-resize:active {
   background:
     linear-gradient(var(--brand, #9a86ff), var(--brand, #9a86ff)) center 3px /
       36px 2px no-repeat,
     var(--bg3, #1a1a28);
+}
+
+/* Groups stack in normal flow inside the scroll window — never overlap. */
+.tl-group {
+  flex: none;
+  position: relative;
+  z-index: 0;
+  border: 1px solid var(--rule, #333);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.tl-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  background: var(--bg3, #1a1a28);
+  color: var(--ink, #eee);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.tl-group-head:hover {
+  color: var(--brand, #9a86ff);
+}
+
+.tl-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px 8px;
+  background: var(--bg, #0a0a12);
 }
 
 .tl-chips {
@@ -204,43 +231,67 @@ body.tl-resizing * {
   padding: 4px 0;
 }
 
-.tl-wallpaper-row label {
-  flex: 1;
+.tl-wallpaper-row label,
+.tl-wallpaper-label {
+  flex: none;
   color: var(--ink2, #ccc);
 }
 
-.tl-group {
+.tl-wallpaper-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 8px 8px;
   border: 1px solid var(--rule, #333);
   border-radius: 4px;
-  overflow: hidden;
+  background: var(--bg, #0a0a12);
 }
 
-.tl-group-head {
+.tl-wallpaper-file {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink, #eee);
+  font-variant-numeric: tabular-nums;
+}
+
+.tl-wallpaper-actions {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 5px 8px;
-  border: none;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.tl-wallpaper-actions button {
+  border: 1px solid var(--rule2, #555);
   background: var(--bg3, #1a1a28);
   color: var(--ink, #eee);
+  border-radius: 4px;
+  padding: 3px 8px;
   font: inherit;
-  font-weight: 600;
   cursor: pointer;
-  text-align: left;
 }
 
-.tl-group-head:hover {
+.tl-wallpaper-actions button:hover {
+  border-color: var(--brand, #9a86ff);
   color: var(--brand, #9a86ff);
 }
 
-.tl-group-body {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 6px 8px 8px;
-  background: var(--bg, #0a0a12);
+.tl-wallpaper-preview {
+  display: block;
+  width: 100%;
+  height: 56px;
+  object-fit: cover;
+  object-position: center;
+  border-radius: 3px;
+  border: 1px solid var(--rule, #333);
+  background-color: var(--bg2, #12121a);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
 }
+
 
 .tl-row {
   display: grid;

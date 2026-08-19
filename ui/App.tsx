@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ComponentType, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type ComponentType, type CSSProperties } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { LeftSidebar } from "./components/layout/LeftSidebar";
 import { MainArea } from "./components/layout/MainArea";
@@ -19,49 +19,50 @@ import { useStore } from "./state/store";
 import {
   getTheme,
   DEFAULT_WALLPAPER_OPACITY,
+  isWallpaperVideo,
 } from "./state/themes";
+import { ThemeLabPanel } from "./components/theme-lab/ThemeLabPanel";
 import "./App.css";
 
 /**
- * Design-feedback annotation UI is a `tauri dev` tool only.
+ * Theme Editor ships in production. Settings → Appearance toggles
+ * `themeLabEnabled` (default off). Ctrl+Shift+T flips the same flag even
+ * when the panel is unmounted.
  *
- * Production builds (`pnpm tauri build` / tagged releases) must not ship the
- * floating tray or pick layer. Vite replaces `import.meta.env.DEV` with the
- * literal `false` at build time, so the dynamic import below is eliminated
- * from the production module graph (a static import would still pull the
- * annotation modules in even behind a dead `&&` branch).
+ * The annotations tray stays a `tauri dev` tool — Vite drops that dynamic
+ * import from the production module graph.
  */
-function DevAnnotationsGate() {
-  const [Comp, setComp] = useState<ComponentType | null>(null);
+function ThemeLabGate() {
+  const enabled = useStore((s) => s.themeLabEnabled);
+  const setThemeLabEnabled = useStore((s) => s.setThemeLabEnabled);
+
   useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    let cancelled = false;
-    void import("./components/annotations/DevAnnotations").then((m) => {
-      if (!cancelled) setComp(() => m.DevAnnotations);
-    });
-    return () => {
-      cancelled = true;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "T" && e.key !== "t") return;
+      if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setThemeLabEnabled(!useStore.getState().themeLabEnabled);
     };
-  }, []);
-  if (!import.meta.env.DEV || !Comp) return null;
-  return <Comp />;
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [setThemeLabEnabled]);
+
+  if (!enabled) return null;
+  return <ThemeLabPanel onHide={() => setThemeLabEnabled(false)} />;
 }
 
-/**
- * Theme Lab mixer — dev only (same elimination rules as DevAnnotationsGate).
- * Live-edits CSS theme tokens + terminal veil; never ships in production.
- */
-function DevThemeLabGate() {
+function AnnotationsGate() {
   const [Comp, setComp] = useState<ComponentType | null>(null);
   useEffect(() => {
     if (!import.meta.env.DEV) return;
     let cancelled = false;
-    void import("./components/theme-lab/DevThemeLab")
+    void import("./components/dev-tools/DevToolsRoot")
       .then((m) => {
-        if (!cancelled) setComp(() => m.DevThemeLab);
+        if (!cancelled) setComp(() => m.DevToolsRoot);
       })
       .catch((err) => {
-        console.error("[ThemeLab] failed to load", err);
+        console.error("[DevTools] failed to load", err);
       });
     return () => {
       cancelled = true;
@@ -71,12 +72,20 @@ function DevThemeLabGate() {
   return <Comp />;
 }
 
+type WallpaperLayer = {
+  kind: "image" | "video";
+  url: string;
+  style: CSSProperties;
+};
+
 /**
  * Resolve the active wallpaper URL + paint params.
  * Priority: mode off → none; custom path → asset URL; auto → theme cartridge.
  * Opacity comes from the single user preference (defaults match themes.ts).
+ * Videos use a <video> layer (muted / loop / metadata preload); stills stay
+ * on the CSS background-image path so existing themes are unchanged.
  */
-function useWallpaperLayer() {
+function useWallpaperLayer(): WallpaperLayer | null {
   const themeId = useStore((s) => s.themeId);
   const mode = useStore((s) => s.wallpaperMode);
   const path = useStore((s) => s.wallpaperPath);
@@ -85,6 +94,7 @@ function useWallpaperLayer() {
   return useMemo(() => {
     const theme = getTheme(themeId);
     let url: string | null = null;
+    let source = "";
     let size = theme?.wallpaper?.size ?? "cover";
     let position = theme?.wallpaper?.position ?? "center";
 
@@ -94,26 +104,65 @@ function useWallpaperLayer() {
       } catch {
         url = null;
       }
+      source = path;
       // Custom picks always cover the viewport; theme size/position only apply
       // to the cartridge's own art.
       size = "cover";
       position = "center";
     } else if (mode === "auto") {
       url = theme?.wallpaperUrl ?? null;
+      source = theme?.wallpaper?.file ?? "";
     }
 
     if (!url) return null;
 
     const imgOpacity = Number.isFinite(opacity) ? opacity : DEFAULT_WALLPAPER_OPACITY;
-
-    const style: CSSProperties = {
-      ["--wallpaper-image" as string]: `url("${url.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}")`,
-      ["--wallpaper-size" as string]: size,
-      ["--wallpaper-position" as string]: position,
-      ["--wallpaper-opacity" as string]: String(imgOpacity),
+    const video = isWallpaperVideo(source);
+    const style: CSSProperties & Record<string, string> = {
+      "--wallpaper-size": size,
+      "--wallpaper-position": position,
+      "--wallpaper-opacity": String(imgOpacity),
     };
-    return style;
+    if (!video) {
+      style["--wallpaper-image"] =
+        `url("${url.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}")`;
+    }
+    return { kind: video ? "video" : "image", url, style };
   }, [themeId, mode, path, opacity]);
+}
+
+/** Looping muted backdrop. Pauses when the window is hidden so a background
+ *  CaPilot session does not keep a 1080p decoder hot. */
+function WallpaperVideo({ src }: { src: string }) {
+  const ref = useRef<HTMLVideoElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const sync = () => {
+      if (document.hidden || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        el.pause();
+        return;
+      }
+      void el.play().catch(() => {});
+    };
+    sync();
+    document.addEventListener("visibilitychange", sync);
+    return () => document.removeEventListener("visibilitychange", sync);
+  }, [src]);
+  return (
+    <video
+      ref={ref}
+      className="app-wallpaper-video"
+      src={src}
+      muted
+      loop
+      playsInline
+      autoPlay
+      preload="metadata"
+      disablePictureInPicture
+      disableRemotePlayback
+    />
+  );
 }
 
 function App() {
@@ -129,7 +178,7 @@ function App() {
   const onboarded = useStore((s) => s.onboarded);
   const fontScale = useStore((s) => s.fontScale);
   const themeId = useStore((s) => s.themeId);
-  const wallpaperStyle = useWallpaperLayer();
+  const wallpaper = useWallpaperLayer();
   // Reflect the chosen font-size preset on <html> so the CSS `html[data-fs=…]`
   // rules can rescale every `--fs-*` token.
   document.documentElement.dataset.fs = fontScale;
@@ -137,13 +186,15 @@ function App() {
   // whole shell (and CodeMirror) without changing component structure.
   document.documentElement.dataset.theme = themeId;
   // Let CSS know a wallpaper is active so shell surfaces can go translucent.
-  if (wallpaperStyle) document.documentElement.dataset.wallpaper = "on";
+  if (wallpaper) document.documentElement.dataset.wallpaper = "on";
   else delete document.documentElement.dataset.wallpaper;
 
   return (
     <div className="app">
-      {wallpaperStyle && (
-        <div className="app-wallpaper" style={wallpaperStyle} aria-hidden="true" />
+      {wallpaper && (
+        <div className="app-wallpaper" style={wallpaper.style} aria-hidden="true">
+          {wallpaper.kind === "video" && <WallpaperVideo src={wallpaper.url} />}
+        </div>
       )}
       <div className="app-body">
         <RightSidebar />
@@ -155,8 +206,8 @@ function App() {
       {/* Frameless window (`decorations: false`): OS edge-resize is missing in
           tauri dev on many Linux compositors — overlay grips restore it. */}
       <WindowResizeEdges />
-      <DevAnnotationsGate />
-      <DevThemeLabGate />
+      <ThemeLabGate />
+      <AnnotationsGate />
       {!onboarded && <Onboarding />}
     </div>
   );
