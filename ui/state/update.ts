@@ -62,8 +62,9 @@ export function useUpdateSync() {
       useStore.setState({ autoCheckUpdate: autoCheck, soundEnabled: soundOn });
       if (!autoCheck) return;
 
-      // Background check a few seconds after mount. Never blocks startup; a
-      // failure just flips the status to "error" (visible in Settings → 关于).
+      // Background check a few seconds after mount. Never blocks startup.
+      // A missing latest.json (release still assembling) is up-to-date;
+      // a real network failure still surfaces in Settings → 关于.
       timer = setTimeout(() => {
         if (!cancelled) checkForUpdate({ notifyOnFound: true }).catch(() => {});
       }, 3000);
@@ -109,6 +110,17 @@ function normalizeUpdateStatus(raw: Record<string, unknown>): UpdateStatus {
     target: pickStr(raw, "target", "target") ?? "",
     installable,
   };
+}
+
+/** Missing `latest.json` (tag just pushed, Release still assembling the
+ *  updater manifest) — treat as already-latest, not a check failure. */
+function isMissingManifestError(msg: string): boolean {
+  const m = msg.toLowerCase();
+  return (
+    m.includes("could not fetch a valid release json") ||
+    m.includes("release not found") ||
+    (m.includes("404") && m.includes("not found"))
+  );
 }
 
 /** Ask the backend for the latest version and fold the result into the store.
@@ -183,11 +195,21 @@ export async function checkForUpdate(opts: CheckOptions = {}): Promise<void> {
     }
   } catch (e) {
     if (gen !== checkGeneration) return;
-    useStore.setState({
-      updateStatus: "error",
-      updateError: String(e),
-      updateCheckedAt: Date.now(),
-    });
+    if (isMissingManifestError(String(e))) {
+      const current = useStore.getState().currentVersion;
+      useStore.setState({
+        updateStatus: "up-to-date",
+        updateLatest: current,
+        updateError: null,
+        updateCheckedAt: Date.now(),
+      });
+    } else {
+      useStore.setState({
+        updateStatus: "error",
+        updateError: String(e),
+        updateCheckedAt: Date.now(),
+      });
+    }
   } finally {
     clearTimeout(timeoutId);
   }

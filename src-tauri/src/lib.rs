@@ -1921,13 +1921,25 @@ const UPDATE_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// Generous budget for the binary download itself (mirrors + slow links).
 const UPDATE_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// Check the update server for a newer version. Network / server failures are
-/// surfaced as a friendly error string rather than a crash — the frontend shows
-/// it inline in Settings → 关于 and never blocks startup on it.
+/// Check the update server for a newer version.
+///
+/// A missing `latest.json` (release still assembling the updater manifest)
+/// is treated as "already on the latest published package" — the running
+/// build *is* that tag. Real network / parse failures still surface as an
+/// error so Settings can retry.
 #[tauri::command]
 async fn update_check(app: tauri::AppHandle) -> Result<UpdateStatus, String> {
     let current = app.package_info().version.to_string();
     let installable = !cfg!(debug_assertions);
+    let up_to_date = || UpdateStatus {
+        current_version: current.clone(),
+        latest_version: Some(current.clone()),
+        available: false,
+        notes: None,
+        published_at: None,
+        target: tauri_plugin_updater::target().unwrap_or_default(),
+        installable,
+    };
     // `updater()` has no default timeout — build explicitly so a dead endpoint
     // fails over to the next one instead of hanging the whole check.
     let updater = app
@@ -1945,16 +1957,52 @@ async fn update_check(app: tauri::AppHandle) -> Result<UpdateStatus, String> {
             target: update.target.clone(),
             installable,
         }),
-        Ok(None) => Ok(UpdateStatus {
-            current_version: current,
-            latest_version: None,
-            available: false,
-            notes: None,
-            published_at: None,
-            target: tauri_plugin_updater::target().unwrap_or_default(),
-            installable,
-        }),
-        Err(e) => Err(format!("无法连接更新服务器: {e}")),
+        Ok(None) => Ok(up_to_date()),
+        Err(e) => {
+            if update_err_is_empty_manifest(&e) {
+                log::info!("update check: no latest.json yet ({e}); treating as up-to-date");
+                Ok(up_to_date())
+            } else {
+                Err(format!("无法连接更新服务器: {e}"))
+            }
+        }
+    }
+}
+
+/// True when every updater endpoint had no usable `latest.json`.
+/// Typical right after a tag push, before the Release `manifest` job uploads
+/// it. Timeouts / DNS / TLS stay errors so a dead mirror is still visible.
+fn update_err_is_empty_manifest(err: &tauri_plugin_updater::Error) -> bool {
+    use tauri_plugin_updater::Error;
+    match err {
+        Error::ReleaseNotFound => true,
+        Error::Serialization(e) => {
+            let m = e.to_string().to_ascii_lowercase();
+            m.contains("eof") || m.contains("end of file") || m.contains("empty")
+        }
+        other => {
+            let m = other.to_string().to_ascii_lowercase();
+            m.contains("could not fetch a valid release json")
+                || (m.contains("404") && m.contains("not found"))
+        }
+    }
+}
+
+#[cfg(test)]
+mod update_check_tests {
+    use super::update_err_is_empty_manifest;
+    use tauri_plugin_updater::Error;
+
+    #[test]
+    fn missing_latest_json_is_up_to_date() {
+        assert!(update_err_is_empty_manifest(&Error::ReleaseNotFound));
+    }
+
+    #[test]
+    fn network_timeout_is_not_up_to_date() {
+        assert!(!update_err_is_empty_manifest(&Error::Network(
+            "error sending request for url: timed out".into()
+        )));
     }
 }
 
