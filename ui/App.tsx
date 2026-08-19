@@ -48,6 +48,30 @@ function DevAnnotationsGate() {
 }
 
 /**
+ * Theme Lab mixer — dev only (same elimination rules as DevAnnotationsGate).
+ * Live-edits CSS theme tokens + terminal veil; never ships in production.
+ */
+function DevThemeLabGate() {
+  const [Comp, setComp] = useState<ComponentType | null>(null);
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    let cancelled = false;
+    void import("./components/theme-lab/DevThemeLab")
+      .then((m) => {
+        if (!cancelled) setComp(() => m.DevThemeLab);
+      })
+      .catch((err) => {
+        console.error("[ThemeLab] failed to load", err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  if (!import.meta.env.DEV || !Comp) return null;
+  return <Comp />;
+}
+
+/**
  * Resolve the active wallpaper URL + paint params.
  * Priority: mode off → none; custom path → asset URL; auto → theme cartridge.
  * Opacity comes from the single user preference (defaults match themes.ts).
@@ -132,6 +156,7 @@ function App() {
           tauri dev on many Linux compositors — overlay grips restore it. */}
       <WindowResizeEdges />
       <DevAnnotationsGate />
+      <DevThemeLabGate />
       {!onboarded && <Onboarding />}
     </div>
   );

@@ -6,6 +6,10 @@ body.annot-mode *:not([data-annot-ui]) { cursor: crosshair !important; }
 body.annot-mode [data-annot-ui],
 body.annot-mode [data-annot-ui] * { cursor: default !important; }
 
+/* Theme Lab panel sits above the annotation layer (z-index 9200 vs 6000–6200);
+   in annotation mode it keeps normal pointer behaviour so elements inside it
+   can be annotated like any other. */
+
 /* Selection layer — full-window, transparent to the mouse so clicks reach the
    elements underneath (the capture-phase handler in AnnotationLayer picks). */
 .annot-layer { position: fixed; inset: 0; z-index: 6000; pointer-events: none; }

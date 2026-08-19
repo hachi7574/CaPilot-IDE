@@ -8,18 +8,17 @@ export function isMouseTuiRuntime(runtime: string | undefined): boolean {
 /**
  * Whether CaPilot may synthesize an SGR 1006 mouse report for this runtime.
  *
- * OpenCode is a special case: its PTY and alternate-screen TUI stay resident
- * while the frontend xterm can be recreated. A recreated xterm may attach after
- * the bounded PTY replay has already dropped OpenCode's initial `CSI ? 1006 h`,
- * even though the live TUI still expects SGR reports. Treat SGR mouse support as
- * part of the OpenCode adapter contract instead of relying on that startup frame.
+ * Claude / OpenCode keep a live alternate-screen TUI. Their xterm can still be
+ * recreated (split-view remount, first restore). A recreated xterm may attach
+ * after the bounded PTY replay has already dropped the initial `CSI ? 1006 h`,
+ * even though the live TUI still expects SGR reports. Treat SGR mouse support
+ * as part of the adapter contract instead of relying on that startup frame.
  */
 export function canForwardSgrMouse(
   runtime: string | undefined,
-  observedSgr: boolean
+  _observedSgr: boolean
 ): boolean {
-  if (!isMouseTuiRuntime(runtime)) return false;
-  return observedSgr || runtime === "opencode";
+  return isMouseTuiRuntime(runtime);
 }
 
 export function sgrWheelReport(

@@ -1,0 +1,379 @@
+/* Dev-only Theme Lab — never imported from production entrypoints. */
+
+.tl-panel {
+  position: fixed;
+  /* Above settings (4000), annotations (6000–6200), update prompt (5500).
+     Below window-edge resize grips (9999) so frameless resize still works. */
+  z-index: 9200;
+  width: 388px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg2, #12121a);
+  color: var(--ink, #eee);
+  border: 1px solid var(--rule2, #444);
+  border-radius: 8px;
+  box-shadow: var(--panel-shadow, 0 8px 28px rgb(0 0 0 / 0.45));
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: var(--fs-xs, 11px);
+  overflow: hidden;
+  user-select: none;
+  pointer-events: auto;
+}
+
+.tl-panel.dragging {
+  cursor: grabbing;
+  opacity: 0.96;
+}
+
+/* While dragging/resizing, suppress text selection & iframe/canvas steal. */
+body.tl-dragging,
+body.tl-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+body.tl-resizing,
+body.tl-resizing * {
+  cursor: ns-resize !important;
+  user-select: none !important;
+}
+
+/* Collapsed launcher chip — always discoverable when the full panel is hidden. */
+.tl-fab {
+  position: fixed;
+  left: 12px;
+  bottom: 40px; /* above 28px status bar */
+  z-index: 9200;
+  pointer-events: auto;
+  border: 1px solid var(--brand, #9a86ff);
+  background: var(--bg2, #12121a);
+  color: var(--brand, #9a86ff);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: var(--fs-xs, 11px);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  box-shadow: var(--panel-shadow, 0 6px 18px rgb(0 0 0 / 0.4));
+}
+
+.tl-fab:hover {
+  background: var(--bg3, #1a1a28);
+  color: var(--ink, #eee);
+}
+
+.tl-panel.collapsed {
+  width: auto;
+  max-height: none;
+}
+
+.tl-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--bg3, #1a1a28);
+  border-bottom: 1px solid var(--rule, #333);
+  cursor: grab;
+  touch-action: none;
+}
+
+.tl-panel.collapsed .tl-head {
+  border-bottom: none;
+}
+
+.tl-head:active {
+  cursor: grabbing;
+}
+
+.tl-title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  color: var(--brand, #9a86ff);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tl-head-btn {
+  flex: none;
+  border: 1px solid var(--rule2, #555);
+  background: var(--bg, #0a0a12);
+  color: var(--ink2, #ccc);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font: inherit;
+  cursor: pointer;
+  line-height: 1.3;
+}
+
+.tl-head-btn:hover {
+  border-color: var(--brand, #9a86ff);
+  color: var(--brand, #9a86ff);
+}
+
+.tl-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  min-height: 0;
+  /* Height is driven by inline style (default 420, user-resizable). */
+  flex: 0 0 auto;
+  box-sizing: border-box;
+}
+
+/* Bottom edge drag-handle — stretch body height. */
+.tl-resize {
+  flex: none;
+  height: 8px;
+  cursor: ns-resize;
+  touch-action: none;
+  background:
+    linear-gradient(var(--rule, #333), var(--rule, #333)) center 3px / 28px 2px
+      no-repeat,
+    var(--bg3, #1a1a28);
+  border-top: 1px solid var(--rule, #333);
+}
+.tl-resize:hover,
+.tl-panel:not(.collapsed) .tl-resize:active {
+  background:
+    linear-gradient(var(--brand, #9a86ff), var(--brand, #9a86ff)) center 3px /
+      36px 2px no-repeat,
+    var(--bg3, #1a1a28);
+}
+
+.tl-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.tl-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  border: 1px solid var(--rule, #333);
+  border-radius: 4px;
+  background: var(--bg, #0a0a12);
+  color: var(--ink2, #ccc);
+  font: inherit;
+  cursor: pointer;
+  max-width: 100%;
+}
+
+.tl-chip:hover {
+  border-color: var(--brand, #9a86ff);
+}
+
+.tl-chip.active {
+  border-color: var(--brand, #9a86ff);
+  color: var(--brand, #9a86ff);
+  background: rgb(var(--brand-rgb, 154 134 255) / 0.14);
+}
+
+.tl-chip-swatches {
+  display: inline-flex;
+  gap: 1px;
+}
+
+.tl-chip-swatches i {
+  width: 8px;
+  height: 8px;
+  border-radius: 1px;
+  display: inline-block;
+}
+
+.tl-chip-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 90px;
+}
+
+.tl-wallpaper-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.tl-wallpaper-row label {
+  flex: 1;
+  color: var(--ink2, #ccc);
+}
+
+.tl-group {
+  border: 1px solid var(--rule, #333);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.tl-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  background: var(--bg3, #1a1a28);
+  color: var(--ink, #eee);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.tl-group-head:hover {
+  color: var(--brand, #9a86ff);
+}
+
+.tl-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px 8px;
+  background: var(--bg, #0a0a12);
+}
+
+.tl-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 6px;
+  align-items: center;
+}
+
+.tl-row-label {
+  grid-column: 1 / -1;
+  color: var(--muted, #888);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+
+.tl-row-controls {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tl-color {
+  width: 36px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--rule2, #555);
+  border-radius: 3px;
+  background: transparent;
+  cursor: pointer;
+  flex: none;
+}
+
+.tl-text {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--rule, #333);
+  border-radius: 3px;
+  background: var(--bg2, #12121a);
+  color: var(--ink, #eee);
+  font: inherit;
+  padding: 3px 6px;
+}
+
+.tl-text:focus {
+  outline: none;
+  border-color: var(--brand, #9a86ff);
+}
+
+.tl-range {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--brand, #9a86ff);
+}
+
+.tl-ratio-val {
+  width: 36px;
+  text-align: right;
+  color: var(--ink2, #ccc);
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.tl-reset {
+  flex: none;
+  border: 1px solid var(--rule, #333);
+  background: transparent;
+  color: var(--muted, #888);
+  border-radius: 3px;
+  padding: 2px 5px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.tl-reset:hover {
+  color: var(--brand, #9a86ff);
+  border-color: var(--brand, #9a86ff);
+}
+
+.tl-reset:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.tl-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding-top: 2px;
+  border-top: 1px solid var(--rule, #333);
+}
+
+.tl-actions button {
+  border: 1px solid var(--rule2, #555);
+  background: var(--bg3, #1a1a28);
+  color: var(--ink, #eee);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.tl-actions button:hover {
+  border-color: var(--brand, #9a86ff);
+  color: var(--brand, #9a86ff);
+}
+
+.tl-actions button.primary {
+  background: var(--brand-dim, #5946b8);
+  border-color: var(--brand, #9a86ff);
+  color: var(--accent-ink, #fff);
+}
+
+.tl-actions button.primary:hover {
+  background: var(--brand, #9a86ff);
+}
+
+.tl-status {
+  color: var(--muted, #888);
+  font-size: 10px;
+  min-height: 1.2em;
+}
+
+.tl-status.ok {
+  color: var(--success, #75d79a);
+}
+
+.tl-status.err {
+  color: var(--danger, #f27e9a);
+}
+
+.tl-hint {
+  color: var(--muted, #888);
+  font-size: 10px;
+  line-height: 1.35;
+}

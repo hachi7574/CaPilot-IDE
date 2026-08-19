@@ -19,8 +19,8 @@ import "@xterm/xterm/css/xterm.css";
 interface XTermPanelProps {
   agentId: string;
   /** True when this panel belongs to the active tab. Only an active terminal may
-   *  steal focus on the F1 input↔terminal toggle; hidden resident OpenCode
-   *  panels must not. Defaults to true for standalone use. */
+   *  steal focus on the F1 input↔terminal toggle; hidden resident Claude /
+   *  OpenCode panels must not. Defaults to true for standalone use. */
   active?: boolean;
 }
 
@@ -594,10 +594,10 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     let flushRaf: number | null = null;
     let redrawPulseTimer: ReturnType<typeof setTimeout> | null = null;
     let redrawRestoreTimer: ReturnType<typeof setTimeout> | null = null;
-    // Dims the last opencode redraw pulse used, so a pulse that ran before the
+    // Dims the last TUI redraw pulse used, so a pulse that ran before the
     // terminal settled can re-fire once the real size arrives (the one-shot
     // `redrawPulseRequested` guard left a stale-size frame stuck until a manual
-    // window resize — see pulseOpenCodeRedraw).
+    // window resize — see pulseTuiRedraw).
     let pulseDims = { rows: 0, cols: 0 };
     let pendingClaudeMode: string | null = null;
     let modePersistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -700,19 +700,22 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
       invoke("agent_resize", { id: agentId, rows, cols }).catch(() => {});
     };
 
-    /** OpenCode's alternate-screen TUI may stay idle after this xterm component
-     *  is recreated. The PTY is still alive, but xterm has no screen snapshot to
-     *  paint and an unchanged resize is normally suppressed. A one-column resize
-     *  pulse makes the native TUI redraw without sending it an input command.
+    /** Alternate-screen TUIs (Claude / OpenCode) may stay idle after this xterm
+     *  component is recreated. The PTY is still alive, but xterm has no screen
+     *  snapshot to paint and an unchanged resize is normally suppressed. A
+     *  one-column resize pulse makes the native TUI redraw without sending it
+     *  an input command.
      *
      *  The pulse is dimension-aware: it records the size it pulsed at and skips
      *  a repeat for the same size, so a pulse fired before the terminal settled
      *  (font still loading, container mid-layout) is retried with the final dims
      *  instead of leaving a wrong-sized frame on screen until the user resizes
      *  the window by hand. */
-    const pulseOpenCodeRedraw = () => {
+    const pulseTuiRedraw = () => {
       if (disposed) return;
-      if (useStore.getState().agents.get(agentId)?.runtime !== "opencode") return;
+      if (!isMouseTuiRuntime(useStore.getState().agents.get(agentId)?.runtime)) {
+        return;
+      }
       const rows = term.rows || 24;
       const cols = term.cols || 80;
       if (pulseDims.rows === rows && pulseDims.cols === cols) return;
@@ -729,23 +732,25 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
         lastResize = { rows, cols };
       }, 32);
     };
-    /** Debounced request for an opencode redraw pulse — schedule one, replacing
-     *  any pending one, so rapid fit passes collapse into a single pulse at the
+    /** Debounced request for a TUI redraw pulse — schedule one, replacing any
+     *  pending one, so rapid fit passes collapse into a single pulse at the
      *  settled size. */
-    const requestOpenCodeRedraw = () => {
-      if (useStore.getState().agents.get(agentId)?.runtime !== "opencode") return;
+    const requestTuiRedraw = () => {
+      if (!isMouseTuiRuntime(useStore.getState().agents.get(agentId)?.runtime)) {
+        return;
+      }
       if (redrawPulseTimer) clearTimeout(redrawPulseTimer);
       redrawPulseTimer = setTimeout(() => {
         redrawPulseTimer = null;
-        pulseOpenCodeRedraw();
+        pulseTuiRedraw();
       }, 80);
     };
 
     /** Fit the terminal to its container and force a repaint. A terminal opened
      *  during a tab switch can land in a 0×0 / not-yet-laid-out container, which
      *  paints a blank canvas until something resizes it — fit() alone won't redraw
-     *  when the size didn't change, so refresh() forces the paint. An opencode
-     *  redraw pulse is also (re)scheduled so its TUI redraws at the settled size. */
+     *  when the size didn't change, so refresh() forces the paint. A TUI redraw
+     *  pulse is also (re)scheduled so Claude / OpenCode redraw at the settled size. */
     const fitAndRefresh = () => {
       if (disposed) return;
       try {
@@ -756,7 +761,9 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
       if (term.rows > 0 && term.cols > 0) {
         sendResize();
         term.refresh(0, term.rows - 1);
-        requestOpenCodeRedraw();
+        // Alternate-screen TUIs (Claude / OpenCode) also get a resize pulse so
+        // they redraw at the settled size after a remount or layout change.
+        requestTuiRedraw();
       }
     };
     // Defer the initial fit so the panel has its final size (a tab switch can
@@ -782,7 +789,7 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
         useStore.getState().clearAgentOutput(agentId);
       }
       sendResize();
-      requestOpenCodeRedraw();
+      requestTuiRedraw();
     };
 
     if (channel) {
@@ -987,14 +994,20 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
 
   // xterm paints to a canvas and therefore cannot follow CSS variables by
   // itself. Refresh its palette in place so live PTY sessions survive a theme
-  // switch without reconnecting or losing scrollback.
+  // switch (or Theme Lab live overrides via `capilot:theme-vars`) without
+  // reconnecting or losing scrollback.
   useEffect(() => {
-    const term = termRef.current;
-    if (!term) return;
-    term.options.theme = readTerminalTheme();
-    if (term.rows > 0) term.refresh(0, term.rows - 1);
-    searchAddonRef.current?.clearDecorations();
-    setSearchResults(null);
+    const apply = () => {
+      const term = termRef.current;
+      if (!term) return;
+      term.options.theme = readTerminalTheme();
+      if (term.rows > 0) term.refresh(0, term.rows - 1);
+      searchAddonRef.current?.clearDecorations();
+      setSearchResults(null);
+    };
+    apply();
+    window.addEventListener("capilot:theme-vars", apply);
+    return () => window.removeEventListener("capilot:theme-vars", apply);
   }, [themeId]);
 
   // Tauri drag-drop event — more reliable in the webview than DOM drop (the
@@ -1065,9 +1078,29 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
       window.removeEventListener("capilot:path-drop", onPathDrop as EventListener);
   }, [active, agentId, insertPathToPty]);
 
+  // A resident Claude / OpenCode panel can sit at `visibility: hidden` while
+  // another tab is active. WebView2 / WebKit may drop the canvas backing store
+  // in that state; fit + refresh when the tab returns so the last TUI frame
+  // (and any packets that arrived while hidden) actually paint.
+  useEffect(() => {
+    if (!active) return;
+    const term = termRef.current;
+    const fitAddon = fitAddonRef.current;
+    if (!term || !fitAddon) return;
+    const raf = requestAnimationFrame(() => {
+      try {
+        fitAddon.fit();
+      } catch {
+        // Container has no dimensions yet — ResizeObserver handles the retry.
+      }
+      if (term.rows > 0) term.refresh(0, term.rows - 1);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [active]);
+
   // F1 focus toggle (Composer → terminal). Only the active tab's terminal
   // responds, and only to requests the shared counter hasn't consumed yet — so
-  // neither a freshly-mounted panel nor a reactivated resident OpenCode panel
+  // neither a freshly-mounted panel nor a reactivated resident TUI panel
   // steals focus for a stale request.
   useEffect(() => {
     if (!active || !focusRequest) return;

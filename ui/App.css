@@ -23,6 +23,10 @@
   /* Terminal default-cell veil. Themes may override `--term-veil` (0–1);
      1 keeps the historic opaque --term-bg. */
   --term-veil: 1;
+  /* Wallpaper shell opacity mixes (only applied under data-wallpaper=on).
+     Themes / Theme Lab may override. 1 = fully opaque shell over art. */
+  --wallpaper-surface-mix: 0.72;
+  --wallpaper-chrome-mix: 0.78;
 }
 
 /* ── Font scale presets (Settings > 字体大小) ─────────────────────
@@ -1395,9 +1399,10 @@ body.path-pointer-dragging * {
 
 .content-area { position: relative; }
 
-/* OpenCode uses an alternate-screen TUI and may emit no output while idle.
-   Its xterm canvas therefore stays resident between tab changes; hiding it by
-   visibility preserves both the DOM renderer and its in-memory screen buffer. */
+/* Claude / OpenCode use an alternate-screen TUI and may emit no output while
+   idle. Their xterm canvas therefore stays resident between tab changes;
+   hiding it by visibility preserves both the DOM renderer and its in-memory
+   screen buffer. */
 .resident-terminal-panel {
   flex: 1; display: flex; min-width: 0; min-height: 0; overflow: hidden;
 }
@@ -3412,8 +3417,16 @@ body::after { content: none; }
    heavier than the right). Terminal default cells use `--term-veil` (0–1)
    over `--term-bg`; 1 is the historic opaque fill. */
 html[data-wallpaper="on"] {
-  --wallpaper-surface: color-mix(in srgb, var(--bg2) 72%, transparent);
-  --wallpaper-chrome: color-mix(in srgb, var(--bg2) 78%, transparent);
+  --wallpaper-surface: color-mix(
+    in srgb,
+    var(--bg2) calc(var(--wallpaper-surface-mix, 0.72) * 100%),
+    transparent
+  );
+  --wallpaper-chrome: color-mix(
+    in srgb,
+    var(--bg2) calc(var(--wallpaper-chrome-mix, 0.78) * 100%),
+    transparent
+  );
 }
 html[data-wallpaper="on"] .left-sidebar,
 html[data-wallpaper="on"] .right-sidebar,

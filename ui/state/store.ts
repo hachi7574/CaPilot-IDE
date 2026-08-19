@@ -1879,7 +1879,7 @@ export const useStore = create<AppState>((set, get) => {
         }
         if (splitLeafCount(pruned) === 1) {
           // One pane left → collapse to the single-panel view (keeps the
-          // OpenCode resident-terminal handling).
+          // Claude / OpenCode resident-terminal handling).
           return {
             tabs,
             activeTabId:

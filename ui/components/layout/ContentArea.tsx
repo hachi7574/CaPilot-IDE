@@ -10,6 +10,7 @@ import { CaPilotLogo } from "../CaPilotLogo";
 import { spawnAgent } from "../../state/agentActions";
 import { notify } from "../../state/notify";
 import { useT, t as tStatic } from "../../i18n";
+import { isMouseTuiRuntime } from "../terminal/mouseProtocol";
 
 type DropEdge = "left" | "right" | "top" | "bottom" | null;
 
@@ -289,10 +290,16 @@ export function ContentArea() {
   }, []);
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
-  const openCodeTabs = tabs.filter(
-    (tab) => tab.type === "agent" && tab.agentId && agents.get(tab.agentId)?.runtime === "opencode"
+  // Claude / OpenCode own an alternate-screen TUI whose complete frame is held
+  // by xterm, not replayed by the PTY. Keep each opened panel mounted across
+  // tab changes so returning to it cannot produce an empty canvas.
+  const residentTabs = tabs.filter(
+    (tab) =>
+      tab.type === "agent" &&
+      tab.agentId &&
+      isMouseTuiRuntime(agents.get(tab.agentId)?.runtime)
   );
-  const activeIsOpenCode = openCodeTabs.some((tab) => tab.id === activeTab?.id);
+  const activeIsResident = residentTabs.some((tab) => tab.id === activeTab?.id);
 
   /** Drop a dragged tab onto a pane: middle → activate it; edge → split that
    *  pane so the dragged tab joins on that side (no-op if it's already shown). */
@@ -372,12 +379,8 @@ export function ContentArea() {
     <div className="content-area">
       {activeTab && (
         <DropShell targetTabId={activeTab.id} draggedTabId={draggedTabId} onSplit={handleSplit}>
-          {!activeIsOpenCode && <Panel tab={activeTab} active />}
-          {/* OpenCode owns an alternate-screen TUI whose complete frame is held
-              by xterm, not replayed by the PTY. Keep each opened OpenCode panel
-              mounted across tab changes so returning to it cannot produce an
-              empty canvas. */}
-          {openCodeTabs.map((tab) => (
+          {!activeIsResident && <Panel tab={activeTab} active />}
+          {residentTabs.map((tab) => (
             <div
               key={tab.id}
               className={`resident-terminal-panel${tab.id === activeTab?.id ? " active" : " hidden"}`}

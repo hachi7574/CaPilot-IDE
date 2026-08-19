@@ -6,12 +6,12 @@ import {
   sgrWheelReport,
 } from "./mouseProtocol.ts";
 
-test("OpenCode keeps SGR mouse forwarding after a resident PTY is reattached", () => {
+test("alternate-screen TUIs keep SGR mouse forwarding after a resident PTY is reattached", () => {
   assert.equal(canForwardSgrMouse("opencode", false), true);
+  assert.equal(canForwardSgrMouse("claude", false), true);
 });
 
 test("other runtimes retain their existing mouse behavior", () => {
-  assert.equal(canForwardSgrMouse("claude", false), false);
   assert.equal(canForwardSgrMouse("claude", true), true);
   assert.equal(canForwardSgrMouse("codex", true), false);
   assert.equal(canForwardSgrMouse("bash", true), false);
