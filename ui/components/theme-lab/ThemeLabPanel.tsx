@@ -34,10 +34,13 @@ import {
 } from "./tokens";
 import "./theme-lab.css";
 
+/** Match the annotations tray so both floating tools share a column. */
+const PANEL_WIDTH = 320;
+
 /** Prefer keeping the full panel on-screen; never let it leave the viewport. */
 function clampPos(
   pos: ThemeLabPos,
-  size: { w: number; h: number } = { w: 388, h: 200 }
+  size: { w: number; h: number } = { w: PANEL_WIDTH, h: 200 }
 ): ThemeLabPos {
   const margin = 8;
   // If the panel is larger than the window, pin to the top-left margin so the
@@ -57,7 +60,7 @@ function resolveDefaultPos(
   bodyHeight: number
 ): ThemeLabPos {
   // Head (~34) + body height ≈ panel total.
-  const panelW = Math.min(388, window.innerWidth - 16);
+  const panelW = Math.min(PANEL_WIDTH, window.innerWidth - 16);
   const panelH = Math.min(window.innerHeight - 16, bodyHeight + 40);
   const looksUnset = stored.y < 0 || !Number.isFinite(stored.y);
   if (looksUnset) {
@@ -220,7 +223,7 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
         return next === h ? h : next;
       });
       const el = panelRef.current;
-      const w = el?.offsetWidth || 388;
+      const w = el?.offsetWidth || PANEL_WIDTH;
       const h = el?.offsetHeight || bodyHeightRef.current + 40;
       setPos((p) => {
         const next = clampPos(p, { w, h });

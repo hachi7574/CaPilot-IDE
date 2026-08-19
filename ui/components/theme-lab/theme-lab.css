@@ -6,7 +6,7 @@
      Below window-edge resize grips (9999) so frameless resize still works.
      Overlay pick chrome lives at 9300+ (also body-portaled). */
   z-index: 9200;
-  width: 388px;
+  width: 320px;
   max-width: calc(100vw - 16px);
   /* Cap the whole panel so head + scroll body + resize always fit the viewport.
      Body is the only scroll container — content must never paint over siblings. */
