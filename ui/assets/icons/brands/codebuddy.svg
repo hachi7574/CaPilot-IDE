@@ -1,0 +1,10 @@
+<!-- Official CodeBuddy mark (download.codebuddy.cn …/assets/logo.svg),
+     scaled 40→24 and flattened to currentColor so it follows --icon-color. -->
+<svg xmlns="http://www.w3.org/2000/svg" class="capilot-icon brand" role="img" width="24" height="24" viewBox="0 0 24 24" style="fill:var(--icon-color,currentColor)">
+<title>CodeBuddy</title>
+<g transform="scale(0.6)">
+<path fill-rule="evenodd" d="M20 0a20 20 0 1 0 0 40A20 20 0 0 0 20 0ZM15.439 23.126c-1.653.954-2.479 1.432-3.086 1.967-2.46 2.166-3.38 5.596-2.332 8.701.259.767.736 1.593 1.69 3.246.954 1.653 1.431 2.48 1.966 3.087 2.166 2.459 5.596 3.378 8.701 2.33.767-.258 1.594-.735 3.247-1.689l9.508-5.49c1.653-.954 2.479-1.432 3.087-1.967 2.459-2.165 3.379-5.595 2.331-8.7-.258-.767-.736-1.594-1.69-3.247-.954-1.653-1.431-2.48-1.966-3.087-2.166-2.459-5.596-3.378-8.701-2.33-.767.258-1.594.735-3.247 1.689Z"/>
+<rect x="15.8816" y="30.0273" width="4.00904" height="8.32646" rx="2.00452" transform="rotate(-30 15.8816 30.0273)"/>
+<rect x="26.6978" y="23.7812" width="4.00904" height="8.32646" rx="2.00452" transform="rotate(-30 26.6978 23.7812)"/>
+</g>
+</svg>

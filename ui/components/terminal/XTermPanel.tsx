@@ -9,6 +9,7 @@ import { useStore, AgentInfo, getTodoDragId, isTodoDrag } from "../../state/stor
 import { assignTodoAndSend } from "../../state/agentActions";
 import { pathsFromDataTransfer } from "../../state/dropPaths";
 import { useT } from "../../i18n";
+import { matchesShortcut } from "../../state/shortcuts";
 import { Icon } from "../Icon";
 import {
   canForwardSgrMouse,
@@ -606,32 +607,15 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     // the browser's default copy; WebView2 / WebKitGTK also have no native menu
     // fallback. Returning false stops the event reaching xterm's own key handling.
     term.attachCustomKeyEventHandler((ev) => {
-      // F1 is reserved for the composer↔terminal focus toggle (handled by a
-      // window-level listener). Swallow it here so the PTY never receives the
-      // F1 escape sequence on top of the focus switch — most CLIs would act on
-      // it (help panel, etc.), leaving the two areas in an inconsistent state.
-      if (
-        ev.type === "keydown" &&
-        ev.key === "F1" &&
-        !ev.ctrlKey &&
-        !ev.shiftKey &&
-        !ev.altKey &&
-        !ev.metaKey
-      ) {
-        return false;
-      }
-      // Ctrl+F opens terminal search. Swallow it here so the PTY never receives
-      // the `^F` control code — most shells bind Ctrl+F to forward-char.
-      if (
-        ev.type === "keydown" &&
-        ev.ctrlKey &&
-        !ev.shiftKey &&
-        !ev.altKey &&
-        !ev.metaKey &&
-        ev.key.toLowerCase() === "f"
-      ) {
-        setSearchOpen(true);
-        return false;
+      // Focus-toggle and search chords are owned by the app (Composer /
+      // ContentArea). Swallow them so the PTY never sees the key on top of the
+      // UI action.
+      if (ev.type === "keydown") {
+        const map = useStore.getState().shortcuts;
+        if (matchesShortcut(ev, "focusToggle", map) || matchesShortcut(ev, "search", map)) {
+          if (matchesShortcut(ev, "search", map)) setSearchOpen(true);
+          return false;
+        }
       }
       // Copy shortcuts. xterm maps Ctrl+C to PTY SIGINT (^C) and never produces
       // the browser's default copy, and WebView2 / WebKitGTK have no native menu

@@ -2162,13 +2162,12 @@ async fn runtime_list_available() -> Vec<agent_runtime::adapter::RuntimeInfo> {
     // and isolate each runtime so one hang still returns the others.
     tauri::async_runtime::spawn_blocking(|| {
         agent_runtime::adapter::ensure_cli_path();
-        let mut out = Vec::new();
-        for id in known_runtimes() {
-            // Per-runtime budget: availability + auth + models. A single
-            // runtime that exceeds this is reported as unavailable rather than
-            // freezing Settings → 已安装 forever.
-            let id_owned = id.to_string();
-            let (tx, rx) = std::sync::mpsc::channel();
+        let ids = known_runtimes();
+        let n = ids.len();
+        let (tx, rx) = std::sync::mpsc::channel();
+        for (i, id) in ids.iter().enumerate() {
+            let tx = tx.clone();
+            let id_owned = (*id).to_string();
             std::thread::spawn(move || {
                 let adapter = get_adapter(&id_owned);
                 let info = agent_runtime::adapter::RuntimeInfo {
@@ -2181,16 +2180,35 @@ async fn runtime_list_available() -> Vec<agent_runtime::adapter::RuntimeInfo> {
                     permission_modes: adapter.list_permission_modes(),
                     thinking_options: adapter.list_thinking_options(),
                 };
-                let _ = tx.send(info);
+                let _ = tx.send((i, info));
             });
-            match rx.recv_timeout(std::time::Duration::from_secs(12)) {
-                Ok(info) => out.push(info),
-                Err(_) => {
+        }
+        drop(tx);
+        let mut slots: Vec<Option<agent_runtime::adapter::RuntimeInfo>> = vec![None; n];
+        let deadline = Instant::now() + Duration::from_secs(12);
+        while Instant::now() < deadline {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(left) {
+                Ok((i, info)) => {
+                    if let Some(slot) = slots.get_mut(i) {
+                        *slot = Some(info);
+                    }
+                    if slots.iter().all(|s| s.is_some()) {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        slots
+            .into_iter()
+            .enumerate()
+            .map(|(i, slot)| {
+                slot.unwrap_or_else(|| {
+                    let id = ids[i];
                     log::warn!("runtime probe timed out for {id}");
-                    // Still surface a row so Settings isn't blank; available=false
-                    // matches the "not detected" state the user can re-scan.
                     let adapter = get_adapter(id);
-                    out.push(agent_runtime::adapter::RuntimeInfo {
+                    agent_runtime::adapter::RuntimeInfo {
                         id: adapter.id().to_string(),
                         name: adapter.name().to_string(),
                         available: false,
@@ -2199,11 +2217,10 @@ async fn runtime_list_available() -> Vec<agent_runtime::adapter::RuntimeInfo> {
                         models: vec![],
                         permission_modes: adapter.list_permission_modes(),
                         thinking_options: adapter.list_thinking_options(),
-                    });
-                }
-            }
-        }
-        out
+                    }
+                })
+            })
+            .collect()
     })
     .await
     .unwrap_or_default()

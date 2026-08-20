@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type UIEvent } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -18,15 +18,64 @@ import {
 } from "../../state/exitDaemon";
 import { Icon, runtimeIcon } from "../Icon";
 import { isShellRuntime, isWindowsHost } from "../../state/shellPath";
+import {
+  type ShortcutId,
+  formatChord,
+  chordFromEvent,
+  isRecordableKey,
+  chordsEqual,
+} from "../../state/shortcuts";
 import { useT, LOCALES, themeLabel, type Locale } from "../../i18n";
 
 interface SettingsModalProps {
   onClose: () => void;
 }
 
-/** True when this runtime is an agent CLI (has models / auth / usage). */
 function isAgentRuntime(id: string): boolean {
   return !isShellRuntime(id);
+}
+
+/** True when this runtime is an agent CLI (has models / auth / usage). */
+function runtimeEnabledOf(
+  rt: RuntimeInfo,
+  enabledRuntimes: string[] | null
+): boolean {
+  if (!rt.available) return false;
+  if (enabledRuntimes === null) return true;
+  return enabledRuntimes.includes(rt.id);
+}
+
+const RUNTIME_FLIP_MS = 420;
+
+function sortRuntimes(
+  list: RuntimeInfo[],
+  enabledRuntimes: string[] | null
+): RuntimeInfo[] {
+  return list.slice().sort((a, b) => {
+    const band = (rt: RuntimeInfo) => {
+      if (rt.available && runtimeEnabledOf(rt, enabledRuntimes)) return 0;
+      if (rt.available) return 1;
+      return 2;
+    };
+    const ba = band(a);
+    const bb = band(b);
+    if (ba !== bb) return ba - bb;
+    const [ak, an] = runtimeSortKey(a);
+    const [bk, bn] = runtimeSortKey(b);
+    if (ak !== bk) return ak - bk;
+    return an.localeCompare(bn);
+  });
+}
+
+/** Compact CLI `--version` for Settings: `5.3.9`, not the GNU bash banner. */
+function shortRuntimeVersion(raw: string): string {
+  const s = raw.trim().replace(/^v/i, "");
+  const m =
+    s.match(/\b(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.]+)?)\b/) ||
+    s.match(/\b(\d+\.\d+)\b/);
+  if (m) return m[1];
+  const token = s.split(/\s+/)[0];
+  return token || s;
 }
 
 /** Sort shells first (powershell/cmd/bash/shell), then agents by name. */
@@ -57,6 +106,38 @@ const DEFAULT_LAUNCH: Record<string, { command: string; args: string }> = {
   dsh: { command: "dsh", args: "--profile dsh-tui" },
   // pi 每会话的 model/thinking/mode 由适配器在 spawn 时按 flag 追加。
   pi: { command: "pi", args: "" },
+  codebuddy: { command: "codebuddy", args: "" },
+  gemini: { command: "gemini", args: "" },
+  grok: { command: "grok", args: "" },
+  kimi: { command: "kimi", args: "" },
+  hermes: { command: "hermes", args: "--tui" },
+  trae: { command: "traecli", args: "" },
+  qoder: { command: "qoderclicn", args: "" },
+  cursor: { command: "cursor-agent", args: "" },
+  copilot: { command: "copilot", args: "" },
+  cline: { command: "cline", args: "" },
+  kilo: { command: "kilo", args: "" },
+  kiro: { command: "kiro-cli", args: "chat --tui" },
+  crush: { command: "crush", args: "" },
+  aug: { command: "auggie", args: "" },
+  continue: { command: "cn", args: "" },
+  "qwen-code": { command: "qwen", args: "" },
+  "command-code": { command: "command-code", args: "--trust" },
+  codebuff: { command: "codebuff", args: "" },
+  droid: { command: "droid", args: "" },
+  aider: { command: "aider", args: "" },
+  goose: { command: "goose", args: "" },
+  amp: { command: "amp", args: "" },
+  openclaude: { command: "openclaude", args: "" },
+  autohand: { command: "autohand", args: "" },
+  "mimo-code": { command: "mimo", args: "" },
+  rovo: { command: "rovo", args: "" },
+  openclaw: { command: "openclaw", args: "" },
+  devin: { command: "devin", args: "" },
+  ante: { command: "ante", args: "" },
+  "prime-agent": { command: "prime-agent", args: "" },
+  omp: { command: "omp", args: "" },
+  antigravity: { command: "agy", args: "" },
   shell: { command: "shell", args: "" },
   powershell: { command: "pwsh", args: "-NoLogo" },
   cmd: { command: "cmd.exe", args: "" },
@@ -87,6 +168,9 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const setThemeLabEnabled = useStore((s) => s.setThemeLabEnabled);
   const ctrlTRuntime = useStore((s) => s.ctrlTRuntime);
   const setCtrlTRuntime = useStore((s) => s.setCtrlTRuntime);
+  const shortcuts = useStore((s) => s.shortcuts);
+  const setShortcut = useStore((s) => s.setShortcut);
+  const resetShortcuts = useStore((s) => s.resetShortcuts);
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const themePickerRef = useRef<HTMLDivElement>(null);
   const [runtimeMenuOpen, setRuntimeMenuOpen] = useState(false);
@@ -144,40 +228,17 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     }
   };
   const [activeSection, setActiveSection] = useState<
-    "runtimes" | "appearance" | "sessions" | "updates"
+    "runtimes" | "appearance" | "sessions" | "shortcuts" | "updates"
   >("runtimes");
-
-  const jumpToSection = (
-    section: "runtimes" | "appearance" | "sessions" | "updates"
-  ) => {
-    setActiveSection(section);
-    document
-      .getElementById(`settings-${section}`)
-      ?.scrollIntoView({ behavior: "smooth", block: "start" });
-  };
-
-  const syncSectionFromScroll = (event: UIEvent<HTMLElement>) => {
-    const container = event.currentTarget;
-    const sectionIds = ["runtimes", "appearance", "sessions", "updates"] as const;
-    let visible: (typeof sectionIds)[number] = "runtimes";
-    for (const section of sectionIds) {
-      const element = document.getElementById(`settings-${section}`);
-      if (!element) continue;
-      const sectionTop = element.offsetTop - container.offsetTop;
-      if (sectionTop <= container.scrollTop + 72) visible = section;
-    }
-    // The final panel is shorter than the viewport on some window sizes, so it
-    // can never reach the 72px threshold. Reaching the scroll bottom still
-    // means the update section is the user's current destination.
-    if (container.scrollTop + container.clientHeight >= container.scrollHeight - 2) {
-      visible = "updates";
-    }
-    setActiveSection(visible);
-  };
+  const [recordingId, setRecordingId] = useState<ShortcutId | null>(null);
 
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      if (recordingId) {
+        setRecordingId(null);
+        return;
+      }
       if (themeMenuOpen) {
         setThemeMenuOpen(false);
         return;
@@ -198,7 +259,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [onClose, themeMenuOpen, runtimeMenuOpen, namePackMenuOpen, namePackPasteOpen]);
+  }, [onClose, themeMenuOpen, runtimeMenuOpen, namePackMenuOpen, namePackPasteOpen, recordingId]);
 
   useEffect(() => {
     if (!themeMenuOpen) return;
@@ -428,6 +489,10 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const [checkingId, setCheckingId] = useState<string | null>(null);
   const usageState = useStore((s) => s.usageState);
   const bumpUsageRevision = useStore((s) => s.bumpUsageRevision);
+  const enabledRuntimes = useStore((s) => s.enabledRuntimes);
+  const setRuntimeEnabled = useStore((s) => s.setRuntimeEnabled);
+  const runtimeListRef = useRef<HTMLDivElement>(null);
+  const runtimeFlipTimer = useRef<number | null>(null);
 
   useEffect(() => {
     invoke<string | null>("setting_get", { key: "usage_enabled" })
@@ -563,19 +628,65 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   // PowerShell / CMD / Git Bash explicitly). On non-Windows hide PowerShell /
   // CMD (Windows-only shells — not probed by the backend either). Show
   // unavailable rows so a failed/slow probe isn't mistaken for "none installed".
-  const listedRuntimes = runtimes
-    .filter((rt) => {
+  // Order: enabled (detected) → detected but off → not detected.
+  const listedRuntimes = sortRuntimes(
+    runtimes.filter((rt) => {
       if (isWindowsHost() && rt.id === "shell") return false;
       if (!isWindowsHost() && (rt.id === "powershell" || rt.id === "cmd")) return false;
       return true;
-    })
-    .slice()
-    .sort((a, b) => {
-      const [ak, an] = runtimeSortKey(a);
-      const [bk, bn] = runtimeSortKey(b);
-      if (ak !== bk) return ak - bk;
-      return an.localeCompare(bn);
+    }),
+    enabledRuntimes
+  );
+
+  const flipRuntimeList = (movedId: string) => {
+    const root = runtimeListRef.current;
+    if (!root) return;
+    const first =
+      (root as HTMLElement & { __flip?: Map<string, DOMRect> }).__flip ??
+      new Map<string, DOMRect>();
+    requestAnimationFrame(() => {
+      const cards = Array.from(root.querySelectorAll<HTMLElement>("[data-runtime-id]"));
+      for (const el of cards) {
+        const id = el.dataset.runtimeId;
+        if (!id) continue;
+        const prev = first.get(id);
+        if (!prev) continue;
+        const next = el.getBoundingClientRect();
+        const dy = prev.top - next.top;
+        if (Math.abs(dy) < 0.5) continue;
+        const delay = id === movedId ? 80 : 0;
+        el.style.transition = "none";
+        el.style.transform = `translateY(${dy}px)`;
+        el.style.zIndex = id === movedId ? "2" : "1";
+        void el.offsetHeight;
+        el.style.transition = `transform ${RUNTIME_FLIP_MS}ms cubic-bezier(.22,.8,.24,1) ${delay}ms`;
+        el.style.transform = "translateY(0)";
+      }
+      if (runtimeFlipTimer.current) window.clearTimeout(runtimeFlipTimer.current);
+      runtimeFlipTimer.current = window.setTimeout(() => {
+        for (const el of Array.from(root.querySelectorAll<HTMLElement>("[data-runtime-id]"))) {
+          el.style.transition = "";
+          el.style.transform = "";
+          el.style.zIndex = "";
+        }
+      }, RUNTIME_FLIP_MS + 140);
     });
+  };
+
+  const onToggleRuntime = (id: string, nextEnabled: boolean) => {
+    const root = runtimeListRef.current;
+    if (root) {
+      const cards = Array.from(root.querySelectorAll<HTMLElement>("[data-runtime-id]"));
+      const first = new Map<string, DOMRect>();
+      for (const el of cards) {
+        const rid = el.dataset.runtimeId;
+        if (rid) first.set(rid, el.getBoundingClientRect());
+      }
+      (root as HTMLElement & { __flip?: Map<string, DOMRect> }).__flip = first;
+    }
+    setRuntimeEnabled(id, nextEnabled);
+    flipRuntimeList(id);
+  };
   const shellRuntimes = listedRuntimes.filter((rt) => isShellRuntime(rt.id));
   const agentRuntimes = listedRuntimes.filter((rt) => isAgentRuntime(rt.id));
   const installedCount = listedRuntimes.filter((rt) => rt.available).length;
@@ -611,31 +722,38 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             <nav className="settings-nav">
               <button
                 className={activeSection === "runtimes" ? "active" : ""}
-                onClick={() => jumpToSection("runtimes")}
+                onClick={() => setActiveSection("runtimes")}
               >
                 <Icon name="bot" size={14} />
                 <span><b>{t("settings.navRuntimes")}</b><small>{t("settings.navRuntimesSub")}</small></span>
               </button>
               <button
                 className={activeSection === "appearance" ? "active" : ""}
-                onClick={() => jumpToSection("appearance")}
+                onClick={() => setActiveSection("appearance")}
               >
                 <Icon name="paintbrush" size={14} />
                 <span><b>{t("settings.navAppearance")}</b><small>{t("settings.navAppearanceSub")}</small></span>
               </button>
               <button
                 className={activeSection === "sessions" ? "active" : ""}
-                onClick={() => jumpToSection("sessions")}
+                onClick={() => setActiveSection("sessions")}
               >
                 <Icon name="square-terminal" size={14} />
                 <span><b>{t("settings.navSessions")}</b><small>{t("settings.navSessionsSub")}</small></span>
+              </button>
+              <button
+                className={activeSection === "shortcuts" ? "active" : ""}
+                onClick={() => setActiveSection("shortcuts")}
+              >
+                <Icon name="command" size={14} />
+                <span><b>{t("settings.navShortcuts")}</b><small>{t("settings.navShortcutsSub")}</small></span>
               </button>
               <button
                 className={
                   (activeSection === "updates" ? "active" : "") +
                   (updateStatus === "available" ? " has-update" : "")
                 }
-                onClick={() => jumpToSection("updates")}
+                onClick={() => setActiveSection("updates")}
               >
                 <Icon name="download" size={14} />
                 <span>
@@ -664,9 +782,10 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             </div>
           </aside>
 
-          <main className="settings-content" onScroll={syncSectionFromScroll}>
+          <main className="settings-content">
 
         {/* Installed runtimes (shells + agents) */}
+        {activeSection === "runtimes" && (
         <section id="settings-runtimes" className="modal-section settings-panel settings-runtime-panel">
           <div className="settings-section-head">
             <span>RUNTIME BUS</span>
@@ -700,14 +819,17 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               <small>{t("settings.noRuntimesHint")}</small>
             </div>
           )}
+          <div className="settings-runtime-list" ref={runtimeListRef}>
           {listedRuntimes.map((rt) => {
             const shell = isShellRuntime(rt.id);
+            const enabled = runtimeEnabledOf(rt, enabledRuntimes);
             return (
             <div
               key={rt.id}
+              data-runtime-id={rt.id}
               className={`settings-runtime${editingId === rt.id ? " expanded" : ""}${
                 rt.available ? "" : " is-missing"
-              }`}
+              }${enabled ? " is-enabled" : ""}`}
             >
               <div className="modal-row settings-runtime-row" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", fontSize: "var(--fs-sm)" }}>
                 <span className="settings-runtime-name">
@@ -724,7 +846,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                       className="settings-runtime-version"
                       title={`${rt.id} ${rt.version}`}
                     >
-                      {rt.version.replace(/^v/i, "")}
+                      {shortRuntimeVersion(rt.version)}
                     </span>
                   )}
                 </span>
@@ -761,6 +883,26 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                     title={t("settings.gearTitle")}
                   >
                     <Icon name="settings" size={12} />
+                  </button>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={enabled}
+                    disabled={!rt.available}
+                    className={`settings-runtime-switch${enabled ? " on" : ""}`}
+                    title={
+                      rt.available
+                        ? enabled
+                          ? t("settings.disableRuntime")
+                          : t("settings.enableRuntime")
+                        : t("settings.enableRuntimeNeedDetect")
+                    }
+                    onClick={() => {
+                      if (!rt.available) return;
+                      onToggleRuntime(rt.id, !enabled);
+                    }}
+                  >
+                    <span className="settings-runtime-switch-knob" />
                   </button>
                 </div>
               </div>
@@ -947,9 +1089,12 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             </div>
             );
           })}
+          </div>
         </section>
+        )}
 
         {/* Preferences */}
+        {activeSection === "appearance" && (
         <section id="settings-appearance" className="modal-section settings-panel settings-appearance-panel">
           <div className="settings-section-head">
             <span>DISPLAY CARTRIDGES</span>
@@ -1349,92 +1494,16 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             </p>
           )}
         </section>
+        )}
 
         {/* Session end handling */}
+        {activeSection === "sessions" && (
         <section id="settings-sessions" className="modal-section settings-panel settings-session-panel">
           <div className="settings-section-head">
             <span>SESSION LIFECYCLE</span>
             <h4>{t("settings.sessionTitle")}</h4>
             <p>{t("settings.sessionDesc")}</p>
           </div>
-          <div className="settings-field-label">
-            <span>{t("settings.ctrlT")}</span>
-            <small>{t("settings.ctrlTHint")}</small>
-          </div>
-          {(() => {
-            const availableRuntimes = runtimes.filter((rt) => rt.available);
-            const currentRuntime =
-              availableRuntimes.find((rt) => rt.id === ctrlTRuntime) ?? availableRuntimes[0] ?? null;
-            return (
-              <div className="settings-runtime-picker" ref={runtimePickerRef}>
-                <button
-                  type="button"
-                  className="settings-runtime-trigger"
-                  aria-label={t("settings.ctrlTAria")}
-                  aria-haspopup="listbox"
-                  aria-expanded={runtimeMenuOpen}
-                  aria-controls="settings-runtime-menu"
-                  disabled={availableRuntimes.length === 0}
-                  onClick={() => setRuntimeMenuOpen((open) => !open)}
-                >
-                  <span className="settings-runtime-current">
-                    {currentRuntime ? (
-                      <>
-                        <span className="settings-runtime-current-icon">
-                          <Icon name={runtimeIcon(currentRuntime.id)} size={14} />
-                        </span>
-                        <span className="settings-runtime-current-copy">
-                          <b>{currentRuntime.name}</b>
-                          <small>{currentRuntime.id}</small>
-                        </span>
-                      </>
-                    ) : (
-                      <span className="settings-runtime-current-copy">
-                        <b>{t("settings.noRuntime")}</b>
-                        <small>{t("settings.noRuntimeHint")}</small>
-                      </span>
-                    )}
-                  </span>
-                  <span className="settings-theme-chevron" aria-hidden="true" />
-                </button>
-
-                {runtimeMenuOpen && availableRuntimes.length > 0 && (
-                  <div
-                    className="settings-runtime-menu"
-                    id="settings-runtime-menu"
-                    role="listbox"
-                    aria-label={t("settings.ctrlTAria")}
-                  >
-                    {availableRuntimes.map((rt) => {
-                      const selected = rt.id === (currentRuntime?.id ?? ctrlTRuntime);
-                      return (
-                        <button
-                          key={rt.id}
-                          type="button"
-                          role="option"
-                          aria-selected={selected}
-                          className={`settings-runtime-option${selected ? " active" : ""}`}
-                          onClick={() => {
-                            setCtrlTRuntime(rt.id);
-                            setRuntimeMenuOpen(false);
-                          }}
-                        >
-                          <span className="settings-runtime-option-icon">
-                            <Icon name={runtimeIcon(rt.id)} size={14} />
-                          </span>
-                          <span className="settings-runtime-option-copy">
-                            <b>{rt.name}</b>
-                            <small>{rt.id}</small>
-                          </span>
-                          {selected && <span className="settings-runtime-option-state">ACTIVE</span>}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            );
-          })()}
           <div className="settings-field-label">
             <span>{t("settings.sessionEnd")}</span>
             <small>{t("settings.sessionEndHint")}</small>
@@ -1527,7 +1596,6 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               <span><b>{t("settings.exitDaemonKill")}</b><small>{t("settings.exitDaemonKillHint")}</small></span>
             </button>
           </div>
-        </section>
 
         {/* First-run onboarding */}
         <div className="modal-section settings-panel settings-onboarding-panel">
@@ -1553,8 +1621,146 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             </button>
           </div>
         </div>
+        </section>
+        )}
+
+        {activeSection === "shortcuts" && (
+        <section id="settings-shortcuts" className="modal-section settings-panel settings-shortcut-panel">
+          <div className="settings-section-head">
+            <span>KEYMAP</span>
+            <h4>{t("settings.shortcutsTitle")}</h4>
+            <p>{t("settings.shortcutsDesc")}</p>
+          </div>
+          <div className="settings-field-label">
+            <span>{t("settings.ctrlT")}</span>
+            <small>{t("settings.ctrlTHint")}</small>
+          </div>
+          {(() => {
+            const availableRuntimes = runtimes.filter((rt) => rt.available);
+            const currentRuntime =
+              availableRuntimes.find((rt) => rt.id === ctrlTRuntime) ?? availableRuntimes[0] ?? null;
+            return (
+              <div className="settings-runtime-picker" ref={runtimePickerRef}>
+                <button
+                  type="button"
+                  className="settings-runtime-trigger"
+                  aria-label={t("settings.ctrlTAria")}
+                  aria-haspopup="listbox"
+                  aria-expanded={runtimeMenuOpen}
+                  aria-controls="settings-runtime-menu"
+                  disabled={availableRuntimes.length === 0}
+                  onClick={() => setRuntimeMenuOpen((open) => !open)}
+                >
+                  <span className="settings-runtime-current">
+                    {currentRuntime ? (
+                      <>
+                        <span className="settings-runtime-current-icon">
+                          <Icon name={runtimeIcon(currentRuntime.id)} size={14} />
+                        </span>
+                        <span className="settings-runtime-current-copy">
+                          <b>{currentRuntime.name}</b>
+                          <small>{currentRuntime.id}</small>
+                        </span>
+                      </>
+                    ) : (
+                      <span className="settings-runtime-current-copy">
+                        <b>{t("settings.noRuntime")}</b>
+                        <small>{t("settings.noRuntimeHint")}</small>
+                      </span>
+                    )}
+                  </span>
+                  <span className="settings-theme-chevron" aria-hidden="true" />
+                </button>
+                {runtimeMenuOpen && availableRuntimes.length > 0 && (
+                  <div
+                    className="settings-runtime-menu"
+                    id="settings-runtime-menu"
+                    role="listbox"
+                    aria-label={t("settings.ctrlTAria")}
+                  >
+                    {availableRuntimes.map((rt) => {
+                      const selected = rt.id === (currentRuntime?.id ?? ctrlTRuntime);
+                      return (
+                        <button
+                          key={rt.id}
+                          type="button"
+                          role="option"
+                          aria-selected={selected}
+                          className={`settings-runtime-option${selected ? " active" : ""}`}
+                          onClick={() => {
+                            setCtrlTRuntime(rt.id);
+                            setRuntimeMenuOpen(false);
+                          }}
+                        >
+                          <span className="settings-runtime-option-icon">
+                            <Icon name={runtimeIcon(rt.id)} size={14} />
+                          </span>
+                          <span className="settings-runtime-option-copy">
+                            <b>{rt.name}</b>
+                            <small>{rt.id}</small>
+                          </span>
+                          {selected && <span className="settings-runtime-option-state">ACTIVE</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+          <div className="settings-shortcut-list">
+            {([
+              { id: "newTerminal" as const, label: t("settings.shortcutNewTerminal") },
+              { id: "search" as const, label: t("settings.shortcutSearch") },
+              { id: "focusToggle" as const, label: t("settings.shortcutFocus") },
+              { id: "themeLab" as const, label: t("settings.shortcutThemeLab") },
+            ]).map(({ id, label }) => (
+              <div key={id} className="settings-shortcut-row">
+                <span className="settings-shortcut-label">{label}</span>
+                <button
+                  type="button"
+                  className={`settings-shortcut-chord${recordingId === id ? " recording" : ""}`}
+                  onClick={() => setRecordingId(id)}
+                  onKeyDown={(e) => {
+                    if (recordingId !== id) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (e.key === "Escape") {
+                      setRecordingId(null);
+                      return;
+                    }
+                    if (!isRecordableKey(e.nativeEvent)) return;
+                    const chord = chordFromEvent(e.nativeEvent);
+                    const clash = (Object.keys(shortcuts) as ShortcutId[]).find(
+                      (other) => other !== id && chordsEqual(shortcuts[other], chord)
+                    );
+                    if (clash) return;
+                    setShortcut(id, chord);
+                    setRecordingId(null);
+                  }}
+                >
+                  {recordingId === id
+                    ? t("settings.shortcutRecording")
+                    : formatChord(shortcuts[id])}
+                </button>
+              </div>
+            ))}
+          </div>
+          <button
+            type="button"
+            className="settings-compact-btn"
+            onClick={() => {
+              resetShortcuts();
+              setRecordingId(null);
+            }}
+          >
+            {t("settings.shortcutReset")}
+          </button>
+        </section>
+        )}
 
         {/* About / Updates */}
+        {activeSection === "updates" && (
         <section id="settings-updates" className="modal-section settings-panel settings-update-panel">
           <div className="settings-section-head">
             <span>UPDATES</span>
@@ -1715,6 +1921,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             </button>
           </div>
         </section>
+        )}
           </main>
         </div>
       </div>

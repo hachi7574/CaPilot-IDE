@@ -195,10 +195,15 @@ import { Settings, Search, GitBranch } from "lucide-react";
 | opencode | `brands/opencode.svg` | `opencode` runtime |
 | GitHub | `brands/github.svg` | Git 面板 / 克隆仓库 |
 | GNU Bash | `brands/gnubash.svg` | `bash` / `bash-rc` runtime |
+| CodeBuddy | `brands/codebuddy.svg` | `codebuddy` runtime（官网 logo.svg 单色化） |
 | Git | `git.svg`（根目录） | git 通用图标 |
 
 > 品牌图标是 Simple Icons 官方单色 path（CC0），非彩色原版，符合授权与主题要求。
 > Simple Icons 没有独立的 "Codex" 或 "Bash" 条目，因此 codex 用 OpenAI、bash 用 GNU Bash 代替。
+>
+> 其余 agent runtime 没有 SVG 时，复用 Orca 打包的 favicon PNG
+> （`agent-favicons/`，来源 `stablyai/orca` `src/shared/agent-icons/`）。
+> `Icon` 优先走 SVG，没有再退到 PNG。CodeBuddy 官网标仍是手写单色 SVG。
 
 ---
 

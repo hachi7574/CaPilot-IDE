@@ -127,7 +127,9 @@ pub fn cli_available(name: &str) -> bool {
     run_cli(name, &["--version"], CLI_PROBE_TIMEOUT).is_some_and(|o| o.status.success())
 }
 
-/// Run `<name> --version` and return the trimmed first stdout line.
+/// Run `<name> --version` and return a compact version token (`5.3.9`, not the
+/// GNU bash banner). `None` when the binary is missing, fails, times out, or
+/// prints nothing useful.
 pub fn cli_version(name: &str) -> Option<String> {
     let out = run_cli(name, &["--version"], CLI_PROBE_TIMEOUT)?;
     if !out.status.success() {
@@ -135,7 +137,65 @@ pub fn cli_version(name: &str) -> Option<String> {
     }
     let text = String::from_utf8_lossy(&out.stdout);
     let line = text.trim().lines().next()?.trim();
-    (!line.is_empty()).then(|| line.to_string())
+    if line.is_empty() {
+        return None;
+    }
+    Some(short_version(line))
+}
+
+/// Pull `1.2.3` / `1.2.3-beta` out of a `--version` banner. Falls back to the
+/// first whitespace token with a leading `v` stripped.
+pub fn short_version(raw: &str) -> String {
+    let s = raw.trim();
+    if let Some(v) = first_semver(s) {
+        return v;
+    }
+    s.split_whitespace()
+        .next()
+        .unwrap_or(s)
+        .trim_start_matches(|c: char| c == 'v' || c == 'V')
+        .to_string()
+}
+
+fn first_semver(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            let mut dots = 0;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            while i < bytes.len() && bytes[i] == b'.' {
+                dots += 1;
+                i += 1;
+                if i >= bytes.len() || !bytes[i].is_ascii_digit() {
+                    break;
+                }
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+            }
+            if dots >= 1 {
+                let mut end = i;
+                if i < bytes.len() && (bytes[i] == b'-' || bytes[i] == b'+') {
+                    i += 1;
+                    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'.' || bytes[i] == b'-') {
+                        i += 1;
+                    }
+                    end = i;
+                }
+                let token = &s[start..end];
+                if token.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                    return Some(token.to_string());
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
 }
 
 /// Run `name` with `args` under the probe timeout. Used by adapters that need
@@ -478,6 +538,17 @@ mod tests {
         assert!(needs_cmd_wrap(Path::new("run.bat")));
         assert!(!needs_cmd_wrap(Path::new("claude.exe")));
         assert!(!needs_cmd_wrap(Path::new("claude")));
+    }
+
+    #[test]
+    fn short_version_strips_gnu_bash_banner() {
+        assert_eq!(
+            short_version("GNU bash，版本 5.3.9(1)-release (x86_64-pc-linux-gnu)"),
+            "5.3.9"
+        );
+        assert_eq!(short_version("codebuddy 2.127.0"), "2.127.0");
+        assert_eq!(short_version("v0.56.0"), "0.56.0");
+        assert_eq!(short_version("1.0.80"), "1.0.80");
     }
 
     #[test]

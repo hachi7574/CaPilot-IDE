@@ -17,6 +17,7 @@ import { useUsageSync } from "./state/usage";
 import { useContextUsageSync } from "./state/usageContext";
 import { useUpdateSync } from "./state/update";
 import { useStore } from "./state/store";
+import { matchesShortcut } from "./state/shortcuts";
 import {
   getTheme,
   DEFAULT_WALLPAPER_OPACITY,
@@ -57,8 +58,7 @@ function ThemeLabGate() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "T" && e.key !== "t") return;
-      if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return;
+      if (!matchesShortcut(e, "themeLab", useStore.getState().shortcuts)) return;
       e.preventDefault();
       e.stopPropagation();
       setThemeLabEnabled(!useStore.getState().themeLabEnabled);
