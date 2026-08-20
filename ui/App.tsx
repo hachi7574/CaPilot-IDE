@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState, type ComponentType, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type ComponentType, type CSSProperties } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { resolveResource } from "@tauri-apps/api/path";
 import { LeftSidebar } from "./components/layout/LeftSidebar";
 import { MainArea } from "./components/layout/MainArea";
 import { RightSidebar } from "./components/layout/RightSidebar";
@@ -23,6 +24,24 @@ import {
 } from "./state/themes";
 import { ThemeLabPanel } from "./components/theme-lab/ThemeLabPanel";
 import "./App.css";
+
+/**
+ * Theme cartridge wallpapers live under bundle resource `themes/wallpapers/`.
+ * Prefer the on-disk path + `asset://` (HTTP Range) over the Vite-bundled
+ * `tauri://localhost/assets/…` URL — WebKitGTK's `<video>` needs Range for
+ * MP4, and Tauri's embedded-asset protocol does not implement it. Dev / plain
+ * browser falls back to the Vite `?url` module when resolveResource is absent.
+ */
+async function bundledWallpaperSrc(file: string, fallbackUrl?: string): Promise<string | null> {
+  const base = file.replace(/\\/g, "/").replace(/^.*\//, "");
+  if (!base) return fallbackUrl ?? null;
+  try {
+    const abs = await resolveResource(`themes/wallpapers/${base}`);
+    return convertFileSrc(abs);
+  } catch {
+    return fallbackUrl ?? null;
+  }
+}
 
 /**
  * Theme Editor ships in production. Settings → Appearance toggles
@@ -80,7 +99,8 @@ type WallpaperLayer = {
 
 /**
  * Resolve the active wallpaper URL + paint params.
- * Priority: mode off → none; custom path → asset URL; auto → theme cartridge.
+ * Priority: mode off → none; custom path → asset URL; auto → theme cartridge
+ * (resource file via asset://, Vite URL fallback).
  * Opacity comes from the single user preference (defaults match themes.ts).
  * Videos use a <video> layer (muted / loop / metadata preload); stills stay
  * on the CSS background-image path so existing themes are unchanged.
@@ -90,45 +110,68 @@ function useWallpaperLayer(): WallpaperLayer | null {
   const mode = useStore((s) => s.wallpaperMode);
   const path = useStore((s) => s.wallpaperPath);
   const opacity = useStore((s) => s.wallpaperOpacity);
+  const [layer, setLayer] = useState<WallpaperLayer | null>(null);
 
-  return useMemo(() => {
-    const theme = getTheme(themeId);
-    let url: string | null = null;
-    let source = "";
-    let size = theme?.wallpaper?.size ?? "cover";
-    let position = theme?.wallpaper?.position ?? "center";
+  useEffect(() => {
+    let cancelled = false;
 
-    if (mode === "custom" && path) {
-      try {
-        url = convertFileSrc(path);
-      } catch {
-        url = null;
+    const build = async () => {
+      if (mode === "off") {
+        if (!cancelled) setLayer(null);
+        return;
       }
-      source = path;
-      // Custom picks always cover the viewport; theme size/position only apply
-      // to the cartridge's own art.
-      size = "cover";
-      position = "center";
-    } else if (mode === "auto") {
-      url = theme?.wallpaperUrl ?? null;
-      source = theme?.wallpaper?.file ?? "";
-    }
 
-    if (!url) return null;
+      const theme = getTheme(themeId);
+      let url: string | null = null;
+      let source = "";
+      let size = theme?.wallpaper?.size ?? "cover";
+      let position = theme?.wallpaper?.position ?? "center";
 
-    const imgOpacity = Number.isFinite(opacity) ? opacity : DEFAULT_WALLPAPER_OPACITY;
-    const video = isWallpaperVideo(source);
-    const style: CSSProperties & Record<string, string> = {
-      "--wallpaper-size": size,
-      "--wallpaper-position": position,
-      "--wallpaper-opacity": String(imgOpacity),
+      if (mode === "custom" && path) {
+        try {
+          url = convertFileSrc(path);
+        } catch {
+          url = null;
+        }
+        source = path;
+        // Custom picks always cover the viewport; theme size/position only apply
+        // to the cartridge's own art.
+        size = "cover";
+        position = "center";
+      } else if (mode === "auto") {
+        source = theme?.wallpaper?.file ?? "";
+        if (source) {
+          url = await bundledWallpaperSrc(source, theme?.wallpaperUrl);
+        }
+      }
+
+      if (cancelled) return;
+      if (!url) {
+        setLayer(null);
+        return;
+      }
+
+      const imgOpacity = Number.isFinite(opacity) ? opacity : DEFAULT_WALLPAPER_OPACITY;
+      const video = isWallpaperVideo(source);
+      const style: CSSProperties & Record<string, string> = {
+        "--wallpaper-size": size,
+        "--wallpaper-position": position,
+        "--wallpaper-opacity": String(imgOpacity),
+      };
+      if (!video) {
+        style["--wallpaper-image"] =
+          `url("${url.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}")`;
+      }
+      setLayer({ kind: video ? "video" : "image", url, style });
     };
-    if (!video) {
-      style["--wallpaper-image"] =
-        `url("${url.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}")`;
-    }
-    return { kind: video ? "video" : "image", url, style };
+
+    void build();
+    return () => {
+      cancelled = true;
+    };
   }, [themeId, mode, path, opacity]);
+
+  return layer;
 }
 
 /** Looping muted backdrop. Pauses when the window is hidden so a background

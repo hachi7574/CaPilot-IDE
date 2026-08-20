@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { resolveResource } from "@tauri-apps/api/path";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { useStore } from "../../state/store";
 import {
@@ -412,6 +413,35 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
     return wallpaperDraft;
   }, [theme, wallpaperDraft]);
 
+  // Cartridge video previews must use asset:// (Range-capable). The Vite-bundled
+  // tauri:// URL works for stills but fails for <video> under WebKitGTK.
+  const [cartridgePreviewUrl, setCartridgePreviewUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (wallpaperPreviewUrl) {
+      setCartridgePreviewUrl(null);
+      return;
+    }
+    const file = effectiveWallpaper?.file;
+    if (!file) {
+      setCartridgePreviewUrl(null);
+      return;
+    }
+    let cancelled = false;
+    const base = file.replace(/\\/g, "/").replace(/^.*\//, "");
+    void resolveResource(`themes/wallpapers/${base}`)
+      .then((abs) => {
+        if (!cancelled) setCartridgePreviewUrl(convertFileSrc(abs));
+      })
+      .catch(() => {
+        if (!cancelled) setCartridgePreviewUrl(theme?.wallpaperUrl ?? null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [wallpaperPreviewUrl, effectiveWallpaper?.file, theme?.wallpaperUrl]);
+
+  const previewSrc = wallpaperPreviewUrl || cartridgePreviewUrl || theme?.wallpaperUrl || "";
+
   const exportJson = useMemo(() => {
     if (!theme) return "{}";
     const payload = buildExportPayload(theme, draft, effectiveWallpaper);
@@ -702,13 +732,13 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
                   </button>
                 )}
               </div>
-              {(wallpaperPreviewUrl || theme?.wallpaperUrl) && (
+              {(wallpaperPreviewUrl || cartridgePreviewUrl || theme?.wallpaperUrl) && (
                 isWallpaperVideo(
                   wallpaperDraft?.file ?? theme?.wallpaper?.file ?? wallpaperPreviewUrl
                 ) ? (
                   <video
                     className="tl-wallpaper-preview"
-                    src={wallpaperPreviewUrl || theme?.wallpaperUrl || ""}
+                    src={previewSrc}
                     muted
                     loop
                     playsInline
@@ -729,9 +759,7 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
                     className="tl-wallpaper-preview"
                     style={{
                       // JSON.stringify quotes the URL safely for CSS url("…")
-                      backgroundImage: `url(${JSON.stringify(
-                        wallpaperPreviewUrl || theme?.wallpaperUrl || ""
-                      )})`,
+                      backgroundImage: `url(${JSON.stringify(previewSrc)})`,
                     }}
                     aria-hidden
                   />

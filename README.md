@@ -14,7 +14,7 @@
     <a href="#license"><img alt="License" src="https://img.shields.io/badge/License-MIT-75D79A?style=for-the-badge" /></a>
     <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows-0E1020?style=flat-square" />
     <img alt="Stack" src="https://img.shields.io/badge/stack-Tauri%20v2%20%2B%20React%2019%20%2B%20Rust-9A86FF?style=flat-square" />
-    <img alt="Version" src="https://img.shields.io/badge/version-0.1.20-58C7FF?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-0.1.21-58C7FF?style=flat-square" />
 
   <p>
     <a href="https://github.com/hachi7574/CaPilot-WebsSite"><b>官网 / Website</b></a>
@@ -99,11 +99,11 @@ Roadmap：Cursor · Codebuddy · Coder · Omp · Gemini · Grok
 
 到 **[Releases · Latest](https://github.com/hachi7574/CaPilot-IDE/releases/latest)** 选择对应资产：
 
-| 平台 | 文件名模式 | 示例（v0.1.20） |
+| 平台 | 文件名模式 | 示例（v0.1.21） |
 | --- | --- | --- |
-| Windows | `CaPilot_*_x64-setup.exe` | `CaPilot_0.1.20_x64-setup.exe` |
-| Linux | `CaPilot_*_amd64.AppImage` | `CaPilot_0.1.20_amd64.AppImage` |
-| Linux | `CaPilot_*_amd64.deb` | `CaPilot_0.1.20_amd64.deb` |
+| Windows | `CaPilot_*_x64-setup.exe` | `CaPilot_0.1.21_x64-setup.exe` |
+| Linux | `CaPilot_*_amd64.AppImage` | `CaPilot_0.1.21_amd64.AppImage` |
+| Linux | `CaPilot_*_amd64.deb` | `CaPilot_0.1.21_amd64.deb` |
 
 也可直接打开官网下载区：  
 https://github.com/hachi7574/CaPilot-WebsSite
