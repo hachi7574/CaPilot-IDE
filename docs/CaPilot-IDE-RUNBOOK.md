@@ -8,12 +8,31 @@
 
 ## 1. 运行 / 构建
 
-前置要求：Rust 1.97+、Node.js 24+、pnpm、claude CLI（`pnpm tauri dev` 需要）。Linux 额外一次性系统依赖：
+前置要求：Rust 1.97+、Node.js 24+、pnpm、claude CLI（`pnpm tauri dev` 需要）。
+
+**Linux 构建依赖（-dev，一次性）：**
 
 ```bash
 sudo apt install libwebkit2gtk-4.1-dev librsvg2-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
 ```
 
+**Linux 运行时媒体（视频壁纸）：** WebKitGTK 的 `<video>` 走 GStreamer。`.deb` 的
+`Depends` 已声明 `gstreamer1.0-libav` + `gstreamer1.0-plugins-bad`（需启用
+Ubuntu universe）。AppImage / 源码运行不会自带解码插件，主机需自行安装：
+
+```bash
+# Debian / Ubuntu
+sudo apt install gstreamer1.0-libav gstreamer1.0-plugins-bad
+
+# Fedora
+sudo dnf install gstreamer1-libav gstreamer1-plugins-bad-free
+
+# Arch
+sudo pacman -S gst-libav gst-plugins-bad
+```
+
+装完可用 `gst-inspect-1.0 avdec_h264 | head` 确认 H.264 解码器存在。Windows
+走 WebView2 系统解码，无需额外包。内置主题视频统一为 H.264（`to-720p.sh`）。
 常用命令：
 
 | 命令 | 位置 | 说明 |

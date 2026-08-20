@@ -13,6 +13,7 @@ import {
   baseName,
   detectShellFlavor,
   isShellRuntime,
+  isWindowsHost,
   joinPath,
   parentPath,
   runCommandForFile,
@@ -373,7 +374,10 @@ function flavorForAgent(agentId: string | null): ShellFlavor {
   const s = useStore.getState();
   if (!agentId) {
     // Prefer an explicit Windows shell when available; fall back to auto `shell`.
-    const order = ["powershell", "cmd", "shell", "bash-rc"];
+    // On Unix never consider PowerShell/CMD — they aren't probed there.
+    const order = isWindowsHost()
+      ? ["powershell", "cmd", "shell", "bash-rc"]
+      : ["shell", "bash-rc"];
     for (const id of order) {
       const rt = s.runtimes.find((r) => r.id === id && r.available);
       if (rt) return detectShellFlavor(id, rt.name);

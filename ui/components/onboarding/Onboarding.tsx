@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useStore } from "../../state/store";
 import { spawnAgent } from "../../state/agentActions";
+import { isWindowsHost } from "../../state/shellPath";
 import { Icon } from "../Icon";
 import { useT } from "../../i18n";
 
@@ -88,7 +89,13 @@ export function Onboarding() {
                   <span>{t("onboarding.detecting")}</span>
                 </div>
               )}
-              {runtimes.map((rt) => (
+              {runtimes
+                .filter(
+                  (rt) =>
+                    isWindowsHost() ||
+                    (rt.id !== "powershell" && rt.id !== "cmd")
+                )
+                .map((rt) => (
                 <div key={rt.id} className="onboarding-runtime-row">
                   <span className="onboarding-runtime-name">{rt.name}</span>
                   <span

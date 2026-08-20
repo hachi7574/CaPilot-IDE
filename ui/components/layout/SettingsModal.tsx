@@ -560,11 +560,13 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   };
 
   // Show shells + agents. On Windows hide the auto `shell` row (users pick
-  // PowerShell / CMD / Git Bash explicitly). Show unavailable rows so a
-  // failed/slow probe isn't mistaken for "none installed".
+  // PowerShell / CMD / Git Bash explicitly). On non-Windows hide PowerShell /
+  // CMD (Windows-only shells — not probed by the backend either). Show
+  // unavailable rows so a failed/slow probe isn't mistaken for "none installed".
   const listedRuntimes = runtimes
     .filter((rt) => {
       if (isWindowsHost() && rt.id === "shell") return false;
+      if (!isWindowsHost() && (rt.id === "powershell" || rt.id === "cmd")) return false;
       return true;
     })
     .slice()

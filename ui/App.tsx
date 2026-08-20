@@ -132,23 +132,35 @@ function useWallpaperLayer(): WallpaperLayer | null {
 }
 
 /** Looping muted backdrop. Pauses when the window is hidden so a background
- *  CaPilot session does not keep a 1080p decoder hot. */
+ *  CaPilot session does not keep a 1080p decoder hot. On media error (missing
+ *  host codec, corrupt file) the element unmounts so `.app-wallpaper` keeps
+ *  only its solid `--bg` fill — no empty video over translucent chrome. */
 function WallpaperVideo({ src }: { src: string }) {
   const ref = useRef<HTMLVideoElement>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [src]);
+
   useEffect(() => {
     const el = ref.current;
-    if (!el) return;
+    if (!el || failed) return;
     const sync = () => {
       if (document.hidden || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
         el.pause();
         return;
       }
+      // Autoplay policy rejections are silent; decode/network failures use onError.
       void el.play().catch(() => {});
     };
     sync();
     document.addEventListener("visibilitychange", sync);
     return () => document.removeEventListener("visibilitychange", sync);
-  }, [src]);
+  }, [src, failed]);
+
+  if (failed) return null;
+
   return (
     <video
       ref={ref}
@@ -161,6 +173,15 @@ function WallpaperVideo({ src }: { src: string }) {
       preload="metadata"
       disablePictureInPicture
       disableRemotePlayback
+      onError={(e) => {
+        const mediaErr = e.currentTarget.error;
+        console.warn(
+          "[wallpaper] video failed to load",
+          src,
+          mediaErr ? `code=${mediaErr.code}` : ""
+        );
+        setFailed(true);
+      }}
     />
   );
 }

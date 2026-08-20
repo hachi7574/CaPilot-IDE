@@ -170,6 +170,11 @@ Keep it thin:
   isn't on disk.
 - If the user supplies an image path, copy it into `themes/wallpapers/`
   with a safe basename and point `wallpaper.file` at that basename.
+- **Shipped videos must be H.264 / `avc1`, yuv420p.** Prefer
+  `themes/wallpapers/to-720p.sh <src>` → `<stem>-720p.mp4` (≤720p, no
+  audio, faststart). Do **not** bundle HEVC (`hvc1`/`hev1`) or AV1 for
+  theme defaults — Linux WebKitGTK often lacks those decoders even when
+  H.264 works via `gstreamer1.0-libav`.
 - Missing file → console warning, theme still loads without art.
 
 ## Hydrate behavior (do not fight it)

@@ -715,6 +715,14 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
                     autoPlay
                     preload="metadata"
                     aria-hidden
+                    onError={(e) => {
+                      // Hide broken preview (e.g. missing host H.264 decoder).
+                      e.currentTarget.style.display = "none";
+                      console.warn(
+                        "[theme-lab] wallpaper video failed",
+                        e.currentTarget.currentSrc || e.currentTarget.src
+                      );
+                    }}
                   />
                 ) : (
                   <div

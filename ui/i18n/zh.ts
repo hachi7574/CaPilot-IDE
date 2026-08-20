@@ -83,7 +83,7 @@ export const zh = {
     navUpdatesSub: "版本与安装",
     navUpdatesAvailable: "可更新 v{version}",
     runtimeBus: "运行环境",
-    runtimeDesc: "管理系统终端（PowerShell / CMD / Git Bash）与已接入的编码 Agent CLI。",
+    runtimeDesc: "管理系统终端与已接入的编码 Agent CLI。",
     detected: "已检测",
     detectFailed: "检测失败",
     noRuntimes: "未检测到运行时",

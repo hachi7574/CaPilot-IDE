@@ -28,7 +28,8 @@ pub fn get_adapter(runtime: &str) -> Box<dyn AgentRuntimeAdapter> {
 /// All known runtime ids (for detection lists).
 ///
 /// - `shell` — OS default interactive terminal (auto: pwsh/cmd on Windows, $SHELL on Unix)
-/// - `powershell` / `cmd` — explicit Windows shells (also probeable on Unix if pwsh exists)
+/// - `powershell` / `cmd` — Windows-only in the detection list (still resolvable via
+///   `get_adapter` on any platform so older sessions can resume)
 /// - `bash-rc` — Git Bash / system bash (optional on Windows)
 /// - agent CLIs
 ///
@@ -36,14 +37,21 @@ pub fn get_adapter(runtime: &str) -> Box<dyn AgentRuntimeAdapter> {
 /// `get_adapter` (for resuming older sessions) but are not offered as new
 /// terminals.
 pub fn known_runtimes() -> &'static [&'static str] {
-    &[
-        "claude",
-        "codex",
-        "dsh",
-        "pi",
-        "shell",
-        "powershell",
-        "cmd",
-        "bash-rc",
-    ]
+    #[cfg(windows)]
+    {
+        &[
+            "claude",
+            "codex",
+            "dsh",
+            "pi",
+            "shell",
+            "powershell",
+            "cmd",
+            "bash-rc",
+        ]
+    }
+    #[cfg(not(windows))]
+    {
+        &["claude", "codex", "dsh", "pi", "shell", "bash-rc"]
+    }
 }

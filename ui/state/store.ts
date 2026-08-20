@@ -1165,8 +1165,12 @@ export function resolveCtrlTRuntime(
   );
   if (available.has(configured)) return configured;
   if (available.has("claude")) return "claude";
-  if (available.has("powershell")) return "powershell";
-  if (available.has("cmd")) return "cmd";
+  // PowerShell / CMD are Windows-only shells; don't prefer them on Unix even
+  // if a stale probe left them in the runtime list.
+  if (isWindowsUi()) {
+    if (available.has("powershell")) return "powershell";
+    if (available.has("cmd")) return "cmd";
+  }
   if (available.has("shell")) return "shell";
   if (available.has("bash-rc")) return "bash-rc";
   return null;

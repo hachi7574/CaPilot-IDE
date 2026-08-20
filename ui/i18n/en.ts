@@ -82,7 +82,7 @@ export const en: ZhMessages = {
     navUpdatesSub: "Version & install",
     navUpdatesAvailable: "Update v{version}",
     runtimeBus: "Runtimes",
-    runtimeDesc: "Manage system terminals (PowerShell / CMD / Git Bash) and connected coding agent CLIs.",
+    runtimeDesc: "Manage system terminals and connected coding agent CLIs.",
     detected: "Detected",
     detectFailed: "Scan failed",
     noRuntimes: "No runtimes detected",
