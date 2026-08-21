@@ -19,6 +19,10 @@ Linux system dependencies: `libwebkit2gtk-4.1-dev librsvg2-dev libgtk-3-dev libs
 - `security-review.md` — security review and release checklist
 - `ai-runtime-references.md` — official docs + hard-coded integration facts for the claude / codex / opencode / dsh / pi runtimes（权限 flag、hook 注入）
 - `styleguide/` — LUCY design guide；图标/logo/app-icon 统一放在 `ui/assets/`（`icons/`、`logo/`、`app-icon/`）
+- `canvas-view.md` — 工作区画布视图开发文档（设计稿：`Tab.type=canvas`，可执行终端图，不改成 canvas-first）
+- `canvas-semantic-contract.md` — 画布语义契约（终端 / 流程 / 组合 / Agent 控制台 / Run vs 图）
+- `canvas-dev-steps.md` — 画布实现步骤入口（已拆到 `canvas-dev/`）
+- `canvas-dev/` — 一期一个文件： [README](canvas-dev/README.md) · [1a](canvas-dev/phase-1a.md) · [1b](canvas-dev/phase-1b.md) · [2](canvas-dev/phase-2.md) · [3](canvas-dev/phase-3.md) · [4](canvas-dev/phase-4.md) · [5](canvas-dev/phase-5.md)
 
 ## SVG 图标集（GUI 图标标准）
 

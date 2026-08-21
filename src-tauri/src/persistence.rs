@@ -6,6 +6,7 @@
 //! ├─ sessions.db            # global session sqlite
 //! ├─ workspaces/<project>/  # project shells (meta, not necessarily source code)
 //! │  ├─ context/
+//! │  ├─ canvas/<workspaceHash>/  # per-workspace canvas graph.json
 //! │  ├─ agents/<agent-id>/  # per-agent workspace (PTY cwd for managed projects)
 //! │  │  └─ .agent-meta.json
 //! │  └─ project.json        # optional custom root (cloned / picked folder)

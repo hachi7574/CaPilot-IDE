@@ -326,15 +326,19 @@ export interface CiStatus {
 
 export interface Tab {
   id: string;
-  type: "agent" | "editor" | "diff" | "image";
+  type: "agent" | "editor" | "diff" | "image" | "canvas";
   agentId?: string;
   /** Editor / image: absolute file path. Diff: the "new" (worktree/index) side
-   *  path, used for project grouping in the tab bar. */
+   *  path, used for project grouping in the tab bar. Canvas: workspaceId
+   *  (worktree path or project root) — not a file. */
   filePath?: string;
   /** Diff tabs carry a snapshot of the two sides at open time. */
   diffOld?: string;
   diffNew?: string;
   title: string;
+  /** canvas / grouping: owning project name. Agent tabs still take
+   *  `AgentInfo.project` as source of truth. */
+  project?: string;
 }
 
 // ── File content search (right sidebar Files tab) ─────────────────
@@ -1889,6 +1893,7 @@ export const useStore = create<AppState>((set, get) => {
 
   closeTab: (id) =>
     set((s) => {
+      const closing = s.tabs.find((t) => t.id === id);
       const tabs = s.tabs.filter((t) => t.id !== id);
       // Closing a tab that occupies a split leaf prunes that leaf and collapses
       // its parent split to the surviving sibling.
@@ -1924,8 +1929,14 @@ export const useStore = create<AppState>((set, get) => {
           splitTree: pruned,
         };
       }
-      const activeTabId =
+      let activeTabId =
         s.activeTabId === id ? (tabs[tabs.length - 1]?.id ?? null) : s.activeTabId;
+      // Closing an active canvas tab while others remain should stay in canvas
+      // view — the last store entry is often an agent/editor tab.
+      if (s.activeTabId === id && closing?.type === "canvas") {
+        const otherCanvas = [...tabs].reverse().find((t) => t.type === "canvas");
+        if (otherCanvas) activeTabId = otherCanvas.id;
+      }
       return { tabs, activeTabId };
     }),
 

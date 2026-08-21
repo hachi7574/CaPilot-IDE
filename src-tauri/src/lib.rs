@@ -1,5 +1,7 @@
 pub mod agent_runtime;
 pub mod bridge;
+mod canvas_graph;
+mod canvas_run;
 mod ci;
 pub mod daemon;
 mod fs_search;
@@ -41,7 +43,7 @@ fn now_ms() -> i64 {
 
 /// Validate a project name: reject absolute paths and `..`/`.` traversal so a
 /// project can't escape the workspace root (persistence::project_dir joins it).
-fn sanitize_project(project: &str) -> Result<(), String> {
+pub(crate) fn sanitize_project(project: &str) -> Result<(), String> {
     if project.is_empty() {
         return Err("Project name cannot be empty".to_string());
     }
@@ -4576,6 +4578,15 @@ pub fn run() {
             worktree_list,
             worktree_list_all,
             worktree_remove,
+            canvas_graph::canvas_graph_get,
+            canvas_graph::canvas_graph_set,
+            canvas_graph::canvas_graph_connect,
+            canvas_run::canvas_run_start,
+            canvas_run::canvas_run_status,
+            canvas_run::canvas_run_stop,
+            canvas_run::canvas_run_report_exit,
+            canvas_run::canvas_run_mark_running,
+            canvas_run::canvas_run_probe_ready,
             runtime_list_available,
             opencode_current_variant,
             pi_current_thinking_level,

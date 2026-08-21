@@ -5,6 +5,7 @@ import { XTermPanel } from "../terminal/XTermPanel";
 import { EditorPanel } from "../editor/EditorPanel";
 import { DiffPanel } from "../editor/DiffPanel";
 import { ImageViewerPanel } from "../editor/ImageViewerPanel";
+import { CanvasPanel } from "../canvas/CanvasPanel";
 import { Icon } from "../Icon";
 import { CaPilotLogo } from "../CaPilotLogo";
 import { spawnAgent } from "../../state/agentActions";
@@ -40,6 +41,15 @@ function Panel({
       )}
       {tab.type === "diff" && (
         <DiffPanel oldText={tab.diffOld ?? ""} newText={tab.diffNew ?? ""} />
+      )}
+      {tab.type === "canvas" && (
+        <CanvasPanel
+          scope={{
+            projectId: tab.project ?? "default",
+            workspaceId: tab.filePath ?? tab.project ?? "default",
+          }}
+          active={active}
+        />
       )}
     </div>
   );
@@ -252,6 +262,7 @@ export function ContentArea() {
       } else if (activeTab.type === "agent" && activeTab.agentId) {
         requestSearch("terminal");
       }
+      // canvas / image / diff: no in-panel search in v1
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -270,6 +281,8 @@ export function ContentArea() {
       const el = document.activeElement as HTMLElement | null;
       const inComposer = !!el?.closest?.(".composer-input");
       const st = useStore.getState();
+      const tab = st.tabs.find((tb) => tb.id === st.activeTabId);
+      if (tab?.type === "canvas") return;
       if (!inComposer && st.tabs.length > 0) return;
       e.preventDefault();
       // Effective runtime: the configured Ctrl+T preference, else claude, else
@@ -380,7 +393,8 @@ export function ContentArea() {
       {activeTab && (
         <DropShell targetTabId={activeTab.id} draggedTabId={draggedTabId} onSplit={handleSplit}>
           {!activeIsResident && <Panel tab={activeTab} active />}
-          {residentTabs.map((tab) => (
+          {activeTab.type !== "canvas" &&
+            residentTabs.map((tab) => (
             <div
               key={tab.id}
               className={`resident-terminal-panel${tab.id === activeTab?.id ? " active" : " hidden"}`}

@@ -26,12 +26,18 @@ export function TerminalTemplatePicker({
   project,
   anchor,
   onClose,
+  onSpawned,
+  addTab = true,
 }: {
   /** Project to spawn the terminal under. */
   project: string;
   /** Fixed-position anchor for the dropdown menu. */
   anchor: { x: number; y: number };
   onClose: () => void;
+  /** Called with the new session id after a successful spawn. */
+  onSpawned?: (id: string) => void;
+  /** When false, spawn the session without activating an agent tab (canvas create). */
+  addTab?: boolean;
 }) {
   const t = useT();
   const termTemplates = useStore((s) => s.termTemplates);
@@ -126,7 +132,9 @@ export function TerminalTemplatePicker({
               key={tpl.id}
               className="tt-item"
               onClick={() => {
-                spawnTerminal(project, tpl).catch(console.error);
+                spawnTerminal(project, tpl, { addTab })
+                  .then((id) => onSpawned?.(id))
+                  .catch(console.error);
                 onClose();
               }}
               onContextMenu={(e) => {

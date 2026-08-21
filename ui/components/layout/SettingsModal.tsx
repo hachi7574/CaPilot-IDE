@@ -19,6 +19,11 @@ import {
 import { Icon, runtimeIcon } from "../Icon";
 import { isShellRuntime, isWindowsHost } from "../../state/shellPath";
 import { useT, LOCALES, themeLabel, type Locale } from "../../i18n";
+import {
+  getCanvasLayoutPrefs,
+  setCanvasLayoutPrefs,
+  subscribeCanvasLayoutPrefs,
+} from "../../state/canvasLayout";
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -87,6 +92,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const setThemeLabEnabled = useStore((s) => s.setThemeLabEnabled);
   const ctrlTRuntime = useStore((s) => s.ctrlTRuntime);
   const setCtrlTRuntime = useStore((s) => s.setCtrlTRuntime);
+  const [canvasLayout, setCanvasLayout] = useState(getCanvasLayoutPrefs);
+  useEffect(() => subscribeCanvasLayoutPrefs(() => setCanvasLayout(getCanvasLayoutPrefs())), []);
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const themePickerRef = useRef<HTMLDivElement>(null);
   const [runtimeMenuOpen, setRuntimeMenuOpen] = useState(false);
@@ -146,6 +153,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const [activeSection, setActiveSection] = useState<
     "runtimes" | "appearance" | "sessions" | "updates"
   >("runtimes");
+  const [runtimeListOpen, setRuntimeListOpen] = useState(true);
 
   const jumpToSection = (
     section: "runtimes" | "appearance" | "sessions" | "updates"
@@ -668,11 +676,32 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
 
         {/* Installed runtimes (shells + agents) */}
         <section id="settings-runtimes" className="modal-section settings-panel settings-runtime-panel">
-          <div className="settings-section-head">
+          <div
+            className="settings-section-head"
+            role="button"
+            tabIndex={0}
+            onClick={() => setRuntimeListOpen((o) => !o)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                setRuntimeListOpen((o) => !o);
+              }
+            }}
+            title={runtimeListOpen ? t("settings.collapseRuntimes") : t("settings.expandRuntimes")}
+            style={{ cursor: "pointer" }}
+          >
             <span>RUNTIME BUS</span>
-            <h4>{t("settings.runtimeBus")}</h4>
+            <h4>
+              {t("settings.runtimeBus")}
+              <Icon
+                name={runtimeListOpen ? "chevron-down" : "chevron-right"}
+                size={12}
+              />
+            </h4>
             <p>{t("settings.runtimeDesc")}</p>
           </div>
+          {runtimeListOpen && (
+          <>
           <div className="settings-toolbar">
             <div className="modal-title">
               {t("settings.detected")}{" "}
@@ -947,6 +976,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             </div>
             );
           })}
+          </>
+          )}
         </section>
 
         {/* Preferences */}
@@ -1161,6 +1192,35 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               >
                 {opt.label}
               </button>
+            ))}
+          </div>
+          <div className="settings-field-label">
+            <span>{t("settings.canvasLayout")}</span>
+            <small>{t("settings.canvasLayoutHint")}</small>
+          </div>
+          <div className="settings-canvas-layout">
+            {(
+              [
+                ["gap", t("settings.canvasGap")],
+                ["cardW", t("settings.canvasCardW")],
+                ["cardH", t("settings.canvasCardH")],
+              ] as const
+            ).map(([key, label]) => (
+              <label key={key} className="settings-canvas-layout-field">
+                <span>{label}</span>
+                <input
+                  type="number"
+                  min={key === "gap" ? 0 : 160}
+                  max={key === "gap" ? 400 : 2400}
+                  step={1}
+                  value={canvasLayout[key]}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    if (!Number.isFinite(v)) return;
+                    setCanvasLayout(setCanvasLayoutPrefs({ [key]: v }));
+                  }}
+                />
+              </label>
             ))}
           </div>
           <div className="settings-field-label">
