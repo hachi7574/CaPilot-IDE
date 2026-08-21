@@ -24,6 +24,13 @@ interface XTermPanelProps {
    *  steal focus on the F1 input↔terminal toggle; hidden resident Claude /
    *  OpenCode panels must not. Defaults to true for standalone use. */
   active?: boolean;
+  /** Canvas-embedded terminals: paint an opaque --term-bg cell instead of
+   *  transparent cells. WebKitGTK otherwise leaves per-row compositor garbage
+   *  (a solid blue band behind glyphs) when the canvas is stretched. */
+  opaqueBg?: boolean;
+  /** Override cell font size in CSS px. Canvas zoom passes baseSize * zoom so
+   *  selection hit-testing stays aligned (no CSS scale on the terminal). */
+  fontSizePx?: number;
 }
 
 /** Terminal PTY font size (px) per UI font-size preset. Base preset "s" keeps
@@ -343,8 +350,11 @@ const termVeil = (): number => {
  *  host's color-mix fill (and wallpaper beneath it) can show through.
  *  allowTransparency stays on so a live theme switch can fade the cell without
  *  reconstructing the PTY. */
-const readTerminalTheme = () => ({
-  background: termVeil() < 0.999 ? "rgba(0,0,0,0)" : cssVar("--term-bg", "#0D1117"),
+const readTerminalTheme = (opaque?: boolean) => ({
+  background:
+    opaque || termVeil() >= 0.999
+      ? cssVar("--term-bg", "#0D1117")
+      : "rgba(0,0,0,0)",
   foreground: cssVar("--pl-fg", "#ABB2BF"),
   cursor: cssVar("--pl-cursor", "#5C6370"),
   selectionBackground: cssVar("--pl-selection", "#3A3F4B"),
@@ -375,7 +385,12 @@ const readTerminalTheme = () => ({
  * is reopened. When the channel object changes (e.g. runtime switch), the
  * effect re-runs and attaches the new channel.
  */
-export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
+export function XTermPanel({
+  agentId,
+  active = true,
+  opaqueBg = false,
+  fontSizePx,
+}: XTermPanelProps) {
   const t = useT();
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -583,10 +598,10 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
       // Claude's TUI draws its own cursor inside the PTY, so a static xterm
       // cursor is barely visible. cursorBlink:false costs nothing perceptible.
       cursorBlink: false,
-      fontSize: TERMINAL_FONT_SIZES[fontScale] ?? 13,
+      fontSize: fontSizePx ?? TERMINAL_FONT_SIZES[fontScale] ?? 13,
       fontFamily: "'JetBrainsMono', ui-monospace, monospace",
-      theme: readTerminalTheme(),
-      allowTransparency: true,
+      theme: readTerminalTheme(opaqueBg),
+      allowTransparency: !opaqueBg,
       allowProposedApi: true,
     });
 
@@ -817,7 +832,23 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     const fitAndRefresh = () => {
       if (disposed) return;
       try {
-        fitAddon.fit();
+        const parent = term.element?.parentElement;
+        const cell = (term as unknown as { _core?: { _renderService?: { dimensions?: { css?: { cell?: { width: number; height: number } } } } } })
+          ._core?._renderService?.dimensions?.css?.cell;
+        if (parent && cell && cell.width > 0 && cell.height > 0) {
+          const cs = window.getComputedStyle(parent);
+          const padX =
+            (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+          const padY =
+            (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+          const cols = Math.max(2, Math.floor((parent.clientWidth - padX) / cell.width));
+          const rows = Math.max(1, Math.floor((parent.clientHeight - padY) / cell.height));
+          if (term.cols !== cols || term.rows !== rows) {
+            term.resize(cols, rows);
+          }
+        } else {
+          fitAddon.fit();
+        }
       } catch {
         // Container has no dimensions yet — the deferred retry handles it.
       }
@@ -1015,9 +1046,57 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     window.addEventListener("mousemove", onMouseMove);
     window.addEventListener("mouseup", onMouseUp);
 
+    // Canvas cards are CSS-scaled. xterm maps mouse with visual offset / unscaled
+    // cell size, so selection lands on the wrong row. Rewrite client coords into
+    // layout space before xterm sees the event.
+    let injectingMouse = false;
+    const remapScaledMouse = (e: MouseEvent) => {
+      if (!opaqueBg || injectingMouse) return;
+      const screen = containerRef.current?.querySelector<HTMLElement>(".xterm-screen");
+      if (!screen || screen.offsetWidth < 1) return;
+      const visual = screen.getBoundingClientRect();
+      const scale = visual.width / screen.offsetWidth;
+      if (!Number.isFinite(scale) || Math.abs(scale - 1) < 0.02) return;
+      e.stopImmediatePropagation();
+      e.preventDefault();
+      injectingMouse = true;
+      screen.dispatchEvent(
+        new MouseEvent(e.type, {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          detail: e.detail,
+          button: e.button,
+          buttons: e.buttons,
+          ctrlKey: e.ctrlKey,
+          shiftKey: e.shiftKey,
+          altKey: e.altKey,
+          metaKey: e.metaKey,
+          clientX: visual.left + (e.clientX - visual.left) / scale,
+          clientY: visual.top + (e.clientY - visual.top) / scale,
+        })
+      );
+      injectingMouse = false;
+    };
+    if (opaqueBg) {
+      containerRef.current.addEventListener("mousedown", remapScaledMouse, true);
+      containerRef.current.addEventListener("mousemove", remapScaledMouse, true);
+      containerRef.current.addEventListener("mouseup", remapScaledMouse, true);
+    }
+
     // Resize handler
+    let fitTimer: number | null = null;
     const handleResize = () => {
-      fitAndRefresh();
+      const screen = containerRef.current?.querySelector<HTMLElement>(".xterm-screen");
+      if (screen && screen.offsetWidth > 0) {
+        const scale = screen.getBoundingClientRect().width / screen.offsetWidth;
+        if (Number.isFinite(scale) && Math.abs(scale - 1) > 0.02) return;
+      }
+      if (fitTimer != null) window.clearTimeout(fitTimer);
+      fitTimer = window.setTimeout(() => {
+        fitTimer = null;
+        fitAndRefresh();
+      }, 50);
     };
 
     const observer = new ResizeObserver(handleResize);
@@ -1028,6 +1107,7 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
       if (redrawRestoreTimer) clearTimeout(redrawRestoreTimer);
       if (modePersistTimer) clearTimeout(modePersistTimer);
       persistClaudeMode();
+      if (fitTimer != null) window.clearTimeout(fitTimer);
       // Do not strand the final packet behind a cancelled animation frame.
       if (flushRaf !== null) cancelAnimationFrame(flushRaf);
       flushPending();
@@ -1037,6 +1117,9 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
       observer.disconnect();
       containerRef.current?.removeEventListener("wheel", onWheel, true);
       containerRef.current?.removeEventListener("mousedown", onMouseDown);
+      containerRef.current?.removeEventListener("mousedown", remapScaledMouse, true);
+      containerRef.current?.removeEventListener("mousemove", remapScaledMouse, true);
+      containerRef.current?.removeEventListener("mouseup", remapScaledMouse, true);
       window.removeEventListener("mousemove", onMouseMove);
       window.removeEventListener("mouseup", onMouseUp);
       searchResultsSub.dispose();
@@ -1063,7 +1146,7 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     const apply = () => {
       const term = termRef.current;
       if (!term) return;
-      term.options.theme = readTerminalTheme();
+      term.options.theme = readTerminalTheme(opaqueBg);
       if (term.rows > 0) term.refresh(0, term.rows - 1);
       searchAddonRef.current?.clearDecorations();
       setSearchResults(null);
@@ -1071,7 +1154,22 @@ export function XTermPanel({ agentId, active = true }: XTermPanelProps) {
     apply();
     window.addEventListener("capilot:theme-vars", apply);
     return () => window.removeEventListener("capilot:theme-vars", apply);
-  }, [themeId]);
+  }, [themeId, opaqueBg]);
+
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    const size = fontSizePx ?? TERMINAL_FONT_SIZES[fontScale] ?? 13;
+    if (term.options.fontSize === size) return;
+    term.options.fontSize = size;
+    requestAnimationFrame(() => {
+      try {
+        fitAddonRef.current?.fit();
+      } catch {
+        /* not laid out yet */
+      }
+    });
+  }, [fontScale, fontSizePx]);
 
   // Tauri drag-drop event — more reliable in the webview than DOM drop (the
   // Composer uses the same fallback). Scoped to the terminal via position so a

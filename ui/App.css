@@ -23,6 +23,8 @@
   /* Terminal default-cell veil. Themes may override `--term-veil` (0–1);
      0 lets wallpaper show through; 1 is the historic opaque --term-bg. */
   --term-veil: 0;
+  /* Canvas panel fill over wallpaper. 0 = fully transparent (default). */
+  --canvas-veil: 0;
   /* Wallpaper shell opacity mixes (only applied under data-wallpaper=on).
      Themes / Theme Lab may override. 1 = fully opaque shell over art. */
   --wallpaper-surface-mix: 0.72;
@@ -264,7 +266,61 @@ body::after {
   display: flex; align-items: center; gap: 6px; padding: 5px 10px 5px 22px;
   cursor: pointer; font-family: var(--mono); font-size: var(--fs-xs); color: var(--ink2);
   transition: all .2s var(--ease-apple); border-left: 2px solid transparent;
+  position: relative;
 }
+.tm-open-split {
+  position: absolute;
+  right: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  z-index: 8;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .15s var(--ease-apple);
+}
+.terminal-item:hover .tm-open-split,
+.tm-open-split:hover,
+.tm-open-split:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+.tm-open-trigger {
+  width: 16px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg3);
+  border: 1px solid var(--rule2);
+  border-right: none;
+  color: var(--ink2);
+  cursor: pointer;
+  padding: 0;
+}
+.tm-open-menu {
+  display: none;
+  flex-direction: column;
+  background: var(--bg2);
+  border: 1px solid var(--rule2);
+  min-width: 132px;
+}
+.tm-open-split:hover .tm-open-menu,
+.tm-open-split:focus-within .tm-open-menu {
+  display: flex;
+}
+.tm-open-menu button {
+  background: none;
+  border: none;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: var(--fs-2xs);
+  text-align: left;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+.tm-open-menu button:hover { background: var(--bg3); color: var(--brand); }
 .terminal-item:hover { background: var(--bg3); color: var(--ink); }
 .terminal-item.active { border-left-color: var(--brand); background: rgb(var(--brand-rgb) / .06); color: var(--ink); }
 .terminal-item .tm-icon { font-size: var(--fs-base); width: 18px; text-align: center; flex-shrink: 0; }
@@ -365,6 +421,16 @@ body::after {
    every cell, and in the pre-paint window it should look like a standalone
    opencode terminal — xterm.css's opaque `#000` — not the app background). */
 .app .xterm .xterm-viewport { background-color: transparent; }
+.app .xterm textarea {
+  outline: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
+  caret-color: transparent;
+  -webkit-tap-highlight-color: transparent;
+}
+.canvas-card-pty .xterm {
+  overflow: hidden !important;
+}
 /* Terminal default-cell background: apply veil over --term-bg when the
    wallpaper layer is on. xterm.rows writes its own background onto
    .xterm-screen (the grid canvas), but the viewport + the container
@@ -410,15 +476,74 @@ html[data-wallpaper="on"] .app .xterm {
 }
 .tab-add:hover { color: var(--brand); }
 
+/* Terminal ↔ canvas view switch. `margin-left: auto` pins this (and the
+   window controls that follow it) to the trailing edge. */
+.tab-view-switch {
+  margin-left: auto;
+  flex-shrink: 0;
+  height: 26px;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.tab-view-switch:disabled { opacity: .4; cursor: default; }
+.tab-view-switch-track {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: center;
+  width: 108px;
+  height: 26px;
+  border: 1px solid var(--rule2);
+  background: var(--bg3);
+  position: relative;
+  transition: background .2s var(--ease-apple), border-color .2s var(--ease-apple);
+}
+.tab-view-switch.on .tab-view-switch-track {
+  background: var(--brand-dim);
+  border-color: var(--brand);
+}
+.tab-view-switch-label {
+  position: relative;
+  z-index: 1;
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  letter-spacing: 0;
+  text-align: center;
+  color: var(--ink2);
+  line-height: 1;
+  pointer-events: none;
+}
+.tab-view-switch:not(.on) .tab-view-switch-label:nth-child(1),
+.tab-view-switch.on .tab-view-switch-label:nth-child(2) {
+  color: var(--ink);
+}
+.tab-view-switch-thumb {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: calc(50% - 2px);
+  height: 22px;
+  background: var(--bg);
+  border: 1px solid var(--rule2);
+  z-index: 0;
+  transition: transform .2s var(--ease-apple), border-color .2s var(--ease-apple);
+}
+.tab-view-switch.on .tab-view-switch-thumb {
+  transform: translateX(calc(100% + 2px));
+  border-color: var(--brand);
+}
+
 /* Window controls hosted on the tab bar while the left sidebar is collapsed.
-   `margin-left: auto` pins them to the trailing edge; tabs scroll under the
-   flex spacer without pushing the buttons off-screen. `flex-shrink: 0` keeps
-   the trio intact when the strip overflows. */
+   Tabs scroll under the flex spacer without pushing the buttons off-screen.
+   `flex-shrink: 0` keeps the trio intact when the strip overflows.
+   `margin-left: 0` — the view-toggle already carries `margin-left: auto`. */
 .tab-win-controls {
   display: flex;
   align-items: center;
   gap: 0;
-  margin-left: auto;
+  margin-left: 0;
   flex-shrink: 0;
   padding-left: 6px;
   -webkit-app-region: no-drag;
@@ -432,6 +557,321 @@ html[data-wallpaper="on"] .app .xterm {
 
 .content-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--rule); min-width: 0; }
 .content-panel:last-child { border-right: none; }
+
+.canvas-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+  position: relative;
+  background: transparent;
+  touch-action: none;
+}
+.canvas-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--bg2);
+  -webkit-app-region: no-drag;
+  z-index: 3;
+}
+.canvas-toolbar-btn {
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  color: var(--ink);
+  background: var(--bg3);
+  border: 1px solid var(--rule2);
+  padding: 2px 10px;
+  cursor: pointer;
+}
+.canvas-toolbar-btn:hover:not(:disabled) { border-color: var(--brand); color: var(--brand); }
+.canvas-toolbar-btn:disabled { opacity: .4; cursor: default; }
+.canvas-toolbar-btn.active { color: var(--brand); border-color: var(--brand); }
+.canvas-toolbar-hint {
+  color: var(--ink2);
+  font-family: var(--mono);
+  font-size: var(--fs-2xs);
+}
+.canvas-surface {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  min-height: 0;
+  isolation: isolate;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grab;
+  background: color-mix(
+    in srgb,
+    var(--term-bg) calc(var(--canvas-veil, 0) * 100%),
+    transparent
+  );
+}
+.canvas-surface:active { cursor: grabbing; }
+.canvas-surface *,
+.canvas-card,
+.canvas-card-name,
+.canvas-card .tab-status {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  -webkit-user-drag: none;
+}
+.canvas-card-pty,
+.canvas-card-pty * {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+.canvas-edges {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 1;
+}
+.canvas-edge-html {
+  position: absolute;
+  height: 2px;
+  margin-top: -1px;
+  background: var(--rule2);
+  pointer-events: none;
+  transform-origin: 0 50%;
+  z-index: 1;
+}
+.canvas-edge-html.selected {
+  height: 3px;
+  margin-top: -1.5px;
+  background: var(--brand);
+  pointer-events: auto;
+}
+.canvas-edge-html.preview {
+  background: var(--brand);
+  opacity: 0.85;
+}
+.canvas-node.run-ok .canvas-card { border-color: var(--success); }
+.canvas-node.run-failed .canvas-card { border-color: var(--danger); }
+.canvas-node.run-blocked .canvas-card { border-color: var(--warn); }
+.canvas-node.run-running .canvas-card { border-color: var(--primary); }
+.canvas-empty {
+  margin: auto;
+  color: var(--ink2);
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  max-width: 36em;
+  text-align: center;
+  padding: 24px;
+}
+.canvas-load-error {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  color: var(--danger);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  max-width: 40em;
+}
+.canvas-world {
+  position: absolute;
+  inset: 0;
+  transform-origin: 0 0;
+  z-index: 2;
+}
+.canvas-node {
+  position: absolute;
+  z-index: 1;
+  transform-origin: 0 0;
+}
+.canvas-node-appear {
+  width: 100%;
+  height: 100%;
+}
+.canvas-node-appear-create,
+.canvas-node-appear-drop {
+  transform-origin: center;
+  opacity: var(--canvas-appear-opacity, 1);
+  transform: scale(var(--canvas-appear-scale, 1));
+}
+.canvas-node-appear-create {
+  --canvas-appear-scale: 0;
+  --canvas-appear-opacity: 0.16;
+}
+.canvas-node-appear-drop {
+  --canvas-appear-scale: 0.86;
+  --canvas-appear-opacity: 0;
+}
+.canvas-node.ghost { opacity: 0.35; pointer-events: none; }
+.canvas-card {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--bg3);
+  border: 1px solid var(--rule2);
+  color: var(--ink);
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+  -webkit-app-region: no-drag;
+  position: relative;
+}
+.canvas-card-drag { cursor: grab; }
+.canvas-card-drag:active { cursor: grabbing; }
+.canvas-card:hover { border-color: var(--brand); }
+.canvas-card.selected { border-color: var(--brand); background: var(--bg); }
+.canvas-node.expanded {
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.canvas-node.expanded > .canvas-node-appear,
+.canvas-node.expanded > .canvas-node-appear-create,
+.canvas-node.expanded > .canvas-node-appear-drop {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.canvas-card.expanded {
+  justify-content: flex-start;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  height: 100%;
+  padding: 8px 8px 10px;
+  cursor: grab;
+}
+.canvas-card.expanded .canvas-card-pty {
+  margin: 0 2px 2px;
+  cursor: text;
+}
+.canvas-card-pty {
+  flex: 1 1 auto;
+  min-height: 220px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--term-bg);
+  -webkit-user-select: text;
+  user-select: text;
+}
+.canvas-card-pty > div {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.canvas-card-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+}
+.canvas-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-shrink: 0;
+}
+.canvas-card-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+.canvas-card-icon-btn {
+  flex-shrink: 0;
+  background: none;
+  border: 1px solid transparent;
+  color: var(--ink2);
+  cursor: pointer;
+  padding: 1px;
+  display: flex;
+}
+.canvas-card-icon-btn:hover { color: var(--brand); border-color: var(--rule2); }
+.canvas-card-grip {
+  position: absolute;
+  z-index: 7;
+  cursor: grab;
+  background: transparent;
+}
+.canvas-card-grip-l { left: 0; top: 0; bottom: 10px; width: 8px; }
+.canvas-card-grip-r { right: 0; top: 0; bottom: 10px; width: 8px; }
+.canvas-card-grip-b { left: 0; right: 16px; bottom: 0; height: 8px; }
+.canvas-surface.dragging .canvas-card-pty {
+  pointer-events: none;
+}
+.canvas-connect-handle {
+  position: absolute;
+  right: -6px;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  margin-top: -6px;
+  border-radius: 50%;
+  background: var(--bg);
+  border: 2px solid var(--brand);
+  cursor: crosshair;
+  z-index: 3;
+}
+.canvas-pty-overlay {
+  position: absolute;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  min-width: 480px;
+  min-height: 280px;
+  background: var(--term-bg);
+  border: 1px solid var(--brand);
+  box-shadow: var(--shadow-hard);
+  -webkit-app-region: no-drag;
+}
+.canvas-pty-overlay-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 6px 10px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--rule);
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  cursor: grab;
+}
+.canvas-pty-overlay-head button {
+  cursor: pointer;
+  pointer-events: auto;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+}
+.canvas-pty-overlay-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+.canvas-pty-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+}
 
 /* ── Empty State ──────────────────────────────────────────────── */
 
@@ -4385,6 +4825,9 @@ html[data-theme="quantum"] .app::before {
 }
 .settings-section-head h4 {
   margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-family: var(--pixel-body);
   font-size: var(--fs-lg);
   line-height: 1.35;
@@ -4397,6 +4840,28 @@ html[data-theme="quantum"] .app::before {
   font-size: var(--fs-xs);
   line-height: 1.45;
   color: var(--muted);
+}
+.settings-canvas-layout {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 8px 0 16px;
+}
+.settings-canvas-layout-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: var(--mono);
+  font-size: var(--fs-2xs);
+  color: var(--ink2);
+}
+.settings-canvas-layout-field input {
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  color: var(--ink);
+  background: var(--bg3);
+  border: 1px solid var(--rule2);
+  padding: 4px 8px;
 }
 
 .settings-toolbar,

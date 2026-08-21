@@ -11,7 +11,8 @@ const DEFAULT_PROJECT = "default";
 /** Spawn a brand-new agent session and register it in the store. */
 export async function spawnAgent(
   project?: string,
-  runtime: string = DEFAULT_RUNTIME
+  runtime: string = DEFAULT_RUNTIME,
+  opts?: { addTab?: boolean }
 ): Promise<string> {
   const s = useStore.getState();
   const { channel, flush } = createBufferedChannel();
@@ -56,12 +57,14 @@ export async function spawnAgent(
   }
   flush(info.id);
   s.addAgent({ ...info, project: proj }, channel);
-  s.addTab({
-    id: info.id,
-    type: "agent",
-    agentId: info.id,
-    title: info.title || runtime,
-  });
+  if (opts?.addTab !== false) {
+    s.addTab({
+      id: info.id,
+      type: "agent",
+      agentId: info.id,
+      title: info.title || runtime,
+    });
+  }
   return info.id;
 }
 
@@ -91,9 +94,10 @@ function preferredShellRuntime(): string {
  *  quick-start commands run in the shell after it reaches its prompt. */
 export async function spawnTerminal(
   project: string,
-  template: { runtime: string; command: string }
+  template: { runtime: string; command: string },
+  opts?: { addTab?: boolean }
 ): Promise<string> {
-  const id = await spawnAgent(project, template.runtime);
+  const id = await spawnAgent(project, template.runtime, opts);
   if (template.command && isShellRuntime(template.runtime)) {
     // Wait for the shell prompt, then send the command (raw:false appends \r).
     await new Promise((r) => setTimeout(r, 400));

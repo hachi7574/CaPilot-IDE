@@ -30,6 +30,7 @@ export const LAB_GROUPS: LabGroup[] = [
     labelKey: "layers",
     tokens: [
       { name: "--term-veil", kind: "ratio", labelKey: "termVeil" },
+      { name: "--canvas-veil", kind: "ratio", labelKey: "canvasVeil" },
       {
         name: "--wallpaper-surface-mix",
         kind: "ratio",
@@ -268,7 +269,10 @@ export function snapshotLabVars(
 }
 
 function defaultFor(t: LabToken): string {
-  if (t.kind === "ratio") return "1";
+  if (t.kind === "ratio") {
+    if (t.name === "--term-veil" || t.name === "--canvas-veil") return "0";
+    return "1";
+  }
   if (t.kind === "rgb") return "0 0 0";
   if (t.kind === "text") return "";
   return "#000000";

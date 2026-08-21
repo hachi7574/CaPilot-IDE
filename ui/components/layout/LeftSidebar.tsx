@@ -16,6 +16,13 @@ import { ExitDaemonDialog } from "./ExitDaemonDialog";
 import { handleTitlebarClose } from "../../state/exitDaemon";
 import { Icon, runtimeIcon } from "../Icon";
 import { useT, t } from "../../i18n";
+import {
+  openCanvas,
+  beginCanvasAgentDrag,
+  endCanvasAgentDrag,
+  CANVAS_AGENT_DRAG_MIME,
+  revealAgentOnCanvas,
+} from "../../state/canvas";
 
 /** Derive the workspace project name from an agent cwd. Prefers the
  *  `workspaces/<name>` segment; for custom-rooted projects falls back to the
@@ -299,6 +306,36 @@ export function LeftSidebar() {
     setFocusedProject(proj);
     openAgentTab(id);
   };
+
+  const canvasActive = tabs.find((tab) => tab.id === activeTabId)?.type === "canvas";
+
+  const openSplit = (proj: string, id: string) => (
+    <div
+      className="tm-open-split"
+      draggable={false}
+      onClick={(e) => e.stopPropagation()}
+      onPointerDown={(e) => e.stopPropagation()}
+      onDragStart={(e) => e.preventDefault()}
+    >
+      <button type="button" className="tm-open-trigger" title={t("leftSidebar.openWhere")}>
+        <Icon name="chevron-left" size={10} />
+      </button>
+      <div className="tm-open-menu">
+        <button
+          type="button"
+          onClick={() => openProjectTerminal(proj, id)}
+        >
+          {t("leftSidebar.openInTerminal")}
+        </button>
+        <button
+          type="button"
+          onClick={() => revealAgentOnCanvas(proj, id)}
+        >
+          {t("leftSidebar.openInCanvas")}
+        </button>
+      </div>
+    </div>
+  );
 
   // Todo-tag drop target on a terminal row: assign the task + send its text to
   // that session, then focus it. Shared by the live and ended row renderers.
@@ -754,7 +791,19 @@ export function LeftSidebar() {
                           key={a.id}
                           className={`terminal-item${activeTabId === a.id ? " active" : ""}`}
                           data-todo-drop-agent={a.id}
-                          onClick={() => openProjectTerminal(name, a.id)}
+                          draggable
+                          onDragStart={(e) => {
+                            e.stopPropagation();
+                            e.dataTransfer.effectAllowed = "copy";
+                            e.dataTransfer.setData("text/plain", a.id);
+                            e.dataTransfer.setData(CANVAS_AGENT_DRAG_MIME, a.id);
+                            beginCanvasAgentDrag(a.id);
+                          }}
+                          onDragEnd={() => endCanvasAgentDrag()}
+                          onClick={() => {
+                            if (canvasActive) revealAgentOnCanvas(name, a.id);
+                            else openProjectTerminal(name, a.id);
+                          }}
                           onDragOver={onTodoDragOver}
                           onDrop={(e) => onTodoDrop(e, a.id, name)}
                           onContextMenu={(e) => {
@@ -763,6 +812,7 @@ export function LeftSidebar() {
                             setCtx({ x: e.clientX, y: e.clientY, agentId: a.id });
                           }}
                         >
+                          {openSplit(name, a.id)}
                           <span className="tm-icon">
                             <Icon name={runtimeIcon(a.runtime)} size={14} />
                           </span>
@@ -770,6 +820,7 @@ export function LeftSidebar() {
                           <span className="tm-time">{fmtAge(a.createdAt)}</span>
                           <button
                             className="tm-close"
+                            draggable={false}
                             title={t("leftSidebar.closeAndKill")}
                             onClick={(e) => {
                               e.stopPropagation();
@@ -820,11 +871,20 @@ export function LeftSidebar() {
                                 key={a.id}
                                 className={`terminal-item term-ended${activeTabId === a.id ? " active" : ""}`}
                                 data-todo-drop-agent={a.id}
+                                draggable
+                                onDragStart={(e) => {
+                                  e.stopPropagation();
+                                  e.dataTransfer.effectAllowed = "copy";
+                                  e.dataTransfer.setData("text/plain", a.id);
+                                  e.dataTransfer.setData(CANVAS_AGENT_DRAG_MIME, a.id);
+                                  beginCanvasAgentDrag(a.id);
+                                }}
+                                onDragEnd={() => endCanvasAgentDrag()}
                                 onClick={() => {
-                                  // Ended sessions never auto-resume; force a
-                                  // fresh mount that resumes: drop the dead
-                                  // channel, close any open (dead) tab, flag the
-                                  // reopen, then open the terminal.
+                                  if (canvasActive) {
+                                    revealAgentOnCanvas(name, a.id);
+                                    return;
+                                  }
                                   dropAgentChannel(a.id);
                                   if (tabs.some((t) => t.id === a.id)) {
                                     closeTab(a.id);
@@ -840,6 +900,7 @@ export function LeftSidebar() {
                                   setCtx({ x: e.clientX, y: e.clientY, agentId: a.id });
                                 }}
                               >
+                                {openSplit(name, a.id)}
                                 <span className="tm-icon">
                                   <Icon name="network" size={14} />
                                 </span>
@@ -1397,6 +1458,15 @@ function ContextMenu({
           }}
         >
           <Icon name="monitor" size={13} /> {t("leftSidebar.newTerminal")}
+        </div>
+        <div
+          className="ctx-item"
+          onClick={() => {
+            openCanvas({ projectId: proj, workspaceId: projRoot ?? proj });
+            onClose();
+          }}
+        >
+          <Icon name="layout-grid" size={13} /> {t("leftSidebar.openCanvas")}
         </div>
         {ctx.cwd && (
           <div

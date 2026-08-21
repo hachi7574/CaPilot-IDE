@@ -198,3 +198,5 @@ IDE 遵循 CaPilot 主仓库的 **LUCY styleguide**（8-bit Pixel × Apple Smoot
 | 本手册 | `docs/CaPilot-IDE-RUNBOOK.md` | 运行 / 已知坑 / 文档地图 |
 | 安全审查 | `docs/security-review.md` | CSP / 权限 / 路径 / IPC 审查与发布前 checklist |
 | LUCY 风格 | `docs/styleguide/` | 设计规范（源：主仓库 `Doc/styleguide/`）|
+| 画布视图 | `docs/canvas-view.md` | 工作区级画布 tab；入口 = TabBar 右侧终端/画布切换 |
+| 画布实现 | `docs/canvas-dev/` | 一期一个步骤文件 |

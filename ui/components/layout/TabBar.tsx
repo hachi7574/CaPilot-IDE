@@ -22,6 +22,7 @@ import { ExitDaemonDialog } from "./ExitDaemonDialog";
 import { handleTitlebarClose } from "../../state/exitDaemon";
 import { Icon, runtimeIcon } from "../Icon";
 import { useT } from "../../i18n";
+import { ensureProjectCanvasTabs, toggleCanvasView } from "../../state/canvas";
 
 function projectOf(cwd: string): string {
   const m = cwd.match(/workspaces\/([^/]+)/);
@@ -88,6 +89,9 @@ function tabProject(
     }
     return undefined;
   }
+  if (tab.type === "canvas") {
+    return tab.project ?? (tab.filePath ? projectOf(tab.filePath) : undefined);
+  }
   if ((tab.type === "editor" || tab.type === "diff" || tab.type === "image") && tab.filePath) {
     const byRoot = projectRootOfPath(tab.filePath, projectRoots);
     if (byRoot) return byRoot;
@@ -109,6 +113,7 @@ export function TabBar() {
   );
   const tabs = useStore((s) => s.tabs);
   const activeTabId = useStore((s) => s.activeTabId);
+  const activeTab = tabs.find((t) => t.id === activeTabId);
   const agents = useStore((s) => s.agents);
   const agentChannels = useStore((s) => s.agentChannels);
   const agentActiveAt = useStore((s) => s.agentActiveAt);
@@ -119,6 +124,7 @@ export function TabBar() {
   const focusedProject = useStore((s) => s.focusedProject);
   const draggedTabId = useStore((s) => s.draggedTabId);
   const leftSidebarOpen = useStore((s) => s.leftSidebarOpen);
+  const projects = useStore((s) => s.projects);
   const setActiveTab = useStore((s) => s.setActiveTab);
   const setDraggedTabId = useStore((s) => s.setDraggedTabId);
   const closeTab = useStore((s) => s.closeTab);
@@ -197,6 +203,8 @@ export function TabBar() {
     };
   }, [tabMenu]);
 
+  const canvasActive = activeTab?.type === "canvas";
+
   // Close a single tab exactly like the × button: active/restored sessions get
   // terminated via closeAgentAction; ended sessions stay recoverable.
   const closeTabById = (id: string) => {
@@ -210,6 +218,10 @@ export function TabBar() {
       } else {
         closeAgentAction(tab.agentId);
       }
+    } else if (tab.type === "canvas") {
+      const remaining = tabs.filter((t) => t.type === "canvas" && t.id !== tab.id);
+      closeTab(tab.id);
+      if (canvasActive && remaining.length === 0) toggleCanvasView();
     } else {
       closeTab(tab.id);
     }
@@ -230,15 +242,23 @@ export function TabBar() {
     });
   };
 
-  // Project-scoped view: when a project is focused, show only its tabs. Tabs
-  // whose project can't be determined (e.g. mid-spawn) stay visible, and tabs
-  // of other projects remain in the store — hidden, NOT closed.
-  const visibleTabs = focusedProject
-    ? tabs.filter((t) => {
-        const tp = tabProject(t, agents, projectRoots);
-        return tp === undefined || tp === focusedProject;
-      })
-    : tabs;
+  // Canvas view lists every project's canvas tab (switching tabs is how you
+  // change project). Terminal view hides canvas tabs, and if a project is
+  // focused, hides other projects' document tabs — those stay in the store.
+  const visibleTabs = canvasActive
+    ? tabs.filter((t) => t.type === "canvas")
+    : (focusedProject
+        ? tabs.filter((t) => {
+            const tp = tabProject(t, agents, projectRoots);
+            return tp === undefined || tp === focusedProject;
+          })
+        : tabs
+      ).filter((t) => t.type !== "canvas");
+
+  useEffect(() => {
+    if (!canvasActive) return;
+    ensureProjectCanvasTabs();
+  }, [canvasActive, projects]);
 
   // The 运行中 → 空闲 flip is time-driven: once the activity window lapses, a
   // connected-but-quiet session reads as idle. Re-render on a 1s tick only
@@ -334,7 +354,6 @@ export function TabBar() {
   } | null>(null);
   const openPicker = (e: React.MouseEvent) => {
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const activeTab = tabs.find((tab) => tab.id === activeTabId);
     const activeProject = activeTab
       ? tabProject(activeTab, agents, projectRoots)
       : undefined;
@@ -610,7 +629,9 @@ export function TabBar() {
                     ? runtimeIcon(agent?.runtime ?? "")
                     : tab.type === "image"
                       ? "image"
-                      : "file-text"
+                      : tab.type === "canvas"
+                        ? "layout-grid"
+                        : "file-text"
                 }
                 size={12}
                 style={{ marginRight: 5 }}
@@ -639,8 +660,34 @@ export function TabBar() {
           </div>
         );
       })}
-      <button className="tab-add" title={t("tabBar.newTerminal")} onClick={openPicker}>
-        +
+      {!canvasActive && (
+        <button className="tab-add" title={t("tabBar.newTerminal")} onClick={openPicker}>
+          +
+        </button>
+      )}
+      <button
+        type="button"
+        role="switch"
+        className={`tab-view-switch${canvasActive ? " on" : ""}`}
+        title={
+          projects.length === 0
+            ? t("canvas.noProject")
+            : canvasActive
+              ? t("tabBar.terminalView")
+              : t("tabBar.canvasView")
+        }
+        aria-checked={canvasActive}
+        disabled={projects.length === 0}
+        onClick={(e) => {
+          e.stopPropagation();
+          toggleCanvasView();
+        }}
+      >
+        <span className="tab-view-switch-track">
+          <span className="tab-view-switch-label">{t("tabBar.switchTerminal")}</span>
+          <span className="tab-view-switch-label">{t("tabBar.switchCanvas")}</span>
+          <span className="tab-view-switch-thumb" />
+        </span>
       </button>
       {/* Spacer keeps window controls pinned to the trailing edge while tabs
           scroll independently under overflow. Only shown when the sidebar is
