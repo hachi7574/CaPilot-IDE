@@ -12,6 +12,13 @@ import {
   isLocale,
   setI18nLocale,
 } from "../i18n";
+import {
+  type Chord,
+  type ShortcutId,
+  DEFAULT_SHORTCUTS,
+  loadShortcuts,
+  saveShortcuts,
+} from "./shortcuts";
 
 // ── Types ───────────────────────────────────────────────────────
 
@@ -1007,6 +1014,9 @@ interface AppState {
   addTermTemplate: (t: TermTemplate) => void;
   updateTermTemplate: (id: string, patch: Partial<Pick<TermTemplate, "name" | "command">>) => void;
   removeTermTemplate: (id: string) => void;
+  /** Explicit enable list from Settings. `null` = unset (treat detected as on). */
+  enabledRuntimes: string[] | null;
+  setRuntimeEnabled: (id: string, enabled: boolean) => void;
   applyResourceSample: (resources: AgentResource[]) => void;
   setOnboarded: (onboarded: boolean) => void;
   setNprojOpen: (open: boolean) => void;
@@ -1036,6 +1046,9 @@ interface AppState {
   setSoundEnabled: (enabled: boolean) => void;
   /** Persist Theme Editor visibility (Settings → 外观与显示). */
   setThemeLabEnabled: (enabled: boolean) => void;
+  shortcuts: Record<ShortcutId, Chord>;
+  setShortcut: (id: ShortcutId, chord: Chord) => void;
+  resetShortcuts: () => void;
   /** Poll the current version's CI build status (developer tool). */
   pollCiStatus: () => void;
 }
@@ -1195,20 +1208,35 @@ export interface TermTemplate {
   id: string;
   name: string;
   command: string;
-  runtime:
-    | "shell"
-    | "powershell"
-    | "cmd"
-    | "bash"
-    | "bash-rc"
-    | "claude"
-    | "codex"
-    | "dsh"
-    | "pi";
+  runtime: string;
   fixed?: boolean;
 }
 
 const TERM_TEMPLATES_KEY = "capilot.termTemplates";
+const ENABLED_RUNTIMES_KEY = "capilot.enabledRuntimes";
+
+/** Runtimes the user turned on in Settings. `null` = never configured, so every
+ *  currently-detected runtime counts as enabled (existing installs keep their
+ *  `+` picker). After the first toggle we persist an explicit id list. */
+function loadEnabledRuntimes(): string[] | null {
+  try {
+    const raw = localStorage.getItem(ENABLED_RUNTIMES_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    return parsed.filter((id): id is string => typeof id === "string");
+  } catch {
+    return null;
+  }
+}
+
+function saveEnabledRuntimes(ids: string[]) {
+  try {
+    localStorage.setItem(ENABLED_RUNTIMES_KEY, JSON.stringify(ids));
+  } catch {
+    // ignore storage errors
+  }
+}
 
 /** True when the UI is running on Windows (Tauri WebView). */
 function isWindowsUi(): boolean {
@@ -1228,6 +1256,38 @@ const DEFAULT_TEMPLATES: TermTemplate[] = isWindowsUi()
       { id: "codex", name: "codex", command: "", runtime: "codex" },
       { id: "dsh", name: "dsh", command: "", runtime: "dsh" },
       { id: "pi", name: "Pi", command: "", runtime: "pi" },
+      { id: "codebuddy", name: "CodeBuddy", command: "", runtime: "codebuddy" },
+      { id: "gemini", name: "Gemini", command: "", runtime: "gemini" },
+      { id: "grok", name: "Grok", command: "", runtime: "grok" },
+      { id: "kimi", name: "Kimi", command: "", runtime: "kimi" },
+      { id: "hermes", name: "Hermes", command: "", runtime: "hermes" },
+      { id: "trae", name: "Trae", command: "", runtime: "trae" },
+      { id: "qoder", name: "Qoder", command: "", runtime: "qoder" },
+      { id: "cursor", name: "Cursor", command: "", runtime: "cursor" },
+      { id: "copilot", name: "Copilot", command: "", runtime: "copilot" },
+      { id: "cline", name: "Cline", command: "", runtime: "cline" },
+      { id: "kilo", name: "Kilo", command: "", runtime: "kilo" },
+      { id: "crush", name: "Crush", command: "", runtime: "crush" },
+      { id: "aug", name: "Auggie", command: "", runtime: "aug" },
+      { id: "continue", name: "Continue", command: "", runtime: "continue" },
+      { id: "qwen-code", name: "Qwen Code", command: "", runtime: "qwen-code" },
+      { id: "codebuff", name: "Codebuff", command: "", runtime: "codebuff" },
+      { id: "command-code", name: "Command Code", command: "", runtime: "command-code" },
+      { id: "droid", name: "Droid", command: "", runtime: "droid" },
+      { id: "aider", name: "Aider", command: "", runtime: "aider" },
+      { id: "goose", name: "Goose", command: "", runtime: "goose" },
+      { id: "amp", name: "Amp", command: "", runtime: "amp" },
+      { id: "kiro", name: "Kiro", command: "", runtime: "kiro" },
+      { id: "openclaude", name: "OpenClaude", command: "", runtime: "openclaude" },
+      { id: "autohand", name: "Autohand", command: "", runtime: "autohand" },
+      { id: "mimo-code", name: "MiMo Code", command: "", runtime: "mimo-code" },
+      { id: "rovo", name: "Rovo", command: "", runtime: "rovo" },
+      { id: "openclaw", name: "OpenClaw", command: "", runtime: "openclaw" },
+      { id: "devin", name: "Devin", command: "", runtime: "devin" },
+      { id: "ante", name: "Ante", command: "", runtime: "ante" },
+      { id: "prime-agent", name: "Prime Agent", command: "", runtime: "prime-agent" },
+      { id: "omp", name: "OMP", command: "", runtime: "omp" },
+      { id: "antigravity", name: "Antigravity", command: "", runtime: "antigravity" },
     ]
   : [
       { id: "shell", name: "终端", command: "", runtime: "shell", fixed: true },
@@ -1236,6 +1296,38 @@ const DEFAULT_TEMPLATES: TermTemplate[] = isWindowsUi()
       { id: "codex", name: "codex", command: "", runtime: "codex" },
       { id: "dsh", name: "dsh", command: "", runtime: "dsh" },
       { id: "pi", name: "Pi", command: "", runtime: "pi" },
+      { id: "codebuddy", name: "CodeBuddy", command: "", runtime: "codebuddy" },
+      { id: "gemini", name: "Gemini", command: "", runtime: "gemini" },
+      { id: "grok", name: "Grok", command: "", runtime: "grok" },
+      { id: "kimi", name: "Kimi", command: "", runtime: "kimi" },
+      { id: "hermes", name: "Hermes", command: "", runtime: "hermes" },
+      { id: "trae", name: "Trae", command: "", runtime: "trae" },
+      { id: "qoder", name: "Qoder", command: "", runtime: "qoder" },
+      { id: "cursor", name: "Cursor", command: "", runtime: "cursor" },
+      { id: "copilot", name: "Copilot", command: "", runtime: "copilot" },
+      { id: "cline", name: "Cline", command: "", runtime: "cline" },
+      { id: "kilo", name: "Kilo", command: "", runtime: "kilo" },
+      { id: "crush", name: "Crush", command: "", runtime: "crush" },
+      { id: "aug", name: "Auggie", command: "", runtime: "aug" },
+      { id: "continue", name: "Continue", command: "", runtime: "continue" },
+      { id: "qwen-code", name: "Qwen Code", command: "", runtime: "qwen-code" },
+      { id: "codebuff", name: "Codebuff", command: "", runtime: "codebuff" },
+      { id: "command-code", name: "Command Code", command: "", runtime: "command-code" },
+      { id: "droid", name: "Droid", command: "", runtime: "droid" },
+      { id: "aider", name: "Aider", command: "", runtime: "aider" },
+      { id: "goose", name: "Goose", command: "", runtime: "goose" },
+      { id: "amp", name: "Amp", command: "", runtime: "amp" },
+      { id: "kiro", name: "Kiro", command: "", runtime: "kiro" },
+      { id: "openclaude", name: "OpenClaude", command: "", runtime: "openclaude" },
+      { id: "autohand", name: "Autohand", command: "", runtime: "autohand" },
+      { id: "mimo-code", name: "MiMo Code", command: "", runtime: "mimo-code" },
+      { id: "rovo", name: "Rovo", command: "", runtime: "rovo" },
+      { id: "openclaw", name: "OpenClaw", command: "", runtime: "openclaw" },
+      { id: "devin", name: "Devin", command: "", runtime: "devin" },
+      { id: "ante", name: "Ante", command: "", runtime: "ante" },
+      { id: "prime-agent", name: "Prime Agent", command: "", runtime: "prime-agent" },
+      { id: "omp", name: "OMP", command: "", runtime: "omp" },
+      { id: "antigravity", name: "Antigravity", command: "", runtime: "antigravity" },
     ];
 
 /** Sort key so OS shells come first, then bash, then agents / quick-starts. */
@@ -1477,6 +1569,7 @@ export const useStore = create<AppState>((set, get) => {
   onboarded: loadOnboarded(),
   nprojOpen: false,
   termTemplates: loadTermTemplates(),
+  enabledRuntimes: loadEnabledRuntimes(),
   fontScale: loadFontScale(),
   locale: loadLocale(),
   themeId: loadThemeId(),
@@ -1486,6 +1579,7 @@ export const useStore = create<AppState>((set, get) => {
   ctrlTRuntime: loadCtrlTRuntime(),
   soundEnabled: true,
   themeLabEnabled: loadThemeLabEnabled(),
+  shortcuts: loadShortcuts(),
   todos: [],
   todoScope: "global",
   currentVersion: null,
@@ -2217,6 +2311,17 @@ export const useStore = create<AppState>((set, get) => {
       return { termTemplates: list };
     }),
 
+  setRuntimeEnabled: (id, enabled) =>
+    set((s) => {
+      const detected = s.runtimes.filter((rt) => rt.available).map((rt) => rt.id);
+      const current = new Set(s.enabledRuntimes ?? detected);
+      if (enabled) current.add(id);
+      else current.delete(id);
+      const list = [...current];
+      saveEnabledRuntimes(list);
+      return { enabledRuntimes: list };
+    }),
+
   // Rename a workspace project: the backend renames the `workspaces/<old>` dir
   // (and rewrites sessions.db + agent-meta cwds). Here we keep the store in
   // sync — re-key projectRoots with the returned root, replace the name in the
@@ -2382,6 +2487,19 @@ export const useStore = create<AppState>((set, get) => {
       // ignore storage errors
     }
     set({ themeLabEnabled: enabled });
+  },
+
+  setShortcut: (id, chord) =>
+    set((s) => {
+      const shortcuts = { ...s.shortcuts, [id]: chord };
+      saveShortcuts(shortcuts);
+      return { shortcuts };
+    }),
+
+  resetShortcuts: () => {
+    const shortcuts = { ...DEFAULT_SHORTCUTS };
+    saveShortcuts(shortcuts);
+    set({ shortcuts });
   },
 
   pollCiStatus: () => {

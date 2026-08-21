@@ -1,5 +1,6 @@
 import { useEffect, useState, ReactNode } from "react";
 import { useStore, Tab, SplitNode, resolveCtrlTRuntime } from "../../state/store";
+import { matchesShortcut } from "../../state/shortcuts";
 import { splitLeafTabIds } from "../../state/store";
 import { XTermPanel } from "../terminal/XTermPanel";
 import { EditorPanel } from "../editor/EditorPanel";
@@ -243,9 +244,8 @@ export function ContentArea() {
   // type through the store directive, mirroring the F1 focus toggle.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === "f")) {
-        return;
-      }
+      const map = useStore.getState().shortcuts;
+      if (!matchesShortcut(e, "search", map)) return;
       const el = document.activeElement as HTMLElement | null;
       const inCm = !!el?.closest?.(".cm-editor");
       const inTerm = !!el?.closest?.(".xterm");
@@ -275,9 +275,8 @@ export function ContentArea() {
   // the user has focused the input.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === "t")) {
-        return;
-      }
+      const map = useStore.getState().shortcuts;
+      if (!matchesShortcut(e, "newTerminal", map)) return;
       const el = document.activeElement as HTMLElement | null;
       const inComposer = !!el?.closest?.(".composer-input");
       const st = useStore.getState();

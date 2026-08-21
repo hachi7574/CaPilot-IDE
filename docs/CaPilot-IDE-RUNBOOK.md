@@ -33,6 +33,29 @@ sudo pacman -S gst-libav gst-plugins-bad
 
 装完可用 `gst-inspect-1.0 avdec_h264 | head` 确认 H.264 解码器存在。Windows
 走 WebView2 系统解码，无需额外包。内置主题视频统一为 H.264（`to-720p.sh`）。
+
+**仅 Linux 打包**的 `<video>` 走 WebKitGTK + GStreamer。GStreamer 只认它能
+自己打开的 URI（`file://`、真正的 `http(s)://`），**不走** WebKit 自定义协议
+回调，所以 `asset://` / `tauri://` / `blob:` 都会零帧。安装版因此在进程内起一个
+`127.0.0.1:<随机端口>` HTTP 服务（`wallpaper_http.rs`，始终 `Accept-Ranges`，
+Range 不截断），`<video src>` 指向 `http://127.0.0.1:<port>/wallpaper/<path>`。
+CSP `media-src` 必须写 `http://127.0.0.1:*`（无端口只匹配 :80，随机端口会被拦）。
+`pnpm tauri dev` 仍走 Vite HTTP；Windows WebView2 / macOS WKWebView 仍走
+`asset://`。静态图一律 `asset://`。
+
+Agent 可重复验证（不依赖截屏；本机 Wayland 截不到原生 GTK 窗口）：
+
+```bash
+# 1) 文件本身能解（GStreamer）
+gst-discoverer-1.0 file:///usr/lib/CaPilot/themes/wallpapers/capilot.mp4
+timeout 3 gst-play-1.0 --no-interactive --audiosink=fakesink --videosink=fakesink \
+  /usr/lib/CaPilot/themes/wallpapers/capilot.mp4
+
+# 2) 同一 WebKitGTK 上哪种 URL 能出帧（videoWidth>0）
+python3 scripts/webkit-video-probe.py --mode all --timeout 10
+# 2026-08-21 实测：file + http 出帧；blob + capilot-media 零帧（MEDIA_ERR_SRC_NOT_SUPPORTED）
+```
+
 常用命令：
 
 | 命令 | 位置 | 说明 |
@@ -40,6 +63,7 @@ sudo pacman -S gst-libav gst-plugins-bad
 | `pnpm install` | 仓库根目录 | 安装前端依赖 |
 | `pnpm tauri dev` | 仓库根目录 | 开发模式（需 claude CLI；Linux 系统依赖见上）|
 | `pnpm tauri build` | 仓库根目录 | 打包发布 |
+| `./reinstall-deb.sh` | 仓库根目录 | 卸掉本机 `ca-pilot`、只打 `.deb`、再装上（用户数据不动）|
 | `cargo test` | `src-tauri/` | Rust 单元测试（24 个）|
 | `pnpm tsc --noEmit` | 仓库根目录 | TS 类型检查 |
 

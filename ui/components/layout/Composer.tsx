@@ -29,8 +29,13 @@ import { ContextWindowMeter } from "./ContextWindowMeter";
 import { CacheHitRate } from "./CacheHitRate";
 import { Icon } from "../Icon";
 import { useT } from "../../i18n";
+import { matchesShortcut } from "../../state/shortcuts";
 
 const DEFAULT_RUNTIME = "claude";
+/** v1 Composer: plaintext + Enter. Hides the action-bar buttons (model /
+ *  permission / thinking / +) and the `/` slash catalog. Live TUI key scripts
+ *  stay in this file but are unreachable while this is true. Flip for v2. */
+const PLAIN_COMPOSER = true;
 type ComposerPermissionMode = PermissionMode;
 
 // Claude Code's Shift+Tab cycle is not the same order as the permission menu:
@@ -1119,8 +1124,7 @@ export function Composer() {
   // window listener never runs.
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent) => {
-      if (e.key !== "F1") return;
-      if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+      if (!matchesShortcut(e, "focusToggle", useStore.getState().shortcuts)) return;
       e.preventDefault();
       e.stopPropagation();
       const el = textareaRef.current;
@@ -2178,7 +2182,7 @@ export function Composer() {
         return;
       }
       handleAtAuto(el);
-      void handleSlashAuto(el);
+      if (!PLAIN_COMPOSER) void handleSlashAuto(el);
     },
     [resizeTextarea, handleAtAuto, handleSlashAuto, slashMenuStack]
   );
@@ -2289,20 +2293,24 @@ export function Composer() {
             t("composer.noTab")
           )}
         </span>
-        <ContextWindowMeter
-          agentId={
-            effectiveTarget?.kind === "agent"
-              ? effectiveTarget.agentId
-              : undefined
-          }
-        />
-        <CacheHitRate
-          agentId={
-            effectiveTarget?.kind === "agent"
-              ? effectiveTarget.agentId
-              : undefined
-          }
-        />
+        {!PLAIN_COMPOSER && (
+          <ContextWindowMeter
+            agentId={
+              effectiveTarget?.kind === "agent"
+                ? effectiveTarget.agentId
+                : undefined
+            }
+          />
+        )}
+        {!PLAIN_COMPOSER && (
+          <CacheHitRate
+            agentId={
+              effectiveTarget?.kind === "agent"
+                ? effectiveTarget.agentId
+                : undefined
+            }
+          />
+        )}
         {tabs.some((tab) => tab.type === "agent") && (
           <span className="composer-target-right">
             {isBangInput && effectiveTarget?.kind !== "todo" && (
@@ -2400,7 +2408,7 @@ export function Composer() {
       {/* Runtime-aware native command / skill menu. `/` is only the trigger:
           each row inserts the syntax required by the selected agent. Commands
           with children (has_children) push a second-level picker. */}
-      {slashMenuStack.length > 0 &&
+      {!PLAIN_COMPOSER && slashMenuStack.length > 0 &&
         (() => {
           const level = slashMenuStack[slashMenuStack.length - 1];
           const visible = level.query
@@ -2482,7 +2490,8 @@ export function Composer() {
           );
         })()}
 
-      {/* Actions */}
+      {/* Actions — v1 hides the whole bar (model / permission / thinking / +). */}
+      {!PLAIN_COMPOSER && (
       <div className="composer-actions">
         <span className="cmp-pop" ref={refAnchorRef}>
           <span
@@ -2762,6 +2771,7 @@ export function Composer() {
           </span>
         )}
       </div>
+      )}
       {pendingPermissionMode && (
         <PermissionConfirmationDialog
           modeLabel={pendingPermissionMode.label}

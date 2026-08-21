@@ -1,0 +1,6 @@
+interface:
+  display_name: "CaPilot add runtime"
+  short_description: "Add a v1 PTY-only agent runtime"
+  icon_small: "terminal"
+  icon_large: "terminal"
+  default_prompt: "Add a v1 CaPilot agent runtime for this CLI (spawn PTY only, no Composer TUI automation)."

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ComponentType, type CSSProperties } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
-import { resolveResource } from "@tauri-apps/api/path";
+import { join, resourceDir } from "@tauri-apps/api/path";
+import { resolveWallpaperSrc } from "./state/wallpaperSrc";
 import { LeftSidebar } from "./components/layout/LeftSidebar";
 import { MainArea } from "./components/layout/MainArea";
 import { RightSidebar } from "./components/layout/RightSidebar";
@@ -17,6 +17,7 @@ import { useUsageSync } from "./state/usage";
 import { useContextUsageSync } from "./state/usageContext";
 import { useUpdateSync } from "./state/update";
 import { useStore } from "./state/store";
+import { matchesShortcut } from "./state/shortcuts";
 import {
   getTheme,
   DEFAULT_WALLPAPER_OPACITY,
@@ -25,21 +26,16 @@ import {
 import { ThemeLabPanel } from "./components/theme-lab/ThemeLabPanel";
 import "./App.css";
 
-/**
- * Theme cartridge wallpapers live under bundle resource `themes/wallpapers/`.
- * Prefer the on-disk path + `asset://` (HTTP Range) over the Vite-bundled
- * `tauri://localhost/assets/…` URL — WebKitGTK's `<video>` needs Range for
- * MP4, and Tauri's embedded-asset protocol does not implement it. Dev / plain
- * browser falls back to the Vite `?url` module when resolveResource is absent.
- */
-async function bundledWallpaperSrc(file: string, fallbackUrl?: string): Promise<string | null> {
+/** Absolute path of a cartridge wallpaper under `$RESOURCE/themes/wallpapers/`. */
+async function bundledWallpaperPath(file: string): Promise<string | null> {
   const base = file.replace(/\\/g, "/").replace(/^.*\//, "");
-  if (!base) return fallbackUrl ?? null;
+  if (!base) return null;
   try {
-    const abs = await resolveResource(`themes/wallpapers/${base}`);
-    return convertFileSrc(abs);
-  } catch {
-    return fallbackUrl ?? null;
+    const root = await resourceDir();
+    return await join(root, "themes", "wallpapers", base);
+  } catch (err) {
+    console.warn("[wallpaper] resourceDir failed", err);
+    return null;
   }
 }
 
@@ -57,8 +53,7 @@ function ThemeLabGate() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "T" && e.key !== "t") return;
-      if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return;
+      if (!matchesShortcut(e, "themeLab", useStore.getState().shortcuts)) return;
       e.preventDefault();
       e.stopPropagation();
       setThemeLabEnabled(!useStore.getState().themeLabEnabled);
@@ -99,11 +94,10 @@ type WallpaperLayer = {
 
 /**
  * Resolve the active wallpaper URL + paint params.
- * Priority: mode off → none; custom path → asset URL; auto → theme cartridge
- * (resource file via asset://, Vite URL fallback).
- * Opacity comes from the single user preference (defaults match themes.ts).
- * Videos use a <video> layer (muted / loop / metadata preload); stills stay
- * on the CSS background-image path so existing themes are unchanged.
+ * Priority: mode off → none; custom path → asset/blob; auto → theme cartridge
+ * under `$RESOURCE/themes/wallpapers/` (Vite URL fallback).
+ * Videos: Vite HTTP in tauri dev; asset:// on Windows/macOS; loopback HTTP
+ * on packaged Linux WebKitGTK.
  */
 function useWallpaperLayer(): WallpaperLayer | null {
   const themeId = useStore((s) => s.themeId);
@@ -114,6 +108,7 @@ function useWallpaperLayer(): WallpaperLayer | null {
 
   useEffect(() => {
     let cancelled = false;
+    let revoke: (() => void) | undefined;
 
     const build = async () => {
       if (mode === "off") {
@@ -122,17 +117,14 @@ function useWallpaperLayer(): WallpaperLayer | null {
       }
 
       const theme = getTheme(themeId);
-      let url: string | null = null;
+      let absPath: string | null = null;
+      let fallbackUrl: string | undefined;
       let source = "";
       let size = theme?.wallpaper?.size ?? "cover";
       let position = theme?.wallpaper?.position ?? "center";
 
       if (mode === "custom" && path) {
-        try {
-          url = convertFileSrc(path);
-        } catch {
-          url = null;
-        }
+        absPath = path;
         source = path;
         // Custom picks always cover the viewport; theme size/position only apply
         // to the cartridge's own art.
@@ -141,18 +133,30 @@ function useWallpaperLayer(): WallpaperLayer | null {
       } else if (mode === "auto") {
         source = theme?.wallpaper?.file ?? "";
         if (source) {
-          url = await bundledWallpaperSrc(source, theme?.wallpaperUrl);
+          absPath = await bundledWallpaperPath(source);
+          fallbackUrl = theme?.wallpaperUrl;
         }
       }
 
       if (cancelled) return;
-      if (!url) {
+      if (!source && !absPath && !fallbackUrl) {
         setLayer(null);
         return;
       }
 
-      const imgOpacity = Number.isFinite(opacity) ? opacity : DEFAULT_WALLPAPER_OPACITY;
       const video = isWallpaperVideo(source);
+      const resolved = await resolveWallpaperSrc(absPath, fallbackUrl, video);
+      if (cancelled) {
+        resolved?.revoke?.();
+        return;
+      }
+      if (!resolved) {
+        setLayer(null);
+        return;
+      }
+      revoke = resolved.revoke;
+
+      const imgOpacity = Number.isFinite(opacity) ? opacity : DEFAULT_WALLPAPER_OPACITY;
       const style: CSSProperties & Record<string, string> = {
         "--wallpaper-size": size,
         "--wallpaper-position": position,
@@ -160,14 +164,15 @@ function useWallpaperLayer(): WallpaperLayer | null {
       };
       if (!video) {
         style["--wallpaper-image"] =
-          `url("${url.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}")`;
+          `url("${resolved.url.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}")`;
       }
-      setLayer({ kind: video ? "video" : "image", url, style });
+      setLayer({ kind: video ? "video" : "image", url: resolved.url, style });
     };
 
     void build();
     return () => {
       cancelled = true;
+      revoke?.();
     };
   }, [themeId, mode, path, opacity]);
 

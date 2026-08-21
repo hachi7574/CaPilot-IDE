@@ -428,6 +428,7 @@ dependencies = [
  "globset",
  "libc",
  "log",
+ "percent-encoding",
  "portable-pty",
  "regex",
  "reqwest",

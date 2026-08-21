@@ -42,35 +42,32 @@ export function TerminalTemplatePicker({
   const t = useT();
   const termTemplates = useStore((s) => s.termTemplates);
   const runtimes = useStore((s) => s.runtimes);
+  const enabledRuntimes = useStore((s) => s.enabledRuntimes);
   const addTermTemplate = useStore((s) => s.addTermTemplate);
   const updateTermTemplate = useStore((s) => s.updateTermTemplate);
   const removeTermTemplate = useStore((s) => s.removeTermTemplate);
   const [edit, setEdit] = useState<TermTemplate | null>(null);
   const [adding, setAdding] = useState(false);
 
-  const availableRuntimeIds = new Set(
-    runtimes.filter((r) => r.available).map((r) => r.id)
-  );
   const runtimeAvailable = (id: string): boolean => {
     const hit = runtimes.find((rt) => rt.id === id);
     // Unknown (runtimes not loaded yet) → keep the row (avoid flash).
     return hit ? hit.available : true;
   };
+  const runtimeEnabled = (id: string): boolean => {
+    if (enabledRuntimes === null) return true;
+    return enabledRuntimes.includes(id);
+  };
   // Fixed OS shell always stays. User quick-starts stay.
   // Optional shells (bash / powershell / cmd) hide when missing.
-  // Agent rows hide when unavailable; while probes are still empty, keep
-  // agents visible to avoid a shell-only flash.
+  // Agent rows hide unless detected AND enabled in Settings.
   const visibleTemplates = termTemplates.filter((tpl) => {
     if (tpl.fixed) return true;
     // User quick-starts with a command always show (they target a shell).
     if (tpl.command && isShellRuntime(tpl.runtime)) return true;
-    if (isShellRuntime(tpl.runtime)) {
-      if (runtimes.length === 0) return true;
-      return runtimeAvailable(tpl.runtime);
-    }
-    // Agent rows.
     if (runtimes.length === 0) return true;
-    return availableRuntimeIds.has(tpl.runtime);
+    if (!runtimeAvailable(tpl.runtime)) return false;
+    return runtimeEnabled(tpl.runtime);
   });
 
   // Keep the menu fully on-screen: the anchor is the "＋" button's bottom-right

@@ -9,6 +9,20 @@ const rawIcons = import.meta.glob('../assets/icons/**/*.svg', {
   eager: true,
 }) as Record<string, string>;
 
+/** Orca's bundled agent favicons (PNG). Used when a runtime has no SVG glyph. */
+const rawFavicons = import.meta.glob('../assets/icons/agent-favicons/*.png', {
+  query: '?url',
+  import: 'default',
+  eager: true,
+}) as Record<string, string>;
+
+const FAVICONS: Record<string, string> = Object.fromEntries(
+  Object.entries(rawFavicons).map(([path, url]) => {
+    const name = (path.split('/').pop() ?? '').replace(/\.png(\?.*)?$/, '');
+    return [name, url];
+  }),
+);
+
 type IconDef = { inner: string; fill: boolean };
 
 /** Inner markup of a source SVG: drop the <svg> wrapper, comments, and <title>. */
@@ -43,50 +57,110 @@ export interface IconProps {
  * brand/fill icons fill with var(--icon-color, currentColor).
  */
 export function Icon({ name, size = 16, className, style }: IconProps) {
-  const def = ICONS[name];
-  if (!def) return null;
-  const fill = def.fill;
   const cls = className ? `capilot-icon ${className}` : 'capilot-icon';
-  const base: CSSProperties = fill
-    ? { fill: 'var(--icon-color, currentColor)' }
-    : { stroke: 'var(--icon-color, currentColor)' };
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      className={cls}
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      role="img"
-      aria-hidden="true"
-      fill={fill ? "currentColor" : "none"}
-      stroke={fill ? undefined : "currentColor"}
-      strokeWidth={fill ? undefined : 2}
-      strokeLinecap={fill ? undefined : "round"}
-      strokeLinejoin={fill ? undefined : "round"}
-      style={fill ? { ...base, ...style } : { ...base, ...style }}
-      dangerouslySetInnerHTML={{ __html: def.inner }}
-    />
-  );
+  const def = ICONS[name];
+  if (def) {
+    const fill = def.fill;
+    const base: CSSProperties = fill
+      ? { fill: 'var(--icon-color, currentColor)' }
+      : { stroke: 'var(--icon-color, currentColor)' };
+    return (
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        className={cls}
+        width={size}
+        height={size}
+        viewBox="0 0 24 24"
+        role="img"
+        aria-hidden="true"
+        fill={fill ? "currentColor" : "none"}
+        stroke={fill ? undefined : "currentColor"}
+        strokeWidth={fill ? undefined : 2}
+        strokeLinecap={fill ? undefined : "round"}
+        strokeLinejoin={fill ? undefined : "round"}
+        style={fill ? { ...base, ...style } : { ...base, ...style }}
+        dangerouslySetInnerHTML={{ __html: def.inner }}
+      />
+    );
+  }
+  const fav = FAVICONS[name];
+  if (fav) {
+    const px = typeof size === 'number' ? size : undefined;
+    return (
+      <img
+        src={fav}
+        alt=""
+        width={px}
+        height={px}
+        className={cls}
+        aria-hidden="true"
+        style={{
+          width: size,
+          height: size,
+          objectFit: 'contain',
+          ...style,
+        }}
+      />
+    );
+  }
+  return null;
 }
+
+/** Aliases from CaPilot / Orca runtime ids onto an icon filename (no extension).
+ *  `Icon` prefers SVG glyphs; PNG favicons fill in the rest. */
+const RUNTIME_ICON_ALIAS: Record<string, string> = {
+  shell: 'terminal',
+  cmd: 'terminal',
+  powershell: 'terminal',
+  pwsh: 'terminal',
+  claude: 'claude',
+  'claude-agent-teams': 'claude',
+  codex: 'openai',
+  dsh: 'deepseek',
+  opencode: 'opencode',
+  pi: 'pi',
+  codebuddy: 'codebuddy',
+  copilot: 'copilot',
+  kilo: 'kilo',
+  kilocode: 'kilo',
+  auggie: 'aug',
+  augment: 'aug',
+  qwen: 'qwen-code',
+  'qwen-code': 'qwen-code',
+  'mimo': 'mimo-code',
+  vibe: 'mistral-vibe',
+  crush: 'crush',
+  charm: 'crush',
+  kiro: 'kiro',
+  cursor: 'cursor',
+  continue: 'continue',
+  trae: 'trae',
+  hermes: 'hermes',
+  grok: 'grok',
+  kimi: 'kimi',
+  gemini: 'gemini',
+  goose: 'goose',
+  amp: 'amp',
+  cline: 'cline',
+  codebuff: 'codebuff',
+  'command-code': 'command-code',
+  droid: 'droid',
+  openclaude: 'openclaude',
+  autohand: 'autohand',
+  'mimo-code': 'mimo-code',
+  rovo: 'rovo',
+  openclaw: 'openclaw',
+  devin: 'devin',
+  ante: 'ante',
+  'prime-agent': 'prime-agent',
+  antigravity: 'antigravity',
+};
 
 /** Icon name per agent runtime (brand marks, not the robot emoji). */
 export function runtimeIcon(runtime: string): string {
-  if (
-    runtime === 'shell' ||
-    runtime === 'cmd' ||
-    runtime === 'powershell' ||
-    runtime === 'pwsh'
-  ) {
-    return 'terminal';
-  }
   if (runtime.startsWith('bash')) return 'gnubash';
-  switch (runtime) {
-    case 'claude': return 'claude';
-    case 'codex': return 'openai';
-    case 'dsh': return 'deepseek';
-    case 'opencode': return 'opencode';
-    case 'pi': return 'pi';
-    default: return 'terminal';
-  }
+  const aliased = RUNTIME_ICON_ALIAS[runtime];
+  if (aliased) return aliased;
+  if (FAVICONS[runtime] || ICONS[runtime]) return runtime;
+  return 'terminal';
 }

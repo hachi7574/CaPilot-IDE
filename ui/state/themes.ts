@@ -20,11 +20,13 @@
  *
  * Optional `wallpaper` on a cartridge points at a file under
  * `themes/wallpapers/` (still image or looping video). Vite also embeds the
- * file as a hashed `/assets/…` URL for catalog hydration, but the runtime
- * wallpaper layer prefers the on-disk bundle resource via `asset://`
- * (`resolveResource` + `convertFileSrc`) so WebKitGTK `<video>` can use HTTP
- * Range. User-picked wallpapers (Settings) live outside this catalog and
- * override the cartridge file when enabled — see `ui/state/store.ts`.
+ * file as a hashed `/assets/…` URL for catalog hydration. At runtime the
+ * wallpaper layer resolves `$RESOURCE/themes/wallpapers/<file>`. Videos on
+ * packaged Linux go through `http://127.0.0.1:<port>/wallpaper/…` (WebKitGTK
+ * GStreamer cannot play custom-protocol / blob MP4); `tauri dev` uses the Vite
+ * HTTP URL; Windows / macOS use `asset://`.
+ * User-picked wallpapers (Settings) live outside this catalog and override the
+ * cartridge file when enabled — see `ui/state/store.ts`.
  *
  * Live overrides (Theme Editor) write inline styles on <html> and
  * dispatch `capilot:theme-vars` so xterm re-samples without a full reload.

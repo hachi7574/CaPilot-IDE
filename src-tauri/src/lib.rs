@@ -13,6 +13,7 @@ mod resource;
 pub mod session_store;
 mod slash;
 mod usage;
+mod wallpaper_http;
 mod worktree;
 
 use agent_runtime::adapter::{AgentError, AgentInfo, AgentRuntimeAdapter, AgentSession, AgentUsage};
@@ -2164,13 +2165,12 @@ async fn runtime_list_available() -> Vec<agent_runtime::adapter::RuntimeInfo> {
     // and isolate each runtime so one hang still returns the others.
     tauri::async_runtime::spawn_blocking(|| {
         agent_runtime::adapter::ensure_cli_path();
-        let mut out = Vec::new();
-        for id in known_runtimes() {
-            // Per-runtime budget: availability + auth + models. A single
-            // runtime that exceeds this is reported as unavailable rather than
-            // freezing Settings → 已安装 forever.
-            let id_owned = id.to_string();
-            let (tx, rx) = std::sync::mpsc::channel();
+        let ids = known_runtimes();
+        let n = ids.len();
+        let (tx, rx) = std::sync::mpsc::channel();
+        for (i, id) in ids.iter().enumerate() {
+            let tx = tx.clone();
+            let id_owned = (*id).to_string();
             std::thread::spawn(move || {
                 let adapter = get_adapter(&id_owned);
                 let info = agent_runtime::adapter::RuntimeInfo {
@@ -2183,16 +2183,35 @@ async fn runtime_list_available() -> Vec<agent_runtime::adapter::RuntimeInfo> {
                     permission_modes: adapter.list_permission_modes(),
                     thinking_options: adapter.list_thinking_options(),
                 };
-                let _ = tx.send(info);
+                let _ = tx.send((i, info));
             });
-            match rx.recv_timeout(std::time::Duration::from_secs(12)) {
-                Ok(info) => out.push(info),
-                Err(_) => {
+        }
+        drop(tx);
+        let mut slots: Vec<Option<agent_runtime::adapter::RuntimeInfo>> = vec![None; n];
+        let deadline = Instant::now() + Duration::from_secs(12);
+        while Instant::now() < deadline {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(left) {
+                Ok((i, info)) => {
+                    if let Some(slot) = slots.get_mut(i) {
+                        *slot = Some(info);
+                    }
+                    if slots.iter().all(|s| s.is_some()) {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        slots
+            .into_iter()
+            .enumerate()
+            .map(|(i, slot)| {
+                slot.unwrap_or_else(|| {
+                    let id = ids[i];
                     log::warn!("runtime probe timed out for {id}");
-                    // Still surface a row so Settings isn't blank; available=false
-                    // matches the "not detected" state the user can re-scan.
                     let adapter = get_adapter(id);
-                    out.push(agent_runtime::adapter::RuntimeInfo {
+                    agent_runtime::adapter::RuntimeInfo {
                         id: adapter.id().to_string(),
                         name: adapter.name().to_string(),
                         available: false,
@@ -2201,11 +2220,10 @@ async fn runtime_list_available() -> Vec<agent_runtime::adapter::RuntimeInfo> {
                         models: vec![],
                         permission_modes: adapter.list_permission_modes(),
                         thinking_options: adapter.list_thinking_options(),
-                    });
-                }
-            }
-        }
-        out
+                    }
+                })
+            })
+            .collect()
     })
     .await
     .unwrap_or_default()
@@ -2270,6 +2288,35 @@ async fn fs_read(path: String) -> Result<String, String> {
         return Err("Path escapes allowed directories".to_string());
     }
     std::fs::read_to_string(&resolved).map_err(|e| format!("Failed to read file: {}", e))
+}
+
+/// Linux packaged builds: return `http://127.0.0.1:<port>/wallpaper/<path>` so
+/// WebKitGTK/GStreamer can play the file. Other platforms return `None` and
+/// the frontend keeps using `asset://`.
+#[tauri::command]
+fn wallpaper_http_url(app: tauri::AppHandle, path: String) -> Result<Option<String>, String> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, path);
+        return Ok(None);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let resolved = std::path::Path::new(&path)
+            .canonicalize()
+            .map_err(|e| format!("Invalid wallpaper path: {e}"))?;
+        if !resolved.is_file() {
+            return Err("Wallpaper path is not a file".into());
+        }
+        let resource_dir = app.path().resource_dir().ok();
+        if !wallpaper_http::wallpaper_bytes_path_ok(&resolved, resource_dir.as_deref())? {
+            return Err("Path escapes allowed directories".into());
+        }
+        if wallpaper_http::port().is_none() {
+            wallpaper_http::start(resource_dir)?;
+        }
+        Ok(Some(wallpaper_http::url_for(&resolved)?))
+    }
 }
 
 #[tauri::command]
@@ -4305,6 +4352,50 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
+    #[test]
+    fn wallpaper_bytes_allows_packaged_resource_dir() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "capilot-wp-bytes-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("CAPILOT_HOME", &tmp);
+        std::env::set_var("HOME", &tmp);
+        std::env::set_var("USERPROFILE", &tmp);
+
+        let home_file = tmp.join("clip.mp4");
+        std::fs::write(&home_file, b"fake").unwrap();
+        assert!(crate::wallpaper_http::wallpaper_bytes_path_ok(&home_file, None).unwrap());
+        let home_json = tmp.join("notes.json");
+        std::fs::write(&home_json, b"{}").unwrap();
+        assert!(!crate::wallpaper_http::wallpaper_bytes_path_ok(&home_json, None).unwrap());
+
+        let usr_lib = std::path::Path::new("/usr/lib/CaPilot");
+        let packaged = usr_lib.join("themes/wallpapers/capilot.mp4");
+        if packaged.is_file() {
+            assert!(
+                crate::wallpaper_http::wallpaper_bytes_path_ok(&packaged, Some(usr_lib)).unwrap(),
+                "resource-dir videos under /usr/lib/CaPilot must be readable"
+            );
+            assert!(
+                !crate::wallpaper_http::wallpaper_bytes_path_ok(&packaged, None).unwrap(),
+                "/usr/lib stays forbidden without a matching resource dir"
+            );
+        }
+
+        let etc = std::path::Path::new("/etc/passwd");
+        if etc.is_file() {
+            assert!(!crate::wallpaper_http::wallpaper_bytes_path_ok(etc, Some(usr_lib)).unwrap());
+        }
+
+        std::env::remove_var("CAPILOT_HOME");
+        std::env::remove_var("HOME");
+        std::env::remove_var("USERPROFILE");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// The Settings → 已安装 → ⚙ launch override replaces the adapter's arg list
     /// wholesale. Regression: the re-append must keep the permission/speed flags
     /// and the status-hook injection (claude `--settings`, codex `-p` profile)
@@ -4595,6 +4686,7 @@ pub fn run() {
             slash::agent_list_slash_items,
             slash::agent_list_slash_children,
             fs_read,
+            wallpaper_http_url,
             fs_write,
             theme_lab_save_cartridge,
             theme_lab_import_wallpaper,
@@ -4635,6 +4727,15 @@ pub fn run() {
             // in once so Settings detection and PTY spawns see the same bins as
             // an interactive terminal.
             agent_runtime::adapter::ensure_cli_path();
+            {
+                #[cfg(target_os = "linux")]
+                {
+                    let resource_dir = app.path().resource_dir().ok();
+                    if let Err(e) = wallpaper_http::start(resource_dir) {
+                        log::warn!("wallpaper http server failed to start: {e}");
+                    }
+                }
+            }
             {
                 let resource_dir = app.path().resource_dir().ok();
                 agent_runtime::cat_breeds::refresh_from_disk(resource_dir.as_deref());
