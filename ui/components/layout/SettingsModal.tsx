@@ -192,7 +192,9 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
       name: currentTheme.name,
       note: currentTheme.note,
     };
-  const themeHasWallpaper = Boolean(currentTheme?.wallpaperUrl);
+  const themeHasWallpaper = Boolean(
+    currentTheme?.wallpaper?.file || currentTheme?.wallpaperUrl
+  );
   const wallpaperActive =
     wallpaperMode === "custom"
       ? Boolean(wallpaperPath)
@@ -208,14 +210,11 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
       const selected = await open({
         multiple: false,
         directory: false,
+        title: "Choose wallpaper",
         filters: [
           {
-            name: "Images",
-            extensions: [...WALLPAPER_IMAGE_EXTS],
-          },
-          {
-            name: "Videos",
-            extensions: [...WALLPAPER_VIDEO_EXTS],
+            name: "Images & Videos",
+            extensions: [...WALLPAPER_IMAGE_EXTS, ...WALLPAPER_VIDEO_EXTS],
           },
         ],
       });

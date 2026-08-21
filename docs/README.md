@@ -15,7 +15,7 @@ Linux system dependencies: `libwebkit2gtk-4.1-dev librsvg2-dev libgtk-3-dev libs
 
 ## Docs
 
-- `CaPilot-IDE-RUNBOOK.md` — running, maintenance, known issues（含 2026-08-18 权限默认/拖拽/F1/todo 完成等已落地记录）, and security notes
+- `CaPilot-IDE-RUNBOOK.md` — running, maintenance, known issues（含 2026-08-18 权限默认/拖拽/F1/todo 完成等已落地记录；Linux 打包视频壁纸走 loopback HTTP）, and security notes
 - `security-review.md` — security review and release checklist
 - `ai-runtime-references.md` — official docs + hard-coded integration facts for the claude / codex / opencode / dsh / pi runtimes（权限 flag、hook 注入）
 - `styleguide/` — LUCY design guide；图标/logo/app-icon 统一放在 `ui/assets/`（`icons/`、`logo/`、`app-icon/`）

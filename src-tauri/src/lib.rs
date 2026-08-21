@@ -11,6 +11,7 @@ mod resource;
 pub mod session_store;
 mod slash;
 mod usage;
+mod wallpaper_http;
 mod worktree;
 
 use agent_runtime::adapter::{AgentError, AgentInfo, AgentRuntimeAdapter, AgentSession, AgentUsage};
@@ -2287,6 +2288,35 @@ async fn fs_read(path: String) -> Result<String, String> {
     std::fs::read_to_string(&resolved).map_err(|e| format!("Failed to read file: {}", e))
 }
 
+/// Linux packaged builds: return `http://127.0.0.1:<port>/wallpaper/<path>` so
+/// WebKitGTK/GStreamer can play the file. Other platforms return `None` and
+/// the frontend keeps using `asset://`.
+#[tauri::command]
+fn wallpaper_http_url(app: tauri::AppHandle, path: String) -> Result<Option<String>, String> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, path);
+        return Ok(None);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let resolved = std::path::Path::new(&path)
+            .canonicalize()
+            .map_err(|e| format!("Invalid wallpaper path: {e}"))?;
+        if !resolved.is_file() {
+            return Err("Wallpaper path is not a file".into());
+        }
+        let resource_dir = app.path().resource_dir().ok();
+        if !wallpaper_http::wallpaper_bytes_path_ok(&resolved, resource_dir.as_deref())? {
+            return Err("Path escapes allowed directories".into());
+        }
+        if wallpaper_http::port().is_none() {
+            wallpaper_http::start(resource_dir)?;
+        }
+        Ok(Some(wallpaper_http::url_for(&resolved)?))
+    }
+}
+
 #[tauri::command]
 async fn fs_write(path: String, content: String) -> Result<(), String> {
     let raw = std::path::Path::new(&path);
@@ -4320,6 +4350,50 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
+    #[test]
+    fn wallpaper_bytes_allows_packaged_resource_dir() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "capilot-wp-bytes-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("CAPILOT_HOME", &tmp);
+        std::env::set_var("HOME", &tmp);
+        std::env::set_var("USERPROFILE", &tmp);
+
+        let home_file = tmp.join("clip.mp4");
+        std::fs::write(&home_file, b"fake").unwrap();
+        assert!(crate::wallpaper_http::wallpaper_bytes_path_ok(&home_file, None).unwrap());
+        let home_json = tmp.join("notes.json");
+        std::fs::write(&home_json, b"{}").unwrap();
+        assert!(!crate::wallpaper_http::wallpaper_bytes_path_ok(&home_json, None).unwrap());
+
+        let usr_lib = std::path::Path::new("/usr/lib/CaPilot");
+        let packaged = usr_lib.join("themes/wallpapers/capilot.mp4");
+        if packaged.is_file() {
+            assert!(
+                crate::wallpaper_http::wallpaper_bytes_path_ok(&packaged, Some(usr_lib)).unwrap(),
+                "resource-dir videos under /usr/lib/CaPilot must be readable"
+            );
+            assert!(
+                !crate::wallpaper_http::wallpaper_bytes_path_ok(&packaged, None).unwrap(),
+                "/usr/lib stays forbidden without a matching resource dir"
+            );
+        }
+
+        let etc = std::path::Path::new("/etc/passwd");
+        if etc.is_file() {
+            assert!(!crate::wallpaper_http::wallpaper_bytes_path_ok(etc, Some(usr_lib)).unwrap());
+        }
+
+        std::env::remove_var("CAPILOT_HOME");
+        std::env::remove_var("HOME");
+        std::env::remove_var("USERPROFILE");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// The Settings → 已安装 → ⚙ launch override replaces the adapter's arg list
     /// wholesale. Regression: the re-append must keep the permission/speed flags
     /// and the status-hook injection (claude `--settings`, codex `-p` profile)
@@ -4601,6 +4675,7 @@ pub fn run() {
             slash::agent_list_slash_items,
             slash::agent_list_slash_children,
             fs_read,
+            wallpaper_http_url,
             fs_write,
             theme_lab_save_cartridge,
             theme_lab_import_wallpaper,
@@ -4641,6 +4716,15 @@ pub fn run() {
             // in once so Settings detection and PTY spawns see the same bins as
             // an interactive terminal.
             agent_runtime::adapter::ensure_cli_path();
+            {
+                #[cfg(target_os = "linux")]
+                {
+                    let resource_dir = app.path().resource_dir().ok();
+                    if let Err(e) = wallpaper_http::start(resource_dir) {
+                        log::warn!("wallpaper http server failed to start: {e}");
+                    }
+                }
+            }
             {
                 let resource_dir = app.path().resource_dir().ok();
                 agent_runtime::cat_breeds::refresh_from_disk(resource_dir.as_deref());

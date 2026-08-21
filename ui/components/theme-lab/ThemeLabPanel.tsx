@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { resolveResource } from "@tauri-apps/api/path";
+import { invoke } from "@tauri-apps/api/core";
+import { join, resourceDir } from "@tauri-apps/api/path";
+import { resolveWallpaperSrc } from "../../state/wallpaperSrc";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { useStore } from "../../state/store";
 import {
@@ -125,6 +126,13 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
   const [wallpaperPreviewUrl, setWallpaperPreviewUrl] = useState<string | null>(
     null
   );
+  const replaceWallpaperPreview = useCallback((next: string | null) => {
+    setWallpaperPreviewUrl((prev) => {
+      if (prev && prev.startsWith("blob:")) URL.revokeObjectURL(prev);
+      return next;
+    });
+  }, []);
+  useEffect(() => () => replaceWallpaperPreview(null), [replaceWallpaperPreview]);
 
   const [bodyHeight, setBodyHeight] = useState(() =>
     clampBodyHeight(loadThemeLabBodyHeight())
@@ -192,10 +200,10 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
   useEffect(() => {
     resnap(themeId);
     setWallpaperDraft(undefined);
-    setWallpaperPreviewUrl(null);
+    replaceWallpaperPreview(null);
     setWallpaperPath(null);
     setWallpaperMode("auto");
-  }, [themeId, resnap, setWallpaperPath, setWallpaperMode]);
+  }, [themeId, resnap, setWallpaperPath, setWallpaperMode, replaceWallpaperPreview]);
 
   // Live-paint draft onto <html>.
   useEffect(() => {
@@ -278,10 +286,10 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
     touchedKeysRef.current.clear();
     setDraft({ ...baseline });
     setWallpaperDraft(undefined);
-    setWallpaperPreviewUrl(null);
+    replaceWallpaperPreview(null);
     notifyThemeVarsChanged();
     flash("ok", t("themeLab.resetDone"));
-  }, [baseline, t, flash]);
+  }, [baseline, t, flash, replaceWallpaperPreview]);
 
   // ── Drag / resize via window listeners ──────────────────────
   // Capture on window so pointerup outside the head (or lost capture) always
@@ -413,8 +421,8 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
     return wallpaperDraft;
   }, [theme, wallpaperDraft]);
 
-  // Cartridge video previews must use asset:// (Range-capable). The Vite-bundled
-  // tauri:// URL works for stills but fails for <video> under WebKitGTK.
+  // Cartridge previews share resolveWallpaperSrc (Vite HTTP in dev; asset://
+  // on Windows/macOS; IPC blob only on packaged Linux).
   const [cartridgePreviewUrl, setCartridgePreviewUrl] = useState<string | null>(null);
   useEffect(() => {
     if (wallpaperPreviewUrl) {
@@ -427,16 +435,31 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
       return;
     }
     let cancelled = false;
+    let revoke: (() => void) | undefined;
     const base = file.replace(/\\/g, "/").replace(/^.*\//, "");
-    void resolveResource(`themes/wallpapers/${base}`)
-      .then((abs) => {
-        if (!cancelled) setCartridgePreviewUrl(convertFileSrc(abs));
-      })
-      .catch(() => {
-        if (!cancelled) setCartridgePreviewUrl(theme?.wallpaperUrl ?? null);
-      });
+    const video = isWallpaperVideo(file);
+
+    void (async () => {
+      let abs: string | null = null;
+      try {
+        const root = await resourceDir();
+        abs = await join(root, "themes", "wallpapers", base);
+      } catch {
+        abs = null;
+      }
+      if (cancelled) return;
+      const resolved = await resolveWallpaperSrc(abs, theme?.wallpaperUrl, video);
+      if (cancelled) {
+        resolved?.revoke?.();
+        return;
+      }
+      revoke = resolved?.revoke;
+      setCartridgePreviewUrl(resolved?.url ?? null);
+    })();
+
     return () => {
       cancelled = true;
+      revoke?.();
     };
   }, [wallpaperPreviewUrl, effectiveWallpaper?.file, theme?.wallpaperUrl]);
 
@@ -475,7 +498,7 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
       // (mode auto). Draft is cleared so dirty drops; the next Vite reload
       // picks up the new wallpaperUrl from themes/wallpapers/.
       setWallpaperDraft(undefined);
-      setWallpaperPreviewUrl(null);
+      replaceWallpaperPreview(null);
       setWallpaperPath(null);
       setWallpaperMode("auto");
       flash("ok", t("themeLab.saved", { path }));
@@ -531,14 +554,11 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
         // Prefer the catalog folder so picking an existing asset is a no-copy
         // reference (backend returns basename when source is under wallpapers/).
         defaultPath: "themes/wallpapers",
+        title: "Choose wallpaper",
         filters: [
           {
-            name: "Images",
-            extensions: [...WALLPAPER_IMAGE_EXTS],
-          },
-          {
-            name: "Videos",
-            extensions: [...WALLPAPER_VIDEO_EXTS],
+            name: "Images & Videos",
+            extensions: [...WALLPAPER_IMAGE_EXTS, ...WALLPAPER_VIDEO_EXTS],
           },
         ],
       });
@@ -554,13 +574,13 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
         position: theme.wallpaper?.position,
       };
       setWallpaperDraft(next);
-      // Live preview: prefer the source path (works for both external picks and
-      // files already in themes/wallpapers/). After Save + Vite reload, the
-      // cartridge's bundled wallpaperUrl takes over under mode "auto".
+      // Live preview: same resolver as the shell wallpaper layer.
       try {
-        setWallpaperPreviewUrl(convertFileSrc(selected));
+        const video = isWallpaperVideo(selected) || isWallpaperVideo(file);
+        const resolved = await resolveWallpaperSrc(selected, undefined, video);
+        replaceWallpaperPreview(resolved?.url ?? null);
       } catch {
-        setWallpaperPreviewUrl(null);
+        replaceWallpaperPreview(null);
       }
       // Session preview only — do NOT lock wallpaperMode to "custom", or
       // switching themes later would keep showing this path. Preview rides on
@@ -576,7 +596,7 @@ export function ThemeLabPanel({ onHide }: { onHide?: () => void }) {
 
   const clearWallpaper = () => {
     setWallpaperDraft(null);
-    setWallpaperPreviewUrl(null);
+    replaceWallpaperPreview(null);
     // Drop any temporary custom preview so the shell goes blank until save
     // (or until the user switches to another theme with built-in art).
     setWallpaperPath(null);
