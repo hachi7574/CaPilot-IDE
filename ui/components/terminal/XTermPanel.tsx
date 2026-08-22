@@ -8,6 +8,7 @@ import { SearchAddon } from "@xterm/addon-search";
 import { useStore, AgentInfo, getTodoDragId, isTodoDrag } from "../../state/store";
 import { assignTodoAndSend } from "../../state/agentActions";
 import { pathsFromDataTransfer } from "../../state/dropPaths";
+import { isShellRuntime } from "../../state/shellPath";
 import { useT } from "../../i18n";
 import { matchesShortcut } from "../../state/shortcuts";
 import { Icon } from "../Icon";
@@ -740,9 +741,35 @@ export function XTermPanel({
       syncClaudeMode(`${lines.join("\n")}\n${lines.join("")}`);
     };
 
+    // Bytes this instance has already painted. On dispose they go back into
+    // agentOutputs so a StrictMode remount (or canvas appear-spring remount)
+    // can drain them — Windows ConPTY will not reprint a shell prompt.
+    // Cap: a prompt + a few screens; TUIs restore via pulseTuiRedraw instead.
+    const PAINTED_PARK_CAP = 64 * 1024;
+    let paintedChunks: Uint8Array[] = [];
+    let paintedBytes = 0;
+
+    const parkBytes = (chunks: Uint8Array[]) => {
+      if (!chunks.length) return;
+      const parked: number[] = [];
+      for (const chunk of chunks) {
+        for (let i = 0; i < chunk.length; i++) parked.push(chunk[i]!);
+      }
+      useStore.getState().appendAgentOutput(agentId, parked);
+    };
+
+    const rememberPainted = (bytes: Uint8Array) => {
+      paintedChunks.push(bytes);
+      paintedBytes += bytes.byteLength;
+      while (paintedBytes > PAINTED_PARK_CAP && paintedChunks.length > 1) {
+        const drop = paintedChunks.shift();
+        if (drop) paintedBytes -= drop.byteLength;
+      }
+    };
+
     const flushPending = () => {
       flushRaf = null;
-      if (disposed || pendingBytes === 0) return;
+      if (pendingBytes === 0) return;
       const merged = new Uint8Array(pendingBytes);
       let offset = 0;
       for (const chunk of pendingChunks) {
@@ -751,16 +778,30 @@ export function XTermPanel({
       }
       pendingChunks = [];
       pendingBytes = 0;
+      if (disposed) {
+        parkBytes([merged]);
+        return;
+      }
       try {
         const filtered = modeFilter.filter(merged);
-        if (filtered) term.write(filtered, syncClaudeModeFromScreen);
+        if (filtered) {
+          rememberPainted(filtered);
+          term.write(filtered, syncClaudeModeFromScreen);
+        }
       } catch {
-        // terminal disposed
+        parkBytes([merged]);
       }
     };
 
     const writeToTerm = (data: number[]) => {
-      if (disposed) return;
+      if (disposed) {
+        // StrictMode (and canvas appear-spring remount) disposes this xterm
+        // while ConPTY may already have printed its one-shot prompt. Park the
+        // bytes so the next mount can drain them — a Windows shell will not
+        // reprint after the first WINCH / attach.
+        useStore.getState().appendAgentOutput(agentId, data);
+        return;
+      }
       const chunk = new Uint8Array(data);
       pendingChunks.push(chunk);
       pendingBytes += chunk.byteLength;
@@ -770,9 +811,12 @@ export function XTermPanel({
     };
 
     let lastResize = { rows: 0, cols: 0 };
+    let fitted = false;
     const sendResize = () => {
-      const rows = term.rows || 24;
-      const cols = term.cols || 80;
+      if (!fitted) return;
+      const rows = term.rows;
+      const cols = term.cols;
+      if (!rows || !cols) return;
       if (rows === lastResize.rows && cols === lastResize.cols) return;
       lastResize = { rows, cols };
       invoke("agent_resize", { id: agentId, rows, cols }).catch(() => {});
@@ -833,6 +877,12 @@ export function XTermPanel({
       if (disposed) return;
       try {
         const parent = term.element?.parentElement;
+        // A 0×0 canvas card (first layout frame, or CSS scale(0) ancestor) must
+        // not WINCH ConPTY down to 2×1 — Windows shells reprint nothing after
+        // that, so the remounted xterm stays blank.
+        if (parent && (parent.clientWidth < 32 || parent.clientHeight < 32)) {
+          return;
+        }
         const cell = (term as unknown as { _core?: { _renderService?: { dimensions?: { css?: { cell?: { width: number; height: number } } } } } })
           ._core?._renderService?.dimensions?.css?.cell;
         if (parent && cell && cell.width > 0 && cell.height > 0) {
@@ -849,10 +899,13 @@ export function XTermPanel({
         } else {
           fitAddon.fit();
         }
+        if (parent && parent.clientWidth >= 32 && parent.clientHeight >= 32) {
+          fitted = true;
+        }
       } catch {
         // Container has no dimensions yet — the deferred retry handles it.
       }
-      if (term.rows > 0 && term.cols > 0) {
+      if (fitted && term.rows > 0 && term.cols > 0) {
         sendResize();
         term.refresh(0, term.rows - 1);
         // Alternate-screen TUIs (Claude / OpenCode) also get a resize pulse so
@@ -866,6 +919,28 @@ export function XTermPanel({
     // pixel/mono font is ready → 0 rows; re-fit once fonts resolve.
     const raf1 = requestAnimationFrame(() => fitAndRefresh());
     const raf2 = requestAnimationFrame(() => fitAndRefresh());
+    // Canvas create/drop springs CSS scale(0)→1 on an ancestor. WebView2
+    // drops the xterm canvas layer at scale 0 (same as visibility:hidden
+    // resident panels). ResizeObserver skips while scaled, and layout size
+    // does not change when the spring ends — so we must fit+refresh at settle.
+    let appearRaf = 0;
+    const refreshWhenAppearDone = () => {
+      if (disposed) return;
+      const wrap = containerRef.current?.closest(
+        ".canvas-node-appear-create, .canvas-node-appear-drop"
+      ) as HTMLElement | null;
+      if (wrap) {
+        const s = parseFloat(
+          getComputedStyle(wrap).getPropertyValue("--canvas-appear-scale") || "1"
+        );
+        if (Number.isFinite(s) && Math.abs(s - 1) > 0.02) {
+          appearRaf = requestAnimationFrame(refreshWhenAppearDone);
+          return;
+        }
+      }
+      fitAndRefresh();
+    };
+    appearRaf = requestAnimationFrame(refreshWhenAppearDone);
     const fontReady = document.fonts?.ready;
     if (fontReady) {
       fontReady.then(() => {
@@ -887,6 +962,11 @@ export function XTermPanel({
     };
 
     if (channel) {
+      // Canvas appear-spring delays this mount ~340ms. Steal the channel only
+      // after this xterm can actually paint: otherwise StrictMode's first
+      // (immediately disposed) instance drains ConPTY's one-shot prompt and
+      // the visible card stays empty. Bytes that arrive before we attach
+      // stay in agentOutputs and are drained below.
       attachChannel(channel);
     } else {
       // Ended (`done`) sessions never auto-resume on their own — only an
@@ -1108,12 +1188,28 @@ export function XTermPanel({
       if (modePersistTimer) clearTimeout(modePersistTimer);
       persistClaudeMode();
       if (fitTimer != null) window.clearTimeout(fitTimer);
-      // Do not strand the final packet behind a cancelled animation frame.
-      if (flushRaf !== null) cancelAnimationFrame(flushRaf);
-      flushPending();
       disposed = true;
+      // Park coalesced + already-painted bytes BEFORE disposing xterm.
+      // flushPending() into a dying Terminal is lost; Windows ConPTY will not
+      // reprint the prompt for the remounted instance.
+      if (flushRaf !== null) cancelAnimationFrame(flushRaf);
+      flushRaf = null;
+      if (pendingBytes > 0) {
+        parkBytes(pendingChunks);
+        pendingChunks = [];
+        pendingBytes = 0;
+      }
+      if (paintedBytes > 0) {
+        // Alternate-screen TUIs restore via pulseTuiRedraw, not raw replay.
+        // A Windows shell prompt is one-shot — park it so the remount can paint.
+        const rt = useStore.getState().agents.get(agentId)?.runtime;
+        if (isShellRuntime(rt)) parkBytes(paintedChunks);
+        paintedChunks = [];
+        paintedBytes = 0;
+      }
       cancelAnimationFrame(raf1);
       cancelAnimationFrame(raf2);
+      if (appearRaf) cancelAnimationFrame(appearRaf);
       observer.disconnect();
       containerRef.current?.removeEventListener("wheel", onWheel, true);
       containerRef.current?.removeEventListener("mousedown", onMouseDown);
@@ -1125,8 +1221,11 @@ export function XTermPanel({
       searchResultsSub.dispose();
       searchAddonRef.current = null;
       term.dispose();
-      // Route output back to the buffer so a reopened tab catches up.
-      const ch = channelRef.current;
+      // Route output back to the buffer so a reopened / StrictMode remount
+      // catches up. Do this even if attachChannel never ran (channelRef is
+      // still null) — a canvas card that opened under scale(0) may have
+      // stolen onmessage and then died before draining.
+      const ch = channelRef.current ?? channel ?? null;
       if (ch) {
         ch.onmessage = (data) =>
           useStore.getState().appendAgentOutput(agentId, data);

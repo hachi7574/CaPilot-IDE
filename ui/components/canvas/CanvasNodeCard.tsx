@@ -14,6 +14,7 @@ export const CanvasNodeCard = memo(function CanvasNodeCard({
   selected,
   marked,
   showPty,
+  mountPty = true,
   onSelect,
   onDoubleClick,
   onPointerDownDrag,
@@ -26,6 +27,9 @@ export const CanvasNodeCard = memo(function CanvasNodeCard({
   /** Marquee / multi-select mark — distinct from keyboard/click focus. */
   marked?: boolean;
   showPty: boolean;
+  /** False while a create/drop appear spring is still scaling the card.
+   *  WebView2 drops the xterm canvas backing store if we mount under CSS scale(0). */
+  mountPty?: boolean;
   onSelect: (e: React.MouseEvent) => void;
   onDoubleClick: () => void;
   onPointerDownDrag: (e: React.PointerEvent<HTMLDivElement>) => void;
@@ -118,7 +122,7 @@ export const CanvasNodeCard = memo(function CanvasNodeCard({
             onCardContextMenu?.(e);
           }}
         >
-          <XTermPanel agentId={agentId} active={selected} opaqueBg />
+          {mountPty && <XTermPanel agentId={agentId} active={selected} opaqueBg />}
         </div>
       )}
       <div

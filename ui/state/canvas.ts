@@ -132,8 +132,20 @@ export function toggleCanvasView(): void {
       s.setActiveTab(prev);
       return;
     }
-    const fallback = s.tabs.find((tb) => tb.type !== "canvas");
-    if (fallback) s.setActiveTab(fallback.id);
+    const nonCanvas = s.tabs.filter((tb) => tb.type !== "canvas");
+    const sameProject = [...nonCanvas].reverse().find((tb) => {
+      if (tb.project === scope.projectId) return true;
+      if (!tb.agentId) return false;
+      return s.agents.get(tb.agentId)?.project === scope.projectId;
+    });
+    const fallback = sameProject ?? [...nonCanvas].reverse()[0];
+    if (fallback) {
+      s.setActiveTab(fallback.id);
+      return;
+    }
+    // No document tabs (e.g. canvas-only after a restart). Leave canvas so
+    // the slider can reach the empty terminal view.
+    useStore.setState({ activeTabId: null });
     return;
   }
   const scope = resolveCanvasScope();

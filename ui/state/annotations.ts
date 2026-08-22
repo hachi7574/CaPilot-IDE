@@ -61,18 +61,24 @@ interface AnnotateState {
   /** Most recently picked element (used when there are no comments: copying
    *  yields the element's own component info instead of a feedback block). */
   lastElement: AnnotElementInfo | null;
+  /** Transient tray status (copy confirmation, screenshot result, …). */
+  status: string;
   toggleMode: () => void;
   setMode: (m: boolean) => void;
   add: (a: Annotation) => void;
   remove: (id: string) => void;
   clear: () => void;
   setLastElement: (info: AnnotElementInfo | null) => void;
+  flash: (msg: string) => void;
 }
+
+let statusTimer: ReturnType<typeof setTimeout> | undefined;
 
 export const useAnnotations = create<AnnotateState>((set) => ({
   mode: false,
   annotations: loadAnnotations(),
   lastElement: null,
+  status: "",
 
   toggleMode: () => set((s) => ({ mode: !s.mode })),
   setMode: (m) => set({ mode: m }),
@@ -97,6 +103,15 @@ export const useAnnotations = create<AnnotateState>((set) => ({
   },
 
   setLastElement: (info) => set({ lastElement: info }),
+
+  flash: (msg) => {
+    set({ status: msg });
+    if (statusTimer) clearTimeout(statusTimer);
+    statusTimer = setTimeout(() => {
+      set({ status: "" });
+      statusTimer = undefined;
+    }, 2600);
+  },
 }));
 
 // ── Element introspection ──────────────────────────────────────
@@ -401,23 +416,72 @@ export function buildElementMarkdown(info: AnnotElementInfo): string {
 
 // ── Clipboard / screenshot ──────────────────────────────────────
 
-/** Copy text to the OS clipboard (navigator API with textarea fallback for
- *  WebKit webviews that reject the async API). */
+/** Markdown currently sitting in the annotator (comments, else last picked element). */
+export function currentCopyMarkdown(): string | null {
+  const { annotations, lastElement } = useAnnotations.getState();
+  if (annotations.length) return buildFeedbackMarkdown(annotations);
+  if (lastElement) return buildElementMarkdown(lastElement);
+  return null;
+}
+
+export type CopyAnnotationsResult = "feedback" | "element" | "empty";
+
+/**
+ * Copy the current annotation payload to the clipboard.
+ * Kick this off from a user-gesture handler (right-click / button) before
+ * awaiting anything else so WebKit still has transient activation.
+ */
+export async function copyCurrentAnnotations(): Promise<CopyAnnotationsResult> {
+  const md = currentCopyMarkdown();
+  if (!md) return "empty";
+  await copyText(md);
+  return useAnnotations.getState().annotations.length ? "feedback" : "element";
+}
+
+function flashCopyResult(kind: CopyAnnotationsResult, n: number) {
+  const { flash } = useAnnotations.getState();
+  if (kind === "feedback") flash(t("annotations.copiedFeedback", { n }));
+  else if (kind === "element") flash(t("annotations.copiedElement"));
+}
+
+/**
+ * Copy then flash the tray status. Starts the clipboard write synchronously so
+ * it still counts as a user gesture (right-click / button).
+ */
+export function copyCurrentAnnotationsWithFlash(): Promise<CopyAnnotationsResult> {
+  const n = useAnnotations.getState().annotations.length;
+  return copyCurrentAnnotations()
+    .then((kind) => {
+      flashCopyResult(kind, n);
+      return kind;
+    })
+    .catch(() => {
+      useAnnotations.getState().flash(t("annotations.copyFailed"));
+      return "empty" as CopyAnnotationsResult;
+    });
+}
+
+/** Copy text to the OS clipboard. Tries `execCommand` first so a right-click /
+ *  button handler still has user-gesture activation on WebKitGTK (the async
+ *  clipboard API often rejects once that activation expires). */
 export async function copyText(text: string): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(text);
-    return;
-  } catch {
-    // fall through to the legacy path
-  }
   const ta = document.createElement("textarea");
   ta.value = text;
   ta.style.position = "fixed";
   ta.style.opacity = "0";
+  ta.setAttribute("readonly", "");
   document.body.appendChild(ta);
+  ta.focus();
   ta.select();
-  document.execCommand("copy");
+  let ok = false;
+  try {
+    ok = document.execCommand("copy");
+  } catch {
+    ok = false;
+  }
   document.body.removeChild(ta);
+  if (ok) return;
+  await navigator.clipboard.writeText(text);
 }
 
 function collectCss(): string {

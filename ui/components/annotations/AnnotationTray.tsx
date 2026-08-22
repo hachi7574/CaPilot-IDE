@@ -2,9 +2,7 @@ import { useState } from "react";
 import { createPortal } from "react-dom";
 import {
   useAnnotations,
-  buildFeedbackMarkdown,
-  buildElementMarkdown,
-  copyText,
+  copyCurrentAnnotationsWithFlash,
   copyElementScreenshot,
   resolveBySelector,
 } from "../../state/annotations";
@@ -24,14 +22,10 @@ export function AnnotationTray({ onHide }: { onHide?: () => void }) {
   const clear = useAnnotations((s) => s.clear);
   const toggleMode = useAnnotations((s) => s.toggleMode);
   const setMode = useAnnotations((s) => s.setMode);
+  const status = useAnnotations((s) => s.status);
+  const flash = useAnnotations((s) => s.flash);
 
-  const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
-
-  const flash = (msg: string) => {
-    setStatus(msg);
-    window.setTimeout(() => setStatus(""), 2600);
-  };
 
   const handleHide = () => {
     // Leaving pick-mode when the tray is dismissed avoids a stuck crosshair.
@@ -39,14 +33,8 @@ export function AnnotationTray({ onHide }: { onHide?: () => void }) {
     onHide?.();
   };
 
-  const handleCopyAll = async () => {
-    if (annotations.length) {
-      await copyText(buildFeedbackMarkdown(annotations));
-      flash(t("annotations.copiedFeedback", { n: annotations.length }));
-    } else if (lastElement) {
-      await copyText(buildElementMarkdown(lastElement));
-      flash(t("annotations.copiedElement"));
-    }
+  const handleCopyAll = () => {
+    void copyCurrentAnnotationsWithFlash();
   };
 
   const handleCopyScreenshot = async () => {

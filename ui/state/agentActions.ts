@@ -62,14 +62,17 @@ export async function spawnAgent(
   }
   flush(info.id);
   s.addAgent({ ...info, project: proj }, channel);
-  if (opts?.addTab !== false) {
-    s.addTab({
-      id: info.id,
-      type: "agent",
-      agentId: info.id,
-      title: info.title || runtime,
-    });
-  }
+  const tab = {
+    id: info.id,
+    type: "agent" as const,
+    agentId: info.id,
+    title: info.title || runtime,
+  };
+  // Canvas spawn passes `addTab: false` so CanvasPanel stays mounted. Still
+  // register a silent tab — otherwise the tab strip has nothing to show when
+  // switching back to terminal view, and the view slider is stuck.
+  if (opts?.addTab === false) s.addTabSilent(tab);
+  else s.addTab(tab);
   return info.id;
 }
 

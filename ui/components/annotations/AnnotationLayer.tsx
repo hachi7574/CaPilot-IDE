@@ -5,6 +5,7 @@ import {
   pickElement,
   elementInfo,
   resolveBySelector,
+  copyCurrentAnnotationsWithFlash,
   AnnotElementInfo,
   AnnotIntent,
 } from "../../state/annotations";
@@ -150,13 +151,15 @@ export function AnnotationLayer() {
       else setMode(false);
     };
 
-    // Right-click always leaves annotation mode (and drops a pending comment).
-    // Capture + stop so the click doesn't also open a tab / file-tree / paste
-    // menu underneath.
+    // Right-click copies the current notes (or last picked element) then leaves
+    // annotation mode. Capture + stop so the click doesn't also open a tab /
+    // file-tree / paste menu underneath. Start the copy *before* closing mode
+    // so the clipboard write still has the user-gesture activation.
     const onContextMenu = (e: MouseEvent) => {
       e.preventDefault();
       e.stopPropagation();
       suppressClick = true;
+      void copyCurrentAnnotationsWithFlash();
       setPending(null);
       setMode(false);
     };

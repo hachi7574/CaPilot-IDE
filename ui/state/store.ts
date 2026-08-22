@@ -726,6 +726,65 @@ function projectOfAgent(agent: AgentInfo): string {
   return agent.project || projectOfCwd(agent.cwd);
 }
 
+function tabOwningProject(
+  tab: Tab,
+  agents: Map<string, AgentInfo>,
+  projectRoots: Record<string, string>
+): string | undefined {
+  if (tab.type === "agent") {
+    if (tab.agentId) {
+      const agent = agents.get(tab.agentId);
+      if (agent) return projectOfAgent(agent);
+    }
+    return undefined;
+  }
+  if (tab.project) return tab.project;
+  if (!tab.filePath) return undefined;
+  let best: string | undefined;
+  let bestLen = -1;
+  for (const [name, root] of Object.entries(projectRoots)) {
+    const prefix = root.endsWith("/") || root.endsWith("\\") ? root : `${root}/`;
+    if (
+      (tab.filePath === root ||
+        tab.filePath.startsWith(prefix) ||
+        tab.filePath.startsWith(root + "\\")) &&
+      prefix.length > bestLen
+    ) {
+      best = name;
+      bestLen = prefix.length;
+    }
+  }
+  return best ?? projectOfCwd(tab.filePath);
+}
+
+/** Next tab after a close: stay in the same project / view. Never jump to
+ * another project's still-open session, and terminal view never enters canvas. */
+function pickFallbackTabId(
+  s: {
+    agents: Map<string, AgentInfo>;
+    projectRoots: Record<string, string>;
+    focusedProject: string | null;
+  },
+  closing: Tab | undefined,
+  remaining: Tab[]
+): string | null {
+  const scope =
+    (closing ? tabOwningProject(closing, s.agents, s.projectRoots) : undefined) ??
+    s.focusedProject;
+  const sameProject = (t: Tab) =>
+    !scope || tabOwningProject(t, s.agents, s.projectRoots) === scope;
+  if (closing?.type === "canvas") {
+    const otherCanvas = [...remaining]
+      .reverse()
+      .find((t) => t.type === "canvas" && sameProject(t));
+    if (otherCanvas) return otherCanvas.id;
+  }
+  const found = [...remaining]
+    .reverse()
+    .find((t) => t.type !== "canvas" && sameProject(t));
+  return found?.id ?? null;
+}
+
 /**
  * Create a Tauri Channel that buffers every event immediately, so no PTY
  * output is lost in the race between spawn and the terminal mounting.
@@ -2326,10 +2385,11 @@ export const useStore = create<AppState>((set, get) => {
         const pruned = splitRemoveLeaf(tree, id);
         if (!pruned) {
           // The last visible tab was closed → back to the (possibly empty)
-          // single-panel view.
+          // single-panel view. Stay in the same project; do not activate
+          // another project's leftover session.
           return {
             tabs,
-            activeTabId: tabs[tabs.length - 1]?.id ?? null,
+            activeTabId: pickFallbackTabId(s, closing, tabs),
             splitTree: null,
           };
         }
@@ -2353,14 +2413,8 @@ export const useStore = create<AppState>((set, get) => {
           splitTree: pruned,
         };
       }
-      let activeTabId =
-        s.activeTabId === id ? (tabs[tabs.length - 1]?.id ?? null) : s.activeTabId;
-      // Closing an active canvas tab while others remain should stay in canvas
-      // view — the last store entry is often an agent/editor tab.
-      if (s.activeTabId === id && closing?.type === "canvas") {
-        const otherCanvas = [...tabs].reverse().find((t) => t.type === "canvas");
-        if (otherCanvas) activeTabId = otherCanvas.id;
-      }
+      const activeTabId =
+        s.activeTabId === id ? pickFallbackTabId(s, closing, tabs) : s.activeTabId;
       return { tabs, activeTabId };
     }),
 

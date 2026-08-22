@@ -21,9 +21,9 @@ import {
   openCanvas,
   beginCanvasAgentDrag,
   endCanvasAgentDrag,
-  CANVAS_AGENT_DRAG_MIME,
   revealAgentOnCanvas,
 } from "../../state/canvas";
+import { PATH_POINTER_DRAG_THRESHOLD } from "../../state/dropPaths";
 
 /** Derive the workspace project name from an agent cwd. Prefers the
  *  `workspaces/<name>` segment; for custom-rooted projects falls back to the
@@ -148,6 +148,19 @@ export function LeftSidebar() {
   // drag (resize) on the divider.
   const resizeStartRef = useRef<{ x: number; y: number } | null>(null);
   const [draggedProj, setDraggedProj] = useState<string | null>(null);
+  const [agentGhost, setAgentGhost] = useState<{
+    name: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const agentDragRef = useRef<{
+    id: string;
+    name: string;
+    startX: number;
+    startY: number;
+    active: boolean;
+  } | null>(null);
+  const suppressClickRef = useRef(false);
   // New-terminal template picker: open menu position (project + anchor).
   const [termMenu, setTermMenu] = useState<{
     x: number;
@@ -309,6 +322,85 @@ export function LeftSidebar() {
   };
 
   const canvasActive = tabs.find((tab) => tab.id === activeTabId)?.type === "canvas";
+
+  const onTerminalPointerDown = (
+    e: React.PointerEvent,
+    id: string,
+    title: string
+  ) => {
+    if (e.button !== 0) return;
+    if (
+      (e.target as HTMLElement).closest(
+        ".tm-open-split, .tm-close, button, input"
+      )
+    ) {
+      return;
+    }
+    e.preventDefault();
+    agentDragRef.current = {
+      id,
+      name: title,
+      startX: e.clientX,
+      startY: e.clientY,
+      active: false,
+    };
+    beginCanvasAgentDrag(id);
+
+    const onMove = (ev: PointerEvent) => {
+      const st = agentDragRef.current;
+      if (!st || st.id !== id) return;
+      const dx = ev.clientX - st.startX;
+      const dy = ev.clientY - st.startY;
+      if (!st.active) {
+        if (Math.hypot(dx, dy) < PATH_POINTER_DRAG_THRESHOLD) return;
+        st.active = true;
+        document.body.classList.add("path-pointer-dragging");
+      }
+      setAgentGhost({ name: st.name, x: ev.clientX, y: ev.clientY });
+      document
+        .querySelectorAll(".path-drop-hover")
+        .forEach((el) => el.classList.remove("path-drop-hover"));
+      const under = document.elementFromPoint(ev.clientX, ev.clientY);
+      const target = under?.closest?.("[data-path-drop=\"canvas\"]") as HTMLElement | null;
+      target?.classList.add("path-drop-hover");
+    };
+
+    const finish = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      document.body.classList.remove("path-pointer-dragging");
+      document
+        .querySelectorAll(".path-drop-hover")
+        .forEach((el) => el.classList.remove("path-drop-hover"));
+
+      const st = agentDragRef.current;
+      agentDragRef.current = null;
+      setAgentGhost(null);
+      endCanvasAgentDrag();
+      if (!st?.active) return;
+      suppressClickRef.current = true;
+      window.setTimeout(() => {
+        suppressClickRef.current = false;
+      }, 0);
+
+      const under = document.elementFromPoint(ev.clientX, ev.clientY);
+      if (!under?.closest?.("[data-path-drop=\"canvas\"]")) return;
+      window.dispatchEvent(
+        new CustomEvent("capilot:canvas-agent-drop", {
+          detail: {
+            agentId: st.id,
+            clientX: ev.clientX,
+            clientY: ev.clientY,
+          },
+        })
+      );
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+  };
 
   const openSplit = (proj: string, id: string) => (
     <div
@@ -791,16 +883,9 @@ export function LeftSidebar() {
                           key={a.id}
                           className={`terminal-item${activeTabId === a.id ? " active" : ""}`}
                           data-todo-drop-agent={a.id}
-                          draggable
-                          onDragStart={(e) => {
-                            e.stopPropagation();
-                            e.dataTransfer.effectAllowed = "copy";
-                            e.dataTransfer.setData("text/plain", a.id);
-                            e.dataTransfer.setData(CANVAS_AGENT_DRAG_MIME, a.id);
-                            beginCanvasAgentDrag(a.id);
-                          }}
-                          onDragEnd={() => endCanvasAgentDrag()}
+                          onPointerDown={(e) => onTerminalPointerDown(e, a.id, a.title)}
                           onClick={() => {
+                            if (suppressClickRef.current) return;
                             if (canvasActive) revealAgentOnCanvas(name, a.id);
                             else openProjectTerminal(name, a.id);
                           }}
@@ -871,16 +956,9 @@ export function LeftSidebar() {
                                 key={a.id}
                                 className={`terminal-item term-ended${activeTabId === a.id ? " active" : ""}`}
                                 data-todo-drop-agent={a.id}
-                                draggable
-                                onDragStart={(e) => {
-                                  e.stopPropagation();
-                                  e.dataTransfer.effectAllowed = "copy";
-                                  e.dataTransfer.setData("text/plain", a.id);
-                                  e.dataTransfer.setData(CANVAS_AGENT_DRAG_MIME, a.id);
-                                  beginCanvasAgentDrag(a.id);
-                                }}
-                                onDragEnd={() => endCanvasAgentDrag()}
+                                onPointerDown={(e) => onTerminalPointerDown(e, a.id, a.title)}
                                 onClick={() => {
+                                  if (suppressClickRef.current) return;
                                   if (canvasActive) {
                                     revealAgentOnCanvas(name, a.id);
                                     return;
@@ -1011,6 +1089,17 @@ export function LeftSidebar() {
           onClose={() => setRenameAgentId(null)}
         />
       )}
+      {agentGhost &&
+        createPortal(
+          <div
+            className="path-drag-ghost"
+            style={{ left: agentGhost.x + 12, top: agentGhost.y + 12 }}
+            aria-hidden
+          >
+            {agentGhost.name}
+          </div>,
+          document.body
+        )}
     </>
   );
 }

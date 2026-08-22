@@ -76,6 +76,37 @@ function worldToSurface(pos: CanvasVec, vp: CanvasViewport): CanvasVec {
   };
 }
 
+function occupiedFromGraph(
+  graph: {
+    terminals?: { agentId?: string | null; id: string; position: CanvasVec }[];
+    agents?: { id: string; position: CanvasVec }[];
+    files?: { position: CanvasVec; size?: { w: number; h: number } }[];
+  } | null | undefined,
+  sizes: Record<string, { w: number; h: number }>,
+  fallback: { w: number; h: number },
+  skipAgentId?: string
+): { pos: CanvasVec; size: { w: number; h: number } }[] {
+  const occupied: { pos: CanvasVec; size: { w: number; h: number } }[] = [];
+  for (const n of graph?.terminals ?? []) {
+    if (skipAgentId && (n.agentId === skipAgentId || n.id === `term_${skipAgentId}`)) continue;
+    occupied.push({
+      pos: n.position,
+      size: sizes[n.agentId ?? n.id] ?? fallback,
+    });
+  }
+  for (const n of graph?.agents ?? []) {
+    if (skipAgentId && n.id === skipAgentId) continue;
+    occupied.push({
+      pos: n.position,
+      size: sizes[n.id] ?? fallback,
+    });
+  }
+  for (const n of graph?.files ?? []) {
+    occupied.push({ pos: n.position, size: n.size ?? fallback });
+  }
+  return occupied;
+}
+
 function findFreeWorldPos(
   _preferred: CanvasVec,
   occupied: { pos: CanvasVec; size: { w: number; h: number } }[],
@@ -182,21 +213,35 @@ function cardOnScreen(
  *  (dampingRatio 1, response 0.34s): scale 0→1 from the card center. */
 function CanvasAppear({
   kind,
+  onSettled,
   children,
 }: {
   kind?: "create" | "drop";
+  onSettled?: () => void;
   children: React.ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const settledRef = useRef(onSettled);
+  settledRef.current = onSettled;
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el || !kind) return;
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
       el.style.setProperty("--canvas-appear-scale", "1");
       el.style.setProperty("--canvas-appear-opacity", "1");
+      settledRef.current?.();
+    };
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      finish();
       return;
     }
     const response = kind === "create" ? 0.34 : 0.24;
+    // If rAF stalls, force-settle after 2× the spring response so xterm
+    // is not left unmounted. Normal settle is the tick() threshold below.
+    const watchdog = window.setTimeout(finish, Math.ceil(response * 2000));
     const wn = (2 * Math.PI) / response;
     let scale = kind === "create" ? 0 : 0.86;
     let opacity = kind === "create" ? 0.16 : 0;
@@ -232,14 +277,16 @@ function CanvasAppear({
         Math.abs(vScale) <= 0.02 &&
         Math.abs(vOp) <= 0.02
       ) {
-        el.style.setProperty("--canvas-appear-scale", "1");
-        el.style.setProperty("--canvas-appear-opacity", "1");
+        finish();
         return;
       }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.clearTimeout(watchdog);
+    };
   }, [kind]);
   return (
     <div
@@ -329,7 +376,7 @@ export function CanvasPanel({
     runtime: string;
   } | null>(null);
   const [termPicker, setTermPicker] = useState<{ x: number; y: number; world: CanvasVec } | null>(null);
-  const pendingAppearRef = useRef<Record<string, "create" | "drop">>({});
+  const [appearById, setAppearById] = useState<Record<string, "create" | "drop">>({});
   const worldRef = useRef<HTMLDivElement>(null);
   const camRafRef = useRef<number | null>(null);
   const [connectPreview, setConnectPreview] = useState<{
@@ -356,6 +403,9 @@ export function CanvasPanel({
   graphRef.current = graph;
   const mergedRef = useRef<BlockGraph | null>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const placeAgentOnCanvasRef = useRef<
+    (agentId: string, world: CanvasVec, motion?: "create" | "drop") => void
+  >(() => {});
   useLayoutEffect(() => {
     if (camRafRef.current != null) return;
     const el = worldRef.current;
@@ -620,6 +670,12 @@ export function CanvasPanel({
     void spawnAgent(scope.projectId, runtime, { addTab: false })
       .then((realId) => promotePending(pendingId, realId, runtime))
       .catch(() => {
+        setAppearById((prev) => {
+          if (!(pendingId in prev)) return prev;
+          const next = { ...prev };
+          delete next[pendingId];
+          return next;
+        });
         hideNode(
           isShellRuntime(runtime) ? "terminal" : "console",
           isShellRuntime(runtime) ? `term_${pendingId}` : pendingId,
@@ -636,20 +692,12 @@ export function CanvasPanel({
     motion: "create" | "drop"
   ) => {
     playAppear(agentId, motion);
-    const display = mergedRef.current;
-    const occupied: { pos: CanvasVec; size: { w: number; h: number } }[] = [];
-    for (const n of display?.terminals ?? []) {
-      occupied.push({
-        pos: n.position,
-        size: expandedSizes[n.agentId ?? n.id] ?? CARD,
-      });
-    }
-    for (const n of display?.agents ?? []) {
-      occupied.push({
-        pos: n.position,
-        size: expandedSizes[n.id] ?? CARD,
-      });
-    }
+    const occupied = occupiedFromGraph(
+      mergedRef.current,
+      expandedSizes,
+      CARD,
+      agentId
+    );
     const dest =
       motion === "create"
         ? findFreeWorldPos(world, occupied, CARD, layout.gap)
@@ -696,8 +744,14 @@ export function CanvasPanel({
   };
 
   const promotePending = (pendingId: string, realId: string, runtime: string) => {
-    pendingAppearRef.current[realId] = pendingAppearRef.current[pendingId];
-    delete pendingAppearRef.current[pendingId];
+    setAppearById((prev) => {
+      const kind = prev[pendingId];
+      if (!kind && !prev[realId]) return prev;
+      const next = { ...prev };
+      delete next[pendingId];
+      if (kind) next[realId] = kind;
+      return next;
+    });
     setExpandedSizes((s) => {
       if (!s[pendingId]) return s;
       const { [pendingId]: size, ...rest } = s;
@@ -724,8 +778,17 @@ export function CanvasPanel({
   };
 
   const playAppear = (agentId: string, kind: "create" | "drop") => {
-    pendingAppearRef.current[agentId] = kind;
+    setAppearById((prev) => ({ ...prev, [agentId]: kind }));
   };
+
+  const settleAppear = useCallback((id: string) => {
+    setAppearById((prev) => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }, []);
 
   const springCameraTo = (target: CanvasViewport) => {
     if (camRafRef.current != null) cancelAnimationFrame(camRafRef.current);
@@ -803,22 +866,12 @@ export function CanvasPanel({
     const display = mergedRef.current;
     let dest = world;
     if (motion === "create" && !onGraph) {
-      const occupied: { pos: CanvasVec; size: { w: number; h: number } }[] = [];
-      for (const n of display?.terminals ?? []) {
-        if (n.agentId === agentId) continue;
-        occupied.push({
-          pos: n.position,
-          size: expandedSizes[n.agentId ?? n.id] ?? CARD,
-        });
-      }
-      for (const n of display?.agents ?? []) {
-        if (n.id === agentId) continue;
-        occupied.push({
-          pos: n.position,
-          size: expandedSizes[n.id] ?? CARD,
-        });
-      }
-      dest = findFreeWorldPos(world, occupied, EXPANDED_MIN);
+      dest = findFreeWorldPos(
+        world,
+        occupiedFromGraph(display, expandedSizes, CARD, agentId),
+        EXPANDED_MIN,
+        layout.gap
+      );
     }
     const el = surfaceRef.current;
     let vp = viewportRef.current;
@@ -864,6 +917,7 @@ export function CanvasPanel({
       return next;
     });
   };
+  placeAgentOnCanvasRef.current = placeAgentOnCanvas;
 
   useEffect(() => {
     if (!merged || pendingPosRef.current.size === 0) return;
@@ -1077,6 +1131,35 @@ export function CanvasPanel({
     fitView(next);
   };
 
+  // Close canvas context menus on outside pointer / new right-click / Escape.
+  // Capture-phase so card `stopPropagation` still dismisses. The 150 ms guard
+  // ignores compositor-synthesized clicks after contextmenu (WebKitGTK).
+  useEffect(() => {
+    if (!ctxMenu && !cardMenu) return;
+    const openedAt = Date.now();
+    const close = () => {
+      if (Date.now() - openedAt <= 150) return;
+      setCtxMenu(null);
+      setCardMenu(null);
+    };
+    const onDismiss = (e: Event) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest(".ctx-menu")) return;
+      close();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("pointerdown", onDismiss, true);
+    window.addEventListener("contextmenu", onDismiss, true);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", onDismiss, true);
+      window.removeEventListener("contextmenu", onDismiss, true);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [ctxMenu, cardMenu]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const el = document.activeElement as HTMLElement | null;
@@ -1085,6 +1168,7 @@ export function CanvasPanel({
       }
       if (e.key === "Escape") {
         setCtxMenu(null);
+        setCardMenu(null);
         setTermPicker(null);
         setSelectedEdgeId(null);
         setSelectedIds(new Set());
@@ -1154,7 +1238,15 @@ export function CanvasPanel({
     const el = surfaceRef.current;
     if (!el) return;
     const onWheelNative = (e: WheelEvent) => {
-      if ((e.target as HTMLElement | null)?.closest(".canvas-card-pty, .canvas-card-body")) return;
+      // The canvas-world has a CSS transform (translate + scale), which makes
+      // e.target unreliable: it often lands on .canvas-world itself instead of
+      // the terminal element beneath the cursor. A geometric hit-test via
+      // elementFromPoint accounts for the transform and correctly identifies
+      // whether the pointer is over a scrollable terminal card. Without this,
+      // stopPropagation() below kills the wheel event before xterm ever sees it.
+      const target = e.target as HTMLElement | null;
+      const hit = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+      if ((hit ?? target)?.closest(".canvas-card-pty, .canvas-card-body")) return;
       e.preventDefault();
       e.stopPropagation();
       const dy = e.deltaY !== 0 ? e.deltaY : 0;
@@ -1691,18 +1783,12 @@ export function CanvasPanel({
             const base = prev ?? emptyBlockGraph(scope);
             const files = base.files ?? [];
             if (files.some((f) => f.path === dest)) return base;
-            const occupied = [
-              ...base.terminals.map((n) => ({
-                pos: n.position,
-                size: expandedSizes[n.agentId ?? n.id] ?? CARD,
-              })),
-              ...base.agents.map((n) => ({
-                pos: n.position,
-                size: expandedSizes[n.id] ?? CARD,
-              })),
-              ...files.map((n) => ({ pos: n.position, size: n.size ?? CARD })),
-            ];
-            const destPos = findFreeWorldPos(world, occupied, CARD, layout.gap);
+            const destPos = findFreeWorldPos(
+              world,
+              occupiedFromGraph({ ...base, files }, expandedSizes, CARD),
+              CARD,
+              layout.gap
+            );
             const next = {
               ...base,
               files: [
@@ -1741,6 +1827,28 @@ export function CanvasPanel({
     return () =>
       window.removeEventListener("capilot:path-drop", onPathDrop as EventListener);
   }, [importDroppedPaths]);
+
+  useEffect(() => {
+    const onAgentDrop = (ev: Event) => {
+      const detail = (ev as CustomEvent).detail as
+        | { agentId?: string; clientX?: number; clientY?: number }
+        | undefined;
+      if (!detail?.agentId) return;
+      const el = surfaceRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const x = detail.clientX ?? 0;
+      const y = detail.clientY ?? 0;
+      if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) return;
+      placeAgentOnCanvasRef.current(
+        detail.agentId,
+        screenToWorld(x, y, rect, viewportRef.current)
+      );
+    };
+    window.addEventListener("capilot:canvas-agent-drop", onAgentDrop as EventListener);
+    return () =>
+      window.removeEventListener("capilot:canvas-agent-drop", onAgentDrop as EventListener);
+  }, []);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -1886,8 +1994,9 @@ export function CanvasPanel({
                 const agentId = node.agentId;
                 if (!agentId) return null;
                 const cardSize = expandedSizes[agentId] ?? CARD;
-                const appear = pendingAppearRef.current[agentId];
+                const appear = appearById[agentId];
                 const livePty =
+                  !!appear ||
                   selectedId === agentId ||
                   viewSize.w === 0 ||
                   cardOnScreen(node.position, cardSize, viewport, viewSize);
@@ -1908,13 +2017,14 @@ export function CanvasPanel({
                       else cardElsRef.current.delete(agentId);
                     }}
                   >
-                    <CanvasAppear kind={appear}>
+                    <CanvasAppear kind={appear} onSettled={() => settleAppear(agentId)}>
                     <CanvasNodeCard
                       agentId={agentId}
                       kind="terminal"
                       selected={selectedIds.size <= 1 && selectedId === agentId}
                       marked={selectedIds.has(agentId)}
                       showPty={livePty}
+                      mountPty={!appear}
                       onSelect={(ev) => {
                         if (didDragRef.current) return;
                         if (ev.shiftKey && selectedTermId && selectedTermId !== node.id) {
@@ -1967,8 +2077,9 @@ export function CanvasPanel({
               {merged.agents.map((node) => {
                 const agentId = node.id;
                 const cardSize = expandedSizes[agentId] ?? CARD;
-                const appear = pendingAppearRef.current[agentId];
+                const appear = appearById[agentId];
                 const livePty =
+                  !!appear ||
                   selectedId === agentId ||
                   viewSize.w === 0 ||
                   cardOnScreen(node.position, cardSize, viewport, viewSize);
@@ -1988,13 +2099,14 @@ export function CanvasPanel({
                       else cardElsRef.current.delete(agentId);
                     }}
                   >
-                    <CanvasAppear kind={appear}>
+                    <CanvasAppear kind={appear} onSettled={() => settleAppear(agentId)}>
                     <CanvasNodeCard
                       agentId={agentId}
                       kind="console"
                       selected={selectedIds.size <= 1 && selectedId === agentId}
                       marked={selectedIds.has(agentId)}
                       showPty={livePty}
+                      mountPty={!appear}
                       onSelect={() => {
                         if (didDragRef.current) return;
                         setSelectedId(agentId);

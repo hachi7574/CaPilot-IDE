@@ -1,3 +1,7 @@
+// MSVC link.exe prints "Creating library …dll.lib" to stdout when building the
+// cdylib; rustc 1.90+ surfaces that as `linker_messages`. Linux/macOS never hit it.
+#![cfg_attr(windows, allow(linker_messages))]
+
 pub mod agent_runtime;
 pub mod bridge;
 mod canvas_graph;
@@ -13,6 +17,7 @@ mod resource;
 pub mod session_store;
 mod slash;
 mod usage;
+#[cfg(target_os = "linux")]
 mod wallpaper_http;
 mod worktree;
 
@@ -4440,6 +4445,7 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn wallpaper_bytes_allows_packaged_resource_dir() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());

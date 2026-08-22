@@ -99,15 +99,8 @@ pub fn parse_single_byte_range(header: &str, len: u64) -> Option<(u64, u64)> {
 }
 
 /// Bind `127.0.0.1:0` and spawn the accept loop. Idempotent.
-/// No-op on Windows / macOS — those webviews play `asset://` natively.
+/// This module is compiled on Linux only; Windows / macOS play `asset://` natively.
 pub fn start(resource_dir: Option<PathBuf>) -> Result<u16, String> {
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = resource_dir;
-        return Ok(0);
-    }
-    #[cfg(target_os = "linux")]
-    {
     if let Some(port) = PORT.get() {
         return Ok(*port);
     }
@@ -140,7 +133,6 @@ pub fn start(resource_dir: Option<PathBuf>) -> Result<u16, String> {
         .map_err(|e| format!("wallpaper http spawn: {e}"))?;
     log::info!("wallpaper http listening on 127.0.0.1:{port}");
     Ok(port)
-    }
 }
 
 pub fn port() -> Option<u16> {
