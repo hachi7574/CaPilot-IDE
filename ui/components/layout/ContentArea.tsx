@@ -321,6 +321,9 @@ export function ContentArea() {
       return;
     }
     if (draggedId === targetTabId) return; // already in this pane
+    const target = tabs.find((t) => t.id === targetTabId);
+    const dragged = tabs.find((t) => t.id === draggedId);
+    if (target?.type === "canvas" || dragged?.type === "canvas") return;
     if (splitTree && splitLeafTabIds(splitTree).includes(draggedId)) return; // already visible
     const direction = edge === "left" || edge === "right" ? "row" : "column";
     const newOnFirst = edge === "left" || edge === "top";
@@ -369,8 +372,9 @@ export function ContentArea() {
     );
   }
 
-  // Split view: render the recursive pane tree.
-  if (splitTree) {
+  // Canvas is a full-view switch, not a split pane. A leftover split tree
+  // would keep painting full-size xterms over / beside the canvas.
+  if (splitTree && activeTab?.type !== "canvas") {
     return (
       <div className="content-area">
         <SplitView

@@ -20,48 +20,204 @@ pub struct V1Runtime {
 /// CodeBuddy / Qoder. Extra argv is only the flags required to open an
 /// interactive TUI (never permission/model/hook injection).
 pub const V1_RUNTIMES: &[V1Runtime] = &[
-    V1Runtime { id: "codebuddy", name: "CodeBuddy", binary: "codebuddy", extra_args: &[] },
-    V1Runtime { id: "gemini", name: "Gemini", binary: "gemini", extra_args: &[] },
-    V1Runtime { id: "grok", name: "Grok", binary: "grok", extra_args: &[] },
-    V1Runtime { id: "kimi", name: "Kimi", binary: "kimi", extra_args: &[] },
-    V1Runtime { id: "hermes", name: "Hermes", binary: "hermes", extra_args: &["--tui"] },
-    V1Runtime { id: "trae", name: "Trae", binary: "traecli", extra_args: &[] },
-    V1Runtime { id: "qoder", name: "Qoder", binary: "qoderclicn", extra_args: &[] },
-    V1Runtime { id: "cursor", name: "Cursor", binary: "cursor-agent", extra_args: &[] },
-    V1Runtime { id: "copilot", name: "Copilot", binary: "copilot", extra_args: &[] },
-    V1Runtime { id: "cline", name: "Cline", binary: "cline", extra_args: &[] },
-    V1Runtime { id: "openclaude", name: "OpenClaude", binary: "openclaude", extra_args: &[] },
-    V1Runtime { id: "autohand", name: "Autohand", binary: "autohand", extra_args: &[] },
-    V1Runtime { id: "mimo-code", name: "MiMo Code", binary: "mimo", extra_args: &[] },
-    V1Runtime { id: "aider", name: "Aider", binary: "aider", extra_args: &[] },
-    V1Runtime { id: "goose", name: "Goose", binary: "goose", extra_args: &[] },
-    V1Runtime { id: "amp", name: "Amp", binary: "amp", extra_args: &[] },
-    V1Runtime { id: "kilo", name: "Kilo", binary: "kilo", extra_args: &[] },
+    V1Runtime {
+        id: "codebuddy",
+        name: "CodeBuddy",
+        binary: "codebuddy",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "gemini",
+        name: "Gemini",
+        binary: "gemini",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "grok",
+        name: "Grok",
+        binary: "grok",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "kimi",
+        name: "Kimi",
+        binary: "kimi",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "mistral-vibe",
+        name: "Mistral Vibe",
+        binary: "vibe",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "hermes",
+        name: "Hermes",
+        binary: "hermes",
+        extra_args: &["--tui"],
+    },
+    V1Runtime {
+        id: "trae",
+        name: "Trae",
+        binary: "traecli",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "qoder",
+        name: "Qoder",
+        binary: "qoderclicn",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "cursor",
+        name: "Cursor",
+        binary: "cursor-agent",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "copilot",
+        name: "Copilot",
+        binary: "copilot",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "cline",
+        name: "Cline",
+        binary: "cline",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "openclaude",
+        name: "OpenClaude",
+        binary: "openclaude",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "autohand",
+        name: "Autohand",
+        binary: "autohand",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "mimo-code",
+        name: "MiMo Code",
+        binary: "mimo",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "aider",
+        name: "Aider",
+        binary: "aider",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "goose",
+        name: "Goose",
+        binary: "goose",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "amp",
+        name: "Amp",
+        binary: "amp",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "kilo",
+        name: "Kilo",
+        binary: "kilo",
+        extra_args: &[],
+    },
     V1Runtime {
         id: "kiro",
         name: "Kiro",
         binary: "kiro-cli",
         extra_args: &["chat", "--tui"],
     },
-    V1Runtime { id: "crush", name: "Crush", binary: "crush", extra_args: &[] },
-    V1Runtime { id: "aug", name: "Auggie", binary: "auggie", extra_args: &[] },
-    V1Runtime { id: "codebuff", name: "Codebuff", binary: "codebuff", extra_args: &[] },
+    V1Runtime {
+        id: "crush",
+        name: "Crush",
+        binary: "crush",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "aug",
+        name: "Auggie",
+        binary: "auggie",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "codebuff",
+        name: "Codebuff",
+        binary: "codebuff",
+        extra_args: &[],
+    },
     V1Runtime {
         id: "command-code",
         name: "Command Code",
         binary: "command-code",
         extra_args: &["--trust"],
     },
-    V1Runtime { id: "continue", name: "Continue", binary: "cn", extra_args: &[] },
-    V1Runtime { id: "droid", name: "Droid", binary: "droid", extra_args: &[] },
-    V1Runtime { id: "qwen-code", name: "Qwen Code", binary: "qwen", extra_args: &[] },
-    V1Runtime { id: "rovo", name: "Rovo", binary: "rovo", extra_args: &[] },
-    V1Runtime { id: "openclaw", name: "OpenClaw", binary: "openclaw", extra_args: &[] },
-    V1Runtime { id: "devin", name: "Devin", binary: "devin", extra_args: &[] },
-    V1Runtime { id: "ante", name: "Ante", binary: "ante", extra_args: &[] },
-    V1Runtime { id: "prime-agent", name: "Prime Agent", binary: "prime-agent", extra_args: &[] },
-    V1Runtime { id: "omp", name: "OMP", binary: "omp", extra_args: &[] },
-    V1Runtime { id: "antigravity", name: "Antigravity", binary: "agy", extra_args: &[] },
+    V1Runtime {
+        id: "continue",
+        name: "Continue",
+        binary: "cn",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "droid",
+        name: "Droid",
+        binary: "droid",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "qwen-code",
+        name: "Qwen Code",
+        binary: "qwen",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "rovo",
+        name: "Rovo",
+        binary: "rovo",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "openclaw",
+        name: "OpenClaw",
+        binary: "openclaw",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "devin",
+        name: "Devin",
+        binary: "devin",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "ante",
+        name: "Ante",
+        binary: "ante",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "prime-agent",
+        name: "Prime Agent",
+        binary: "prime-agent",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "omp",
+        name: "OMP",
+        binary: "omp",
+        extra_args: &[],
+    },
+    V1Runtime {
+        id: "antigravity",
+        name: "Antigravity",
+        binary: "agy",
+        extra_args: &[],
+    },
 ];
 
 pub fn spec_for(id: &str) -> Option<&'static V1Runtime> {
@@ -86,7 +242,11 @@ impl GenericCliAdapter {
         }
     }
 
-    pub fn with_binary(id: impl Into<String>, binary: impl Into<String>, extra_args: Vec<String>) -> Self {
+    pub fn with_binary(
+        id: impl Into<String>,
+        binary: impl Into<String>,
+        extra_args: Vec<String>,
+    ) -> Self {
         let id = id.into();
         Self {
             name: id.clone(),
@@ -219,5 +379,23 @@ mod tests {
     fn trae_binary_is_traecli() {
         let adapter = GenericCliAdapter::for_id("trae");
         assert_eq!(adapter.binary, "traecli");
+    }
+
+    #[test]
+    fn mistral_vibe_binary_is_vibe() {
+        let adapter = GenericCliAdapter::for_id("mistral-vibe");
+        assert_eq!(adapter.binary, "vibe");
+        assert_eq!(adapter.name(), "Mistral Vibe");
+    }
+
+    #[test]
+    fn is_available_uses_path_not_version() {
+        let missing = GenericCliAdapter::for_id("capilot-definitely-missing-binary-xyz");
+        assert!(!missing.is_available());
+        #[cfg(unix)]
+        {
+            let bash = GenericCliAdapter::with_binary("bash-probe", "bash", vec![]);
+            assert!(bash.is_available());
+        }
     }
 }

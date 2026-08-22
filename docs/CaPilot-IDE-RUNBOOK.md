@@ -134,7 +134,7 @@ IDE 遵循 CaPilot 主仓库的 **LUCY styleguide**（8-bit Pixel × Apple Smoot
 >
 > 已落地（2026-08-20）：**主题编辑器进入构建版本**。
 > - 浮动主题编辑器不再被 `import.meta.env.DEV` 裁掉；`pnpm tauri build` 会打进生产包。
-> - 设置 → 外观 → 「显示主题编辑器」开关（默认关，写入 `localStorage` `capilot.themeLab.enabled`）。Ctrl+Shift+T 同步翻转该开关。
+> - 设置 → 外观 → 「左下角入口」开关（默认关，写入 `localStorage` `capilot.themeLab.enabled`）只控制左下角入口按钮，不直接打开编辑器。点按钮或 Ctrl+Shift+T（入口开启时）打开/收起面板（`capilot.themeLab.open`）。
 > - 标注工具仍仅 `tauri dev`。
 > - 保存：开发态仍覆盖仓库 `themes/<id>.json`；安装包只读 `$RESOURCE/themes/`，写入 `<data_root>/themes/`（运行时目录仍读 Vite 内置 glob，磁盘副本供导出 / 后续热加载）。
 >
@@ -175,6 +175,18 @@ IDE 遵循 CaPilot 主仓库的 **LUCY styleguide**（8-bit Pixel × Apple Smoot
 > - **Tab 闪烁**：`tabFlash` 以 agentId 为键，DOM 以 `tab.id` 注册——解析时同时匹配 `tab.id` 与 `tab.agentId`（`TabBar.tsx`）。
 > - **Todo 卡在 assigned / 无提示音**：完成逻辑原依赖 hook `working→idle`，1s 轮询常漏掉短暂 `working`。新增 `turnPending`（`markAgentSubmitted` 开启）：在提交后窗口内，看到 terminal idle/dormant 且（明确 edge / 提交后有活动再安静 / 或 ≥8s）即完成——移动 assigned→待处理、chime、flash。会话 `done`/`failed` 仍会完成。
 > - 关键：`ui/state/store.ts`（`turnPending` / `setHookStatus` / `notifyAgentTransition`）、`ui/state/sound.ts`、`Composer.tsx`、`TabBar.tsx`。
+
+> 已落地（2026-08-21）：**完成反馈两种模式**。
+> - 设置 → 外观 → 「完成反馈」：`仅待办`（默认，现有行为）/ `每次完成`。
+> - 两种模式都会在 turn 结束时闪标签、播提示音（仍受「完成提示音」开关控制）。
+> - `仅待办`：待处理 tag 只来自拖到会话的待办。
+> - `每次完成`：Composer / 终端发送 / 待办拖放都会在 `sendPromptToAgent` 里记一条 in-flight assigned tag，turn 结束进待处理。已有拖放待办时不重复建 tag。
+> - 设置键 `feedback_mode`（`todo` | `always`）。
+
+> 已落地（2026-08-21）：**自定义完成提示音**。
+> - 设置 → 外观 → 「提示音」：开关仍控制是否播放；可「选择音频」指向本地文件（mp3/wav/ogg/m4a/flac/…）。
+> - 路径存在 `localStorage` `capilot.sound.path`（与壁纸一样，不进 settings KV 白名单）。
+> - `sound.ts` 经 `convertFileSrc` 解码到同一 AudioContext；失败则回退主题合成音。试听按钮走同一播放路径。
 
 ### 待开发项
 

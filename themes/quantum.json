@@ -15,8 +15,8 @@
     "--bg2": "#0E1020",
     "--bg3": "#17182D",
     "--bg4": "#242342",
-    "--ink": "#ECEAFF",
-    "--ink2": "#C2BCE2",
+    "--ink": "#ffffff",
+    "--ink2": "#f6f5f4",
     "--muted": "#817DA6",
     "--rule": "#2A2850",
     "--rule2": "#494382",
@@ -47,7 +47,7 @@
     "--lane-4": "#75D79A",
     "--lane-5": "#F1BD68",
     "--lane-6": "#8C9DFF",
-    "--pl-fg": "#D6D2EB",
+    "--pl-fg": "#ffffff",
     "--pl-black": "#0B0C18",
     "--pl-red": "#F27E9A",
     "--pl-green": "#75D79A",
@@ -78,7 +78,8 @@
     "--panel-shadow": "0 0 0 1px #050611, 4px 4px 0 #050611, 0 0 18px rgb(154 134 255 / 0.09)",
     "--shadow-hard": "4px 4px 0 #050611",
     "--wallpaper-surface-mix": "0.72",
-    "--wallpaper-chrome-mix": "0.78"
+    "--wallpaper-chrome-mix": "0.78",
+    "--canvas-veil": "0"
   },
   "wallpaper": {
     "file": "capilot.mp4"

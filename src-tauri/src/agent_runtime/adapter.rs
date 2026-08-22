@@ -186,8 +186,27 @@ pub fn ensure_cli_path() {
                 home.join("n/bin"),
                 home.join(".volta/bin"),
                 home.join(".asdf/shims"),
-                home.join(".local/share/pnpm"),
+                home.join(".fnm/aliases/default/bin"),
+                home.join(".local/share/mise/shims"),
+                home.join(".yarn/bin"),
+                home.join(".bun/bin"),
             ]);
+            #[cfg(target_os = "macos")]
+            candidates.push(home.join("Library/pnpm"));
+            #[cfg(not(target_os = "macos"))]
+            candidates.push(home.join(".local/share/pnpm"));
+            if let Ok(entries) = std::fs::read_dir(home.join(".nvm/versions/node")) {
+                let mut versions: Vec<PathBuf> = entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir())
+                    .collect();
+                versions.sort();
+                versions.reverse();
+                for ver in versions {
+                    candidates.push(ver.join("bin"));
+                }
+            }
         }
         #[cfg(target_os = "macos")]
         {
@@ -211,6 +230,7 @@ pub fn ensure_cli_path() {
                 candidates.push(local.join("npm"));
                 // pnpm's global bin dir (user-level).
                 candidates.push(local.join("pnpm"));
+                candidates.push(local.join("Yarn").join("bin"));
             }
         }
 
@@ -221,10 +241,7 @@ pub fn ensure_cli_path() {
 
         let current = std::env::var_os("PATH").unwrap_or_default();
         let current_str = current.to_string_lossy();
-        let existing: Vec<&str> = current_str
-            .split(sep)
-            .filter(|s| !s.is_empty())
-            .collect();
+        let existing: Vec<&str> = current_str.split(sep).filter(|s| !s.is_empty()).collect();
 
         let mut prepend = Vec::new();
         for dir in candidates {
@@ -472,10 +489,12 @@ fn kill_probe_tree(child: &mut std::process::Child) {
     let _ = child.kill();
 }
 
-/// `true` when `<cmd> --version` exits 0 within [`CLI_PROBE_TIMEOUT`].
+/// `true` when `cmd` resolves to a launchable file on PATH.
 ///
-/// On Windows this walks `PATH`+`PATHEXT` and wraps npm `.cmd` shims via
-/// `cmd.exe` — see [`crate::agent_runtime::executable`].
+/// Detection is a filesystem lookup (Orca-style), not a `--version` spawn —
+/// a wedged CLI must not hide an installed agent. On Windows this still
+/// walks `PATH`+`PATHEXT` and prefers `.cmd` over npm's Unix shim; see
+/// [`crate::agent_runtime::executable`].
 pub fn cli_available(cmd: &str) -> bool {
     crate::agent_runtime::executable::cli_available(cmd)
 }

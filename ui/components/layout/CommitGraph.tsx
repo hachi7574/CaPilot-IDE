@@ -84,6 +84,8 @@ interface CommitGraphProps {
   currentBranch?: string;
 }
 
+const POINTER_DRAG_THRESHOLD = 5;
+
 /**
  * Self-drawn SVG commit tree (no external graph library).
  *
@@ -111,6 +113,13 @@ export function CommitGraph({ log, onCommitContextMenu, menuOpen = false, curren
   // Custom hover tooltip (the native SVG <title> renders a huge black GTK box
   // on WebKitGTK). Positioned below the hovered row; cleared on mouseleave.
   const [hover, setHover] = useState<{ left: number; top: number; c: GitLogEntry } | null>(null);
+  const [ghost, setGhost] = useState<{ hash: string; x: number; y: number } | null>(null);
+  const dragRef = useRef<{
+    hash: string;
+    startX: number;
+    startY: number;
+    active: boolean;
+  } | null>(null);
   const placed = useMemo(() => layout(log, currentBranch), [log, currentBranch]);
   const { commits, numCols, maxRow } = placed;
 
@@ -133,6 +142,75 @@ export function CommitGraph({ log, onCommitContextMenu, menuOpen = false, curren
   useEffect(() => {
     if (menuOpen) setHover(null);
   }, [menuOpen]);
+
+  const resolveHashDropTarget = (clientX: number, clientY: number) => {
+    const under = document.elementFromPoint(clientX, clientY);
+    if (!under) return null;
+    const agentEl = under.closest("[data-todo-drop-agent]") as HTMLElement | null;
+    if (agentEl) {
+      const agentId = agentEl.getAttribute("data-todo-drop-agent");
+      if (agentId) return { kind: "terminal" as const, el: agentEl, agentId };
+    }
+    const composerEl = under.closest('[data-todo-drop="composer"]') as HTMLElement | null;
+    if (composerEl) return { kind: "composer" as const, el: composerEl };
+    return null;
+  };
+
+  const onRowPointerDown = (e: React.PointerEvent<HTMLDivElement>, hash: string) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    dragRef.current = { hash, startX: e.clientX, startY: e.clientY, active: false };
+
+    const clearHover = () => {
+      document
+        .querySelectorAll(".commit-drop-hover")
+        .forEach((el) => el.classList.remove("commit-drop-hover"));
+    };
+
+    const onMove = (ev: PointerEvent) => {
+      const st = dragRef.current;
+      if (!st || st.hash !== hash) return;
+      const dx = ev.clientX - st.startX;
+      const dy = ev.clientY - st.startY;
+      if (!st.active) {
+        if (Math.hypot(dx, dy) < POINTER_DRAG_THRESHOLD) return;
+        st.active = true;
+        setHover(null);
+        document.body.classList.add("commit-pointer-dragging");
+      }
+      setGhost({ hash: st.hash, x: ev.clientX, y: ev.clientY });
+      clearHover();
+      const target = resolveHashDropTarget(ev.clientX, ev.clientY);
+      target?.el.classList.add("commit-drop-hover");
+    };
+
+    const finish = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      document.body.classList.remove("commit-pointer-dragging");
+      clearHover();
+      const st = dragRef.current;
+      dragRef.current = null;
+      setGhost(null);
+      if (!st?.active) return;
+      const target = resolveHashDropTarget(ev.clientX, ev.clientY);
+      if (!target) return;
+      window.dispatchEvent(
+        new CustomEvent("capilot:commit-drop", {
+          detail: {
+            kind: target.kind,
+            hash: st.hash,
+            agentId: target.kind === "terminal" ? target.agentId : null,
+          },
+        })
+      );
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+  };
 
   if (commits.length === 0) return null;
 
@@ -287,6 +365,7 @@ export function CommitGraph({ log, onCommitContextMenu, menuOpen = false, curren
               setHover({ left, top, c: p.c });
             }}
             onMouseLeave={() => setHover(null)}
+            onPointerDown={(e) => onRowPointerDown(e, p.c.hash)}
           >
             <span
               className="gg-subject"
@@ -306,6 +385,15 @@ export function CommitGraph({ log, onCommitContextMenu, menuOpen = false, curren
           <span className="gg-tip-hash" style={{ color: hoverColor }}>{hover.c.hash.slice(0, 7)}</span>
           <span className="gg-tip-subject">{clip(hover.c.subject, 34)}</span>
           <span className="gg-tip-meta">{hover.c.author} · {fmtTsFull(hover.c.ts)}</span>
+        </div>
+      )}
+      {ghost && (
+        <div
+          className="commit-drag-ghost"
+          style={{ left: ghost.x + 12, top: ghost.y + 12 }}
+          aria-hidden
+        >
+          {ghost.hash.slice(0, 7)}
         </div>
       )}
     </div>

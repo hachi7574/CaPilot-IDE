@@ -1,19 +1,42 @@
+import { useEffect, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import type { ReactNode } from "react";
 import "./dev-tools-dock.css";
 
 /**
- * Bottom-left chip row for hidden dev tools (Theme Lab / Annotations).
- * Portaled to document.body so it sits above app chrome.
+ * Bottom-left chip row for hidden tools (Theme Editor / Annotations).
+ * Multiple callers share one dock so chips sit in a single row instead of
+ * stacking on top of each other.
  */
+let sharedDock: HTMLDivElement | null = null;
+
+function ensureDock(): HTMLDivElement {
+  if (sharedDock && document.body.contains(sharedDock)) return sharedDock;
+  const el = document.createElement("div");
+  el.className = "dev-tools-dock";
+  el.setAttribute("data-dev-tools-dock", "");
+  document.body.appendChild(el);
+  sharedDock = el;
+  return el;
+}
+
 export function DevToolsDock({ children }: { children: ReactNode }) {
-  const dock = (
-    <div className="dev-tools-dock" data-dev-tools-dock>
-      {children}
-    </div>
-  );
-  if (typeof document === "undefined") return dock;
-  return createPortal(dock, document.body);
+  const [slot, setSlot] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    const dock = ensureDock();
+    const host = document.createElement("div");
+    host.style.display = "contents";
+    dock.appendChild(host);
+    setSlot(host);
+    return () => {
+      host.remove();
+      if (dock.childElementCount === 0) {
+        dock.remove();
+        if (sharedDock === dock) sharedDock = null;
+      }
+    };
+  }, []);
+  if (!slot) return null;
+  return createPortal(children, slot);
 }
 
 export function DevToolChip({

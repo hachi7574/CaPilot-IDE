@@ -1239,6 +1239,24 @@ export function XTermPanel({
       window.removeEventListener("capilot:path-drop", onPathDrop as EventListener);
   }, [active, agentId, insertPathToPty]);
 
+  useEffect(() => {
+    if (!active) return;
+    const onCommitDrop = (ev: Event) => {
+      const detail = (ev as CustomEvent).detail as
+        | { kind?: string; hash?: string; agentId?: string | null }
+        | undefined;
+      if (!detail || detail.kind !== "terminal" || !detail.hash) return;
+      if (detail.agentId && detail.agentId !== agentId) return;
+      useStore.getState().markAgentActive(agentId);
+      invoke("agent_write", { id: agentId, data: ` ${detail.hash}`, raw: true }).catch(
+        () => {}
+      );
+    };
+    window.addEventListener("capilot:commit-drop", onCommitDrop as EventListener);
+    return () =>
+      window.removeEventListener("capilot:commit-drop", onCommitDrop as EventListener);
+  }, [active, agentId]);
+
   // A resident Claude / OpenCode panel can sit at `visibility: hidden` while
   // another tab is active. WebView2 / WebKit may drop the canvas backing store
   // in that state; fit + refresh when the tab returns so the last TUI frame
@@ -1259,17 +1277,22 @@ export function XTermPanel({
     return () => cancelAnimationFrame(raf);
   }, [active]);
 
-  // F1 focus toggle (Composer → terminal). Only the active tab's terminal
-  // responds, and only to requests the shared counter hasn't consumed yet — so
-  // neither a freshly-mounted panel nor a reactivated resident TUI panel
-  // steals focus for a stale request.
+  // F1 focus toggle (Composer → terminal). A request with `agentId` is for that
+  // session only (canvas cards). Without it, only the active tab's terminal
+  // responds. Shared seq so a freshly-mounted / reactivated panel can't steal
+  // a stale request.
   useEffect(() => {
-    if (!active || !focusRequest) return;
+    if (!focusRequest) return;
     if (focusRequest.target !== "terminal") return;
     if (focusRequest.seq <= lastFocusHandledSeq) return;
+    if (focusRequest.agentId) {
+      if (focusRequest.agentId !== agentId) return;
+    } else if (!active) {
+      return;
+    }
     lastFocusHandledSeq = focusRequest.seq;
     termRef.current?.focus();
-  }, [focusRequest, active]);
+  }, [focusRequest, active, agentId]);
 
   // Ctrl+F routed from the window (when the terminal itself does not have
   // focus). Same seq discipline as the F1 handler above.

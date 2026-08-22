@@ -1,12 +1,32 @@
 /**
- * Completion chime (Web Audio, no asset files). When an agent runtime flips out
- * of 运行中 the app plays a short confirmation sound and flashes the tab label.
+ * Completion chime. When an agent runtime flips out of 运行中 the app plays a
+ * short confirmation sound and flashes the tab label.
  *
- * The chime is synthesized so it costs nothing to ship. Each theme maps to its
- * own `SoundConfig`; for now every theme shares the single confirmation sound
- * (confirmation-001) — add a `THEME_SOUNDS[themeId]` entry to give a theme its
- * own voice.
+ * Default: a synthesized two-note ding (no asset files). Settings can point at
+ * a custom audio file; that path is converted via `convertFileSrc` and decoded
+ * into the same AudioContext. Decode / play failures fall back to the theme
+ * chime so a missing file never silences the notification.
+ *
+ * Each theme maps to its own `SoundConfig`; missing ids share confirmation-001
+ * — add a `THEME_SOUNDS[themeId]` entry to give a theme its own voice.
  */
+
+import { convertFileSrc } from "@tauri-apps/api/core";
+
+/** Extensions accepted by Settings → 提示音 → 选择文件. */
+export const SOUND_AUDIO_EXTS = [
+  "mp3",
+  "wav",
+  "ogg",
+  "oga",
+  "m4a",
+  "aac",
+  "flac",
+  "opus",
+  "webm",
+] as const;
+
+const CUSTOM_DECODE_MAX_BYTES = 8 * 1024 * 1024;
 
 export interface SoundConfig {
   /** Two notes (Hz) played in sequence — the confirmation "ding". */
@@ -56,6 +76,9 @@ export function soundForTheme(themeId: string): SoundConfig {
 
 let audioCtx: AudioContext | null = null;
 let unlockBound = false;
+let customCache: { path: string; buffer: AudioBuffer } | null = null;
+let customSource: AudioBufferSourceNode | null = null;
+let htmlAudio: HTMLAudioElement | null = null;
 
 /** Bind a one-shot user-gesture unlock so the first completion chime is not
  *  dropped by a still-suspended AudioContext (WebView policy). */
@@ -92,10 +115,21 @@ function audioContext(): AudioContext | null {
   return audioCtx;
 }
 
-/** Play the theme-mapped confirmation chime. Safe no-op when Web Audio is
- *  unavailable. Resumes a suspended context (WebView keeps it suspended until
- *  a user gesture has unlocked audio — after first click/key, resume works). */
-export function playConfirmationSound(themeId: string): void {
+/** Play the confirmation chime. `customPath` (absolute filesystem path) wins
+ *  over the theme-mapped oscillator; a missing / unreadable file falls back. */
+export function playConfirmationSound(
+  themeId: string,
+  customPath?: string | null
+): void {
+  const path = customPath?.trim() || null;
+  if (path) {
+    void playCustomFile(path).catch(() => playSynthesized(themeId));
+    return;
+  }
+  playSynthesized(themeId);
+}
+
+function playSynthesized(themeId: string): void {
   const ac = audioContext();
   if (!ac) return;
   // Fire-and-forget resume; schedule notes on the (possibly still-resuming)
@@ -111,6 +145,96 @@ export function playConfirmationSound(themeId: string): void {
     return;
   }
   playNow(ac, themeId);
+}
+
+function stopCustomPlayback(): void {
+  if (customSource) {
+    try {
+      customSource.stop();
+    } catch {
+      // already ended
+    }
+    customSource = null;
+  }
+  if (!htmlAudio) return;
+  try {
+    htmlAudio.pause();
+    htmlAudio.removeAttribute("src");
+    htmlAudio.load();
+  } catch {
+    // ignore
+  }
+  htmlAudio = null;
+}
+
+async function playCustomFile(path: string): Promise<void> {
+  stopCustomPlayback();
+  const ac = audioContext();
+  if (ac) {
+    if (ac.state === "suspended") {
+      try {
+        await ac.resume();
+      } catch {
+        // still try decode / HTMLAudio below
+      }
+    }
+    const buffer = await loadCustomBuffer(ac, path);
+    if (buffer) {
+      const src = ac.createBufferSource();
+      src.buffer = buffer;
+      src.connect(ac.destination);
+      src.onended = () => {
+        if (customSource === src) customSource = null;
+      };
+      customSource = src;
+      src.start();
+      return;
+    }
+  }
+  await playHtmlAudio(path);
+}
+
+async function loadCustomBuffer(
+  ac: AudioContext,
+  path: string
+): Promise<AudioBuffer | null> {
+  if (customCache?.path === path) return customCache.buffer;
+  let url: string;
+  try {
+    url = convertFileSrc(path);
+  } catch {
+    return null;
+  }
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const arr = await res.arrayBuffer();
+    if (arr.byteLength === 0 || arr.byteLength > CUSTOM_DECODE_MAX_BYTES) {
+      return null;
+    }
+    // Some WebKits detach the buffer; copy before decode.
+    const buffer = await ac.decodeAudioData(arr.slice(0));
+    customCache = { path, buffer };
+    return buffer;
+  } catch {
+    return null;
+  }
+}
+
+function playHtmlAudio(path: string): Promise<void> {
+  let url: string;
+  try {
+    url = convertFileSrc(path);
+  } catch (err) {
+    return Promise.reject(err);
+  }
+  return new Promise((resolve, reject) => {
+    const a = new Audio(url);
+    htmlAudio = a;
+    a.onended = () => resolve();
+    a.onerror = () => reject(new Error("custom sound failed"));
+    void a.play().then(() => resolve()).catch(reject);
+  });
 }
 
 function playNow(ac: AudioContext, themeId: string): void {

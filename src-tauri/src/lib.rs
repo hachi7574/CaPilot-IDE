@@ -2160,9 +2160,11 @@ async fn update_download_and_install(
 
 #[tauri::command]
 async fn runtime_list_available() -> Vec<agent_runtime::adapter::RuntimeInfo> {
-    // Detection shells out to each CLI (`--version`, auth, model catalogs).
-    // Keep it off the async runtime so a slow/wedged binary can't stall IPC,
-    // and isolate each runtime so one hang still returns the others.
+    // Availability is a PATH lookup (Orca-style). Version / auth / model
+    // catalogs still shell out, so keep them off the async runtime and
+    // isolate each CLI so a hang still returns the others. A slow probe
+    // must not flip `available` to false — that's how Settings used to
+    // under-count installed agents against Orca's 19.
     tauri::async_runtime::spawn_blocking(|| {
         agent_runtime::adapter::ensure_cli_path();
         let ids = known_runtimes();
@@ -2173,13 +2175,22 @@ async fn runtime_list_available() -> Vec<agent_runtime::adapter::RuntimeInfo> {
             let id_owned = (*id).to_string();
             std::thread::spawn(move || {
                 let adapter = get_adapter(&id_owned);
+                let available = adapter.is_available();
                 let info = agent_runtime::adapter::RuntimeInfo {
                     id: adapter.id().to_string(),
                     name: adapter.name().to_string(),
-                    available: adapter.is_available(),
-                    authenticated: adapter.is_authenticated(),
-                    version: adapter.version(),
-                    models: adapter.list_models(),
+                    available,
+                    authenticated: if available {
+                        adapter.is_authenticated()
+                    } else {
+                        false
+                    },
+                    version: if available { adapter.version() } else { None },
+                    models: if available {
+                        adapter.list_models()
+                    } else {
+                        vec![]
+                    },
                     permission_modes: adapter.list_permission_modes(),
                     thinking_options: adapter.list_thinking_options(),
                 };
@@ -2211,10 +2222,11 @@ async fn runtime_list_available() -> Vec<agent_runtime::adapter::RuntimeInfo> {
                     let id = ids[i];
                     log::warn!("runtime probe timed out for {id}");
                     let adapter = get_adapter(id);
+                    let available = adapter.is_available();
                     agent_runtime::adapter::RuntimeInfo {
                         id: adapter.id().to_string(),
                         name: adapter.name().to_string(),
-                        available: false,
+                        available,
                         authenticated: false,
                         version: None,
                         models: vec![],
@@ -2638,6 +2650,82 @@ async fn fs_list(dir: String) -> Result<Vec<FsEntryBrief>, String> {
         });
     }
     Ok(entries)
+}
+
+/// Names of executables on `PATH` (and Windows `PATHEXT` siblings). Read-only:
+/// used by Composer to autocomplete `sudo` / `ifconfig` / `poweroff` (and
+/// cmd/PowerShell equivalents). Does not follow [`persistence::path_is_allowed`]
+/// because `/usr/bin` is a system dir the IDE otherwise refuses to browse.
+#[tauri::command]
+fn shell_list_commands() -> Vec<String> {
+    agent_runtime::adapter::ensure_cli_path();
+    let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+
+    #[cfg(windows)]
+    let exts: Vec<String> = {
+        let pathext = std::env::var_os("PATHEXT")
+            .map(|v| v.to_string_lossy().into_owned())
+            .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".to_string());
+        pathext
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                if s.starts_with('.') {
+                    s.to_ascii_lowercase()
+                } else {
+                    format!(".{}", s.to_ascii_lowercase())
+                }
+            })
+            .collect()
+    };
+
+    for dir in std::env::split_paths(&path_var) {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let name = entry.file_name();
+            let Some(raw) = name.to_str() else {
+                continue;
+            };
+            if raw.is_empty() || raw.starts_with('.') {
+                continue;
+            }
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_dir() {
+                continue;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let Ok(meta) = entry.metadata() else {
+                    continue;
+                };
+                if meta.permissions().mode() & 0o111 == 0 {
+                    continue;
+                }
+                names.insert(raw.to_string());
+            }
+            #[cfg(windows)]
+            {
+                let lower = raw.to_ascii_lowercase();
+                if let Some(dot) = lower.rfind('.') {
+                    let ext = &lower[dot..];
+                    if exts.iter().any(|e| e == ext) {
+                        names.insert(raw[..dot].to_string());
+                    }
+                }
+            }
+        }
+        if names.len() >= 8000 {
+            break;
+        }
+    }
+    names.into_iter().take(8000).collect()
 }
 
 /// Recursively search file *contents* under `root_path`. Path safety mirrors
@@ -4691,6 +4779,7 @@ pub fn run() {
             theme_lab_save_cartridge,
             theme_lab_import_wallpaper,
             fs_list,
+            shell_list_commands,
             fs_search,
             fs_create_file,
             fs_create_dir,

@@ -6,11 +6,13 @@ import {
   DEFAULT_WALLPAPER_OPACITY,
 } from "./themes";
 import { playConfirmationSound } from "./sound";
+import { notify } from "./notify";
 import {
   type Locale,
   DEFAULT_LOCALE,
   isLocale,
   setI18nLocale,
+  t,
 } from "../i18n";
 import {
   type Chord,
@@ -211,6 +213,61 @@ export const SUBMIT_FLASH_MS = 1500;
  *  Kept small (0.5s) so a future non-zero window still tracks liveness without
  *  re-rendering the tab strip on every PTY chunk. */
 export const ACTIVE_STAMP_THROTTLE_MS = 500;
+
+/**
+ * Non-hook CLIs (CodeBuddy and the other v1 generics) have no working→idle
+ * event. After Composer submits, wait until PTY output has been quiet this
+ * long, then fire the same completion UX the hook path uses. Longer than
+ * `ACTIVE_WINDOW_MS` so a brief thinking pause doesn't count as "done".
+ */
+export const TURN_SETTLE_MS = 4000;
+
+const SHELL_RUNTIME_IDS = new Set([
+  "shell",
+  "powershell",
+  "pwsh",
+  "cmd",
+  "bash",
+  "bash-rc",
+]);
+
+function isShellRuntimeId(runtime: string | undefined): boolean {
+  if (!runtime) return false;
+  const id = runtime.toLowerCase();
+  return SHELL_RUNTIME_IDS.has(id) || id.startsWith("bash");
+}
+
+/**
+ * Printable bytes in a PTY chunk after stripping CSI/OSC. Idle TUI status-line
+ * redraws are mostly escapes; a real assistant burst has leftover glyphs.
+ * Used so `settlePendingTurns` isn't reset by a spinner that never goes quiet.
+ */
+function ptyContentByteCount(data: number[]): number {
+  let n = 0;
+  for (let i = 0; i < data.length; i++) {
+    const b = data[i]!;
+    if (b !== 0x1b) {
+      if (b >= 0x20 && b !== 0x7f) n++;
+      continue;
+    }
+    const next = data[++i];
+    if (next === 0x5b) {
+      i++;
+      while (i < data.length && (data[i]! < 0x40 || data[i]! > 0x7e)) i++;
+    } else if (next === 0x5d) {
+      i++;
+      while (i < data.length && data[i] !== 0x07 && data[i] !== 0x1b) i++;
+      if (data[i] === 0x1b) i++;
+    }
+  }
+  return n;
+}
+
+const TURN_CONTENT_MIN_BYTES = 24;
+
+/** Last post-submit *content* burst (not CSI idle redraws). Module-local so a
+ *  spinning status line doesn't re-render the store on every tick. */
+const pendingTurnContentAt = new Map<string, number>();
 
 export interface RuntimeInfo {
   id: string;
@@ -769,7 +826,12 @@ interface AppState {
   composerOpen: boolean;
   /** One-shot focus directive for the F1 input↔terminal toggle. `seq` bumps on
    *  every request so subscribers can skip stale/mount-time values. */
-  focusRequest: { target: "composer" | "terminal"; seq: number } | null;
+  focusRequest: {
+    target: "composer" | "terminal";
+    seq: number;
+    /** When set, only this agent's XTermPanel consumes the request (canvas cards). */
+    agentId?: string;
+  } | null;
   /** One-shot Ctrl+F search directive routed to the active panel (terminal or
    *  editor). Same `seq` discipline as `focusRequest`. */
   searchRequest: { target: "terminal" | "editor"; seq: number } | null;
@@ -852,12 +914,29 @@ interface AppState {
 
   /** Whether the running → other transition chime is enabled (default true). */
   soundEnabled: boolean;
+  /**
+   * Absolute path of a custom completion-chime file. `null` uses the
+   * theme-mapped synthesized ding. Persisted in localStorage like wallpaper.
+   */
+  soundPath: string | null;
 
   /**
-   * Theme Editor floating panel. Off by default in production; Settings →
-   * Appearance toggles it. Independent of the DEV-only annotations tray.
+   * Completion-feedback mode.
+   * - `todo` — today's behaviour: chime + tab flash on every turn end; 待处理
+   *   tags only for prompts that came from a dragged todo.
+   * - `always` — same chime + flash, and every prompt (Composer, terminal
+   *   send, todo drop) also lands a 待处理 tag when the turn ends.
+   */
+  feedbackMode: "todo" | "always";
+
+  /**
+   * Theme Editor bottom-left entry chip. Off by default; Settings → Appearance
+   * toggles the chip, not the mixer itself. Independent of the DEV-only
+   * annotations tray.
    */
   themeLabEnabled: boolean;
+  /** Whether the Theme Editor mixer is open. Only meaningful when the chip is on. */
+  themeLabOpen: boolean;
 
   /** Runtime spawned by Ctrl+T (preference). The effective pick is resolved by
    *  `resolveCtrlTRuntime` (configured → claude → bash → hint). */
@@ -914,8 +993,16 @@ interface AppState {
   markAgentActive: (id: string) => void;
   /** Stamp an agent as having just received a submitted prompt. Sets the
    *  `agentSubmittedAt` flash marker so the tab reads 运行中 while the
-   *  lifecycle hook catches up; clears the activity-based wakeup marker. */
+   *  lifecycle hook catches up; clears the activity-based wakeup marker.
+   *  Also the turn-pending flag used by `settlePendingTurns`. */
   markAgentSubmitted: (id: string) => void;
+  /**
+   * For Composer-submitted turns on CLIs with no lifecycle hook: if PTY
+   * output has been quiet for `TURN_SETTLE_MS` after the submit, fire the
+   * completion chime / tab flash / 待处理 tag. No-op for shells and for
+   * sessions whose hook already settled the turn.
+   */
+  settlePendingTurns: () => void;
   /** Update (or clear with `null`) an agent's hook-reported lifecycle status.
    *  Pass `{ silent: true }` for offline journal replay so historical
    *  `working → idle` edges do not chime / flash as if they just happened. */
@@ -959,7 +1046,7 @@ interface AppState {
   setSplitRatio: (nodeId: string, ratio: number) => void;
   setDraggedTabId: (id: string | null) => void;
   toggleComposer: () => void;
-  requestFocus: (target: "composer" | "terminal") => void;
+  requestFocus: (target: "composer" | "terminal", agentId?: string) => void;
   requestSearch: (target: "terminal" | "editor") => void;
   /** Ask the editor showing `filePath` to scroll its cursor to line/column. */
   requestReveal: (filePath: string, line: number, column?: number) => void;
@@ -1038,14 +1125,26 @@ interface AppState {
     agentId: string,
     sessionName: string | null
   ) => void;
+  /**
+   * In `always` feedback mode, mint (or reuse) an in-flight assigned tag for
+   * this prompt so the turn lands in 待处理. No-op in `todo` mode, and no-op
+   * when the session already has an assigned tag (a dragged todo).
+   */
+  trackPromptAsTodo: (agentId: string, text: string) => void;
   deleteTodo: (id: string) => void;
   toggleTodoScope: () => void;
   /** Persist the startup auto-check toggle (Settings → 关于). */
   setAutoCheckUpdate: (enabled: boolean) => void;
   /** Persist the completion-chime toggle (Settings → 外观与显示). */
   setSoundEnabled: (enabled: boolean) => void;
-  /** Persist Theme Editor visibility (Settings → 外观与显示). */
+  /** Persist a custom completion-chime file path (Settings → 外观与显示). */
+  setSoundPath: (path: string | null) => void;
+  /** Persist the completion-feedback mode (Settings → 外观与显示). */
+  setFeedbackMode: (mode: "todo" | "always") => void;
+  /** Persist the Theme Editor bottom-left chip (Settings → 外观与显示). */
   setThemeLabEnabled: (enabled: boolean) => void;
+  /** Open or hide the Theme Editor mixer (chip / Ctrl+Shift+T). */
+  setThemeLabOpen: (open: boolean) => void;
   shortcuts: Record<ShortcutId, Chord>;
   setShortcut: (id: ShortcutId, chord: Chord) => void;
   resetShortcuts: () => void;
@@ -1063,7 +1162,7 @@ function loadOnboarded(): boolean {
   }
 }
 
-/** Persisted UI font size preset. Fallback: medium ("m"). */
+/** Persisted UI font size preset. Fallback: 中 ("l"). */
 const FONT_SCALE_KEY = "capilot.fontScale";
 const FONT_SCALES: FontScale[] = ["s", "m", "l", "xl", "xxl"];
 function loadFontScale(): FontScale {
@@ -1071,9 +1170,9 @@ function loadFontScale(): FontScale {
     const v = localStorage.getItem(FONT_SCALE_KEY);
     if (v && (FONT_SCALES as string[]).includes(v)) return v as FontScale;
   } catch {
-    // storage unavailable — use base
+    // storage unavailable — use 中
   }
-  return "m";
+  return "l";
 }
 
 /** Persisted UI language. Fallback: Chinese (the historical default). */
@@ -1104,7 +1203,9 @@ function loadThemeId(): ThemeId {
 const WALLPAPER_MODE_KEY = "capilot.wallpaper.mode";
 const WALLPAPER_PATH_KEY = "capilot.wallpaper.path";
 const WALLPAPER_OPACITY_KEY = "capilot.wallpaper.opacity";
+const SOUND_PATH_KEY = "capilot.sound.path";
 const THEME_LAB_ENABLED_KEY = "capilot.themeLab.enabled";
+const THEME_LAB_OPEN_KEY = "capilot.themeLab.open";
 
 function loadThemeLabEnabled(): boolean {
   try {
@@ -1113,6 +1214,17 @@ function loadThemeLabEnabled(): boolean {
     if (v === "0" || v === "false") return false;
   } catch {
     // storage unavailable — hide by default
+  }
+  return false;
+}
+
+function loadThemeLabOpen(): boolean {
+  try {
+    const v = localStorage.getItem(THEME_LAB_OPEN_KEY);
+    if (v === "1" || v === "true") return true;
+    if (v === "0" || v === "false") return false;
+  } catch {
+    // storage unavailable — start from the chip
   }
   return false;
 }
@@ -1129,12 +1241,22 @@ function loadWallpaperMode(): WallpaperMode {
   } catch {
     // storage unavailable
   }
-  return "auto";
+  return "off";
 }
 
 function loadWallpaperPath(): string | null {
   try {
     const value = localStorage.getItem(WALLPAPER_PATH_KEY);
+    if (value && value.trim()) return value;
+  } catch {
+    // storage unavailable
+  }
+  return null;
+}
+
+function loadSoundPath(): string | null {
+  try {
+    const value = localStorage.getItem(SOUND_PATH_KEY);
     if (value && value.trim()) return value;
   } catch {
     // storage unavailable
@@ -1195,11 +1317,11 @@ export function resolveCtrlTRuntime(
 
 // ── New-terminal templates ──────────────────────────────────────
 // The project "+" button opens a picker: OS shells (PowerShell / CMD /
-// Git Bash on Windows; shell / bash on Unix) / Claude / Codex / dsh / Pi /
-// user quick-starts. Built-in agent entries stay in the default list so they
-// reappear when the CLI is installed again; TerminalTemplatePicker hides ones
-// whose runtime reports `available: false`. Custom templates persist locally.
-// (opencode was removed as a selectable runtime — see `known_runtimes`.)
+// Git Bash on Windows; shell / bash on Unix) / Claude / Codex / OpenCode /
+// dsh / Pi / user quick-starts. Built-in agent entries stay in the default
+// list so they reappear when the CLI is installed again;
+// TerminalTemplatePicker hides ones whose runtime reports `available: false`.
+// Custom templates persist locally.
 
 /** A new-terminal template shown in the project "+" picker. `command` is run
  *  after the shell starts (shell / bash*) / ignored for agent runtimes;
@@ -1215,9 +1337,9 @@ export interface TermTemplate {
 const TERM_TEMPLATES_KEY = "capilot.termTemplates";
 const ENABLED_RUNTIMES_KEY = "capilot.enabledRuntimes";
 
-/** Runtimes the user turned on in Settings. `null` = never configured, so every
- *  currently-detected runtime counts as enabled (existing installs keep their
- *  `+` picker). After the first toggle we persist an explicit id list. */
+// user quick-starts. Built-in agent entries stay in the default list so they
+// reappear when the CLI is installed again; TerminalTemplatePicker hides ones
+// whose runtime reports `available: false`. Custom templates persist locally.
 function loadEnabledRuntimes(): string[] | null {
   try {
     const raw = localStorage.getItem(ENABLED_RUNTIMES_KEY);
@@ -1254,12 +1376,14 @@ const DEFAULT_TEMPLATES: TermTemplate[] = isWindowsUi()
       { id: "bash-rc", name: "Git Bash", command: "", runtime: "bash-rc" },
       { id: "claude", name: "claude", command: "", runtime: "claude" },
       { id: "codex", name: "codex", command: "", runtime: "codex" },
+      { id: "opencode", name: "OpenCode", command: "", runtime: "opencode" },
       { id: "dsh", name: "dsh", command: "", runtime: "dsh" },
       { id: "pi", name: "Pi", command: "", runtime: "pi" },
       { id: "codebuddy", name: "CodeBuddy", command: "", runtime: "codebuddy" },
       { id: "gemini", name: "Gemini", command: "", runtime: "gemini" },
       { id: "grok", name: "Grok", command: "", runtime: "grok" },
       { id: "kimi", name: "Kimi", command: "", runtime: "kimi" },
+      { id: "mistral-vibe", name: "Mistral Vibe", command: "", runtime: "mistral-vibe" },
       { id: "hermes", name: "Hermes", command: "", runtime: "hermes" },
       { id: "trae", name: "Trae", command: "", runtime: "trae" },
       { id: "qoder", name: "Qoder", command: "", runtime: "qoder" },
@@ -1294,12 +1418,14 @@ const DEFAULT_TEMPLATES: TermTemplate[] = isWindowsUi()
       { id: "bash-rc", name: "bash", command: "", runtime: "bash-rc" },
       { id: "claude", name: "claude", command: "", runtime: "claude" },
       { id: "codex", name: "codex", command: "", runtime: "codex" },
+      { id: "opencode", name: "OpenCode", command: "", runtime: "opencode" },
       { id: "dsh", name: "dsh", command: "", runtime: "dsh" },
       { id: "pi", name: "Pi", command: "", runtime: "pi" },
       { id: "codebuddy", name: "CodeBuddy", command: "", runtime: "codebuddy" },
       { id: "gemini", name: "Gemini", command: "", runtime: "gemini" },
       { id: "grok", name: "Grok", command: "", runtime: "grok" },
       { id: "kimi", name: "Kimi", command: "", runtime: "kimi" },
+      { id: "mistral-vibe", name: "Mistral Vibe", command: "", runtime: "mistral-vibe" },
       { id: "hermes", name: "Hermes", command: "", runtime: "hermes" },
       { id: "trae", name: "Trae", command: "", runtime: "trae" },
       { id: "qoder", name: "Qoder", command: "", runtime: "qoder" },
@@ -1353,13 +1479,11 @@ function loadTermTemplates(): TermTemplate[] {
     const raw = localStorage.getItem(TERM_TEMPLATES_KEY);
     const stored: TermTemplate[] = raw ? (JSON.parse(raw) as TermTemplate[]) : [];
     // Migrations:
-    // - drop minimal `--norc` "bash", omp, opencode (runtimes removed as new terminals)
+    // - drop minimal `--norc` "bash" (not offered as a new terminal)
     // - promote the old fixed bash-rc row to optional
     // - re-label legacy "正常 bash"
     // - on Windows, replace the single fixed "shell" row with powershell/cmd/Git Bash
-    const list = stored.filter(
-      (t) => t.id !== "bash" && t.id !== "omp" && t.id !== "opencode"
-    );
+    const list = stored.filter((t) => t.id !== "bash");
     for (const t of list) {
       if (t.id === "bash-rc" && t.name === "正常 bash") {
         t.name = isWindowsUi() ? "Git Bash" : "bash";
@@ -1445,10 +1569,12 @@ function todoUid(): string {
   return `todo-${Date.now().toString(36)}-${todoUidSeq.toString(36)}`;
 }
 
-function saveTodos(todos: TodoTag[]) {
-  invoke("setting_set", { key: "todos", value: JSON.stringify(todos) }).catch(
+function saveTodos(todos: TodoTag[]): TodoTag[] {
+  const next = compactSessionTodos(todos);
+  invoke("setting_set", { key: "todos", value: JSON.stringify(next) }).catch(
     () => {}
   );
+  return next;
 }
 
 /** Hook statuses that mean a turn is still in flight (or blocked on the user).
@@ -1462,11 +1588,65 @@ const IN_FLIGHT_HOOK = new Set([
   "awaiting_choice",
 ]);
 
+function todoProjectFor(
+  s: { todoScope: "global" | "project"; focusedProject: string | null },
+  agent: AgentInfo | undefined
+): string | null {
+  if (s.todoScope !== "project") return null;
+  return (agent ? projectOfAgent(agent) : s.focusedProject) ?? null;
+}
+
 /**
- * Mark every in-flight (assigned) tag on `agentId` as done / 待处理.
- * No-op when none match. Returns the (possibly unchanged) list; persists only
- * when something actually moved.
+ * A session never accumulates multiple task tags (see `assignTodoToAgent`).
+ * Keep `keepId` when promoting/replacing an existing row; otherwise drop every
+ * tag already linked to `agentId`.
  */
+function dropOtherTagsForAgent(
+  todos: TodoTag[],
+  agentId: string,
+  keepId?: string
+): TodoTag[] {
+  return todos.filter((t) => t.id === keepId || t.agentId !== agentId);
+}
+
+function sessionTagStamp(tag: TodoTag): number {
+  return tag.doneAt ?? tag.createdAt;
+}
+
+/** In-flight assigned beats 待处理; otherwise the later stamp wins. */
+function sessionTagWins(a: TodoTag, b: TodoTag): boolean {
+  if (a.status === "assigned" && b.status !== "assigned") return true;
+  if (b.status === "assigned" && a.status !== "assigned") return false;
+  return sessionTagStamp(a) >= sessionTagStamp(b);
+}
+
+/** Collapse historical duplicates so each `agentId` keeps a single tag. */
+function compactSessionTodos(todos: TodoTag[]): TodoTag[] {
+  const chosen = new Map<string, TodoTag>();
+  for (const tag of todos) {
+    if (!tag.agentId) continue;
+    const prev = chosen.get(tag.agentId);
+    if (!prev || sessionTagWins(tag, prev)) chosen.set(tag.agentId, tag);
+  }
+  const keep = new Set(Array.from(chosen.values(), (t) => t.id));
+  const next = todos.filter((t) => !t.agentId || keep.has(t.id));
+  return next.length === todos.length ? todos : next;
+}
+
+function latestTagForAgent(
+  todos: TodoTag[],
+  agentId: string,
+  status: TodoTag["status"]
+): TodoTag | undefined {
+  let best: TodoTag | undefined;
+  for (const tag of todos) {
+    if (tag.status !== status || tag.agentId !== agentId) continue;
+    if (!best || sessionTagStamp(tag) >= sessionTagStamp(best)) best = tag;
+  }
+  return best;
+}
+
+/** Promote in-flight assigned tags on `agentId` to 待处理. */
 function completeAssignedTodos(
   todos: TodoTag[],
   agentId: string,
@@ -1476,18 +1656,97 @@ function completeAssignedTodos(
     return todos;
   }
   const now = Date.now();
-  const next = todos.map((t) =>
-    t.status === "assigned" && t.agentId === agentId
-      ? {
-          ...t,
-          status: "done" as const,
-          doneAt: now,
-          sessionName: sessionName ?? t.sessionName,
-        }
-      : t
-  );
-  saveTodos(next);
-  return next;
+  let keepId: string | undefined;
+  const next = todos.map((t) => {
+    if (t.status !== "assigned" || t.agentId !== agentId) return t;
+    keepId = t.id;
+    return {
+      ...t,
+      status: "done" as const,
+      doneAt: now,
+      sessionName: sessionName ?? t.sessionName,
+    };
+  });
+  return saveTodos(keepId ? dropOtherTagsForAgent(next, agentId, keepId) : next);
+}
+
+/**
+ * Always-mode safety net: if this turn ended with no assigned tag (typed in
+ * the TUI, missed Composer tracking, hook skipped working), mint a 待处理
+ * row so the session still shows up. Text falls back to the terminal name.
+ * A session already in 待处理 is refreshed in place — never appended again.
+ */
+function ensureDoneTodo(
+  s: {
+    todos: TodoTag[];
+    feedbackMode: "todo" | "always";
+    todoScope: "global" | "project";
+    focusedProject: string | null;
+    agents: Map<string, AgentInfo>;
+  },
+  agentId: string
+): TodoTag[] {
+  const agent = s.agents.get(agentId);
+  const sessionName = agent?.title ?? null;
+  const todos = completeAssignedTodos(s.todos, agentId, sessionName);
+  if (todos !== s.todos) return todos;
+  if (s.feedbackMode !== "always") return todos;
+  const now = Date.now();
+  const existing = latestTagForAgent(todos, agentId, "done");
+  if (existing) {
+    return saveTodos(
+      dropOtherTagsForAgent(todos, agentId, existing.id).map((t) =>
+        t.id === existing.id
+          ? {
+              ...t,
+              doneAt: now,
+              sessionName: sessionName ?? t.sessionName,
+            }
+          : t
+      )
+    );
+  }
+  const tag: TodoTag = {
+    id: todoUid(),
+    text: sessionName || agentId,
+    status: "done",
+    agentId,
+    sessionName,
+    project: todoProjectFor(s, agent),
+    createdAt: now,
+    doneAt: now,
+  };
+  return saveTodos([...dropOtherTagsForAgent(todos, agentId), tag]);
+}
+
+/** Always-mode: start an in-flight assigned tag when a turn begins in the TUI. */
+function ensureAssignedTodo(
+  s: {
+    todos: TodoTag[];
+    feedbackMode: "todo" | "always";
+    todoScope: "global" | "project";
+    focusedProject: string | null;
+    agents: Map<string, AgentInfo>;
+  },
+  agentId: string
+): TodoTag[] {
+  if (s.feedbackMode !== "always") return s.todos;
+  if (s.todos.some((t) => t.status === "assigned" && t.agentId === agentId)) {
+    return s.todos;
+  }
+  const agent = s.agents.get(agentId);
+  const sessionName = agent?.title ?? null;
+  const tag: TodoTag = {
+    id: todoUid(),
+    text: sessionName || agentId,
+    status: "assigned",
+    agentId,
+    sessionName,
+    project: todoProjectFor(s, agent),
+    createdAt: Date.now(),
+    doneAt: null,
+  };
+  return saveTodos([...dropOtherTagsForAgent(s.todos, agentId), tag]);
 }
 
 export const useStore = create<AppState>((set, get) => {
@@ -1578,7 +1837,10 @@ export const useStore = create<AppState>((set, get) => {
   wallpaperOpacity: loadWallpaperOpacity(),
   ctrlTRuntime: loadCtrlTRuntime(),
   soundEnabled: true,
+  soundPath: loadSoundPath(),
+  feedbackMode: "always",
   themeLabEnabled: loadThemeLabEnabled(),
+  themeLabOpen: loadThemeLabOpen(),
   shortcuts: loadShortcuts(),
   todos: [],
   todoScope: "global",
@@ -1668,6 +1930,7 @@ export const useStore = create<AppState>((set, get) => {
       submittedAt.delete(id);
       const unreadCompletion = new Set(s.unreadCompletion);
       unreadCompletion.delete(id);
+      pendingTurnContentAt.delete(id);
       const outputs = new Map(s.agentOutputs);
       outputs.delete(id);
       const resources = new Map(s.agentResources);
@@ -1718,14 +1981,12 @@ export const useStore = create<AppState>((set, get) => {
       const agents = new Map(s.agents);
       const a = agents.get(id);
       if (a) agents.set(id, { ...a, status });
-      // Process exit is a hard end-of-work signal. If the status hook never
-      // delivered a clean non-idle → idle edge (short turns, missed poll, hook
-      // not wired), the assigned tag would otherwise stay invisible forever —
-      // promote it to 待处理 here. `removeAgent` still reverts on explicit
-      // delete; this path is natural exit only.
+      // Process exit is a hard end-of-work signal. Promote assigned → 待处理;
+      // in always-mode also mint a 待处理 row if the hook never delivered a
+      // clean idle edge (TUI-typed turn, missed poll).
       let todos = s.todos;
-      if (status === "done" && a) {
-        todos = completeAssignedTodos(todos, id, a.title);
+      if ((status === "done" || status === "failed") && a) {
+        todos = ensureDoneTodo({ ...s, agents, todos }, id);
       }
       return todos === s.todos ? { agents } : { agents, todos };
     });
@@ -1780,6 +2041,12 @@ export const useStore = create<AppState>((set, get) => {
       // real task work. (With ACTIVE_WINDOW_MS = 0 the stamp no longer drives
       // 运行中, but the bookkeeping is kept for a future non-zero window.)
       const now = Date.now();
+      if (
+        s.agentSubmittedAt.has(id) &&
+        ptyContentByteCount(data) >= TURN_CONTENT_MIN_BYTES
+      ) {
+        pendingTurnContentAt.set(id, now);
+      }
       const waking = s.agentWakeAt.has(id);
       if (!waking && now - (s.agentActiveAt.get(id) ?? 0) >= ACTIVE_STAMP_THROTTLE_MS) {
         const activeAt = new Map(s.agentActiveAt);
@@ -1811,6 +2078,7 @@ export const useStore = create<AppState>((set, get) => {
       const now = Date.now();
       const submittedAt = new Map(s.agentSubmittedAt);
       submittedAt.set(id, now);
+      pendingTurnContentAt.delete(id);
       // Mirror markAgentActive: user interaction ends the wake window.
       const wakeAt = s.agentWakeAt.has(id) ? new Map(s.agentWakeAt) : undefined;
       if (wakeAt) wakeAt.delete(id);
@@ -1822,6 +2090,46 @@ export const useStore = create<AppState>((set, get) => {
         ? { agentSubmittedAt: submittedAt, agentActiveAt: activeAt, agentWakeAt: wakeAt }
         : { agentSubmittedAt: submittedAt, agentActiveAt: activeAt };
     }),
+
+  settlePendingTurns: () => {
+    const s = useStore.getState();
+    if (s.agentSubmittedAt.size === 0) return;
+    const now = Date.now();
+    const settled: string[] = [];
+    for (const [id, submittedAt] of s.agentSubmittedAt) {
+      const agent = s.agents.get(id);
+      if (!agent || isShellRuntimeId(agent.runtime)) continue;
+      // Hook-backed sessions settle via setHookStatus. Don't second-guess them
+      // from PTY silence — a thinking pause would false-complete.
+      if (s.hookStatus.has(id)) continue;
+      const contentAt = pendingTurnContentAt.get(id) ?? 0;
+      if (contentAt < submittedAt) continue;
+      if (now - contentAt < TURN_SETTLE_MS) continue;
+      settled.push(id);
+    }
+    if (settled.length === 0) return;
+    for (const id of settled) {
+      notifyAgentTransition(id);
+    }
+    set((state) => {
+      const submittedAt = new Map(state.agentSubmittedAt);
+      let unreadCompletion = state.unreadCompletion;
+      let todos = state.todos;
+      for (const id of settled) {
+        submittedAt.delete(id);
+        pendingTurnContentAt.delete(id);
+        const tab = state.tabs.find((t) => t.agentId === id);
+        if (tab && !tabIsVisible(tab.id, state.activeTabId, state.splitTree)) {
+          if (unreadCompletion === state.unreadCompletion) {
+            unreadCompletion = new Set(unreadCompletion);
+          }
+          unreadCompletion.add(id);
+        }
+        todos = ensureDoneTodo({ ...state, todos }, id);
+      }
+      return { agentSubmittedAt: submittedAt, unreadCompletion, todos };
+    });
+  },
 
   setHookStatus: (id, hook, opts) => {
     // Running → other transition (the hook went working → idle / waiting_input
@@ -1879,27 +2187,44 @@ export const useStore = create<AppState>((set, get) => {
         unreadCompletion = new Set(unreadCompletion);
         unreadCompletion.add(id);
       }
-      // Task auto-complete: an in-flight (assigned) tag on this session is done
-      // when the turn ends — move it to 待处理 with the session name. Trigger on
-      // any in-flight hook status → idle (not only working→idle): after a
-      // permission/question block the brief working pulse is easy to miss, and
-      // the observed edge is often waiting_input|awaiting_choice → idle.
-      // Unlike the unread flag this does not depend on tab visibility. Still
-      // runs on silent replay so offline completions catch assigned todos up.
+      // Always-mode: a TUI-typed turn starts at idle/dormant → working with no
+      // Composer assigned tag. Mint one (text = terminal name) so 待处理 can
+      // land when the turn ends. No-op if a dragged todo / Composer prompt
+      // already occupies the session.
       let todos = s.todos;
+      if (!silent && hook && hook.status === "working" && prev?.status !== "working") {
+        todos = ensureAssignedTodo({ ...s, todos }, id);
+      }
+      // Turn ended: promote assigned → 待处理. Always-mode mints a 待处理 row
+      // (terminal name) if nothing was tracked — TUI input, missed working
+      // pulse, or a runtime whose hook never reported working. Silent replay
+      // still promotes existing assigned tags so offline completions catch up,
+      // but does not mint new ones (those would flood 待处理 with history).
       if (
         hook &&
         prev &&
         hook.status === "idle" &&
         IN_FLIGHT_HOOK.has(prev.status)
       ) {
-        todos = completeAssignedTodos(
-          todos,
-          id,
-          s.agents.get(id)?.title
-        );
+        todos = silent
+          ? completeAssignedTodos(todos, id, s.agents.get(id)?.title)
+          : ensureDoneTodo({ ...s, todos }, id);
       }
-      return { hookStatus, unreadCompletion, todos };
+      // Hook settled the turn — drop the Composer pending marker so the
+      // activity-silence fallback cannot chime a second time.
+      let agentSubmittedAt = s.agentSubmittedAt;
+      if (
+        hook &&
+        prev &&
+        IN_FLIGHT_HOOK.has(prev.status) &&
+        !IN_FLIGHT_HOOK.has(hook.status) &&
+        agentSubmittedAt.has(id)
+      ) {
+        agentSubmittedAt = new Map(agentSubmittedAt);
+        agentSubmittedAt.delete(id);
+        pendingTurnContentAt.delete(id);
+      }
+      return { hookStatus, unreadCompletion, todos, agentSubmittedAt };
     });
   },
 
@@ -1957,6 +2282,11 @@ export const useStore = create<AppState>((set, get) => {
   addTab: (tab) =>
     set((s) => {
       const tabs = [...s.tabs.filter((t) => t.id !== tab.id), tab];
+      // Canvas is a view switch, not a pane — never splice it into the split
+      // tree or a leftover split would keep showing full-size terminals.
+      if (tab.type === "canvas") {
+        return { tabs, activeTabId: tab.id };
+      }
       // With an active split, surface a newly opened tab in the first pane.
       const tree = s.splitTree;
       if (tree && !splitLeafTabIds(tree).includes(tab.id)) {
@@ -2040,12 +2370,14 @@ export const useStore = create<AppState>((set, get) => {
       // it in the first pane.
       const tree = s.splitTree;
       let splitTree = tree;
-      if (tree && !splitLeafTabIds(tree).includes(id)) {
+      const tab = s.tabs.find((t) => t.id === id);
+      // Canvas is a full-view switch. Don't splice it into a leftover split —
+      // that would keep painting full-size terminals next to / over the canvas.
+      if (tab?.type !== "canvas" && tree && !splitLeafTabIds(tree).includes(id)) {
         splitTree = splitReplaceLeaf(tree, splitFirstLeaf(tree), id);
       }
       // Viewing a tab clears its agent's unviewed-completion flag (已完成 → 空闲).
       let unreadCompletion = s.unreadCompletion;
-      const tab = s.tabs.find((t) => t.id === id);
       if (tab?.agentId && unreadCompletion.has(tab.agentId)) {
         unreadCompletion = new Set(unreadCompletion);
         unreadCompletion.delete(tab.agentId);
@@ -2055,6 +2387,9 @@ export const useStore = create<AppState>((set, get) => {
 
   splitPane: (targetTabId, newTabId, direction, newOnFirst) =>
     set((s) => {
+      const target = s.tabs.find((t) => t.id === targetTabId);
+      const incoming = s.tabs.find((t) => t.id === newTabId);
+      if (target?.type === "canvas" || incoming?.type === "canvas") return {};
       const fresh: SplitNode = { kind: "leaf", id: splitUid(), tabId: newTabId };
       if (!s.splitTree) {
         const existing: SplitNode = { kind: "leaf", id: splitUid(), tabId: targetTabId };
@@ -2092,9 +2427,13 @@ export const useStore = create<AppState>((set, get) => {
 
   toggleComposer: () => set((s) => ({ composerOpen: !s.composerOpen })),
 
-  requestFocus: (target) =>
+  requestFocus: (target, agentId) =>
     set((s) => ({
-      focusRequest: { target, seq: (s.focusRequest?.seq ?? 0) + 1 },
+      focusRequest: {
+        target,
+        seq: (s.focusRequest?.seq ?? 0) + 1,
+        agentId,
+      },
     })),
 
   requestSearch: (target) =>
@@ -2480,13 +2819,42 @@ export const useStore = create<AppState>((set, get) => {
     }).catch(() => {});
   },
 
-  setThemeLabEnabled: (enabled) => {
+  setSoundPath: (soundPath) => {
     try {
-      localStorage.setItem(THEME_LAB_ENABLED_KEY, enabled ? "1" : "0");
+      if (soundPath) localStorage.setItem(SOUND_PATH_KEY, soundPath);
+      else localStorage.removeItem(SOUND_PATH_KEY);
     } catch {
       // ignore storage errors
     }
-    set({ themeLabEnabled: enabled });
+    set({ soundPath });
+  },
+
+  setFeedbackMode: (mode) => {
+    set({ feedbackMode: mode });
+    invoke("setting_set", {
+      key: "feedback_mode",
+      value: mode,
+    }).catch(() => {});
+  },
+
+  setThemeLabEnabled: (enabled) => {
+    try {
+      localStorage.setItem(THEME_LAB_ENABLED_KEY, enabled ? "1" : "0");
+      if (!enabled) localStorage.setItem(THEME_LAB_OPEN_KEY, "0");
+    } catch {
+      // ignore storage errors
+    }
+    // Turning the chip off also closes the mixer — Settings is not a panel switch.
+    set(enabled ? { themeLabEnabled: true } : { themeLabEnabled: false, themeLabOpen: false });
+  },
+
+  setThemeLabOpen: (open) => {
+    try {
+      localStorage.setItem(THEME_LAB_OPEN_KEY, open ? "1" : "0");
+    } catch {
+      // ignore storage errors
+    }
+    set({ themeLabOpen: open });
   },
 
   setShortcut: (id, chord) =>
@@ -2517,7 +2885,12 @@ export const useStore = create<AppState>((set, get) => {
   // (`setTodos`) is the exception — TodoPanel writes it back only when it
   // repaired orphans, not on every mount.
 
-  setTodos: (todos) => set({ todos }),
+  setTodos: (todos) =>
+    set(() => {
+      const next = compactSessionTodos(todos);
+      if (next !== todos) saveTodos(next);
+      return { todos: next };
+    }),
 
   addTodo: (text) =>
     set((s) => {
@@ -2536,9 +2909,7 @@ export const useStore = create<AppState>((set, get) => {
         createdAt: Date.now(),
         doneAt: null,
       };
-      const todos = [...s.todos, tag];
-      saveTodos(todos);
-      return { todos };
+      return { todos: saveTodos([...s.todos, tag]) };
     }),
 
   cloneTodo: (id) =>
@@ -2555,18 +2926,18 @@ export const useStore = create<AppState>((set, get) => {
         createdAt: Date.now(),
         doneAt: null,
       };
-      const todos = [...s.todos, tag];
-      saveTodos(todos);
-      return { todos };
+      return { todos: saveTodos([...s.todos, tag]) };
     }),
 
   updateTodoText: (id, text) =>
     set((s) => {
       const trimmed = text.trim();
       if (!trimmed) return {};
-      const todos = s.todos.map((t) => (t.id === id ? { ...t, text: trimmed } : t));
-      saveTodos(todos);
-      return { todos };
+      return {
+        todos: saveTodos(
+          s.todos.map((t) => (t.id === id ? { ...t, text: trimmed } : t))
+        ),
+      };
     }),
 
   assignTodoToAgent: (id, agentId, sessionName) =>
@@ -2582,28 +2953,54 @@ export const useStore = create<AppState>((set, get) => {
       // promote it. (The old `t.id !== id && …` filter deleted the target tag
       // itself — assign looked like a silent delete, and nothing ever reached
       // 待处理 on turn end.)
-      const todos = s.todos
-        .filter((t) => t.id === id || t.agentId !== agentId)
-        .map((t) =>
-          t.id === id
-            ? {
-                ...t,
-                status: "assigned" as const,
-                agentId,
-                sessionName,
-                doneAt: null,
-              }
-            : t
-        );
-      saveTodos(todos);
-      return { todos };
+      return {
+        todos: saveTodos(
+          dropOtherTagsForAgent(s.todos, agentId, id).map((t) =>
+            t.id === id
+              ? {
+                  ...t,
+                  status: "assigned" as const,
+                  agentId,
+                  sessionName,
+                  doneAt: null,
+                }
+              : t
+          )
+        ),
+      };
+    }),
+
+  trackPromptAsTodo: (agentId, text) =>
+    set((s) => {
+      if (s.feedbackMode !== "always") return {};
+      const agent = s.agents.get(agentId);
+      const sessionName = agent?.title ?? null;
+      const trimmed = text.trim() || sessionName || agentId;
+      // A dragged todo already occupies this session — don't mint a second tag
+      // (assignTodoToAgent also enforces one-tag-per-session).
+      if (s.todos.some((t) => t.status === "assigned" && t.agentId === agentId)) {
+        return {};
+      }
+      const tag: TodoTag = {
+        id: todoUid(),
+        text: trimmed,
+        status: "assigned",
+        agentId,
+        sessionName,
+        // Follow the overview scope: global view → global tag (visible in 待处理
+        // without flipping to 本项目). Project view → this session's project.
+        project: todoProjectFor(s, agent),
+        createdAt: Date.now(),
+        doneAt: null,
+      };
+      return {
+        todos: saveTodos([...dropOtherTagsForAgent(s.todos, agentId), tag]),
+      };
     }),
 
   deleteTodo: (id) =>
     set((s) => {
-      const todos = s.todos.filter((t) => t.id !== id);
-      saveTodos(todos);
-      return { todos };
+      return { todos: saveTodos(s.todos.filter((t) => t.id !== id)) };
     }),
 
   toggleTodoScope: () =>
@@ -2630,11 +3027,21 @@ export function clearAgentOutput(id: string): void {
 }
 
 /** Fire the running → other transition notification: play the theme-mapped
- *  confirmation chime and request a two-flash on the agent's tab label. */
+ *  confirmation chime (or a custom file), flash the tab label, flash the
+ *  canvas card if it's on the board, and raise a system notification. */
 function notifyAgentTransition(id: string): void {
   const s = useStore.getState();
-  if (s.soundEnabled) playConfirmationSound(s.themeId);
+  if (s.soundEnabled) playConfirmationSound(s.themeId, s.soundPath);
   s.flashTab(id);
+  const agent = s.agents.get(id);
+  const title = agent?.title || id;
+  const runtime = s.runtimes.find((r) => r.id === agent?.runtime)?.name ?? agent?.runtime ?? "";
+  void notify(
+    t("agentActions.turnDoneTitle"),
+    runtime
+      ? t("agentActions.turnDoneBodyRuntime", { title, runtime })
+      : t("agentActions.turnDoneBody", { title })
+  );
 }
 
 // Seed the i18n locale bus so imperative `t()` and `useT()` see the persisted

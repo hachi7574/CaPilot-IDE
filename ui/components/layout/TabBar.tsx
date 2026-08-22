@@ -285,6 +285,7 @@ export function TabBar() {
   useEffect(() => {
     const t = setInterval(() => {
       const s = useStore.getState();
+      s.settlePendingTurns();
       const targets: string[] = [];
       for (const [id, agent] of s.agents) {
         if (HOOK_STATUS_RUNTIMES.has(agent.runtime) && s.agentChannels.has(id)) {
@@ -601,8 +602,9 @@ export function TabBar() {
               setDraggedTabId(tab.id);
             }}
             onDragEnd={endTabDrag}
-            // Todo-tag drop target (agent tabs only): assign the task + send its
-            // text to the session, then focus the tab.
+            // Todo-tag drop target (agent tabs only): assign + send. Dropping on
+            // a tab is an explicit pick of that session, so focus it — unlike
+            // sidebar / canvas drops, which keep the current view.
             onDragOver={(e) => {
               acceptTodoDragOver(e);
             }}
@@ -694,7 +696,6 @@ export function TabBar() {
           collapsed (open sidebar already hosts these buttons in its op bar). */}
       {!leftSidebarOpen && (
         <div className="tab-win-controls">
-          <span className="win-sep" aria-hidden />
           <span
             className="sidebar-btn win-btn"
             onClick={() => void appWindow.minimize()}

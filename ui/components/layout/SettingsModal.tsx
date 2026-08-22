@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   useStore,
   FontScale,
@@ -9,7 +10,8 @@ import {
   UsageConfig,
   WallpaperMode,
 } from "../../state/store";
-import { THEMES, getTheme, DEFAULT_THEME_ID, WALLPAPER_IMAGE_EXTS, WALLPAPER_VIDEO_EXTS } from "../../state/themes";
+import { THEMES, getTheme, DEFAULT_THEME_ID, DEFAULT_WALLPAPER_OPACITY, WALLPAPER_IMAGE_EXTS, WALLPAPER_VIDEO_EXTS } from "../../state/themes";
+import { SOUND_AUDIO_EXTS, playConfirmationSound } from "../../state/sound";
 import { checkForUpdate, downloadAndInstall } from "../../state/update";
 import {
   loadExitDaemonMode,
@@ -25,11 +27,14 @@ import {
   isRecordableKey,
   chordsEqual,
 } from "../../state/shortcuts";
-import { useT, LOCALES, themeLabel, type Locale } from "../../i18n";
+import { useT, LOCALES, themeLabel, DEFAULT_LOCALE, type Locale } from "../../i18n";
 import {
+  CANVAS_LAYOUT_DEFAULTS,
+  CANVAS_LAYOUT_LIMITS,
   getCanvasLayoutPrefs,
   setCanvasLayoutPrefs,
   subscribeCanvasLayoutPrefs,
+  type CanvasLayoutPrefs,
 } from "../../state/canvasLayout";
 
 interface SettingsModalProps {
@@ -115,6 +120,7 @@ const DEFAULT_LAUNCH: Record<string, { command: string; args: string }> = {
   gemini: { command: "gemini", args: "" },
   grok: { command: "grok", args: "" },
   kimi: { command: "kimi", args: "" },
+  "mistral-vibe": { command: "vibe", args: "" },
   hermes: { command: "hermes", args: "--tui" },
   trae: { command: "traecli", args: "" },
   qoder: { command: "qoderclicn", args: "" },
@@ -150,6 +156,49 @@ const DEFAULT_LAUNCH: Record<string, { command: string; args: string }> = {
   bash: { command: "bash", args: "--norc" },
 };
 
+/** Official install / homepage docs. Paseo `homepageUrl` plus CaPilot-only CLIs. */
+const AGENT_HOMEPAGE_URL: Record<string, string> = {
+  claude: "https://docs.anthropic.com/claude/docs/claude-code",
+  openclaude: "https://openclaude.gitlawb.com/",
+  codex: "https://github.com/openai/codex",
+  grok: "https://x.ai/cli",
+  copilot: "https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli",
+  opencode: "https://opencode.ai/docs/cli/",
+  "mimo-code": "https://mimo.xiaomi.com/coder",
+  ante: "https://github.com/AntigmaLabs/ante-preview",
+  trae: "https://docs.trae.cn/cli_get-started-with-trae-cli",
+  pi: "https://pi.dev",
+  omp: "https://omp.sh",
+  "prime-agent": "https://github.com/PrimeIntellect-ai/prime-agent",
+  gemini: "https://github.com/google-gemini/gemini-cli",
+  antigravity: "https://antigravity.google/docs/cli-overview",
+  aider: "https://aider.chat/docs/",
+  goose: "https://block.github.io/goose/docs/quickstart/",
+  amp: "https://ampcode.com/manual#install",
+  kilo: "https://kilo.ai/docs/cli",
+  kiro: "https://kiro.dev/docs/cli/",
+  crush: "https://github.com/charmbracelet/crush",
+  aug: "https://docs.augmentcode.com/cli/overview",
+  autohand: "https://github.com/autohandai/code-cli",
+  cline: "https://docs.cline.bot/cline-cli/overview",
+  codebuff: "https://www.codebuff.com/docs/help/quick-start",
+  "command-code": "https://commandcode.ai/docs/quickstart",
+  continue: "https://docs.continue.dev/guides/cli",
+  cursor: "https://cursor.com/cli",
+  droid: "https://docs.factory.ai/cli/getting-started/quickstart",
+  kimi: "https://www.kimi.com/code/docs/en/kimi-code-cli/getting-started.html",
+  "mistral-vibe": "https://github.com/mistralai/mistral-vibe",
+  "qwen-code": "https://github.com/QwenLM/qwen-code",
+  rovo: "https://support.atlassian.com/rovo/docs/install-and-run-rovo-dev-cli-on-your-device/",
+  hermes: "https://hermes-agent.nousresearch.com/docs/",
+  devin: "https://devin.ai/cli",
+  openclaw: "https://github.com/openclaw/openclaw",
+  // CaPilot-only first-class / v1 CLIs not in Paseo's catalog.
+  dsh: "https://www.npmjs.com/package/@deepseek-ai/dsh",
+  codebuddy: "https://www.codebuddy.cn/",
+  qoder: "https://qoder.com/cli",
+};
+
 export function SettingsModal({ onClose }: SettingsModalProps) {
   const t = useT();
   const locale = useStore((s) => s.locale);
@@ -169,12 +218,19 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const setWallpaperOpacity = useStore((s) => s.setWallpaperOpacity);
   const soundEnabled = useStore((s) => s.soundEnabled);
   const setSoundEnabled = useStore((s) => s.setSoundEnabled);
+  const soundPath = useStore((s) => s.soundPath);
+  const setSoundPath = useStore((s) => s.setSoundPath);
+  const feedbackMode = useStore((s) => s.feedbackMode);
+  const setFeedbackMode = useStore((s) => s.setFeedbackMode);
   const themeLabEnabled = useStore((s) => s.themeLabEnabled);
   const setThemeLabEnabled = useStore((s) => s.setThemeLabEnabled);
   const ctrlTRuntime = useStore((s) => s.ctrlTRuntime);
   const setCtrlTRuntime = useStore((s) => s.setCtrlTRuntime);
   const [canvasLayout, setCanvasLayout] = useState(getCanvasLayoutPrefs);
   useEffect(() => subscribeCanvasLayoutPrefs(() => setCanvasLayout(getCanvasLayoutPrefs())), []);
+  const [canvasLayoutDraft, setCanvasLayoutDraft] = useState<
+    Partial<Record<keyof CanvasLayoutPrefs, string>>
+  >({});
   const shortcuts = useStore((s) => s.shortcuts);
   const setShortcut = useStore((s) => s.setShortcut);
   const resetShortcuts = useStore((s) => s.resetShortcuts);
@@ -228,6 +284,32 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
       if (typeof selected === "string" && selected) {
         setWallpaperPath(selected);
         setWallpaperMode("custom");
+      }
+    } catch {
+      // dialog cancelled / unavailable
+    }
+  };
+
+  const soundFileLabel = soundPath
+    ? soundPath.replace(/\\/g, "/").split("/").pop() ?? soundPath
+    : null;
+
+  const pickSound = async () => {
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        title: t("settings.pickSound"),
+        filters: [
+          {
+            name: "Audio",
+            extensions: [...SOUND_AUDIO_EXTS],
+          },
+        ],
+      });
+      if (typeof selected === "string" && selected) {
+        setSoundPath(selected);
+        if (!soundEnabled) setSoundEnabled(true);
       }
     } catch {
       // dialog cancelled / unavailable
@@ -389,6 +471,24 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     setNamePackId(id);
     setNamePackMenuOpen(false);
     invoke("setting_set", { key: "name_pack", value: id }).catch(() => {});
+  };
+
+  const [appearanceResetFlash, setAppearanceResetFlash] = useState<string | null>(null);
+  const resetAppearance = () => {
+    setLocale(DEFAULT_LOCALE);
+    setThemeId(DEFAULT_THEME_ID);
+    setFeedbackMode("always");
+    setWallpaperMode("off");
+    setWallpaperPath(null);
+    setWallpaperOpacity(DEFAULT_WALLPAPER_OPACITY);
+    setFontScale("l");
+    setCanvasLayout(setCanvasLayoutPrefs({ ...CANVAS_LAYOUT_DEFAULTS }));
+    setCanvasLayoutDraft({});
+    setSoundEnabled(true);
+    setSoundPath(null);
+    setThemeLabEnabled(false);
+    setAppearanceResetFlash(t("settings.resetAppearanceDone"));
+    window.setTimeout(() => setAppearanceResetFlash(null), 1800);
   };
 
   // App self-update slice.
@@ -889,16 +989,37 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                     {rt.available ? (
                       <>
                         <Icon name="check" size={12} style={{ marginRight: 4 }} />
-                        {shell
-                          ? t("common.available")
-                          : rt.authenticated
-                            ? t("common.loggedIn")
-                            : t("common.installed")}
+                        {t("common.available")}
                       </>
                     ) : (
                       t("common.notDetected")
                     )}
                   </span>
+                  {!shell && AGENT_HOMEPAGE_URL[rt.id] && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const url = AGENT_HOMEPAGE_URL[rt.id];
+                        if (url) void openUrl(url);
+                      }}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        width: 22,
+                        height: 22,
+                        borderRadius: 6,
+                        cursor: "pointer",
+                        background: "transparent",
+                        border: "1px solid var(--rule2)",
+                        color: "var(--ink2)",
+                      }}
+                      title={t("settings.installDocsTitle")}
+                      aria-label={t("settings.installDocsAria", { name: rt.name })}
+                    >
+                      <Icon name="external-link" size={12} />
+                    </button>
+                  )}
                   <button
                     onClick={() => toggleEditor(rt.id)}
                     style={{
@@ -1152,6 +1273,38 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           </div>
 
           <div className="settings-field-label">
+            <span>{t("settings.feedbackMode")}</span>
+            <small>{t("settings.feedbackModeHint")}</small>
+          </div>
+          <div className="settings-segmented" role="radiogroup" aria-label={t("settings.feedbackMode")}>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={feedbackMode === "todo"}
+              className={feedbackMode === "todo" ? "active" : ""}
+              title={t("settings.feedbackModeTodoHint")}
+              onClick={() => setFeedbackMode("todo")}
+            >
+              {t("settings.feedbackModeTodo")}
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={feedbackMode === "always"}
+              className={feedbackMode === "always" ? "active" : ""}
+              title={t("settings.feedbackModeAlwaysHint")}
+              onClick={() => setFeedbackMode("always")}
+            >
+              {t("settings.feedbackModeAlways")}
+            </button>
+          </div>
+          <p className="settings-help-text">
+            {feedbackMode === "always"
+              ? t("settings.feedbackModeAlwaysHint")
+              : t("settings.feedbackModeTodoHint")}
+          </p>
+
+          <div className="settings-field-label">
             <span>{t("settings.themeStyle")}</span>
             <small>{t("settings.themeInstant")}</small>
           </div>
@@ -1349,45 +1502,147 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 ["cardW", t("settings.canvasCardW")],
                 ["cardH", t("settings.canvasCardH")],
               ] as const
-            ).map(([key, label]) => (
-              <label key={key} className="settings-canvas-layout-field">
-                <span>{label}</span>
-                <input
-                  type="number"
-                  min={key === "gap" ? 0 : 160}
-                  max={key === "gap" ? 400 : 2400}
-                  step={1}
-                  value={canvasLayout[key]}
-                  onChange={(e) => {
-                    const v = Number(e.target.value);
-                    if (!Number.isFinite(v)) return;
-                    setCanvasLayout(setCanvasLayoutPrefs({ [key]: v }));
-                  }}
-                />
-              </label>
-            ))}
+            ).map(([key, label]) => {
+              const limits = CANVAS_LAYOUT_LIMITS[key];
+              const commit = (raw: string) => {
+                const v = Number(raw);
+                if (!Number.isFinite(v) || raw.trim() === "") {
+                  setCanvasLayoutDraft((d) => {
+                    const next = { ...d };
+                    delete next[key];
+                    return next;
+                  });
+                  return;
+                }
+                setCanvasLayout(setCanvasLayoutPrefs({ [key]: v }));
+                setCanvasLayoutDraft((d) => {
+                  const next = { ...d };
+                  delete next[key];
+                  return next;
+                });
+              };
+              return (
+                <label key={key} className="settings-canvas-layout-field">
+                  <span>{label}</span>
+                  <input
+                    type="number"
+                    min={limits.min}
+                    max={limits.max}
+                    step={1}
+                    value={canvasLayoutDraft[key] ?? String(canvasLayout[key])}
+                    onFocus={() =>
+                      setCanvasLayoutDraft((d) =>
+                        d[key] == null ? { ...d, [key]: String(canvasLayout[key]) } : d
+                      )
+                    }
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      setCanvasLayoutDraft((d) => ({ ...d, [key]: raw }));
+                    }}
+                    onBlur={(e) => commit(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.currentTarget.blur();
+                      }
+                    }}
+                  />
+                </label>
+              );
+            })}
+          </div>
+          <div className="settings-wallpaper" style={{ marginBottom: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+              <span style={{ fontSize: "var(--fs-sm)", color: "var(--ink2)" }}>
+                {t("settings.canvasSelectSyncs")}
+                <small style={{ display: "block", color: "var(--muted)", fontSize: "var(--fs-2xs)", marginTop: 2 }}>
+                  {t("settings.canvasSelectSyncsHint")}
+                </small>
+              </span>
+              <button
+                type="button"
+                onClick={() =>
+                  setCanvasLayout(
+                    setCanvasLayoutPrefs({
+                      selectSyncsSendTarget: !canvasLayout.selectSyncsSendTarget,
+                    })
+                  )
+                }
+                style={{
+                  fontFamily: "var(--pixel)",
+                  fontSize: "var(--fs-2xs)",
+                  padding: "4px 12px",
+                  border: `1px solid ${canvasLayout.selectSyncsSendTarget ? "var(--brand)" : "var(--rule2)"}`,
+                  color: canvasLayout.selectSyncsSendTarget ? "var(--brand)" : "var(--ink2)",
+                  background: canvasLayout.selectSyncsSendTarget
+                    ? "rgb(var(--brand-rgb) / .08)"
+                    : "transparent",
+                  borderRadius: 6,
+                  cursor: "pointer",
+                  flexShrink: 0,
+                }}
+              >
+                {canvasLayout.selectSyncsSendTarget ? t("common.on") : t("common.off")}
+              </button>
+            </div>
           </div>
           <div className="settings-field-label">
             <span>{t("settings.sound")}</span>
             <small>{t("settings.soundHint")}</small>
           </div>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
-            <span style={{ fontSize: "var(--fs-sm)", color: "var(--ink2)" }}>{t("settings.soundToggle")}</span>
-            <button
-              onClick={() => setSoundEnabled(!soundEnabled)}
-              style={{
-                fontFamily: "var(--pixel)",
-                fontSize: "var(--fs-2xs)",
-                padding: "4px 12px",
-                border: `1px solid ${soundEnabled ? "var(--brand)" : "var(--rule2)"}`,
-                color: soundEnabled ? "var(--brand)" : "var(--ink2)",
-                background: soundEnabled ? "rgb(var(--brand-rgb) / .08)" : "transparent",
-                borderRadius: 6,
-                cursor: "pointer",
-              }}
-            >
-              {soundEnabled ? t("common.on") : t("common.off")}
-            </button>
+          <div className="settings-wallpaper">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontSize: "var(--fs-sm)", color: "var(--ink2)" }}>{t("settings.soundToggle")}</span>
+              <button
+                onClick={() => setSoundEnabled(!soundEnabled)}
+                style={{
+                  fontFamily: "var(--pixel)",
+                  fontSize: "var(--fs-2xs)",
+                  padding: "4px 12px",
+                  border: `1px solid ${soundEnabled ? "var(--brand)" : "var(--rule2)"}`,
+                  color: soundEnabled ? "var(--brand)" : "var(--ink2)",
+                  background: soundEnabled ? "rgb(var(--brand-rgb) / .08)" : "transparent",
+                  borderRadius: 6,
+                  cursor: "pointer",
+                }}
+              >
+                {soundEnabled ? t("common.on") : t("common.off")}
+              </button>
+            </div>
+            <div className="settings-wallpaper-row">
+              <span className="settings-wallpaper-status">
+                {soundFileLabel
+                  ? t("settings.soundCustomStatus", { name: soundFileLabel })
+                  : t("settings.soundCustomNone")}
+              </span>
+              <div className="settings-wallpaper-actions">
+                <button
+                  type="button"
+                  className="settings-wallpaper-btn"
+                  onClick={() =>
+                    playConfirmationSound(themeId, soundPath)
+                  }
+                  disabled={!soundEnabled}
+                >
+                  {t("settings.previewSound")}
+                </button>
+                <button
+                  type="button"
+                  className="settings-wallpaper-btn"
+                  onClick={() => void pickSound()}
+                >
+                  {t("settings.pickSound")}
+                </button>
+                {soundPath && (
+                  <button
+                    type="button"
+                    className="settings-wallpaper-btn ghost"
+                    onClick={() => setSoundPath(null)}
+                  >
+                    {t("common.clear")}
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
 
           <div className="settings-field-label">
@@ -1552,6 +1807,24 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               {namePackErr}
             </p>
           )}
+          <div className="settings-field-label settings-font-label">
+            <span>{t("settings.resetAppearance")}</span>
+            <small>{t("settings.resetAppearanceHint")}</small>
+          </div>
+          <div className="settings-wallpaper-row" style={{ marginTop: 8 }}>
+            <button
+              type="button"
+              className="settings-compact-btn"
+              onClick={resetAppearance}
+            >
+              {t("common.resetDefault")}
+            </button>
+            {appearanceResetFlash && (
+              <span className="settings-help-text" style={{ margin: 0, color: "var(--success)" }}>
+                {appearanceResetFlash}
+              </span>
+            )}
+          </div>
         </section>
         )}
 

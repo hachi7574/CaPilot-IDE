@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { confirm } from "@tauri-apps/plugin-dialog";
+import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { EditorState } from "@codemirror/state";
 import { EditorView, lineNumbers } from "@codemirror/view";
 import { capilotTheme } from "../editor/capilotTheme";
@@ -8,6 +10,8 @@ import { MergeView } from "@codemirror/merge";
 import { useStore } from "../../state/store";
 import type { ContentSearchFileResult, ContentSearchMatch } from "../../state/store";
 import { fileTab, isImagePath } from "../../state/openFile";
+import { isWallpaperVideo } from "../../state/themes";
+import { SOUND_AUDIO_EXTS } from "../../state/sound";
 import { spawnBashAt } from "../../state/agentActions";
 import {
   baseName,
@@ -30,6 +34,7 @@ import {
   beginPathDrag,
   endPathDrag,
   PATH_POINTER_DRAG_THRESHOLD,
+  pathsFromDataTransfer,
   resolvePathDropTarget,
 } from "../../state/dropPaths";
 
@@ -48,6 +53,38 @@ export function RightSidebar() {
   // Resize-handle mousedown position: distinguishes a click (toggle) from a
   // drag (resize) on the divider.
   const resizeStartRef = useRef<{ x: number; y: number } | null>(null);
+  const sidebarRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const p = event.payload;
+        if (p.type !== "drop" || !p.paths?.length) return;
+        const el = sidebarRef.current;
+        if (!el || el.classList.contains("collapsed")) return;
+        const r = el.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        const x = p.position.x / dpr;
+        const y = p.position.y / dpr;
+        if (x < r.left || x > r.right || y < r.top || y > r.bottom) return;
+        setActiveTab("files");
+        window.dispatchEvent(
+          new CustomEvent("capilot:path-drop", {
+            detail: { kind: "files", paths: p.paths, clientX: x, clientY: y },
+          })
+        );
+      })
+      .then((un) => {
+        if (cancelled) un();
+        else unlisten = un;
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   // Draggable right sidebar resize. In the current layout this panel is the
   // leftmost one (rendered before the main area), with the handle on its right
@@ -71,7 +108,9 @@ export function RightSidebar() {
   return (
     <>
       <div
+        ref={sidebarRef}
         className={`right-sidebar${!rightSidebarOpen ? " collapsed" : ""}`}
+        data-path-drop="files"
         style={rightSidebarOpen ? { width: rightWidth } : undefined}
       >
         {/* Tabs */}
@@ -111,7 +150,15 @@ export function RightSidebar() {
         {/* Tab Content */}
         <div className="right-panel">
           {activeTab === "overview" && <TodoPanel />}
-          {activeTab === "files" && <FilesPanel />}
+          <div
+            style={
+              activeTab === "files"
+                ? { display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }
+                : { display: "none" }
+            }
+          >
+            <FilesPanel />
+          </div>
           {activeTab === "git" && <GitPanel />}
         </div>
       </div>
@@ -342,6 +389,18 @@ function fileClass(name: string): { cls: string; icon: string } {
   return { cls: "file", icon: "file-text" };
 }
 
+function fileExt(name: string): string {
+  const base = name.replace(/\\/g, "/").split("/").pop() ?? name;
+  const dot = base.lastIndexOf(".");
+  return dot >= 0 ? base.slice(dot + 1).toLowerCase() : "";
+}
+
+/** Git ±N is line-diff noise on binary media; only show it for text/code. */
+function showsGitLineStats(name: string): boolean {
+  if (isImagePath(name) || isWallpaperVideo(name)) return false;
+  return !(SOUND_AUDIO_EXTS as readonly string[]).includes(fileExt(name));
+}
+
 /** Normalize separators so prefix checks work for both `/` and `\` roots. */
 function normPath(p: string): string {
   return p.replace(/\\/g, "/");
@@ -451,6 +510,8 @@ function FilesPanel() {
   // Single-click select target in the tree; second click / double-click opens.
   // `isDir` lets keyboard actions (paste-into, delete, rename) target folders.
   const [selected, setSelected] = useState<{ path: string; isDir: boolean } | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const filesPanelRef = useRef<HTMLDivElement>(null);
   // Per-file git state (new/modified + ±N) for the tree, keyed by absolute path.
   const [gitState, setGitState] = useState<Record<string, GitFileState>>({});
   const addTab = useStore((s) => s.addTab);
@@ -820,9 +881,9 @@ function FilesPanel() {
   const openCtx = (e: React.MouseEvent, kind: "file" | "dir" | "space", path?: string) => {
     e.preventDefault();
     e.stopPropagation();
-    // Clamp so the ~190px menu stays inside the viewport.
-    const x = Math.min(e.clientX, window.innerWidth - 200);
-    const y = Math.min(e.clientY, window.innerHeight - 140);
+    // Clamp so the ~280px menu (folder actions + reveal) stays in the viewport.
+    const x = Math.min(e.clientX, window.innerWidth - 220);
+    const y = Math.min(e.clientY, window.innerHeight - 280);
     setMenu({ x, y, kind, path });
   };
 
@@ -866,6 +927,97 @@ function FilesPanel() {
     closeMenu();
   };
 
+  const destDirFromPoint = (clientX: number, clientY: number): string | null => {
+    const panel = filesPanelRef.current;
+    if (!panel) return null;
+    const r = panel.getBoundingClientRect();
+    if (clientX < r.left || clientX > r.right || clientY < r.top || clientY > r.bottom) {
+      return null;
+    }
+    const under = document.elementFromPoint(clientX, clientY);
+    const row = under?.closest("[data-drop-dir]") as HTMLElement | null;
+    return row?.getAttribute("data-drop-dir") || root;
+  };
+
+  const importExternalPaths = async (paths: string[], destDir: string) => {
+    const unique = [...new Set(paths.map((p) => p.trim()).filter(Boolean))];
+    if (!unique.length) return;
+    const destNorm = destDir.replace(/\\/g, "/").replace(/\/+$/, "");
+    let copied = 0;
+    let lastName = "";
+    for (const src of unique) {
+      const srcNorm = src.replace(/\\/g, "/").replace(/\/+$/, "");
+      if (srcNorm === destNorm || destNorm.startsWith(`${srcNorm}/`)) continue;
+      try {
+        const created = await invoke<string>("fs_paste", {
+          src,
+          destDir,
+          isMove: false,
+        });
+        lastName = baseName(created);
+        copied += 1;
+      } catch (err) {
+        setNotice({ text: String(err), err: true });
+      }
+    }
+    if (copied > 0) {
+      loadChildren(destDir);
+      setNotice({
+        text:
+          copied === 1
+            ? t("files.copiedAs", { name: lastName })
+            : t("files.importedN", { n: String(copied) }),
+      });
+    }
+  };
+
+  const onTreeDragOver = (e: React.DragEvent) => {
+    const types = Array.from(e.dataTransfer.types);
+    if (
+      !pathsFromDataTransfer(e.dataTransfer).length &&
+      !types.includes("text/uri-list") &&
+      !types.includes("Files")
+    ) {
+      return;
+    }
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    setDropTarget(destDirFromPoint(e.clientX, e.clientY));
+  };
+
+  const onTreeDrop = (e: React.DragEvent) => {
+    const dest = destDirFromPoint(e.clientX, e.clientY);
+    setDropTarget(null);
+    const paths = pathsFromDataTransfer(e.dataTransfer);
+    if (!dest || !paths.length) return;
+    e.preventDefault();
+    e.stopPropagation();
+    void importExternalPaths(paths, dest);
+  };
+
+  const importExternalPathsRef = useRef(importExternalPaths);
+  importExternalPathsRef.current = importExternalPaths;
+  const destDirFromPointRef = useRef(destDirFromPoint);
+  destDirFromPointRef.current = destDirFromPoint;
+
+  useEffect(() => {
+    const onPathDrop = (ev: Event) => {
+      const detail = (ev as CustomEvent).detail as
+        | { paths?: string[]; kind?: string; clientX?: number; clientY?: number }
+        | undefined;
+      if (!detail || detail.kind !== "files") return;
+      if (!Array.isArray(detail.paths) || !detail.paths.length) return;
+      const dest =
+        typeof detail.clientX === "number" && typeof detail.clientY === "number"
+          ? destDirFromPointRef.current(detail.clientX, detail.clientY)
+          : root;
+      if (dest) void importExternalPathsRef.current(detail.paths, dest);
+    };
+    window.addEventListener("capilot:path-drop", onPathDrop as EventListener);
+    return () =>
+      window.removeEventListener("capilot:path-drop", onPathDrop as EventListener);
+  }, [root]);
+
   /** cd the single open shell terminal to a folder (req: open in current terminal). */
   const doOpenInCurrentTerminal = () => {
     if (!menu?.path || !singleBashId) return;
@@ -884,9 +1036,22 @@ function FilesPanel() {
     if (!menu?.path) return;
     const proj = projectForPath(menu.path);
     spawnBashAt(proj, menu.path).catch((e) =>
-      setNotice({ text: String(e), err: true })
+      setNotice({ text: e instanceof Error ? e.message : String(e), err: true })
     );
     closeMenu();
+  };
+
+  /** Open the target in the OS file manager (folder) or reveal a file. */
+  const doReveal = () => {
+    const path = menu?.path;
+    if (!path) return;
+    const kind = menu.kind;
+    closeMenu();
+    const job =
+      kind === "file"
+        ? revealItemInDir(path).catch(() => openPath(parentPath(path) || path))
+        : openPath(path);
+    job.catch((e) => setNotice({ text: String(e), err: true }));
   };
 
   /** Resolve the runnable command for the menu's file path (null = not runnable). */
@@ -918,7 +1083,7 @@ function FilesPanel() {
     } else {
       const proj = projectForPath(dir);
       spawnBashAt(proj, dir, cmd).catch((e) =>
-        setNotice({ text: String(e), err: true })
+        setNotice({ text: e instanceof Error ? e.message : String(e), err: true })
       );
     }
     closeMenu();
@@ -1163,8 +1328,9 @@ function FilesPanel() {
             return (
               <div key={path}>
                 <div
-                  className={`dir${gCls}${isCutSource ? " files-ctx-cut" : ""}${selected?.path === path ? " selected" : ""}`}
+                  className={`dir${gCls}${isCutSource ? " files-ctx-cut" : ""}${selected?.path === path ? " selected" : ""}${dropTarget === path ? " drop-target" : ""}`}
                   style={{ paddingLeft: depth * 14 }}
+                  data-drop-dir={path}
                   onClick={() => {
                     if (suppressClickRef.current) return;
                     toggleDir(path);
@@ -1207,8 +1373,9 @@ function FilesPanel() {
           return (
             <div
               key={path}
-              className={`${cls}${gCls}${isCutSource ? " files-ctx-cut" : ""}${selected?.path === path ? " selected" : ""}`}
+              className={`${cls}${gCls}${isCutSource ? " files-ctx-cut" : ""}${selected?.path === path ? " selected" : ""}${dropTarget === parentPath(path) ? " drop-target" : ""}`}
               style={{ paddingLeft: depth * 14 }}
+              data-drop-dir={parentPath(path)}
               onClick={() => {
                 if (suppressClickRef.current) return;
                 clickFile(path, e.name);
@@ -1226,7 +1393,7 @@ function FilesPanel() {
             >
               <Icon name={icon} size={14} />
               <span className="file-label">{e.name}</span>
-              {g && (g.add > 0 || g.del > 0) && (
+              {g && showsGitLineStats(e.name) && (g.add > 0 || g.del > 0) && (
                 <span className="fs-stats">
                   {g.add > 0 && <span className="fs-add">+{g.add}</span>}
                   {g.del > 0 && <span className="fs-del">−{g.del}</span>}
@@ -1269,11 +1436,22 @@ function FilesPanel() {
     <div
       className="tab-panel"
       id="tab-files"
-      style={
-        searchMode === "content"
-          ? { padding: "8px 0", display: "flex", flexDirection: "column", minHeight: 0 }
-          : { padding: "8px 0" }
-      }
+      data-path-drop="files"
+      ref={filesPanelRef}
+      style={{
+        padding: "8px 0",
+        display: "flex",
+        flexDirection: "column",
+        minHeight: 0,
+        flex: 1,
+      }}
+      onDragOver={onTreeDragOver}
+      onDragLeave={(e) => {
+        const next = e.relatedTarget as Node | null;
+        if (next && e.currentTarget.contains(next)) return;
+        setDropTarget(null);
+      }}
+      onDrop={onTreeDrop}
       onContextMenu={(e) => {
         // Blank-space right-click acts on the root directory: give the menu the
         // root path so the folder-consistent actions (open in terminal, copy
@@ -1407,7 +1585,12 @@ function FilesPanel() {
           )}
         </div>
       ) : (
-        <div className="files-tree">{renderEntries(root, 0)}</div>
+        <div
+          className={`files-tree${dropTarget === root ? " drop-target" : ""}`}
+          data-drop-dir={root}
+        >
+          {renderEntries(root, 0)}
+        </div>
       )}
       {menu && (
         <div
@@ -1426,11 +1609,19 @@ function FilesPanel() {
               <div className="ctx-item" onClick={doOpenInNewTerminal}>
                 <Icon name="monitor" size={13} /> {t("files.openInNewTerminal")}
               </div>
+              <div className="ctx-item" onClick={doReveal}>
+                <Icon name="folder" size={13} /> {t("files.reveal")}
+              </div>
             </>
           )}
           {menu.kind === "file" && fileRunCommand(menu.path) && (
             <div className="ctx-item" onClick={doRunFile}>
               <Icon name="play" size={13} /> {t("files.runFile")}
+            </div>
+          )}
+          {menu.kind === "file" && (
+            <div className="ctx-item" onClick={doReveal}>
+              <Icon name="folder" size={13} /> {t("files.reveal")}
             </div>
           )}
           {menu.kind !== "file" && (

@@ -187,23 +187,19 @@ body::after {
   width: 36px; height: 28px; display: flex; align-items: center;
   justify-content: center; font-family: var(--pixel); font-size: var(--fs-md);
   color: var(--ink2); cursor: pointer; background: none; border: none;
-  transition: all .2s var(--ease-apple);
+  box-shadow: none; outline: none;
+  transition: color .2s var(--ease-apple);
 }
 
-.sidebar-btn:hover { color: var(--brand); transform: translateY(-1px); }
+.sidebar-btn:hover { color: var(--brand); }
 .sidebar-btn.active { color: var(--brand); }
 
-/* Window controls (min/max/close) pinned to the right end of the op bar,
-   with a slim divider separating them from the project actions. The draggable
-   `win-drag` spacer fills the gap so the window can be moved from the op bar
-   (frameless window — native decorations are off). */
+/* Window controls (min/max/close) pinned to the right end of the op bar.
+   The draggable `win-drag` spacer fills the gap so the window can be moved
+   from the op bar (frameless window — native decorations are off). */
 .win-drag {
   flex: 1;
   align-self: stretch;
-}
-.win-sep {
-  width: 1px; height: 14px;
-  background: var(--rule2);
 }
 .win-btn { width: 28px; }
 .win-btn:hover { transform: none; }
@@ -548,7 +544,6 @@ html[data-wallpaper="on"] .app .xterm {
   padding-left: 6px;
   -webkit-app-region: no-drag;
 }
-.tab-win-controls .win-sep { margin-right: 2px; }
 .tab-win-controls .win-btn { height: 26px; }
 
 /* ── Content Area ─────────────────────────────────────────────── */
@@ -612,6 +607,14 @@ html[data-wallpaper="on"] .app .xterm {
   );
 }
 .canvas-surface:active { cursor: grabbing; }
+.canvas-surface.marquee { cursor: crosshair; }
+.canvas-marquee {
+  position: absolute;
+  z-index: 8;
+  pointer-events: none;
+  border: 1px solid var(--brand);
+  background: rgb(var(--brand-rgb) / 0.12);
+}
 .canvas-surface *,
 .canvas-card,
 .canvas-card-name,
@@ -621,7 +624,26 @@ html[data-wallpaper="on"] .app .xterm {
   -webkit-user-drag: none;
 }
 .canvas-card-pty,
-.canvas-card-pty * {
+.canvas-card-pty *,
+.canvas-card.file .canvas-card-body,
+.canvas-card.file .canvas-card-body * {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+  cursor: text;
+}
+/* While dragging a text selection, only the originating card stays selectable.
+   Other cards / empty canvas must not join the native HTML selection. */
+.canvas-surface.selecting .canvas-card-pty,
+.canvas-surface.selecting .canvas-card-pty *,
+.canvas-surface.selecting .canvas-card.file .canvas-card-body,
+.canvas-surface.selecting .canvas-card.file .canvas-card-body * {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+.canvas-surface.selecting .canvas-card.selecting-text .canvas-card-pty,
+.canvas-surface.selecting .canvas-card.selecting-text .canvas-card-pty *,
+.canvas-surface.selecting .canvas-card.selecting-text.file .canvas-card-body,
+.canvas-surface.selecting .canvas-card.selecting-text.file .canvas-card-body * {
   user-select: text !important;
   -webkit-user-select: text !important;
 }
@@ -726,7 +748,28 @@ html[data-wallpaper="on"] .app .xterm {
 .canvas-card-drag { cursor: grab; }
 .canvas-card-drag:active { cursor: grabbing; }
 .canvas-card:hover { border-color: var(--brand); }
-.canvas-card.selected { border-color: var(--brand); background: var(--bg); }
+.canvas-card.selected {
+  border-color: var(--brand);
+  background: var(--bg);
+  box-shadow: 0 0 0 2px var(--brand), 0 0 18px rgb(var(--brand-rgb) / 0.45);
+}
+.canvas-card.marked {
+  background: color-mix(in srgb, var(--brand) 10%, var(--bg3));
+  box-shadow: inset 0 0 0 1px rgb(var(--brand-rgb) / 0.55);
+}
+.canvas-card.marked::after {
+  content: "";
+  position: absolute;
+  inset: 5px;
+  pointer-events: none;
+  border: 1px dashed rgb(var(--brand-rgb) / 0.7);
+}
+@keyframes canvas-card-flash {
+  0%, 100% { box-shadow: none; border-color: var(--rule2); }
+  50% { box-shadow: 0 0 0 2px var(--brand), 0 0 18px rgb(var(--brand-rgb) / 0.7); border-color: var(--brand); }
+}
+.canvas-card.canvas-card-flash { animation: canvas-card-flash 0.3s var(--ease-apple) 2; }
+.canvas-card.selected.canvas-card-flash { animation: canvas-card-flash 0.3s var(--ease-apple) 2; }
 .canvas-node.expanded {
   z-index: 5;
   display: flex;
@@ -752,7 +795,52 @@ html[data-wallpaper="on"] .app .xterm {
 }
 .canvas-card.expanded .canvas-card-pty {
   margin: 0 2px 2px;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 4px;
+}
+.canvas-card.file .canvas-card-body {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  margin: 0 2px 2px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border-radius: 4px;
+  background: var(--bg);
+  border: 1px solid var(--rule);
   cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.canvas-card.file .canvas-card-body pre {
+  margin: 0;
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: var(--fs-2xs);
+  line-height: 1.45;
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+  width: max-content;
+  min-width: 100%;
+  box-sizing: border-box;
+  color: var(--ink);
+}
+.canvas-card.file .canvas-card-body img,
+.canvas-card.file .canvas-card-body video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: var(--bg2);
+}
+.canvas-file-error, .canvas-file-empty {
+  padding: 10px;
+  color: var(--ink2);
+  font-family: var(--mono);
+  font-size: var(--fs-2xs);
 }
 .canvas-card-pty {
   flex: 1 1 auto;
@@ -812,6 +900,17 @@ html[data-wallpaper="on"] .app .xterm {
 .canvas-card-grip-l { left: 0; top: 0; bottom: 10px; width: 8px; }
 .canvas-card-grip-r { right: 0; top: 0; bottom: 10px; width: 8px; }
 .canvas-card-grip-b { left: 0; right: 16px; bottom: 0; height: 8px; }
+.canvas-card-grip-resize { z-index: 8; }
+.canvas-card-grip-resize.canvas-card-grip-r {
+  cursor: ew-resize;
+  top: 0;
+  bottom: 14px;
+}
+.canvas-card-grip-resize.canvas-card-grip-b {
+  cursor: ns-resize;
+  left: 0;
+  right: 14px;
+}
 .canvas-surface.dragging .canvas-card-pty {
   pointer-events: none;
 }
@@ -1108,12 +1207,15 @@ html[data-wallpaper="on"] .app .xterm {
 body.todo-pointer-dragging,
 body.todo-pointer-dragging *,
 body.path-pointer-dragging,
-body.path-pointer-dragging * {
+body.path-pointer-dragging *,
+body.commit-pointer-dragging,
+body.commit-pointer-dragging * {
   cursor: grabbing !important;
   user-select: none !important;
 }
 .todo-drop-hover,
-.path-drop-hover {
+.path-drop-hover,
+.commit-drop-hover {
   outline: 1px dashed var(--brand) !important;
   background: rgb(var(--brand-rgb) / 0.14) !important;
 }
@@ -1137,9 +1239,22 @@ body.path-pointer-dragging * {
   text-overflow: ellipsis;
   opacity: 0.95;
 }
-.files-tree .dir,
-.files-tree .file {
-  touch-action: none; /* pointer path-drag, not scroll/select */
+.commit-drag-ghost {
+  position: fixed;
+  z-index: 10000;
+  pointer-events: none;
+  padding: 4px 8px;
+  border: 1px solid var(--brand);
+  border-radius: 3px;
+  background: var(--bg2);
+  box-shadow: var(--panel-shadow);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--ink);
+  opacity: 0.95;
+}
+.gg-row {
+  touch-action: none;
 }
 
 /* 待处理 rows — session-name chip + click-to-open */
@@ -1215,7 +1330,12 @@ body.path-pointer-dragging * {
   padding: 6px 14px; border-bottom: 1px solid var(--rule);
   font-family: var(--pixel); font-size: var(--fs-2xs); line-height: 1; color: var(--primary);
   letter-spacing: 1px; text-transform: uppercase;
+  cursor: row-resize;
 }
+.composer-target.resizing { cursor: row-resize; }
+.composer-target .composer-f1-hint,
+.composer-target kbd,
+.composer-target button { cursor: pointer; }
 
 .composer-input {
   padding: 8px 14px; font-family: var(--mono); font-size: var(--fs-base);
@@ -1547,7 +1667,7 @@ body.path-pointer-dragging * {
 
 /* ── Tab panels (right sidebar) ───────────────────────────────── */
 
-.tab-panel { padding: 0; flex: 1; }
+.tab-panel { padding: 0; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
 /* Git panel: the tab itself is a flex column so the two regions lay out
    vertically instead of stacking as plain blocks. Without this the flex
@@ -1575,6 +1695,7 @@ body.path-pointer-dragging * {
 /* Files tab */
 .files-search {
   padding: 0 12px 10px; border-bottom: 1px solid var(--rule2);
+  flex-shrink: 0;
 }
 .files-search input {
   width: 100%; background: var(--bg3); border: 1px solid var(--rule2);
@@ -1596,6 +1717,15 @@ body.path-pointer-dragging * {
 .files-tree {
   font-family: var(--mono); font-size: var(--fs-sm); color: var(--ink2);
   line-height: 2; padding: 0 12px;
+  flex: 1;
+  min-height: 80px;
+  overflow-y: auto;
+}
+.files-tree.drop-target,
+.files-tree .dir.drop-target,
+.files-tree .file.drop-target {
+  outline: 1px dashed var(--brand);
+  background: rgb(var(--brand-rgb) / 0.12);
 }
 .files-tree .dir { color: var(--primary); }
 .files-tree .file { color: var(--ink2); }
@@ -1729,7 +1859,9 @@ body.path-pointer-dragging * {
 
 /* ── P1 additions ─────────────────────────────────────────────── */
 
-/* Context menu (right-click on terminal items) */
+/* Context menu (right-click on terminal items). z-index sits above the
+   frameless-window resize grips (9999) so a menu clamped to the right
+   edge is still clickable — the 6px east strip must not swallow items. */
 .ctx-menu {
   position: fixed;
   min-width: 170px;
@@ -1739,7 +1871,7 @@ body.path-pointer-dragging * {
   box-shadow: 0 8px 30px rgb(var(--black-rgb) / 0.45);
   padding: 4px;
   font-size: var(--fs-sm);
-  z-index: 1000;
+  z-index: 10000;
 }
 .ctx-item {
   padding: 7px 10px;
@@ -3429,7 +3561,8 @@ body.path-pointer-dragging * {
   left: 0;
   /* Hovering a commit row must not change the cursor — the row is interactive
      (right-click menu, drag) but visually it should feel like plain text. */
-  cursor: default;
+  cursor: grab;
+  touch-action: none;
 }
 /* Commit subject: HTML overlay (not SVG) so ellipsis clips at the row's own
    right edge — full width up to the panel window, never overflowing. The
@@ -3960,7 +4093,6 @@ html[data-wallpaper="on"] .ov-section-body {
 .act-mode-group,
 .send-btn,
 .ul-send-btn,
-.sidebar-btn,
 .empty-state-cta,
 .onboarding-btn,
 .permission-confirm-btn,
@@ -4370,6 +4502,14 @@ html[data-theme="quantum"] .app::before {
 .settings-wallpaper-btn:hover {
   color: var(--ink);
   border-color: var(--brand);
+}
+.settings-wallpaper-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.settings-wallpaper-btn:disabled:hover {
+  color: var(--ink2);
+  border-color: var(--rule2);
 }
 .settings-wallpaper-btn.ghost {
   color: var(--muted);
@@ -5027,9 +5167,19 @@ html[data-theme="quantum"] .app::before {
   border-right: 1px solid var(--rule2) !important;
   border-radius: 0 !important;
   box-shadow: none !important;
+  color: var(--ink);
+  background: var(--bg3);
 }
 .settings-segmented button:last-child { border-right: 0 !important; }
-.settings-segmented button.active { color: var(--accent-ink) !important; background: var(--brand) !important; }
+.settings-segmented button:hover:not(.active) {
+  color: var(--ink);
+  background: var(--bg4);
+}
+.settings-segmented button.active {
+  color: var(--ink);
+  background: rgb(var(--brand-rgb) / 0.16);
+  box-shadow: inset 0 -2px 0 var(--brand) !important;
+}
 
 .settings-help-text {
   margin: -2px 0 9px;

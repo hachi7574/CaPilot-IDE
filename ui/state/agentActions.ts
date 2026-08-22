@@ -1,7 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useStore, AgentInfo, RestoredSession, createBufferedChannel } from "./store";
 import { notify } from "./notify";
-import { isShellRuntime } from "./shellPath";
+import {
+  detectShellFlavor,
+  isShellRuntime,
+  shellCd,
+  shellCdAndRun,
+} from "./shellPath";
 import { t } from "../i18n";
 
 const DEFAULT_RUNTIME = "claude";
@@ -68,25 +73,56 @@ export async function spawnAgent(
   return info.id;
 }
 
-/** Pick the best available plain shell for file-tree "在此打开终端".
- *  On Windows prefer PowerShell → cmd → bash; elsewhere shell → bash. */
-function preferredShellRuntime(): string {
+function shellRuntimeOrder(): string[] {
+  return typeof navigator !== "undefined" &&
+    ((navigator.platform || "").toLowerCase().includes("win") ||
+      (navigator.userAgent || "").toLowerCase().includes("windows"))
+    ? ["powershell", "cmd", "shell", "bash-rc"]
+    : ["shell", "bash-rc"];
+}
+
+/** Available shells in preference order (always at least the first preference). */
+function preferredShellRuntimes(): string[] {
   const available = new Set(
     useStore
       .getState()
       .runtimes.filter((r) => r.available)
       .map((r) => r.id)
   );
-  const order =
-    typeof navigator !== "undefined" &&
-    ((navigator.platform || "").toLowerCase().includes("win") ||
-      (navigator.userAgent || "").toLowerCase().includes("windows"))
-      ? ["powershell", "cmd", "shell", "bash-rc"]
-      : ["shell", "bash-rc"];
-  for (const id of order) {
-    if (available.has(id)) return id;
+  const order = shellRuntimeOrder();
+  const hits = order.filter((id) => available.has(id));
+  return hits.length ? hits : [order[0]];
+}
+
+function spawnErrorRaw(e: unknown): string {
+  if (typeof e === "string") return e;
+  if (e instanceof Error && e.message) return e.message;
+  if (e && typeof e === "object" && "message" in e) {
+    const m = (e as { message: unknown }).message;
+    if (typeof m === "string" && m) return m;
   }
-  return order[0];
+  return String(e);
+}
+
+function spawnErrorText(e: unknown): string {
+  const raw = spawnErrorRaw(e);
+  if (/pty error/i.test(raw) || /daemon error/i.test(raw)) {
+    return t("agentActions.ptyError");
+  }
+  return raw;
+}
+
+function isCapacityOrNameError(e: unknown): boolean {
+  const raw = spawnErrorRaw(e);
+  return /会话数已达上限|CapacityReached|Invalid project name|Project name cannot be empty/i.test(
+    raw
+  );
+}
+
+function sameDir(a: string | null, b: string): boolean {
+  if (!a) return false;
+  const n = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  return n(a) === n(b);
 }
 
 /** Spawn a terminal from a new-terminal template (project "+" / tab-bar "+"
@@ -111,56 +147,118 @@ export async function spawnTerminal(
   return id;
 }
 
+function titleForShell(runtime: string): string {
+  if (runtime === "powershell") return "PowerShell";
+  if (runtime === "cmd") return "CMD";
+  if (runtime === "bash-rc" || runtime.startsWith("bash")) return "bash";
+  return t("agentActions.terminal");
+}
+
+function flavorForRuntime(runtime: string) {
+  const info = useStore.getState().runtimes.find((r) => r.id === runtime);
+  return detectShellFlavor(runtime, info?.name);
+}
+
+async function spawnShellOnce(
+  project: string,
+  runtime: string,
+  projectRoot: string | null
+): Promise<{
+  info: AgentInfo;
+  channel: ReturnType<typeof createBufferedChannel>["channel"];
+  flush: (id: string) => void;
+}> {
+  const { channel, flush } = createBufferedChannel();
+  const info = (await invoke("agent_spawn", {
+    runtime,
+    project,
+    projectRoot,
+    resumeKey: null,
+    model: null,
+    speed: "auto",
+    mode: "ask",
+    onData: channel,
+  })) as AgentInfo;
+  return { info, channel, flush };
+}
+
 /** Spawn a plain shell whose cwd is an arbitrary directory (e.g. a folder
  *  picked in the file tree). `command` (optional) runs after the shell reaches
- *  its prompt. Grouped under `project` in the sidebar. */
+ *  its prompt. Grouped under `project` in the sidebar.
+ *
+ *  File-tree folders sometimes fail as a PTY cwd (permissions, daemon wrap,
+ *  ConPTY). Retry other shells, then spawn at the project root and `cd`. */
 export async function spawnBashAt(
   project: string,
   dir: string,
   command?: string
 ): Promise<string> {
-  const s = useStore.getState();
-  const { channel, flush } = createBufferedChannel();
-  const runtime = preferredShellRuntime();
-  let info: AgentInfo;
-  try {
-    info = (await invoke("agent_spawn", {
-      runtime,
-      project,
-      projectRoot: dir,
-      resumeKey: null,
-      model: null,
-      speed: "auto",
-      mode: "ask",
-      onData: channel,
-    })) as AgentInfo;
-  } catch (e) {
-    notify(t("agentActions.spawnFailed"), typeof e === "string" ? e : String(e));
-    throw e;
+  const runtimes = preferredShellRuntimes();
+  let lastError: unknown;
+  let spawned: {
+    info: AgentInfo;
+    channel: ReturnType<typeof createBufferedChannel>["channel"];
+    flush: (id: string) => void;
+    runtime: string;
+    needCd: boolean;
+  } | null = null;
+
+  for (const runtime of runtimes) {
+    try {
+      const r = await spawnShellOnce(project, runtime, dir);
+      spawned = { ...r, runtime, needCd: false };
+      break;
+    } catch (e) {
+      lastError = e;
+      if (isCapacityOrNameError(e)) break;
+    }
   }
+
+  // Folder cwd can fail (PTY/permissions/canonicalize). Spawn at the project
+  // root — or the per-agent workspace if the folder *is* the project root —
+  // then cd into the requested directory.
+  if (!spawned && lastError && !isCapacityOrNameError(lastError)) {
+    const stored = useStore.getState().projectRoots[project] ?? null;
+    const fallbackRoot = sameDir(stored, dir) ? null : stored;
+    for (const runtime of runtimes) {
+      try {
+        const r = await spawnShellOnce(project, runtime, fallbackRoot);
+        spawned = { ...r, runtime, needCd: true };
+        break;
+      } catch (e) {
+        lastError = e;
+        if (isCapacityOrNameError(e)) break;
+      }
+    }
+  }
+
+  if (!spawned) {
+    const msg = spawnErrorText(lastError);
+    notify(t("agentActions.spawnFailed"), msg);
+    throw new Error(msg);
+  }
+
+  const { info, channel, flush, runtime, needCd } = spawned;
+  const s = useStore.getState();
   flush(info.id);
   s.addAgent({ ...info, project }, channel);
-  const titleFallback =
-    runtime === "powershell"
-      ? "PowerShell"
-      : runtime === "cmd"
-        ? "CMD"
-        : runtime === "bash-rc" || runtime.startsWith("bash")
-          ? "bash"
-          : t("agentActions.terminal");
   s.addTab({
     id: info.id,
     type: "agent",
     agentId: info.id,
-    title: info.title || titleFallback,
+    title: info.title || titleForShell(runtime),
   });
-  if (command) {
-    // Wait for the shell prompt, then send the command (raw:false appends \r).
+
+  const flavor = flavorForRuntime(runtime);
+  const followup = needCd
+    ? command
+      ? shellCdAndRun(dir, command, flavor)
+      : shellCd(dir, flavor)
+    : command ?? null;
+  if (followup) {
     await new Promise((r) => setTimeout(r, 400));
-    // The launch command is user-intended work — end the spawn wake so its
-    // output reads as 运行中 rather than being dismissed as boot noise.
     useStore.getState().markAgentActive(info.id);
-    await invoke("agent_write", { id: info.id, data: command, raw: false }).catch(
+    await invoke("agent_write", { id: info.id, data: followup, raw: false }).catch(
       () => {}
     );
   }
@@ -183,6 +281,38 @@ export async function ensureAgentChannel(agentId: string): Promise<boolean> {
 }
 
 /**
+ * TUIs that treat a text+Enter burst as pasted input. When both land in one
+ * PTY write, the trailing CR stays in the editor as a literal newline instead
+ * of submitting. Send the prompt and Enter as two writes, matching a user
+ * typing in the terminal. Codex was the original case; CodeBuddy Code (v1
+ * generic CLI) does the same.
+ */
+const SPLIT_ENTER_RUNTIMES = new Set(["codex", "codebuddy"]);
+
+/** CodeBuddy's editor treats a short text→CR burst as a paste, so the CR lands
+ *  as a literal newline. Wait out paste-mode; 150ms was still too short. */
+const SPLIT_ENTER_GAP_MS: Record<string, number> = {
+  codex: 30,
+  codebuddy: 400,
+};
+
+async function writePromptToPty(
+  agentId: string,
+  text: string,
+  runtime?: string
+): Promise<void> {
+  // Trailing CRs in the payload become extra editor newlines before submit.
+  const payload = text.replace(/[\r\n]+$/, "");
+  if (runtime && SPLIT_ENTER_RUNTIMES.has(runtime)) {
+    await invoke("agent_write", { id: agentId, data: payload, raw: true });
+    await new Promise((r) => setTimeout(r, SPLIT_ENTER_GAP_MS[runtime] ?? 30));
+    await invoke("agent_write", { id: agentId, data: "\r", raw: true });
+    return;
+  }
+  await invoke("agent_write", { id: agentId, data: payload });
+}
+
+/**
  * Send a prompt to an agent with the Composer's exact send semantics, shared by
  * the Composer and the todo-tag drop targets:
  *   1. ensure a live PTY channel (resume restored/dormant sessions);
@@ -191,9 +321,9 @@ export async function ensureAgentChannel(agentId: string): Promise<boolean> {
  *      Composer);
  *   3. stamp the submission (tab bar reads 运行中) and clear the
  *      unviewed-completion flag;
- *   4. write the message — codex gets the text+Enter keystroke burst its TUI
- *      needs to treat the input as a submitted prompt, other runtimes a plain
- *      write (raw:false appends the Enter).
+ *   4. write the message — split-enter runtimes (codex, codebuddy) get text
+ *      then Enter as two PTY writes; other runtimes a plain write (raw:false
+ *      appends the Enter).
  */
 export async function sendPromptToAgent(
   agentId: string,
@@ -207,26 +337,17 @@ export async function sendPromptToAgent(
   }
   s.markAgentSubmitted(agentId);
   s.setAgentUnread(agentId, false);
-  const runtime = s.agents.get(agentId)?.runtime;
-  if (runtime === "codex") {
-    // Codex's TUI detects a text+Enter burst as pasted input. When both are
-    // delivered in one PTY write, the trailing CR may remain in the editor
-    // instead of submitting the prompt. Send the keystrokes separately,
-    // matching what happens when a user types in the terminal directly.
-    await invoke("agent_write", { id: agentId, data: text, raw: true });
-    await new Promise((r) => setTimeout(r, 30));
-    await invoke("agent_write", { id: agentId, data: "\r", raw: true });
-  } else {
-    await invoke("agent_write", { id: agentId, data: text });
-  }
+  s.trackPromptAsTodo(agentId, text);
+  await writePromptToPty(agentId, text, s.agents.get(agentId)?.runtime);
 }
 
 /**
  * Assign a todo tag to an agent and send its text as a prompt. The tag leaves
  * 待分配 (becomes invisible `assigned`), linked to the session so it auto-lands
- * in 待处理 when the session's turn ends. For an ended/dormant session the
- * standard reopen flow runs first (drop dead channel + flag resume + open the
- * terminal), then the prompt is injected once the resumed channel is live.
+ * in 待处理 when the session's turn ends. Does not switch the active tab —
+ * dropping onto a sidebar session from the canvas (or any other view) must
+ * keep that view. A missing/ended channel is resumed in-place by
+ * `sendPromptToAgent`.
  */
 export async function assignTodoAndSend(tagId: string, agentId: string): Promise<void> {
   const st = useStore.getState();
@@ -237,28 +358,9 @@ export async function assignTodoAndSend(tagId: string, agentId: string): Promise
   // The tag keeps its creation-time scope (project) — see `assignTodoToAgent`.
   st.assignTodoToAgent(tagId, agentId, sessionName);
 
-  // Live session (channel attached, not ended) → straight in.
-  if (!st.agentChannels.has(agentId) || agent?.status === "done") {
-    // Ended/dormant: reopen like the sidebar "已结束" click — force a fresh
-    // terminal mount that resumes — then wait for the resumed channel before
-    // sending, so `sendPromptToAgent`'s ensureAgentChannel can't double-resume.
-    st.dropAgentChannel(agentId);
-    if (st.tabs.some((t) => t.id === agentId)) st.closeTab(agentId);
-    st.requestResume(agentId);
-    if (!st.tabs.find((t) => t.id === agentId)) {
-      st.addTab({
-        id: agentId,
-        type: "agent",
-        agentId,
-        title: sessionName ?? `agent-${agentId.slice(0, 6)}`,
-      });
-    }
-    st.setActiveTab(agentId);
-    for (let i = 0; i < 30; i++) {
-      if (useStore.getState().agentChannels.has(agentId)) break;
-      await new Promise((r) => setTimeout(r, 100));
-    }
-  }
+  // Inject the prompt without stealing the current view (canvas / editor /
+  // another terminal stay put). `sendPromptToAgent` resumes a missing channel
+  // in-place via `agent_resume` — no tab switch required.
   await sendPromptToAgent(agentId, tag.text).catch(() => {});
 }
 

@@ -30,12 +30,22 @@ import { CacheHitRate } from "./CacheHitRate";
 import { Icon } from "../Icon";
 import { useT } from "../../i18n";
 import { matchesShortcut } from "../../state/shortcuts";
+import { detectShellFlavor, isShellRuntime, joinPath } from "../../state/shellPath";
+import {
+  liveCanvasSendAgentIds,
+  subscribeCanvasLiveCards,
+  subscribeCanvasSendTarget,
+  getCanvasSendTargetReq,
+  requestCanvasSelect,
+  requestCanvasCenter,
+} from "../../state/canvas";
 
 const DEFAULT_RUNTIME = "claude";
-/** v1 Composer: plaintext + Enter. Hides the action-bar buttons (model /
- *  permission / thinking / +) and the `/` slash catalog. Live TUI key scripts
- *  stay in this file but are unreachable while this is true. Flip for v2. */
-const PLAIN_COMPOSER = true;
+/** First-class Claude / Codex keep the full Composer (slash catalog, model /
+ *  permission / thinking / +). Other runtimes stay plaintext + Enter. */
+function isRichComposerRuntime(id: string): boolean {
+  return id === "claude" || id === "codex";
+}
 type ComposerPermissionMode = PermissionMode;
 
 // Claude Code's Shift+Tab cycle is not the same order as the permission menu:
@@ -88,6 +98,31 @@ interface AtMenuState {
   idx: number;
 }
 
+interface ShellMenuState {
+  /** Index of the token being completed. */
+  anchor: number;
+  query: string;
+  items: string[];
+  idx: number;
+}
+
+const POSIX_BUILTINS = [
+  "alias", "bg", "cd", "command", "echo", "eval", "exec", "exit", "export",
+  "fg", "hash", "history", "jobs", "kill", "pwd", "read", "source", "test",
+  "times", "trap", "type", "ulimit", "umask", "unalias", "unset", "wait",
+];
+const CMD_BUILTINS = [
+  "assoc", "break", "call", "cd", "chdir", "cls", "color", "copy", "date",
+  "del", "dir", "echo", "endlocal", "erase", "exit", "md", "mkdir", "move",
+  "path", "pause", "popd", "prompt", "pushd", "rd", "ren", "rename", "rmdir",
+  "set", "setlocal", "shift", "start", "time", "title", "type", "ver", "vol",
+];
+const POWERSHELL_BUILTINS = [
+  "cd", "chdir", "clc", "clear", "cls", "copy", "cpi", "del", "dir", "echo",
+  "erase", "ex", "exit", "gi", "gp", "gci", "ls", "md", "mkdir", "move", "mv",
+  "ni", "pwd", "ren", "rm", "rmdir", "rv", "sal", "set", "si", "sl", "sleep",
+];
+
 interface SlashItem {
   name: string;
   description: string;
@@ -126,8 +161,10 @@ interface ComposerDraftState {
 }
 
 /** Where a Composer send goes. Tab cycles through the open terminals (live
- *  agent sessions) + the 待分配 todo area; a null cycle target means "follow the
- *  active tab" (the pre-existing behavior). */
+ *  agent sessions, or live canvas cards when the canvas view is active) + the
+ *  待分配 todo area; a null cycle target means "follow the active tab" (the
+ *  pre-existing behavior). On canvas with no pin, that follow is the first
+ *  live card in visual order. */
 type ComposerTarget =
   | { kind: "agent"; agentId: string }
   | { kind: "todo" };
@@ -137,6 +174,7 @@ export function Composer() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const atMenuRef = useRef<HTMLDivElement>(null);
   const slashMenuRef = useRef<HTMLDivElement>(null);
+  const shellMenuRef = useRef<HTMLDivElement>(null);
 
   const composerOpen = useStore((s) => s.composerOpen);
   const permissionMode = useStore((s) => s.permissionMode);
@@ -157,6 +195,7 @@ export function Composer() {
 
   const [atMenu, setAtMenu] = useState<AtMenuState | null>(null);
   const [slashMenuStack, setSlashMenuStack] = useState<SlashMenuState[]>([]);
+  const [shellMenu, setShellMenu] = useState<ShellMenuState | null>(null);
   // Tab-cycled send target: null follows the active tab (pre-existing behavior).
   const [cycleTarget, setCycleTarget] = useState<ComposerTarget | null>(null);
   const [dragHover, setDragHover] = useState(false);
@@ -246,22 +285,38 @@ export function Composer() {
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const targetAgentId = activeTab?.agentId;
+  const onCanvas = activeTab?.type === "canvas";
+
+  // CanvasPanel publishes the cards it currently paints. Composer reads that
+  // list so Tab / default-send can see canvas sessions that have no agent tab.
+  const [canvasLiveGen, setCanvasLiveGen] = useState(0);
+  useEffect(() => subscribeCanvasLiveCards(() => setCanvasLiveGen((n) => n + 1)), []);
+  const canvasAgentIds = useMemo(
+    () => (onCanvas ? liveCanvasSendAgentIds(agents) : []),
+    [onCanvas, agents, canvasLiveGen]
+  );
 
   // Effective send target: a Tab-cycled pin wins; otherwise follow the active
-  // terminal. Falls back to null (spawn a new session on send) when the active
-  // tab carries no agent. A cycled terminal whose session has since ended or
-  // been deleted falls back to following the active tab rather than sending
-  // into a dead session.
+  // terminal. On canvas that follow is the first live card (visual order).
+  // Falls back to null (spawn a new session on send) when neither an active
+  // agent tab nor a live canvas card is available. A cycled terminal whose
+  // session has since ended or been deleted falls back the same way rather
+  // than sending into a dead session.
   const effectiveTarget: ComposerTarget | null = useMemo(() => {
+    const follow =
+      targetAgentId
+        ? ({ kind: "agent", agentId: targetAgentId } as const)
+        : canvasAgentIds[0]
+          ? ({ kind: "agent", agentId: canvasAgentIds[0] } as const)
+          : null;
     if (cycleTarget?.kind === "agent") {
       const alive = agents.get(cycleTarget.agentId);
       if (!alive || alive.status === "done" || alive.status === "failed") {
-        return targetAgentId ? { kind: "agent", agentId: targetAgentId } : null;
+        return follow;
       }
     }
-    return cycleTarget ??
-      (targetAgentId ? { kind: "agent", agentId: targetAgentId } : null);
-  }, [cycleTarget, agents, targetAgentId]);
+    return cycleTarget ?? follow;
+  }, [cycleTarget, agents, targetAgentId, canvasAgentIds]);
 
   useEffect(() => {
     // Skills are session/runtime/cwd-specific. Never carry a previous agent's
@@ -272,9 +327,26 @@ export function Composer() {
     slashChildrenRef.current.clear();
     setAtMenu(null);
     setSlashMenuStack([]);
-    // A Tab-cycled send target follows the newly-active terminal again.
+    setShellMenu(null);
+    // A Tab-cycled send target follows the newly-active terminal / canvas again.
     setCycleTarget(null);
-  }, [targetAgentId]);
+  }, [targetAgentId, activeTabId]);
+
+  // Canvas card click (when the layout pref is on) pins Composer to that session.
+  useEffect(() => {
+    let lastSeq = 0;
+    const apply = () => {
+      const req = getCanvasSendTargetReq();
+      if (!req.agentId || req.seq === lastSeq) return;
+      lastSeq = req.seq;
+      const alive = useStore.getState().agents.get(req.agentId);
+      if (!alive || alive.status === "done" || alive.status === "failed") return;
+      setCycleTarget({ kind: "agent", agentId: req.agentId });
+    };
+    const unsub = subscribeCanvasSendTarget(apply);
+    apply();
+    return unsub;
+  }, []);
 
   useEffect(() => {
     // Keep the highlighted file visible while navigating a long `@` result list.
@@ -295,15 +367,45 @@ export function Composer() {
     activeItem?.scrollIntoView({ block: "nearest" });
   }, [topSlashLevel?.idx, topSlashLevel?.items]);
 
+  useEffect(() => {
+    const activeItem = shellMenuRef.current?.querySelector<HTMLElement>(
+      '[role="option"][aria-selected="true"]'
+    );
+    activeItem?.scrollIntoView({ block: "nearest" });
+  }, [shellMenu?.idx, shellMenu?.items]);
+
   // ── Per-session composer config ────────────────────────────────
   // The permission/speed/model controls show and edit the CURRENT target
   // session's own values (falling back to the global "next spawn" defaults when
   // no session is targeted). Changing one applies to that session (persisted,
   // takes effect on next resume) and remembers the choice for new sessions.
-  const configAgentId = activeTab?.agentId;
+  const configAgentId =
+    effectiveTarget?.kind === "agent" ? effectiveTarget.agentId : activeTab?.agentId;
   const configAgent = configAgentId ? agents.get(configAgentId) : undefined;
   const configRuntimeId = configAgent?.runtime ?? DEFAULT_RUNTIME;
+  /** Slash catalog + model / thinking / permission only apply to a live
+   *  Claude / Codex session. With no terminal, DEFAULT_RUNTIME is still
+   *  claude — that must not paint those controls. The `+` file-ref button
+   *  stays available either way. */
+  const liveRichComposer = !!configAgent && isRichComposerRuntime(configRuntimeId);
+  const liveShellComposer = !!configAgent && isShellRuntime(configRuntimeId);
   const configRuntime = runtimes.find((runtime) => runtime.id === configRuntimeId);
+  const shellFlavor = detectShellFlavor(configRuntimeId, configRuntime?.name);
+
+  useEffect(() => {
+    if (liveRichComposer) return;
+    slashReqRef.current += 1;
+    setSlashMenuStack([]);
+    setModelMenuOpen(false);
+    setPermissionMenuOpen(false);
+    setThinkingMenuOpen(false);
+    setPendingEffortModel(null);
+  }, [liveRichComposer]);
+
+  useEffect(() => {
+    if (liveShellComposer) return;
+    setShellMenu(null);
+  }, [liveShellComposer]);
   const models = configRuntime?.models ?? [];
   const permissionModes: PermissionModeInfo[] = configRuntime?.permission_modes ?? [];
   const thinkingOptions: ThinkingOptionInfo[] = configRuntime?.thinking_options ?? [];
@@ -1110,11 +1212,17 @@ export function Composer() {
     };
   }, [refMenuOpen]);
 
+  // Live send-target agent for F1 (canvas pin / follow / agent tab). Kept in a
+  // ref so the capture listener (empty deps) always sees the current target.
+  const focusAgentIdRef = useRef<string | null>(null);
+  focusAgentIdRef.current =
+    effectiveTarget?.kind === "agent" ? effectiveTarget.agentId : null;
+
   // ── F1 → toggle focus between the composer input and the terminal ──────
   // Composer owns the F1 window listener (it always mounts, and it knows both
   // the textarea and its open/closed state). When the input holds focus we hand
-  // focus to the active tab's terminal via a store directive; otherwise (focus
-  // in the terminal, a sidebar, or elsewhere) we focus the input. A collapsed
+  // focus to the send-target terminal (agent tab, or the pinned/followed canvas
+  // card) via a store directive; otherwise we focus the input. A collapsed
   // composer hides its input (`display:none`, unfocusable), so F1 then routes
   // to the terminal instead of no-oping. Dismiss any open popover first so
   // focus can't straddle the two areas.
@@ -1130,26 +1238,32 @@ export function Composer() {
       const el = textareaRef.current;
       const inputFocused = el !== null && document.activeElement === el;
       const st = useStore.getState();
-      // The active tab is where the terminal would live: an agent tab with a
-      // session renders an XTermPanel; editor/diff tabs and placeholder agent
-      // tabs have no terminal to hand focus to.
       const activeTab = st.tabs.find((t) => t.id === st.activeTabId);
-      const hasTerminal = activeTab?.type === "agent" && !!activeTab.agentId;
+      const targetId =
+        focusAgentIdRef.current ??
+        (activeTab?.type === "agent" ? activeTab.agentId : undefined) ??
+        null;
+      const hasTerminal = !!targetId;
       // Dismiss any open popover first so focus can't straddle the two areas.
       setAtMenu(null);
       setSlashMenuStack([]);
+      setShellMenu(null);
       setModelMenuOpen(false);
       setPermissionMenuOpen(false);
       setThinkingMenuOpen(false);
       setRefMenuOpen(false);
       setPendingEffortModel(null);
       if (inputFocused) {
-        if (hasTerminal) st.requestFocus("terminal");
+        if (hasTerminal) {
+          st.requestFocus("terminal", targetId);
+          if (activeTab?.type === "canvas" && targetId) requestCanvasSelect(targetId);
+        }
         // No terminal to move to — leave focus in the input.
       } else if (el && st.composerOpen) {
         el.focus();
       } else if (hasTerminal) {
-        st.requestFocus("terminal");
+        st.requestFocus("terminal", targetId);
+        if (activeTab?.type === "canvas" && targetId) requestCanvasSelect(targetId);
       }
     };
     window.addEventListener("keydown", onKey, true);
@@ -1426,12 +1540,67 @@ export function Composer() {
       window.removeEventListener("capilot:todo-drop", onTodoDrop as EventListener);
   }, [insertText]);
 
+  useEffect(() => {
+    const onCommitDrop = (ev: Event) => {
+      const detail = (ev as CustomEvent).detail as
+        | { kind?: string; hash?: string }
+        | undefined;
+      if (!detail || detail.kind !== "composer") return;
+      if (detail.hash) insertText(detail.hash + " ");
+    };
+    window.addEventListener("capilot:commit-drop", onCommitDrop as EventListener);
+    return () =>
+      window.removeEventListener("capilot:commit-drop", onCommitDrop as EventListener);
+  }, [insertText]);
+
+  const shellCmdCache = useRef<string[] | null>(null);
+  const shellCmdReq = useRef(0);
+
+  useEffect(() => {
+    shellCmdCache.current = null;
+  }, [shellFlavor]);
+
+  const ensureShellCommands = useCallback(async (): Promise<string[]> => {
+    if (shellCmdCache.current) return shellCmdCache.current;
+    try {
+      const names = (await invoke<string[]>("shell_list_commands")) ?? [];
+      const builtins =
+        shellFlavor === "cmd"
+          ? CMD_BUILTINS
+          : shellFlavor === "powershell"
+            ? POWERSHELL_BUILTINS
+            : POSIX_BUILTINS;
+      const merged = Array.from(new Set([...builtins, ...names]));
+      merged.sort((a, b) => a.localeCompare(b));
+      shellCmdCache.current = merged;
+      return merged;
+    } catch {
+      shellCmdCache.current = [];
+      return [];
+    }
+  }, [shellFlavor]);
+
   // ── `@` file autocomplete (DevPlan §3.2) ──────────────────────
   const resolveTargetCwd = useCallback((): string | null => {
     const s = useStore.getState();
-    const id = s.tabs.find((t) => t.id === s.activeTabId)?.agentId;
-    return id ? s.agents.get(id)?.cwd ?? null : null;
-  }, []);
+    const agentId =
+      effectiveTarget?.kind === "agent"
+        ? effectiveTarget.agentId
+        : s.tabs.find((tab) => tab.id === s.activeTabId)?.agentId;
+    if (agentId) {
+      const cwd = s.agents.get(agentId)?.cwd;
+      if (cwd) return cwd;
+    }
+    if (s.focusedProject) {
+      const root = s.projectRoots[s.focusedProject];
+      if (root) return root;
+    }
+    for (const name of s.projects) {
+      const root = s.projectRoots[name];
+      if (root) return root;
+    }
+    return Object.values(s.projectRoots)[0] ?? null;
+  }, [effectiveTarget]);
 
   const handleAtAuto = useCallback(
     async (el: HTMLTextAreaElement) => {
@@ -1443,6 +1612,7 @@ export function Composer() {
         setAtMenu(null);
         return;
       }
+      setShellMenu(null);
       const query = before.slice(lastAt + 1);
       // A space / newline ends the `@` mention.
       if (/\s/.test(query)) {
@@ -1462,7 +1632,7 @@ export function Composer() {
       const slashIdx = query.lastIndexOf("/");
       const dirPart = slashIdx >= 0 ? query.slice(0, slashIdx) : "";
       const filePart = slashIdx >= 0 ? query.slice(slashIdx + 1) : query;
-      const listDir = dirPart ? `${cwd}/${dirPart}` : cwd;
+      const listDir = dirPart ? joinPath(cwd, dirPart) : cwd;
 
       let items: FsEntryBrief[] = [];
       try {
@@ -1497,7 +1667,7 @@ export function Composer() {
       const { anchor, query } = atMenu;
       const slashIdx = query.lastIndexOf("/");
       const dirPart = slashIdx >= 0 ? query.slice(0, slashIdx + 1) : "";
-      const insert = `@${dirPart}${item.name} `;
+      const insert = `@${dirPart}${item.name}${item.is_dir ? "/" : " "}`;
       el.value =
         el.value.slice(0, anchor) +
         insert +
@@ -1507,9 +1677,74 @@ export function Composer() {
       el.focus();
       resizeTextarea(el);
       setHasInput(true);
-      setAtMenu(null);
+      if (item.is_dir) {
+        void handleAtAuto(el);
+      } else {
+        setAtMenu(null);
+      }
     },
-    [atMenu, resizeTextarea]
+    [atMenu, resizeTextarea, handleAtAuto]
+  );
+
+  const handleShellAuto = useCallback(
+    async (el: HTMLTextAreaElement) => {
+      if (!liveShellComposer) {
+        setShellMenu(null);
+        return;
+      }
+      const pos = el.selectionStart ?? el.value.length;
+      const before = el.value.slice(0, pos);
+      const at = before.lastIndexOf("@");
+      if (at >= 0 && !/\s/.test(before.slice(at + 1))) {
+        setShellMenu(null);
+        return;
+      }
+      const match = before.match(/(?:^|[\s|&;])([A-Za-z][\w.-]*)$/);
+      if (!match) {
+        setShellMenu(null);
+        return;
+      }
+      const query = match[1];
+      if (query.length < 1) {
+        setShellMenu(null);
+        return;
+      }
+      const req = ++shellCmdReq.current;
+      const names = await ensureShellCommands();
+      if (req !== shellCmdReq.current) return;
+      const needle = query.toLowerCase();
+      const items = names
+        .filter((name) => name.toLowerCase().startsWith(needle) && name.toLowerCase() !== needle)
+        .slice(0, 20);
+      if (!items.length) {
+        setShellMenu(null);
+        return;
+      }
+      setAtMenu(null);
+      setShellMenu({
+        anchor: before.length - query.length,
+        query,
+        items,
+        idx: 0,
+      });
+    },
+    [liveShellComposer, ensureShellCommands]
+  );
+
+  const insertShellCmd = useCallback(
+    (name: string) => {
+      if (!shellMenu || !textareaRef.current) return;
+      const el = textareaRef.current;
+      const { anchor, query } = shellMenu;
+      el.value = el.value.slice(0, anchor) + name + el.value.slice(anchor + query.length);
+      const newPos = anchor + name.length;
+      el.selectionStart = el.selectionEnd = newPos;
+      el.focus();
+      resizeTextarea(el);
+      setHasInput(el.value.trim().length > 0);
+      setShellMenu(null);
+    },
+    [shellMenu, resizeTextarea]
   );
 
   // ── Runtime-aware `/` skill / command autocomplete ───────────
@@ -1541,7 +1776,8 @@ export function Composer() {
         setSlashMenuStack([]);
         return;
       }
-      const agentId = targetAgentId;
+      const agentId =
+        effectiveTarget?.kind === "agent" ? effectiveTarget.agentId : targetAgentId;
       if (!agentId) {
         slashReqRef.current += 1;
         setSlashMenuStack([]);
@@ -1569,7 +1805,7 @@ export function Composer() {
       try {
         const items =
           (await invoke<SlashItem[]>("agent_list_slash_items", { id: agentId })) ?? [];
-        if (req !== slashReqRef.current || targetAgentId !== agentId) return;
+        if (req !== slashReqRef.current) return;
         slashCatalogRef.current = { agentId, items };
         // Re-derive the trigger from the current text: the user may have typed
         // more while the catalog was loading, or deleted past `/` entirely.
@@ -1596,7 +1832,7 @@ export function Composer() {
         }
       }
     },
-    [slashContext, targetAgentId]
+    [slashContext, targetAgentId, effectiveTarget]
   );
 
   /** Patch the deepest open level without touching the rest of the stack. */
@@ -1812,32 +2048,34 @@ export function Composer() {
     [appendPaths]
   );
 
-  // ── Send target (Tab cycle: visible terminals ↔ 待分配) ────────
+  // ── Send target (Tab cycle: visible terminals / canvas cards ↔ 待分配) ────────
   /** Advance the composer's send target through the terminals VISIBLE in the
-   *  content area (the split leaves when in split view, else just the active
-   *  tab) then 待分配, wrapping around. Tabs parked in the bar but not rendered
-   *  in this area — other split panes' sessions, or open tabs not currently
-   *  shown — stay out of the cycle. A bare Tab from "follow the active tab"
-   *  starts at the next terminal after the active one (or the first terminal /
-   *  待分配 when the active tab isn't a live terminal). */
+   *  content area then 待分配, wrapping around.
+   *  Terminal view: split leaves (else the active tab). Parked tab-bar sessions
+   *  stay out. Canvas view: live BlockGraph cards in visual order (top→bottom,
+   *  left→right), including sessions spawned with addTab:false.
+   *  A bare Tab from "follow the active tab" starts at the next terminal after
+   *  the active one (or the first terminal / 待分配 when the active tab isn't a
+   *  live terminal). On canvas the unpinned follow is the first live card, so
+   *  the first Tab advances to the next card / 待分配. */
   const cycleSendTarget = useCallback(() => {
-    // The visible set is the split tree's leaves in split view, otherwise the
-    // active tab alone. Ended/failed sessions (status done/failed) keep a row
-    // in the sidebar but are no longer open terminals, so they stay out of the
-    // cycle. Visible order is the natural 终端1/终端2 ordering the user sees.
-    const visibleIds = splitTree
-      ? splitLeafTabIds(splitTree)
-      : activeTabId
-        ? [activeTabId]
-        : [];
-    const terminalIds = visibleIds
-      .map((id) => tabs.find((t) => t.id === id))
-      .filter((t) => t && t.type === "agent" && !!t.agentId)
-      .map((t) => t!.agentId as string)
-      .filter((id) => {
-        const a = agents.get(id);
-        return a && a.status !== "done" && a.status !== "failed";
-      });
+    const terminalIds = onCanvas
+      ? canvasAgentIds
+      : (() => {
+          const visibleIds = splitTree
+            ? splitLeafTabIds(splitTree)
+            : activeTabId
+              ? [activeTabId]
+              : [];
+          return visibleIds
+            .map((id) => tabs.find((t) => t.id === id))
+            .filter((t) => t && t.type === "agent" && !!t.agentId)
+            .map((t) => t!.agentId as string)
+            .filter((id) => {
+              const a = agents.get(id);
+              return a && a.status !== "done" && a.status !== "failed";
+            });
+        })();
     const slots: ComposerTarget[] = [
       ...terminalIds.map((agentId) => ({ kind: "agent" as const, agentId })),
       { kind: "todo" as const },
@@ -1855,9 +2093,30 @@ export function Composer() {
       cur = slots.findIndex(
         (s) => s.kind === "agent" && s.agentId === targetAgentId
       );
+    } else if (onCanvas && slots[0]?.kind === "agent") {
+      // Unpinned canvas follow is the first card; Tab should not re-pin it.
+      cur = 0;
     }
-    setCycleTarget(slots[(cur + 1) % slots.length]);
-  }, [splitTree, activeTabId, tabs, agents, targetAgentId, cycleTarget]);
+    const next = slots[(cur + 1) % slots.length];
+    setCycleTarget(next);
+    if (onCanvas) {
+      if (next.kind === "agent") {
+        requestCanvasSelect(next.agentId);
+        requestCanvasCenter(next.agentId, { zoom: 1 });
+      } else {
+        requestCanvasSelect("");
+      }
+    }
+  }, [
+    onCanvas,
+    canvasAgentIds,
+    splitTree,
+    activeTabId,
+    tabs,
+    agents,
+    targetAgentId,
+    cycleTarget,
+  ]);
 
   // ── Send ──────────────────────────────────────────────────────
   const handleSend = useCallback(async () => {
@@ -1883,6 +2142,7 @@ export function Composer() {
     setHasInput(false);
     setAtMenu(null);
     setSlashMenuStack([]);
+    setShellMenu(null);
 
     // 待分配 target: the input becomes a task tag instead of a prompt. The `!`
     // 终端直发 marker is stripped exactly like an agent send — it is a Composer
@@ -1947,7 +2207,35 @@ export function Composer() {
   // ── Keyboard ──────────────────────────────────────────────────
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
-      if (slashMenuStack.length > 0) {
+      if (shellMenu && shellMenu.items.length > 0) {
+        const count = shellMenu.items.length;
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          setShellMenu({ ...shellMenu, idx: (shellMenu.idx + 1) % count });
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          setShellMenu({
+            ...shellMenu,
+            idx: (shellMenu.idx - 1 + count) % count,
+          });
+          return;
+        }
+        if (e.key === "Enter" || e.key === "Tab") {
+          e.preventDefault();
+          const item = shellMenu.items[Math.min(shellMenu.idx, count - 1)];
+          if (item) insertShellCmd(item);
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setShellMenu(null);
+          return;
+        }
+      }
+
+      if (liveRichComposer && slashMenuStack.length > 0) {
         const level = slashMenuStack[slashMenuStack.length - 1];
         const visible = level.query
           ? filterSlashItems(level.items, level.query)
@@ -2055,7 +2343,7 @@ export function Composer() {
             void applyPermissionMode(next.id);
           }
         } else {
-          // Tab: 在打开的终端 + 待分配 之间循环发送目标（见 cycleSendTarget）.
+          // Tab: 在打开的终端（终端视图）/ 画布卡 + 待分配 之间循环发送目标.
           cycleSendTarget();
         }
       } else if (e.key === "ArrowUp" && !e.currentTarget.value) {
@@ -2143,6 +2431,9 @@ export function Composer() {
       abortAgentOperation,
       effectiveTarget,
       targetAgentId,
+      liveRichComposer,
+      shellMenu,
+      insertShellCmd,
     ]
   );
 
@@ -2155,7 +2446,7 @@ export function Composer() {
       // Typing dismisses the popover menus (模型选择 / 文件引用).
       setModelMenuOpen(false);
       setRefMenuOpen(false);
-      if (slashMenuStack.length > 0) {
+      if (liveRichComposer && slashMenuStack.length > 0) {
         // At the root level the trigger is live text: deleting the `/` or
         // typing a space invalidates the `/query` token and must close the
         // menu (mirrors the pre-stack behavior). Child levels sit on committed
@@ -2182,9 +2473,19 @@ export function Composer() {
         return;
       }
       handleAtAuto(el);
-      if (!PLAIN_COMPOSER) void handleSlashAuto(el);
+      if (liveRichComposer) void handleSlashAuto(el);
+      else if (liveShellComposer) void handleShellAuto(el);
+      else setShellMenu(null);
     },
-    [resizeTextarea, handleAtAuto, handleSlashAuto, slashMenuStack]
+    [
+      resizeTextarea,
+      handleAtAuto,
+      handleSlashAuto,
+      handleShellAuto,
+      slashMenuStack,
+      liveRichComposer,
+      liveShellComposer,
+    ]
   );
 
   // ── Height resize (drag the divider above the composer) ───────
@@ -2277,8 +2578,24 @@ export function Composer() {
           <Icon name={composerOpen ? "chevron-down" : "chevron-up"} size={10} />
         </button>
       </div>
-      {/* Target line */}
-      <div className="composer-target">
+      {/* Target line — same drag-to-resize as the divider above. */}
+      <div
+        className={`composer-target${composerResizing ? " resizing" : ""}`}
+        title={t("composer.resizeTitle")}
+        onMouseDown={(e) => {
+          if ((e.target as HTMLElement).closest("button, kbd, a, input, textarea, .composer-f1-hint")) {
+            return;
+          }
+          resizeStartRef.current = { x: e.clientX, y: e.clientY };
+          startComposerResize(e);
+        }}
+        onDoubleClick={(e) => {
+          if ((e.target as HTMLElement).closest("button, kbd, a, input, textarea, .composer-f1-hint")) {
+            return;
+          }
+          resetComposerH();
+        }}
+      >
         <span>
           <Icon name="arrow-right" size={12} style={{ marginRight: 4 }} />
           {effectiveTarget?.kind === "todo" ? (
@@ -2293,7 +2610,7 @@ export function Composer() {
             t("composer.noTab")
           )}
         </span>
-        {!PLAIN_COMPOSER && (
+        {liveRichComposer && (
           <ContextWindowMeter
             agentId={
               effectiveTarget?.kind === "agent"
@@ -2302,7 +2619,7 @@ export function Composer() {
             }
           />
         )}
-        {!PLAIN_COMPOSER && (
+        {liveRichComposer && (
           <CacheHitRate
             agentId={
               effectiveTarget?.kind === "agent"
@@ -2311,7 +2628,7 @@ export function Composer() {
             }
           />
         )}
-        {tabs.some((tab) => tab.type === "agent") && (
+        {(tabs.some((tab) => tab.type === "agent") || onCanvas) && (
           <span className="composer-target-right">
             {isBangInput && effectiveTarget?.kind !== "todo" && (
               <span className="composer-bang">
@@ -2363,7 +2680,11 @@ export function Composer() {
             placeholder={
               effectiveTarget?.kind === "todo"
                 ? t("composer.placeholderTodo")
-                : t("composer.placeholder")
+                : liveRichComposer
+                  ? t("composer.placeholderRich")
+                  : liveShellComposer
+                    ? t("composer.placeholderShell")
+                    : t("composer.placeholder")
             }
             rows={4}
             onKeyDown={handleKeyDown}
@@ -2383,6 +2704,29 @@ export function Composer() {
           </button>
         </div>
       </div>
+
+      {/* PATH command autocomplete for bash / cmd / powershell sessions. */}
+      {shellMenu && (
+        <div ref={shellMenuRef} className="composer-at-menu composer-slash-menu" role="listbox">
+          <div className="composer-slash-head">
+            <span>{t("composer.shellCmdPicker")}</span>
+          </div>
+          {shellMenu.items.map((item, i) => (
+            <div
+              key={item}
+              role="option"
+              aria-selected={i === shellMenu.idx}
+              className={`composer-at-item composer-slash-item${
+                i === shellMenu.idx ? " active" : ""
+              }`}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => insertShellCmd(item)}
+            >
+              <span className="composer-slash-invocation">{item}</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* `@` file autocomplete menu */}
       {atMenu && (
@@ -2408,7 +2752,7 @@ export function Composer() {
       {/* Runtime-aware native command / skill menu. `/` is only the trigger:
           each row inserts the syntax required by the selected agent. Commands
           with children (has_children) push a second-level picker. */}
-      {!PLAIN_COMPOSER && slashMenuStack.length > 0 &&
+      {liveRichComposer && slashMenuStack.length > 0 &&
         (() => {
           const level = slashMenuStack[slashMenuStack.length - 1];
           const visible = level.query
@@ -2490,8 +2834,8 @@ export function Composer() {
           );
         })()}
 
-      {/* Actions — v1 hides the whole bar (model / permission / thinking / +). */}
-      {!PLAIN_COMPOSER && (
+      {/* `+` is always available (insert a file path). Model / thinking /
+          permission only appear on a live Claude / Codex session. */}
       <div className="composer-actions">
         <span className="cmp-pop" ref={refAnchorRef}>
           <span
@@ -2540,6 +2884,8 @@ export function Composer() {
           )}
         </span>
 
+        {liveRichComposer && (
+        <>
         <span className="cmp-pop" ref={modelAnchorRef}>
           <span
             className="act-btn"
@@ -2770,8 +3116,9 @@ export function Composer() {
             )}
           </span>
         )}
+        </>
+        )}
       </div>
-      )}
       {pendingPermissionMode && (
         <PermissionConfirmationDialog
           modeLabel={pendingPermissionMode.label}

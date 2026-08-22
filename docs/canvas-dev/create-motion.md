@@ -101,7 +101,7 @@ intent = adaptive-focus / spatial
   .canvas-world                  // 唯一 viewport：translate(x,y) scale(z)
                                  // 只通过 DOM style 写，禁止 JSX 每帧绑定
     .canvas-node                 // position:absolute; left/top = 世界坐标
-                                 // width/height = 展开尺寸（700×700），无自身 scale(zoom)
+                                 // width/height = 展开尺寸（700×600），无自身 scale(zoom)
       [.canvas-node-appear]      // 仅新卡：scale(var(--scale))，origin center
         CanvasNodeCard           // memo；内部自己订 agentId；内部挂 XTermPanel
 ```
@@ -149,7 +149,7 @@ spawnTerminal(project, tpl, { addTab: false }).then(id => onSpawned(id))
 
 在 `placeAgentOnCanvas`、`motion === "create"`：
 
-1. 用当前 **已展开尺寸**（默认 `EXPANDED_MIN` 700×700）和间距（32px）对已有节点做 AABB。  
+1. 用当前 **已展开尺寸**（默认 Settings 默认宽高，缺省 700×600）和间距（Settings 卡间距，缺省 24px）对已有节点做 AABB。  
 2. `findFreeWorldPos(preferred, occupied, size)`（已有函数）得到 `dest`。  
 3. **只把 `dest` 写入 graph**，不要先让 merge 用网格位画一张。  
 4. 侧栏拖入（`drop`）用落点，不找空位。

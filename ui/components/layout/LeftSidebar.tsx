@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -337,18 +338,18 @@ export function LeftSidebar() {
     </div>
   );
 
-  // Todo-tag drop target on a terminal row: assign the task + send its text to
-  // that session, then focus it. Shared by the live and ended row renderers.
+  // Todo-tag drop target on a terminal row: assign the task + send its text.
+  // Do not switch the main view — dropping onto a session from the canvas
+  // (or any other tab) should keep the current tab.
   const onTodoDragOver = (e: React.DragEvent) => {
     acceptTodoDragOver(e);
   };
-  const onTodoDrop = (e: React.DragEvent, agentId: string, proj: string) => {
+  const onTodoDrop = (e: React.DragEvent, agentId: string, _proj: string) => {
     if (!isTodoDrag(e.dataTransfer)) return;
     e.preventDefault();
     e.stopPropagation();
     const tagId = getTodoDragId(e.dataTransfer);
     if (tagId) void assignTodoAndSend(tagId, agentId);
-    openProjectTerminal(proj, agentId);
   };
 
   // Draggable left sidebar resize. The panel sits on the right of the main
@@ -635,7 +636,6 @@ export function LeftSidebar() {
                 +
               </span>
               <span className="win-drag" data-tauri-drag-region aria-hidden />
-              <span className="win-sep" aria-hidden />
               <span
                 className="sidebar-btn win-btn"
                 onClick={() => void appWindow.minimize()}
@@ -1381,6 +1381,50 @@ function RenameProjectModal({
 
 /* ── Right-click context menu ─────────────────────────────────── */
 
+/** Sidebar sits on the window's right edge, so a menu at the cursor overflows
+ *  the viewport (and WebKitGTK clips `position:fixed` inside `overflow:hidden`
+ *  ancestors such as `.app-body`). Portal to `document.body` and flip/clamp
+ *  after paint so every item stays on-screen, inward of the 6px resize strip. */
+function CtxMenuPanel({
+  x,
+  y,
+  children,
+}: {
+  x: number;
+  y: number;
+  children: ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState({ left: x, top: y });
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const pad = 8;
+    let left = x;
+    let top = y;
+    if (left + rect.width + pad > window.innerWidth) {
+      left = Math.max(pad, window.innerWidth - rect.width - pad);
+    }
+    if (top + rect.height + pad > window.innerHeight) {
+      top = Math.max(pad, window.innerHeight - rect.height - pad);
+    }
+    setPos((prev) => (prev.left === left && prev.top === top ? prev : { left, top }));
+  }, [x, y]);
+  return createPortal(
+    <div
+      ref={ref}
+      className="ctx-menu"
+      style={{ left: pos.left, top: pos.top }}
+      onClick={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.stopPropagation()}
+    >
+      {children}
+    </div>,
+    document.body
+  );
+}
+
 function ContextMenu({
   ctx,
   onClose,
@@ -1412,12 +1456,7 @@ function ContextMenu({
   // ── Blank-space context (sidebar dropzone below the project list) ──
   if (!ctx.project && !ctx.agentId) {
     return (
-      <div
-        className="ctx-menu"
-        style={{ position: "fixed", left: ctx.x, top: ctx.y, zIndex: 1000 }}
-        onClick={(e) => e.stopPropagation()}
-        onContextMenu={(e) => e.stopPropagation()}
-      >
+      <CtxMenuPanel x={ctx.x} y={ctx.y}>
         <div
           className="ctx-item"
           onClick={() => {
@@ -1427,7 +1466,7 @@ function ContextMenu({
         >
           <Icon name="folder-plus" size={13} /> {t("leftSidebar.newProject")}
         </div>
-      </div>
+      </CtxMenuPanel>
     );
   }
 
@@ -1439,12 +1478,7 @@ function ContextMenu({
     const projRoot = projectRoots[proj] ?? ctx.cwd;
     const wt = projRoot ? worktrees.find((w) => w.path === projRoot) : undefined;
     return (
-      <div
-        className="ctx-menu"
-        style={{ position: "fixed", left: ctx.x, top: ctx.y, zIndex: 1000 }}
-        onClick={(e) => e.stopPropagation()}
-        onContextMenu={(e) => e.stopPropagation()}
-      >
+      <CtxMenuPanel x={ctx.x} y={ctx.y}>
         <div
           className="ctx-item"
           onClick={() => {
@@ -1539,7 +1573,7 @@ function ContextMenu({
             <Icon name="trash-2" size={13} /> {t("leftSidebar.removeProject")}
           </div>
         )}
-      </div>
+      </CtxMenuPanel>
     );
   }
 
@@ -1576,12 +1610,7 @@ function ContextMenu({
   };
 
   return (
-    <div
-      className="ctx-menu"
-      style={{ position: "fixed", left: ctx.x, top: ctx.y, zIndex: 1000 }}
-      onClick={(e) => e.stopPropagation()}
-      onContextMenu={(e) => e.stopPropagation()}
-    >
+    <CtxMenuPanel x={ctx.x} y={ctx.y}>
       {ctx.agentId && (
         <div
           className="ctx-item"
@@ -1616,6 +1645,6 @@ function ContextMenu({
             : t("leftSidebar.closeAndRemoveProject")}
         </div>
       )}
-    </div>
+    </CtxMenuPanel>
   );
 }

@@ -58,8 +58,17 @@ export function useUpdateSync() {
       } catch {
         // Backend not ready — keep default.
       }
+      let feedbackMode: "todo" | "always" = "always";
+      try {
+        const raw = await invoke<string | null>("setting_get", {
+          key: "feedback_mode",
+        });
+        if (raw === "always" || raw === "todo") feedbackMode = raw;
+      } catch {
+        // Backend not ready — keep default.
+      }
       if (cancelled) return;
-      useStore.setState({ autoCheckUpdate: autoCheck, soundEnabled: soundOn });
+      useStore.setState({ autoCheckUpdate: autoCheck, soundEnabled: soundOn, feedbackMode });
       if (!autoCheck) return;
 
       // Background check a few seconds after mount. Never blocks startup.

@@ -1,7 +1,8 @@
 /**
- * Theme Editor chrome state (position / visible / size).
- * Visibility is owned by the store (`themeLabEnabled`) so Settings can toggle
- * it; this module only remembers panel geometry.
+ * Theme Editor chrome state (position / size).
+ * The Settings switch owns the bottom-left entry chip (`themeLabEnabled`);
+ * the mixer open/close flag is `themeLabOpen`. This module only remembers
+ * panel geometry.
  */
 
 const POS_KEY = "capilot.themeLab.pos";

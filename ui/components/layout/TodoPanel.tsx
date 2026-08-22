@@ -338,10 +338,19 @@ export function TodoPanel() {
     () => todos.filter((t) => t.status === "todo" && inScope(t)).reverse(),
     [todos, inScope]
   );
-  const doneTags = useMemo(
-    () => todos.filter((t) => t.status === "done" && inScope(t)),
-    [todos, inScope]
-  );
+  const doneTags = useMemo(() => {
+    const scoped = todos.filter((t) => t.status === "done" && inScope(t));
+    const latest = new Map<string, TodoTag>();
+    for (const tag of scoped) {
+      if (!tag.agentId) continue;
+      const prev = latest.get(tag.agentId);
+      if (!prev || (tag.doneAt ?? tag.createdAt) >= (prev.doneAt ?? prev.createdAt)) {
+        latest.set(tag.agentId, tag);
+      }
+    }
+    // One 待处理 row per session; tags with no session stay as their own rows.
+    return scoped.filter((t) => !t.agentId || latest.get(t.agentId) === t);
+  }, [todos, inScope]);
   // 待处理 also surfaces in-flight (assigned) tags whose session is currently
   // blocked on a user interaction: `awaiting_choice` (待选择 — a question tool
   // asking for a pick) AND `waiting_input` (待确认 — a permission/approval
@@ -410,9 +419,6 @@ export function TodoPanel() {
 
   const sendTagToAgent = (tagId: string, agentId: string) => {
     void assignTodoAndSend(tagId, agentId);
-    const store = useStore.getState();
-    const tab = store.tabs.find((tb) => tb.agentId === agentId);
-    if (tab) store.setActiveTab(tab.id);
   };
 
   // Hydrate from the settings KV once session restore has settled, so an
@@ -563,9 +569,6 @@ export function TodoPanel() {
       }
 
       void assignTodoAndSend(st.id, target.agentId);
-      const store = useStore.getState();
-      const tab = store.tabs.find((tb) => tb.agentId === target.agentId);
-      if (tab) store.setActiveTab(tab.id);
     };
 
     window.addEventListener("pointermove", onMove);

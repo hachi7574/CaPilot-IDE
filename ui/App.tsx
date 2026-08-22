@@ -17,13 +17,15 @@ import { useUsageSync } from "./state/usage";
 import { useContextUsageSync } from "./state/usageContext";
 import { useUpdateSync } from "./state/update";
 import { useStore } from "./state/store";
-import { matchesShortcut } from "./state/shortcuts";
+import { formatChord, matchesShortcut } from "./state/shortcuts";
 import {
   getTheme,
   DEFAULT_WALLPAPER_OPACITY,
   isWallpaperVideo,
 } from "./state/themes";
 import { ThemeLabPanel } from "./components/theme-lab/ThemeLabPanel";
+import { DevToolChip, DevToolsDock } from "./components/dev-tools/DevToolsDock";
+import { useT } from "./i18n";
 import "./App.css";
 
 /** Absolute path of a cartridge wallpaper under `$RESOURCE/themes/wallpapers/`. */
@@ -41,29 +43,45 @@ async function bundledWallpaperPath(file: string): Promise<string | null> {
 
 /**
  * Theme Editor ships in production. Settings → Appearance toggles
- * `themeLabEnabled` (default off). Ctrl+Shift+T flips the same flag even
- * when the panel is unmounted.
+ * `themeLabEnabled` (default off): that is the bottom-left entry chip, not
+ * the mixer. Clicking the chip (or Ctrl+Shift+T while the chip is on) opens
+ * the panel; hiding the panel returns the chip.
  *
  * The annotations tray stays a `tauri dev` tool — Vite drops that dynamic
  * import from the production module graph.
  */
 function ThemeLabGate() {
+  const t = useT();
   const enabled = useStore((s) => s.themeLabEnabled);
-  const setThemeLabEnabled = useStore((s) => s.setThemeLabEnabled);
+  const open = useStore((s) => s.themeLabOpen);
+  const setThemeLabOpen = useStore((s) => s.setThemeLabOpen);
+  const shortcut = useStore((s) => s.shortcuts.themeLab);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!matchesShortcut(e, "themeLab", useStore.getState().shortcuts)) return;
+      const s = useStore.getState();
+      if (!s.themeLabEnabled) return;
       e.preventDefault();
       e.stopPropagation();
-      setThemeLabEnabled(!useStore.getState().themeLabEnabled);
+      s.setThemeLabOpen(!s.themeLabOpen);
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [setThemeLabEnabled]);
+  }, []);
 
   if (!enabled) return null;
-  return <ThemeLabPanel onHide={() => setThemeLabEnabled(false)} />;
+  if (open) return <ThemeLabPanel onHide={() => setThemeLabOpen(false)} />;
+  return (
+    <DevToolsDock>
+      <DevToolChip
+        label={t("themeLab.title")}
+        ariaLabel={t("themeLab.show")}
+        title={`${t("themeLab.title")} (${formatChord(shortcut)})`}
+        onClick={() => setThemeLabOpen(true)}
+      />
+    </DevToolsDock>
+  );
 }
 
 function AnnotationsGate() {

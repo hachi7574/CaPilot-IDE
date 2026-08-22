@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useStore, ACTIVE_WINDOW_MS, resolveCtrlTRuntime } from "../../state/store";
 import {
   type BlockGraph,
@@ -15,14 +16,22 @@ import {
   endCanvasAgentDrag,
   subscribeCanvasCenter,
   getCanvasCenterReq,
+  setCanvasLiveCards,
+  clearCanvasLiveCards,
+  subscribeCanvasSelect,
+  getCanvasSelectReq,
+  requestCanvasSendTarget,
 } from "../../state/canvas";
 import { isShellRuntime } from "../../state/shellPath";
 import { closeAgent as closeAgentAction, spawnAgent } from "../../state/agentActions";
 import { notify } from "../../state/notify";
+import { fileTab } from "../../state/openFile";
+import { pathsFromDataTransfer } from "../../state/dropPaths";
 import { useT } from "../../i18n";
 import { Icon } from "../Icon";
 import { TerminalTemplatePicker } from "../layout/TerminalTemplatePicker";
 import { CanvasNodeCard } from "./CanvasNodeCard";
+import { CanvasFileCard } from "./CanvasFileCard";
 import { CanvasToolbar } from "./CanvasToolbar";
 import {
   getCanvasLayoutPrefs,
@@ -41,7 +50,7 @@ const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 2;
 const SAVE_DEBOUNCE_MS = 400;
 const DRAG_THRESHOLD = 5;
-const EXPANDED_MIN = { w: 700, h: 700 };
+const EXPANDED_MIN = { w: 700, h: 600 };
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
@@ -129,6 +138,29 @@ function findFreeWorldPos(
     if (best && best.r <= r) break;
   }
   return best?.pos ?? { x: maxX + gap, y: minY };
+}
+
+/** Visual-only grid: only `position` changes. Uniform cells so rows/cols line up. */
+function arrangeCardsInGrid(
+  items: { id: string; size: { w: number; h: number }; pos: CanvasVec }[],
+  gap: number,
+  origin = { x: 80, y: 80 }
+): Map<string, CanvasVec> {
+  const out = new Map<string, CanvasVec>();
+  if (items.length === 0) return out;
+  const ordered = [...items].sort((a, b) => a.pos.y - b.pos.y || a.pos.x - b.pos.x);
+  const cellW = Math.max(...ordered.map((it) => it.size.w));
+  const cellH = Math.max(...ordered.map((it) => it.size.h));
+  const cols = Math.max(1, Math.round(Math.sqrt(ordered.length)));
+  ordered.forEach((it, i) => {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    out.set(it.id, {
+      x: origin.x + col * (cellW + gap),
+      y: origin.y + row * (cellH + gap),
+    });
+  });
+  return out;
 }
 
 function cardOnScreen(
@@ -268,11 +300,19 @@ export function CanvasPanel({
   const CARD = { w: layout.cardW, h: layout.cardH };
   const agentIdSig = useStore((s) => [...s.agents.keys()].sort().join("\0"));
   const agentActiveAt = useStore((s) => s.agentActiveAt);
+  const tabFlash = useStore((s) => s.tabFlash);
 
   const [graph, setGraph] = useState<BlockGraph | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [viewport, setViewport] = useState<CanvasViewport>({ x: 0, y: 0, zoom: 1 });
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [marquee, setMarquee] = useState<{
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+  } | null>(null);
   const [selectedTermId, setSelectedTermId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [expandedSizes, setExpandedSizes] = useState<Record<string, { w: number; h: number }>>(
@@ -284,7 +324,7 @@ export function CanvasPanel({
     x: number;
     y: number;
     agentId: string;
-    kind: "terminal" | "console";
+    kind: "terminal" | "console" | "file";
     nodeId: string;
     runtime: string;
   } | null>(null);
@@ -306,6 +346,9 @@ export function CanvasPanel({
   const lastClickRef = useRef<{ id: string; at: number } | null>(null);
   const pendingPosRef = useRef<Map<string, CanvasVec>>(new Map());
   const [, setTick] = useState(0);
+  const cardElsRef = useRef<Map<string, HTMLDivElement>>(new Map());
+  const flashSeenRef = useRef<Map<string, number>>(new Map());
+  const flashTimerRef = useRef<Map<string, number>>(new Map());
 
   const viewportRef = useRef(viewport);
   viewportRef.current = viewport;
@@ -336,10 +379,12 @@ export function CanvasPanel({
     startX: number;
     startY: number;
     orig: CanvasViewport;
+    armed: boolean;
+    marquee: boolean;
   } | null>(null);
   const dragRef = useRef<{
     pointerId: number;
-    kind: "terminal" | "console";
+    kind: "terminal" | "console" | "file";
     id: string;
     start: CanvasVec;
     orig: CanvasVec;
@@ -355,8 +400,10 @@ export function CanvasPanel({
     agentId: string;
     start: CanvasVec;
     orig: { w: number; h: number };
+    edge: "e" | "s" | "se";
   } | null>(null);
   const centerSeqRef = useRef(0);
+  const selectSeqRef = useRef(0);
 
   const persist = useCallback(
     (next: BlockGraph, vp: CanvasViewport) => {
@@ -416,8 +463,57 @@ export function CanvasPanel({
   }, [graph, agentIdSig, scope]);
   mergedRef.current = merged;
 
+  useEffect(() => {
+    if (!merged) return;
+    const cards: { agentId: string; x: number; y: number }[] = [];
+    for (const n of merged.terminals) {
+      if (!n.agentId) continue;
+      cards.push({ agentId: n.agentId, x: n.position.x, y: n.position.y });
+    }
+    for (const n of merged.agents) {
+      cards.push({ agentId: n.id, x: n.position.x, y: n.position.y });
+    }
+    cards.sort((a, b) => a.y - b.y || a.x - b.x);
+    setCanvasLiveCards(
+      { projectId: scope.projectId, workspaceId: scope.workspaceId },
+      cards
+    );
+  }, [merged, scope.projectId, scope.workspaceId]);
+
+  useEffect(() => {
+    const s = { projectId: scope.projectId, workspaceId: scope.workspaceId };
+    return () => clearCanvasLiveCards(s);
+  }, [scope.projectId, scope.workspaceId]);
+
+  useEffect(() => {
+    for (const [agentId, seq] of tabFlash) {
+      if (flashSeenRef.current.get(agentId) === seq) continue;
+      flashSeenRef.current.set(agentId, seq);
+      const el = cardElsRef.current.get(agentId);
+      if (!el) continue;
+      const card = el.querySelector<HTMLElement>(".canvas-card");
+      if (!card) continue;
+      card.classList.remove("canvas-card-flash");
+      void card.offsetWidth;
+      card.classList.add("canvas-card-flash");
+      window.clearTimeout(flashTimerRef.current.get(agentId));
+      flashTimerRef.current.set(
+        agentId,
+        window.setTimeout(() => card.classList.remove("canvas-card-flash"), 800)
+      );
+    }
+  }, [tabFlash]);
+  useEffect(
+    () => () => {
+      for (const t of flashTimerRef.current.values()) window.clearTimeout(t);
+    },
+    []
+  );
+
   const cardCount =
-    (merged?.terminals.length ?? 0) + (merged?.agents.length ?? 0);
+    (merged?.terminals.length ?? 0) +
+    (merged?.agents.length ?? 0) +
+    (merged?.files?.length ?? 0);
 
   useEffect(() => {
     const apply = () => {
@@ -432,14 +528,17 @@ export function CanvasPanel({
       if (!node) return;
       if (centerSeqRef.current === req.seq) return;
       centerSeqRef.current = req.seq;
-      const z = viewportRef.current.zoom || 1;
-      const size = node.size ?? { w: 240, h: 88 };
+      const z = req.zoom ?? viewportRef.current.zoom ?? 1;
+      // Paint size, not the persisted compact `node.size` (often 240×88).
+      const size = (req.agentId ? expandedSizes[req.agentId] : undefined) ?? CARD;
+      const cx = node.position.x + size.w / 2;
+      const cy = node.position.y + size.h / 2;
       const next = {
         zoom: z,
-        x: el.clientWidth / 2 - (node.position.x + size.w / 2) * z,
-        y: el.clientHeight / 2 - (node.position.y + size.h / 2) * z,
+        x: el.clientWidth / 2 - cx * z,
+        y: el.clientHeight / 2 - cy * z,
       };
-      setViewport(next);
+      springCameraTo(next);
       setSelectedId(req.agentId);
       setSelectedTermId(term?.id ?? null);
       const snap = graphRef.current ?? g;
@@ -448,7 +547,33 @@ export function CanvasPanel({
     const unsub = subscribeCanvasCenter(apply);
     apply();
     return unsub;
-  }, [merged, persist]);
+  }, [merged, persist, expandedSizes, CARD.w, CARD.h]);
+
+  useEffect(() => {
+    const apply = () => {
+      const req = getCanvasSelectReq();
+      if (selectSeqRef.current === req.seq) return;
+      if (!req.agentId) {
+        selectSeqRef.current = req.seq;
+        setSelectedId(null);
+        setSelectedTermId(null);
+        setSelectedEdgeId(null);
+        return;
+      }
+      const g = mergedRef.current;
+      if (!g) return;
+      const term = g.terminals.find((n) => n.agentId === req.agentId);
+      const cons = g.agents.find((n) => n.id === req.agentId);
+      if (!term && !cons) return;
+      selectSeqRef.current = req.seq;
+      setSelectedId(req.agentId);
+      setSelectedTermId(term?.id ?? null);
+      setSelectedEdgeId(null);
+    };
+    const unsub = subscribeCanvasSelect(apply);
+    apply();
+    return unsub;
+  }, [merged]);
 
   const hasActive = useMemo(() => {
     if (!merged) return false;
@@ -613,7 +738,7 @@ export function CanvasPanel({
       setViewport(target);
       return;
     }
-    const wn = (2 * Math.PI) / 0.36;
+    const wn = (2 * Math.PI) / 0.28;
     let x = viewportRef.current.x;
     let y = viewportRef.current.y;
     let z = viewportRef.current.zoom || 1;
@@ -642,6 +767,7 @@ export function CanvasPanel({
       vy = sy.velocity;
       z = sz.value;
       vz = sz.velocity;
+      viewportRef.current = { x, y, zoom: z };
       worldEl.style.transform = `translate(${x}px, ${y}px) scale(${z})`;
       if (
         Math.abs(x - target.x) <= 0.4 &&
@@ -756,7 +882,7 @@ export function CanvasPanel({
     persist(next, viewportRef.current);
   }, [merged, persist]);
 
-  const hideNode = (kind: "terminal" | "console", id: string, agentId: string | null) => {
+  const hideNode = (kind: "terminal" | "console" | "file", id: string, agentId: string | null) => {
     setGraph((prev) => {
       const base = mergedRef.current ?? prev;
       if (!base) return prev;
@@ -767,6 +893,11 @@ export function CanvasPanel({
               terminals: base.terminals.filter((n) => n.id !== id),
               edges: base.edges.filter((e) => e.source !== id && e.target !== id),
             }
+          : kind === "file"
+            ? {
+                ...base,
+                files: (base.files ?? []).filter((n) => n.id !== id),
+              }
           : {
               ...base,
               agentsHidden: [...(base.agentsHidden ?? []), id],
@@ -777,6 +908,52 @@ export function CanvasPanel({
     });
     if (selectedId === agentId || selectedId === id) setSelectedId(null);
     if (selectedTermId === id) setSelectedTermId(null);
+    if (agentId || id) {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        if (agentId) next.delete(agentId);
+        next.delete(id);
+        return next;
+      });
+    }
+  };
+
+  const hideSelectedCards = () => {
+    const ids = selectedIds.size > 0 ? selectedIds : selectedId ? new Set([selectedId]) : new Set<string>();
+    if (ids.size === 0) return;
+    setGraph((prev) => {
+      const base = mergedRef.current ?? prev;
+      if (!base) return prev;
+      const dropTerms = new Set(
+        base.terminals.filter((n) => n.agentId && ids.has(n.agentId)).map((n) => n.id)
+      );
+      const dropAgents = new Set(base.agents.filter((n) => ids.has(n.id)).map((n) => n.id));
+      const dropFiles = new Set((base.files ?? []).filter((n) => ids.has(n.id)).map((n) => n.id));
+      const next = {
+        ...base,
+        terminals: base.terminals.filter((n) => !dropTerms.has(n.id)),
+        agents: base.agents.filter((n) => !dropAgents.has(n.id)),
+        agentsHidden: [...(base.agentsHidden ?? []), ...dropAgents],
+        files: (base.files ?? []).filter((n) => !dropFiles.has(n.id)),
+        edges: base.edges.filter((e) => !dropTerms.has(e.source) && !dropTerms.has(e.target)),
+      };
+      persist(next, viewportRef.current);
+      return next;
+    });
+    setSelectedIds(new Set());
+    setSelectedId(null);
+    setSelectedTermId(null);
+  };
+
+  const closeSelectedCards = () => {
+    const ids = selectedIds.size > 0 ? selectedIds : selectedId ? new Set([selectedId]) : new Set<string>();
+    if (ids.size === 0) return;
+    const g = mergedRef.current;
+    const fileIds = new Set((g?.files ?? []).map((n) => n.id));
+    hideSelectedCards();
+    for (const id of ids) {
+      if (!fileIds.has(id)) void closeAgentAction(id);
+    }
   };
 
   const connectTerminals = (source: string, target: string) => {
@@ -804,26 +981,30 @@ export function CanvasPanel({
     setSelectedEdgeId(null);
   };
 
-  const fitView = () => {
-    const g = mergedRef.current;
+  const fitView = (g?: BlockGraph | null) => {
+    const graph = g && Array.isArray(g.terminals) ? g : mergedRef.current;
     const el = surfaceRef.current;
-    if (!g || !el) return;
+    if (!graph || !el) return;
     const sizeOf = (agentId: string | null | undefined) =>
       (agentId ? expandedSizes[agentId] : undefined) ?? CARD;
     const nodes = [
-      ...g.terminals.map((n) => {
+      ...graph.terminals.map((n) => {
         const size = sizeOf(n.agentId);
         return { x: n.position.x, y: n.position.y, w: size.w, h: size.h };
       }),
-      ...g.agents.map((n) => {
+      ...graph.agents.map((n) => {
         const size = sizeOf(n.id);
+        return { x: n.position.x, y: n.position.y, w: size.w, h: size.h };
+      }),
+      ...(graph.files ?? []).map((n) => {
+        const size = n.size ?? CARD;
         return { x: n.position.x, y: n.position.y, w: size.w, h: size.h };
       }),
     ];
     if (nodes.length === 0) {
       const next = { x: 0, y: 0, zoom: 1 };
       springCameraTo(next);
-      if (graphRef.current) persist(graphRef.current, next);
+      persist(graph, next);
       return;
     }
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -849,7 +1030,51 @@ export function CanvasPanel({
       y: (viewH - bh * zoom) / 2 - minY * zoom,
     };
     springCameraTo(next);
-    if (graphRef.current) persist(graphRef.current, next);
+    persist(graph, next);
+  };
+
+  const arrangeGrid = () => {
+    const g = mergedRef.current;
+    if (!g) return;
+    const sizeOf = (agentId: string | null | undefined) =>
+      (agentId ? expandedSizes[agentId] : undefined) ?? CARD;
+    const items: { id: string; size: { w: number; h: number }; pos: CanvasVec }[] = [
+      ...g.terminals.map((n) => ({
+        id: `t:${n.id}`,
+        size: sizeOf(n.agentId),
+        pos: n.position,
+      })),
+      ...g.agents.map((n) => ({
+        id: `a:${n.id}`,
+        size: sizeOf(n.id),
+        pos: n.position,
+      })),
+      ...(g.files ?? []).map((n) => ({
+        id: `f:${n.id}`,
+        size: n.size ?? CARD,
+        pos: n.position,
+      })),
+    ];
+    if (items.length === 0) return;
+    const placed = arrangeCardsInGrid(items, layout.gap);
+    const next: BlockGraph = {
+      ...g,
+      terminals: g.terminals.map((n) => {
+        const pos = placed.get(`t:${n.id}`);
+        return pos ? { ...n, position: pos } : n;
+      }),
+      agents: g.agents.map((n) => {
+        const pos = placed.get(`a:${n.id}`);
+        return pos ? { ...n, position: pos } : n;
+      }),
+      files: (g.files ?? []).map((n) => {
+        const pos = placed.get(`f:${n.id}`);
+        return pos ? { ...n, position: pos } : n;
+      }),
+    };
+    persist(next, viewportRef.current);
+    setGraph(next);
+    fitView(next);
   };
 
   useEffect(() => {
@@ -862,6 +1087,8 @@ export function CanvasPanel({
         setCtxMenu(null);
         setTermPicker(null);
         setSelectedEdgeId(null);
+        setSelectedIds(new Set());
+        setMarquee(null);
         return;
       }
       if (e.key === "Enter" && selectedId) {
@@ -874,9 +1101,9 @@ export function CanvasPanel({
         deleteEdge(selectedEdgeId);
         return;
       }
-      if ((e.key === "Delete" || e.key === "Backspace") && selectedTermId) {
+      if ((e.key === "Delete" || e.key === "Backspace") && (selectedIds.size > 0 || selectedTermId || selectedId)) {
         e.preventDefault();
-        hideNode("terminal", selectedTermId, selectedId);
+        hideSelectedCards();
         return;
       }
       if (e.ctrlKey && e.key === "0") {
@@ -921,13 +1148,13 @@ export function CanvasPanel({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selectedId, selectedTermId, selectedEdgeId, persist]);
+  }, [selectedId, selectedTermId, selectedEdgeId, selectedIds, persist]);
 
   useEffect(() => {
     const el = surfaceRef.current;
     if (!el) return;
     const onWheelNative = (e: WheelEvent) => {
-      if ((e.target as HTMLElement | null)?.closest(".canvas-card-pty")) return;
+      if ((e.target as HTMLElement | null)?.closest(".canvas-card-pty, .canvas-card-body")) return;
       e.preventDefault();
       e.stopPropagation();
       const dy = e.deltaY !== 0 ? e.deltaY : 0;
@@ -985,7 +1212,11 @@ export function CanvasPanel({
     if (e.button === 2) return;
     if (e.button !== 0 && e.button !== 1) return;
     const tEl = e.target as HTMLElement;
-    if (tEl.closest(".canvas-card, .canvas-card-pty, .ctx-menu, .canvas-connect-handle")) {
+    if (
+      tEl.closest(
+        ".canvas-card, .canvas-card-pty, .canvas-card-body, .canvas-pty-resize, .canvas-card-grip, .ctx-menu, .canvas-connect-handle"
+      )
+    ) {
       return;
     }
     e.preventDefault();
@@ -993,17 +1224,31 @@ export function CanvasPanel({
       cancelAnimationFrame(camRafRef.current);
       camRafRef.current = null;
     }
-    setSelectedId(null);
-    setSelectedTermId(null);
     setSelectedEdgeId(null);
     setCtxMenu(null);
     setCardMenu(null);
-    panRef.current = {
-      pointerId: e.pointerId,
-      startX: e.clientX,
-      startY: e.clientY,
-      orig: { ...viewportRef.current },
-    };
+    if (e.button === 1) {
+      setSelectedId(null);
+      setSelectedTermId(null);
+      setSelectedIds(new Set());
+      panRef.current = {
+        pointerId: e.pointerId,
+        startX: e.clientX,
+        startY: e.clientY,
+        orig: { ...viewportRef.current },
+        armed: true,
+        marquee: false,
+      };
+    } else {
+      panRef.current = {
+        pointerId: e.pointerId,
+        startX: e.clientX,
+        startY: e.clientY,
+        orig: { ...viewportRef.current },
+        armed: false,
+        marquee: false,
+      };
+    }
     e.currentTarget.setPointerCapture(e.pointerId);
   };
 
@@ -1011,11 +1256,26 @@ export function CanvasPanel({
     const resize = resizeRef.current;
     if (resize && resize.pointerId === e.pointerId) {
       const z = viewportRef.current.zoom || 1;
+      const dx = resize.edge === "s" ? 0 : (e.clientX - resize.start.x) / z;
+      const dy = resize.edge === "e" ? 0 : (e.clientY - resize.start.y) / z;
       const next = {
-        w: Math.max(EXPANDED_MIN.w, resize.orig.w + (e.clientX - resize.start.x) / z),
-        h: Math.max(EXPANDED_MIN.h, resize.orig.h + (e.clientY - resize.start.y) / z),
+        w: Math.max(EXPANDED_MIN.w, resize.orig.w + dx),
+        h: Math.max(EXPANDED_MIN.h, resize.orig.h + dy),
       };
-      setExpandedSizes((s) => ({ ...s, [resize.agentId]: next }));
+      const isFile = (mergedRef.current?.files ?? []).some((n) => n.id === resize.agentId);
+      if (isFile) {
+        setGraph((prev) => {
+          const base = prev ?? emptyBlockGraph(scope);
+          return {
+            ...base,
+            files: (base.files ?? []).map((n) =>
+              n.id === resize.agentId ? { ...n, size: next } : n
+            ),
+          };
+        });
+      } else {
+        setExpandedSizes((s) => ({ ...s, [resize.agentId]: next }));
+      }
       return;
     }
     const conn = connectRef.current;
@@ -1032,6 +1292,33 @@ export function CanvasPanel({
     }
     const pan = panRef.current;
     if (pan && pan.pointerId === e.pointerId) {
+      const dist = Math.hypot(e.clientX - pan.startX, e.clientY - pan.startY);
+      if (!pan.armed && dist >= DRAG_THRESHOLD) {
+        pan.armed = true;
+        pan.marquee = true;
+        const rect = surfaceRef.current?.getBoundingClientRect();
+        if (rect) {
+          setMarquee({
+            x1: pan.startX - rect.left,
+            y1: pan.startY - rect.top,
+            x2: e.clientX - rect.left,
+            y2: e.clientY - rect.top,
+          });
+        }
+      }
+      if (pan.marquee) {
+        const rect = surfaceRef.current?.getBoundingClientRect();
+        if (rect) {
+          setMarquee({
+            x1: pan.startX - rect.left,
+            y1: pan.startY - rect.top,
+            x2: e.clientX - rect.left,
+            y2: e.clientY - rect.top,
+          });
+        }
+        return;
+      }
+      if (!pan.armed) return;
       const next = {
         ...pan.orig,
         x: pan.orig.x + (e.clientX - pan.startX),
@@ -1068,6 +1355,15 @@ export function CanvasPanel({
             terminals: g.terminals.map((n) =>
               n.id === drag.id ? { ...n, position: pos } : n
             ),
+          };
+        }
+        if (drag.kind === "file") {
+          const files = g.files ?? [];
+          return {
+            ...g,
+            files: files.some((n) => n.id === drag.id)
+              ? files.map((n) => (n.id === drag.id ? { ...n, position: pos } : n))
+              : files,
           };
         }
         if (!g.agents.some((n) => n.id === drag.id)) {
@@ -1107,21 +1403,72 @@ export function CanvasPanel({
       const toId = hit?.dataset.termId;
       if (toId && toId !== conn.fromId) connectTerminals(conn.fromId, toId);
     }
-    const panned = panRef.current && panRef.current.pointerId === e.pointerId;
+    const pan = panRef.current;
+    const panned = pan && pan.pointerId === e.pointerId && pan.armed && !pan.marquee;
+    const marqueeing = pan && pan.pointerId === e.pointerId && pan.marquee;
+    const clickedEmpty = pan && pan.pointerId === e.pointerId && !pan.armed;
     const drag = dragRef.current;
     const dragged = drag && drag.pointerId === e.pointerId && drag.armed;
+    if (marqueeing) {
+      const rect = surfaceRef.current?.getBoundingClientRect();
+      const g = mergedRef.current;
+      if (rect && g) {
+        const x1 = Math.min(pan.startX, e.clientX) - rect.left;
+        const y1 = Math.min(pan.startY, e.clientY) - rect.top;
+        const x2 = Math.max(pan.startX, e.clientX) - rect.left;
+        const y2 = Math.max(pan.startY, e.clientY) - rect.top;
+        const vp = viewportRef.current;
+        const hits = new Set<string>();
+        let firstTerm: string | null = null;
+        let firstId: string | null = null;
+        const hit = (agentId: string, pos: CanvasVec, size: { w: number; h: number }, termId?: string) => {
+          const sx = vp.x + pos.x * (vp.zoom || 1);
+          const sy = vp.y + pos.y * (vp.zoom || 1);
+          const sw = size.w * (vp.zoom || 1);
+          const sh = size.h * (vp.zoom || 1);
+          if (sx + sw < x1 || sy + sh < y1 || sx > x2 || sy > y2) return;
+          hits.add(agentId);
+          if (!firstId) firstId = agentId;
+          if (termId && !firstTerm) firstTerm = termId;
+        };
+        for (const n of g.terminals) {
+          if (!n.agentId) continue;
+          hit(n.agentId, n.position, expandedSizes[n.agentId] ?? CARD, n.id);
+        }
+        for (const n of g.agents) {
+          hit(n.id, n.position, expandedSizes[n.id] ?? CARD);
+        }
+        for (const n of g.files ?? []) {
+          hit(n.id, n.position, n.size ?? CARD);
+        }
+        setSelectedIds(hits);
+        setSelectedId(firstId);
+        setSelectedTermId(firstTerm);
+        if (hits.size === 1 && firstId && getCanvasLayoutPrefs().selectSyncsSendTarget) {
+          requestCanvasSendTarget(firstId);
+        }
+      }
+      setMarquee(null);
+    } else if (clickedEmpty) {
+      setSelectedIds(new Set());
+      setSelectedId(null);
+      setSelectedTermId(null);
+      setMarquee(null);
+    }
     panRef.current = null;
+    const resizedFile = resizeRef.current && resizeRef.current.pointerId === e.pointerId;
     dragRef.current = null;
     resizeRef.current = null;
     setCardDragging(false);
     if (panned && graphRef.current) {
       persist(graphRef.current, viewportRef.current);
-    } else if (dragged && graphRef.current) {
+    } else if ((dragged || resizedFile) && graphRef.current) {
       persist(graphRef.current, viewportRef.current);
     } else if (
       drag &&
       drag.pointerId === e.pointerId &&
       !drag.armed &&
+      drag.kind !== "file" &&
       !(e.target as HTMLElement | null)?.closest(".canvas-card-icon-btn")
     ) {
       const display = mergedRef.current;
@@ -1145,9 +1492,28 @@ export function CanvasPanel({
     }, 0);
   };
 
+  const startCardResize = (
+    e: React.PointerEvent<HTMLDivElement>,
+    agentId: string,
+    orig: { w: number; h: number },
+    edge: "e" | "s" | "se" = "se"
+  ) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    e.preventDefault();
+    resizeRef.current = {
+      pointerId: e.pointerId,
+      agentId,
+      start: { x: e.clientX, y: e.clientY },
+      orig: { ...orig },
+      edge,
+    };
+    surfaceRef.current?.setPointerCapture(e.pointerId);
+  };
+
   const startCardDrag = (
     e: React.PointerEvent<HTMLDivElement>,
-    kind: "terminal" | "console",
+    kind: "terminal" | "console" | "file",
     id: string,
     orig: CanvasVec
   ) => {
@@ -1289,12 +1655,134 @@ export function CanvasPanel({
     focusAgentTab(agentId);
   };
 
+  const importDroppedPaths = useCallback(
+    async (paths: string[]) => {
+      const unique = [...new Set(paths.map((p) => p.trim()).filter(Boolean))];
+      if (unique.length === 0) return;
+      const s = useStore.getState();
+      const root = s.projectRoots[scope.projectId];
+      const destDir = root || unique[0].replace(/[\\/][^\\/]+$/, "") || ".";
+      const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+      const rootNorm = root ? norm(root) : "";
+      for (const src of unique) {
+        try {
+          const inProject =
+            !!rootNorm &&
+            (norm(src) === rootNorm || norm(src).startsWith(`${rootNorm}/`));
+          const dest = inProject
+            ? src
+            : await invoke<string>("fs_paste", {
+                src,
+                destDir,
+                isMove: false,
+              });
+          const name = dest.replace(/\\/g, "/").split("/").pop() || dest;
+          const el = surfaceRef.current;
+          const vp = viewportRef.current;
+          const world = el
+            ? screenToWorld(
+                el.getBoundingClientRect().left + el.clientWidth / 2,
+                el.getBoundingClientRect().top + el.clientHeight / 2,
+                el.getBoundingClientRect(),
+                vp
+              )
+            : { x: 80, y: 80 };
+          setGraph((prev) => {
+            const base = prev ?? emptyBlockGraph(scope);
+            const files = base.files ?? [];
+            if (files.some((f) => f.path === dest)) return base;
+            const occupied = [
+              ...base.terminals.map((n) => ({
+                pos: n.position,
+                size: expandedSizes[n.agentId ?? n.id] ?? CARD,
+              })),
+              ...base.agents.map((n) => ({
+                pos: n.position,
+                size: expandedSizes[n.id] ?? CARD,
+              })),
+              ...files.map((n) => ({ pos: n.position, size: n.size ?? CARD })),
+            ];
+            const destPos = findFreeWorldPos(world, occupied, CARD, layout.gap);
+            const next = {
+              ...base,
+              files: [
+                ...files,
+                {
+                  id: `file_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+                  path: dest,
+                  name,
+                  position: destPos,
+                  size: { w: CARD.w, h: CARD.h },
+                },
+              ],
+            };
+            persist(next, viewportRef.current);
+            return next;
+          });
+        } catch (err) {
+          notify(t("canvas.dropFileFailed"), typeof err === "string" ? err : String(err));
+        }
+      }
+    },
+    [scope.projectId, t, CARD.w, CARD.h, layout.gap, persist, scope]
+  );
+
+  useEffect(() => {
+    const onPathDrop = (ev: Event) => {
+      const detail = (ev as CustomEvent).detail as
+        | { paths?: string[]; kind?: string }
+        | undefined;
+      if (!detail || detail.kind !== "canvas") return;
+      if (Array.isArray(detail.paths) && detail.paths.length) {
+        void importDroppedPaths(detail.paths);
+      }
+    };
+    window.addEventListener("capilot:path-drop", onPathDrop as EventListener);
+    return () =>
+      window.removeEventListener("capilot:path-drop", onPathDrop as EventListener);
+  }, [importDroppedPaths]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    const el = surfaceRef.current;
+    getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const p = event.payload;
+        if (p.type !== "drop" || !p.paths?.length) return;
+        const surface = el ?? surfaceRef.current;
+        if (!surface) return;
+        const r = surface.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        const x = p.position.x / dpr;
+        const y = p.position.y / dpr;
+        if (x < r.left || x > r.right || y < r.top || y > r.bottom) return;
+        const overFiles = document.elementFromPoint(x, y)?.closest("[data-path-drop=\"files\"]");
+        if (overFiles) return;
+        void importDroppedPaths(p.paths);
+      })
+      .then((un) => {
+        if (cancelled) un();
+        else unlisten = un;
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [importDroppedPaths]);
+
   return (
     <div className="canvas-panel">
-      <CanvasToolbar onAdd={() => onAddAt()} onFit={fitView} />
+      <CanvasToolbar
+        onAdd={() => onAddAt()}
+        onFit={() => fitView()}
+        onArrange={arrangeGrid}
+        canArrange={cardCount > 0}
+      />
       <div
         ref={surfaceRef}
-        className="canvas-surface"
+        data-path-drop="canvas"
+        className={`canvas-surface${marquee ? " marquee" : ""}`}
         onPointerDown={onSurfacePointerDown}
         onPointerMove={onSurfacePointerMove}
         onPointerUp={endGesture}
@@ -1304,12 +1792,19 @@ export function CanvasPanel({
           if (e.button === 1) e.preventDefault();
         }}
         onDragOver={(e) => {
-          if (isCanvasAgentDrag(e.dataTransfer)) {
+          if (isCanvasAgentDrag(e.dataTransfer) || pathsFromDataTransfer(e.dataTransfer).length) {
             e.preventDefault();
             e.dataTransfer.dropEffect = "copy";
           }
         }}
         onDrop={(e) => {
+          const paths = pathsFromDataTransfer(e.dataTransfer);
+          if (paths.length) {
+            e.preventDefault();
+            e.stopPropagation();
+            void importDroppedPaths(paths);
+            return;
+          }
           if (!isCanvasAgentDrag(e.dataTransfer)) return;
           e.preventDefault();
           e.stopPropagation();
@@ -1393,6 +1888,7 @@ export function CanvasPanel({
                 const cardSize = expandedSizes[agentId] ?? CARD;
                 const appear = pendingAppearRef.current[agentId];
                 const livePty =
+                  selectedId === agentId ||
                   viewSize.w === 0 ||
                   cardOnScreen(node.position, cardSize, viewport, viewSize);
                 return (
@@ -1407,12 +1903,17 @@ export function CanvasPanel({
                       height: cardSize.h,
                       zIndex: 5,
                     }}
+                    ref={(el) => {
+                      if (el) cardElsRef.current.set(agentId, el);
+                      else cardElsRef.current.delete(agentId);
+                    }}
                   >
                     <CanvasAppear kind={appear}>
                     <CanvasNodeCard
                       agentId={agentId}
                       kind="terminal"
-                      selected={selectedId === agentId}
+                      selected={selectedIds.size <= 1 && selectedId === agentId}
+                      marked={selectedIds.has(agentId)}
                       showPty={livePty}
                       onSelect={(ev) => {
                         if (didDragRef.current) return;
@@ -1422,7 +1923,11 @@ export function CanvasPanel({
                         }
                         setSelectedId(agentId);
                         setSelectedTermId(node.id);
+                        setSelectedIds(new Set([agentId]));
                         setSelectedEdgeId(null);
+                        if (getCanvasLayoutPrefs().selectSyncsSendTarget) {
+                          requestCanvasSendTarget(agentId);
+                        }
                       }}
                       onDoubleClick={() => goToTerminal(agentId)}
                       onPointerDownDrag={(ev) =>
@@ -1433,6 +1938,12 @@ export function CanvasPanel({
                       }
                       onHide={() => hideNode("terminal", node.id, agentId)}
                       onCardContextMenu={(e) => {
+                        const multi = selectedIds.size > 1 && selectedIds.has(agentId);
+                        if (!multi) {
+                          setSelectedId(agentId);
+                          setSelectedTermId(node.id);
+                          setSelectedIds(new Set([agentId]));
+                        }
                         setCardMenu({
                           x: e.clientX,
                           y: e.clientY,
@@ -1445,16 +1956,9 @@ export function CanvasPanel({
                     />
                     <div
                       className="canvas-pty-resize"
-                      onPointerDown={(e) => {
-                        e.stopPropagation();
-                        resizeRef.current = {
-                          pointerId: e.pointerId,
-                          agentId,
-                          start: { x: e.clientX, y: e.clientY },
-                          orig: { ...(expandedSizes[agentId] ?? CARD) },
-                        };
-                        surfaceRef.current?.setPointerCapture(e.pointerId);
-                      }}
+                      onPointerDown={(e) =>
+                        startCardResize(e, agentId, expandedSizes[agentId] ?? CARD, "se")
+                      }
                     />
                     </CanvasAppear>
                   </div>
@@ -1465,6 +1969,7 @@ export function CanvasPanel({
                 const cardSize = expandedSizes[agentId] ?? CARD;
                 const appear = pendingAppearRef.current[agentId];
                 const livePty =
+                  selectedId === agentId ||
                   viewSize.w === 0 ||
                   cardOnScreen(node.position, cardSize, viewport, viewSize);
                 return (
@@ -1478,18 +1983,27 @@ export function CanvasPanel({
                       height: cardSize.h,
                       zIndex: 5,
                     }}
+                    ref={(el) => {
+                      if (el) cardElsRef.current.set(agentId, el);
+                      else cardElsRef.current.delete(agentId);
+                    }}
                   >
                     <CanvasAppear kind={appear}>
                     <CanvasNodeCard
                       agentId={agentId}
                       kind="console"
-                      selected={selectedId === agentId}
+                      selected={selectedIds.size <= 1 && selectedId === agentId}
+                      marked={selectedIds.has(agentId)}
                       showPty={livePty}
                       onSelect={() => {
                         if (didDragRef.current) return;
                         setSelectedId(agentId);
                         setSelectedTermId(null);
+                        setSelectedIds(new Set([agentId]));
                         setSelectedEdgeId(null);
+                        if (getCanvasLayoutPrefs().selectSyncsSendTarget) {
+                          requestCanvasSendTarget(agentId);
+                        }
                       }}
                       onDoubleClick={() => goToTerminal(agentId)}
                       onPointerDownDrag={(ev) =>
@@ -1497,6 +2011,12 @@ export function CanvasPanel({
                       }
                       onHide={() => hideNode("console", node.id, agentId)}
                       onCardContextMenu={(e) => {
+                        const multi = selectedIds.size > 1 && selectedIds.has(agentId);
+                        if (!multi) {
+                          setSelectedId(agentId);
+                          setSelectedTermId(null);
+                          setSelectedIds(new Set([agentId]));
+                        }
                         setCardMenu({
                           x: e.clientX,
                           y: e.clientY,
@@ -1509,22 +2029,85 @@ export function CanvasPanel({
                     />
                     <div
                       className="canvas-pty-resize"
-                      onPointerDown={(e) => {
-                        e.stopPropagation();
-                        resizeRef.current = {
-                          pointerId: e.pointerId,
-                          agentId,
-                          start: { x: e.clientX, y: e.clientY },
-                          orig: { ...(expandedSizes[agentId] ?? CARD) },
-                        };
-                        surfaceRef.current?.setPointerCapture(e.pointerId);
-                      }}
+                      onPointerDown={(e) =>
+                        startCardResize(e, agentId, expandedSizes[agentId] ?? CARD, "se")
+                      }
                     />
                     </CanvasAppear>
                   </div>
                 );
               })}
+              {(merged.files ?? []).map((node) => {
+                const cardSize = node.size ?? CARD;
+                return (
+                  <div
+                    key={node.id}
+                    className="canvas-node expanded"
+                    style={{
+                      left: node.position.x,
+                      top: node.position.y,
+                      width: cardSize.w,
+                      height: cardSize.h,
+                      zIndex: 5,
+                    }}
+                    ref={(el) => {
+                      if (el) cardElsRef.current.set(node.id, el);
+                      else cardElsRef.current.delete(node.id);
+                    }}
+                  >
+                    <CanvasFileCard
+                      path={node.path}
+                      name={node.name}
+                      selected={selectedIds.size <= 1 && selectedId === node.id}
+                      marked={selectedIds.has(node.id)}
+                      onSelect={() => {
+                        if (didDragRef.current) return;
+                        setSelectedId(node.id);
+                        setSelectedTermId(null);
+                        setSelectedIds(new Set([node.id]));
+                        setSelectedEdgeId(null);
+                      }}
+                      onDoubleClick={() => {
+                        useStore.getState().addTab(fileTab(node.path, node.name));
+                      }}
+                      onPointerDownDrag={(ev) =>
+                        startCardDrag(ev, "file", node.id, node.position)
+                      }
+                      onResizePointerDown={(ev, edge) => {
+                        startCardResize(ev, node.id, cardSize, edge);
+                      }}
+                      onCardContextMenu={(e) => {
+                        const multi = selectedIds.size > 1 && selectedIds.has(node.id);
+                        if (!multi) {
+                          setSelectedId(node.id);
+                          setSelectedTermId(null);
+                          setSelectedIds(new Set([node.id]));
+                        }
+                        setCardMenu({
+                          x: e.clientX,
+                          y: e.clientY,
+                          agentId: node.id,
+                          kind: "file",
+                          nodeId: node.id,
+                          runtime: "",
+                        });
+                      }}
+                    />
+                  </div>
+                );
+              })}
             </div>
+            {marquee && (
+              <div
+                className="canvas-marquee"
+                style={{
+                  left: Math.min(marquee.x1, marquee.x2),
+                  top: Math.min(marquee.y1, marquee.y2),
+                  width: Math.abs(marquee.x2 - marquee.x1),
+                  height: Math.abs(marquee.y2 - marquee.y1),
+                }}
+              />
+            )}
           </>
         )}
         {ctxMenu && (
@@ -1563,6 +2146,52 @@ export function CanvasPanel({
             onClick={(e) => e.stopPropagation()}
             onContextMenu={(e) => e.stopPropagation()}
           >
+            {selectedIds.size > 1 && selectedIds.has(cardMenu.agentId) ? (
+              <>
+                <div
+                  className="ctx-item"
+                  onClick={() => {
+                    hideSelectedCards();
+                    setCardMenu(null);
+                  }}
+                >
+                  <Icon name="x" size={13} /> {t("canvas.hideSelected")}
+                </div>
+                <div
+                  className="ctx-item"
+                  onClick={() => {
+                    closeSelectedCards();
+                    setCardMenu(null);
+                  }}
+                >
+                  <Icon name="trash-2" size={13} /> {t("canvas.closeSelected")}
+                </div>
+              </>
+            ) : cardMenu.kind === "file" ? (
+              <>
+                <div
+                  className="ctx-item"
+                  onClick={() => {
+                    const g = mergedRef.current;
+                    const file = g?.files?.find((n) => n.id === cardMenu.nodeId);
+                    if (file) useStore.getState().addTab(fileTab(file.path, file.name));
+                    setCardMenu(null);
+                  }}
+                >
+                  <Icon name="file-text" size={13} /> {t("canvas.openFile")}
+                </div>
+                <div
+                  className="ctx-item"
+                  onClick={() => {
+                    hideNode("file", cardMenu.nodeId, cardMenu.agentId);
+                    setCardMenu(null);
+                  }}
+                >
+                  <Icon name="x" size={13} /> {t("canvas.hideFromCanvas")}
+                </div>
+              </>
+            ) : (
+              <>
             <div
               className="ctx-item"
               onClick={() => {
@@ -1592,6 +2221,8 @@ export function CanvasPanel({
             >
               <Icon name="trash-2" size={13} /> {t("canvas.closeAndKill")}
             </div>
+              </>
+            )}
           </div>
         )}
       </div>

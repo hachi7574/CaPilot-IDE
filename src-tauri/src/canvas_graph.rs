@@ -64,6 +64,16 @@ pub struct CanvasAgentLayout {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct CanvasFile {
+    pub id: String,
+    pub path: String,
+    pub name: String,
+    pub position: CanvasVec,
+    pub size: CanvasSize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct CanvasEdge {
     pub id: String,
     pub source: String,
@@ -90,6 +100,8 @@ pub struct BlockGraph {
     pub agents: Vec<CanvasAgentLayout>,
     #[serde(default)]
     pub agents_hidden: Vec<String>,
+    #[serde(default)]
+    pub files: Vec<CanvasFile>,
 }
 
 impl BlockGraph {
@@ -108,6 +120,7 @@ impl BlockGraph {
             combinations: Vec::new(),
             agents: Vec::new(),
             agents_hidden: Vec::new(),
+            files: Vec::new(),
         }
     }
 }

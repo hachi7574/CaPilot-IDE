@@ -12,6 +12,7 @@ export const CanvasNodeCard = memo(function CanvasNodeCard({
   agentId,
   kind,
   selected,
+  marked,
   showPty,
   onSelect,
   onDoubleClick,
@@ -22,6 +23,8 @@ export const CanvasNodeCard = memo(function CanvasNodeCard({
   agentId: string;
   kind: "terminal" | "console";
   selected: boolean;
+  /** Marquee / multi-select mark — distinct from keyboard/click focus. */
+  marked?: boolean;
   showPty: boolean;
   onSelect: (e: React.MouseEvent) => void;
   onDoubleClick: () => void;
@@ -60,7 +63,7 @@ export const CanvasNodeCard = memo(function CanvasNodeCard({
 
   return (
     <div
-      className={`canvas-card expanded${selected ? " selected" : ""}${kind === "console" ? " console" : ""}`}
+      className={`canvas-card expanded${selected ? " selected" : ""}${marked ? " marked" : ""}${kind === "console" ? " console" : ""}`}
       draggable={false}
       onDragStart={(e) => e.preventDefault()}
       onPointerDown={(e) => {
@@ -91,7 +94,23 @@ export const CanvasNodeCard = memo(function CanvasNodeCard({
       {showPty && (
         <div
           className="canvas-card-pty"
-          onPointerDown={(e) => e.stopPropagation()}
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            if (e.button !== 0) return;
+            const card = e.currentTarget.closest(".canvas-card") as HTMLElement | null;
+            const surface = e.currentTarget.closest(".canvas-surface") as HTMLElement | null;
+            card?.classList.add("selecting-text");
+            surface?.classList.add("selecting");
+            const clear = () => {
+              card?.classList.remove("selecting-text");
+              surface?.classList.remove("selecting");
+              window.removeEventListener("pointerup", clear, true);
+              window.removeEventListener("pointercancel", clear, true);
+            };
+            window.addEventListener("pointerup", clear, true);
+            window.addEventListener("pointercancel", clear, true);
+          }}
+          onMouseDown={(e) => e.stopPropagation()}
           onWheel={(e) => e.stopPropagation()}
           onContextMenuCapture={(e) => {
             e.preventDefault();
@@ -99,7 +118,7 @@ export const CanvasNodeCard = memo(function CanvasNodeCard({
             onCardContextMenu?.(e);
           }}
         >
-          <XTermPanel agentId={agentId} active opaqueBg />
+          <XTermPanel agentId={agentId} active={selected} opaqueBg />
         </div>
       )}
       <div

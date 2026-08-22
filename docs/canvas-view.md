@@ -157,7 +157,7 @@ CaPilot 已有可复用资产：真实 PTY、resident xterm、worktree、多 run
 6. **主入口：TabBar 右侧切换按钮**（`.tab-add` 与窗口控件之间）在当前作用域的终端视角和画布视角之间切换；次入口：LeftSidebar 项目菜单「打开画布」
 7. Ctrl+F 暂不进画布（与 editor/terminal 搜索分流）
 
-Composer 仍挂在 MainArea 底部；发送逻辑继续认 `agent` tab，不认 canvas。
+Composer 仍挂在 MainArea 底部。画布视角下 Tab 循环当前图上的活卡（视觉顺序：上→下、左→右）再加待分配，默认发给第一张卡；点选是否同步发送目标由设置「画布布局」里的开关控制（默认开）。
 
 ---
 

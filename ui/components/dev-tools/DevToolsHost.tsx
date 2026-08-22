@@ -11,8 +11,8 @@ export type DevToolId = "annotations";
 
 /**
  * Shared host for dev-only floating tools. Renders a bottom-left chip dock
- * with one button per *hidden* tool. Theme Editor is no longer hosted here
- * (it ships in production and is toggled from Settings).
+ * with one button per *hidden* tool. Theme Editor ships in production via
+ * ThemeLabGate (Settings toggles that chip; the chip opens the mixer).
  */
 export function DevToolsHost({
   tools,

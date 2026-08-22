@@ -1,13 +1,28 @@
-/** Persisted canvas layout prefs (gap + default expanded card size). */
+/** Persisted canvas layout prefs (gap + default expanded card size + click sync). */
 
 export interface CanvasLayoutPrefs {
   gap: number;
   cardW: number;
   cardH: number;
+  /** Clicking a canvas card pins Composer send target to that session. Default on. */
+  selectSyncsSendTarget: boolean;
 }
 
+export const CANVAS_LAYOUT_LIMITS = {
+  gap: { min: 0, max: 400 },
+  cardW: { min: 240, max: 2400 },
+  cardH: { min: 160, max: 2400 },
+} as const;
+
+export const CANVAS_LAYOUT_DEFAULTS: CanvasLayoutPrefs = {
+  gap: 24,
+  cardW: 700,
+  cardH: 600,
+  selectSyncsSendTarget: true,
+};
+
 const KEY = "capilot.canvasLayout";
-const DEFAULTS: CanvasLayoutPrefs = { gap: 24, cardW: 700, cardH: 700 };
+const DEFAULTS = CANVAS_LAYOUT_DEFAULTS;
 
 const listeners = new Set<() => void>();
 
@@ -18,9 +33,13 @@ function clampPrefs(p: Partial<CanvasLayoutPrefs>): CanvasLayoutPrefs {
     return Math.min(hi, Math.max(lo, Math.round(x)));
   };
   return {
-    gap: n(p.gap, 0, 400, DEFAULTS.gap),
-    cardW: n(p.cardW, 240, 2400, DEFAULTS.cardW),
-    cardH: n(p.cardH, 160, 2400, DEFAULTS.cardH),
+    gap: n(p.gap, CANVAS_LAYOUT_LIMITS.gap.min, CANVAS_LAYOUT_LIMITS.gap.max, DEFAULTS.gap),
+    cardW: n(p.cardW, CANVAS_LAYOUT_LIMITS.cardW.min, CANVAS_LAYOUT_LIMITS.cardW.max, DEFAULTS.cardW),
+    cardH: n(p.cardH, CANVAS_LAYOUT_LIMITS.cardH.min, CANVAS_LAYOUT_LIMITS.cardH.max, DEFAULTS.cardH),
+    selectSyncsSendTarget:
+      typeof p.selectSyncsSendTarget === "boolean"
+        ? p.selectSyncsSendTarget
+        : DEFAULTS.selectSyncsSendTarget,
   };
 }
 

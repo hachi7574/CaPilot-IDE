@@ -28,8 +28,9 @@ pub struct ResolvedExe {
 /// Process-wide cache: bare name → resolved path. Invalidated never — install
 /// layout is stable for a CaPilot session; restart picks up new installs.
 fn resolve_cache() -> &'static Mutex<std::collections::HashMap<String, Option<ResolvedExe>>> {
-    static CACHE: std::sync::OnceLock<Mutex<std::collections::HashMap<String, Option<ResolvedExe>>>> =
-        std::sync::OnceLock::new();
+    static CACHE: std::sync::OnceLock<
+        Mutex<std::collections::HashMap<String, Option<ResolvedExe>>>,
+    > = std::sync::OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -122,9 +123,31 @@ pub fn prepare_pty_launch(program: &str, args: &[String]) -> (String, Vec<String
     (prog, args.to_vec())
 }
 
-/// `true` when `<name> --version` exits 0 within [`CLI_PROBE_TIMEOUT`].
+/// `true` when `name` resolves to an executable on PATH (or a known install
+/// dir after [`ensure_cli_path`]). Matches Orca's agent scan: presence of a
+/// runnable file, not a successful `--version` spawn.
+///
+/// A missing binary, a directory, or (on Unix) a non-executable file is
+/// unavailable. `--version` stays on [`cli_version`] so Settings can still
+/// show a version chip without gating detection on a 3s subprocess.
 pub fn cli_available(name: &str) -> bool {
-    run_cli(name, &["--version"], CLI_PROBE_TIMEOUT).is_some_and(|o| o.status.success())
+    let Some(resolved) = resolve_executable(name) else {
+        return false;
+    };
+    // Unix `resolve_bare_uncached` still returns a bare name when PATH misses
+    // so `Command::new` keeps historical spawn behaviour. A bare name is not
+    // a launchable file, so detection correctly reports unavailable.
+    is_launchable_file(&resolved.path)
+}
+
+#[cfg(not(windows))]
+fn is_launchable_file(path: &Path) -> bool {
+    is_executable_file(path)
+}
+
+#[cfg(windows)]
+fn is_launchable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 /// Run `<name> --version` and return a compact version token (`5.3.9`, not the
@@ -181,7 +204,11 @@ fn first_semver(s: &str) -> Option<String> {
                 let mut end = i;
                 if i < bytes.len() && (bytes[i] == b'-' || bytes[i] == b'+') {
                     i += 1;
-                    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'.' || bytes[i] == b'-') {
+                    while i < bytes.len()
+                        && (bytes[i].is_ascii_alphanumeric()
+                            || bytes[i] == b'.'
+                            || bytes[i] == b'-')
+                    {
                         i += 1;
                     }
                     end = i;
@@ -211,9 +238,7 @@ fn looks_like_path(name: &str) -> bool {
     // Separators (or a Windows drive-absolute form) mean the caller named a
     // filesystem location. A bare `tool.exe` is a PATH lookup key, not a path —
     // CreateProcess still needs PATHEXT/PATH resolution for those.
-    name.contains('/')
-        || name.contains('\\')
-        || Path::new(name).is_absolute()
+    name.contains('/') || name.contains('\\') || Path::new(name).is_absolute()
 }
 
 fn needs_cmd_wrap(path: &Path) -> bool {
@@ -407,15 +432,12 @@ fn is_unix_script_shim(path: &Path) -> bool {
         Ok(2) if &buf == b"MZ" => false,
         // No PE header and not shebang — if it has no Windows executable
         // extension, treat as non-launchable so PATHEXT siblings can win.
-        Ok(_) => path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_none_or(|e| {
-                !(e.eq_ignore_ascii_case("exe")
-                    || e.eq_ignore_ascii_case("com")
-                    || e.eq_ignore_ascii_case("cmd")
-                    || e.eq_ignore_ascii_case("bat"))
-            }),
+        Ok(_) => path.extension().and_then(|e| e.to_str()).is_none_or(|e| {
+            !(e.eq_ignore_ascii_case("exe")
+                || e.eq_ignore_ascii_case("com")
+                || e.eq_ignore_ascii_case("cmd")
+                || e.eq_ignore_ascii_case("bat"))
+        }),
         _ => false,
     }
 }
@@ -434,12 +456,7 @@ fn wrap_with_cmd(script: &Path, args: &[String]) -> (String, Vec<String>) {
 
     (
         comspec,
-        vec![
-            "/d".to_string(),
-            "/s".to_string(),
-            "/c".to_string(),
-            line,
-        ],
+        vec!["/d".to_string(), "/s".to_string(), "/c".to_string(), line],
     )
 }
 
@@ -572,6 +589,76 @@ mod tests {
         }
     }
 
+    /// Orca-style scan: an executable on PATH counts as installed even when
+    /// `--version` fails. Settings used to under-count agents because every
+    /// CLI had to spawn successfully inside a 12s budget.
+    #[test]
+    fn cli_available_is_path_presence_not_version() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _guard = crate::agent_runtime::ENV_LOCK
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let dir = std::env::temp_dir().join(format!(
+                "capilot-detect-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let bin = dir.join("capilot-fake-agent");
+            std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+            let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&bin, perms).unwrap();
+
+            let old_path = std::env::var_os("PATH").unwrap_or_default();
+            let mut new_path = dir.as_os_str().to_owned();
+            new_path.push(":");
+            new_path.push(&old_path);
+            std::env::set_var("PATH", &new_path);
+            if let Ok(mut cache) = resolve_cache().lock() {
+                cache.remove("capilot-fake-agent");
+            }
+
+            assert!(
+                cli_available("capilot-fake-agent"),
+                "executable on PATH must count as installed"
+            );
+            assert!(
+                cli_version("capilot-fake-agent").is_none(),
+                "--version failing must not hide the binary"
+            );
+
+            std::env::set_var("PATH", old_path);
+            if let Ok(mut cache) = resolve_cache().lock() {
+                cache.remove("capilot-fake-agent");
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn cli_available_rejects_bare_name_without_path_hit() {
+        #[cfg(unix)]
+        {
+            let _guard = crate::agent_runtime::ENV_LOCK
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let old_path = std::env::var_os("PATH").unwrap_or_default();
+            std::env::set_var("PATH", "/tmp/capilot-empty-path-does-not-exist");
+            if let Ok(mut cache) = resolve_cache().lock() {
+                cache.remove("capilot-definitely-missing-binary-xyz");
+            }
+            assert!(!cli_available("capilot-definitely-missing-binary-xyz"));
+            std::env::set_var("PATH", old_path);
+        }
+    }
+
     #[test]
     fn looks_like_path_rules() {
         assert!(looks_like_path(r"C:\foo\claude.cmd"));
@@ -612,11 +699,7 @@ mod tests {
         )
         .unwrap();
         // Real Windows entry.
-        std::fs::write(
-            dir.join("fakectl.cmd"),
-            "@ECHO off\r\necho fakectl-ok\r\n",
-        )
-        .unwrap();
+        std::fs::write(dir.join("fakectl.cmd"), "@ECHO off\r\necho fakectl-ok\r\n").unwrap();
 
         // Prepend our dir so the search hits it first; keep the rest of PATH.
         let old_path = std::env::var_os("PATH").unwrap_or_default();

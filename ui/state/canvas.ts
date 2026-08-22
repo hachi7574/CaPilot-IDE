@@ -141,13 +141,13 @@ export function toggleCanvasView(): void {
   openCanvas(scope);
 }
 
-type CanvasCenterReq = { agentId: string; seq: number };
+type CanvasCenterReq = { agentId: string; seq: number; zoom?: number };
 let canvasCenterReq: CanvasCenterReq = { agentId: "", seq: 0 };
 const canvasCenterListeners = new Set<() => void>();
 
 /** Ask the open canvas to pan so `agentId`'s card is centered. */
-export function requestCanvasCenter(agentId: string): void {
-  canvasCenterReq = { agentId, seq: canvasCenterReq.seq + 1 };
+export function requestCanvasCenter(agentId: string, opts?: { zoom?: number }): void {
+  canvasCenterReq = { agentId, seq: canvasCenterReq.seq + 1, zoom: opts?.zoom };
   for (const l of canvasCenterListeners) l();
 }
 
@@ -160,6 +160,110 @@ export function subscribeCanvasCenter(fn: () => void): () => void {
 
 export function getCanvasCenterReq(): CanvasCenterReq {
   return canvasCenterReq;
+}
+
+/** Cards currently painted on the mounted canvas, visual order (top→bottom, left→right). */
+export interface CanvasLiveCard {
+  agentId: string;
+  x: number;
+  y: number;
+}
+
+let liveCards: CanvasLiveCard[] = [];
+let liveCardsScope = "";
+const liveCardListeners = new Set<() => void>();
+
+export function setCanvasLiveCards(scope: CanvasScope, cards: CanvasLiveCard[]): void {
+  const id = canvasTabId(scope);
+  if (
+    liveCardsScope === id &&
+    liveCards.length === cards.length &&
+    liveCards.every((c, i) => c.agentId === cards[i]!.agentId)
+  ) {
+    liveCards = cards;
+    return;
+  }
+  liveCardsScope = id;
+  liveCards = cards;
+  for (const l of liveCardListeners) l();
+}
+
+export function clearCanvasLiveCards(scope: CanvasScope): void {
+  if (liveCardsScope !== canvasTabId(scope)) return;
+  liveCardsScope = "";
+  liveCards = [];
+  for (const l of liveCardListeners) l();
+}
+
+export function getCanvasLiveCards(): readonly CanvasLiveCard[] {
+  return liveCards;
+}
+
+export function subscribeCanvasLiveCards(fn: () => void): () => void {
+  liveCardListeners.add(fn);
+  return () => {
+    liveCardListeners.delete(fn);
+  };
+}
+
+/**
+ * Live canvas send targets in visual order. Skips pending stubs and ended
+ * sessions — same filter the terminal-view Tab cycle uses on agent tabs.
+ */
+export function liveCanvasSendAgentIds(agents: Map<string, AgentInfo>): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const c of liveCards) {
+    const id = c.agentId;
+    if (!id || seen.has(id) || id.startsWith("pending:")) continue;
+    const a = agents.get(id);
+    if (!a || a.status === "done" || a.status === "failed") continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+type CanvasSelectReq = { agentId: string; seq: number };
+let canvasSelectReq: CanvasSelectReq = { agentId: "", seq: 0 };
+const canvasSelectListeners = new Set<() => void>();
+
+/** Ask the open canvas to select `agentId`'s card (empty id clears). No camera pan. */
+export function requestCanvasSelect(agentId: string): void {
+  canvasSelectReq = { agentId, seq: canvasSelectReq.seq + 1 };
+  for (const l of canvasSelectListeners) l();
+}
+
+export function subscribeCanvasSelect(fn: () => void): () => void {
+  canvasSelectListeners.add(fn);
+  return () => {
+    canvasSelectListeners.delete(fn);
+  };
+}
+
+export function getCanvasSelectReq(): CanvasSelectReq {
+  return canvasSelectReq;
+}
+
+type CanvasSendTargetReq = { agentId: string; seq: number };
+let canvasSendTargetReq: CanvasSendTargetReq = { agentId: "", seq: 0 };
+const canvasSendTargetListeners = new Set<() => void>();
+
+/** Ask Composer to pin send target to this canvas card. */
+export function requestCanvasSendTarget(agentId: string): void {
+  canvasSendTargetReq = { agentId, seq: canvasSendTargetReq.seq + 1 };
+  for (const l of canvasSendTargetListeners) l();
+}
+
+export function subscribeCanvasSendTarget(fn: () => void): () => void {
+  canvasSendTargetListeners.add(fn);
+  return () => {
+    canvasSendTargetListeners.delete(fn);
+  };
+}
+
+export function getCanvasSendTargetReq(): CanvasSendTargetReq {
+  return canvasSendTargetReq;
 }
 
 /** Open this project's canvas and center the given session card. */
@@ -209,6 +313,14 @@ export interface CanvasAgentLayout {
   size: CanvasSize;
 }
 
+export interface CanvasFile {
+  id: string;
+  path: string;
+  name: string;
+  position: CanvasVec;
+  size: CanvasSize;
+}
+
 export interface CanvasEdge {
   id: string;
   source: string;
@@ -230,6 +342,7 @@ export interface BlockGraph {
   combinations: CanvasCombination[];
   agents: CanvasAgentLayout[];
   agentsHidden?: string[];
+  files?: CanvasFile[];
 }
 
 export const DEFAULT_CARD_SIZE: CanvasSize = { w: 240, h: 88 };
@@ -245,6 +358,7 @@ export function emptyBlockGraph(scope: CanvasScope): BlockGraph {
     combinations: [],
     agents: [],
     agentsHidden: [],
+    files: [],
   };
 }
 

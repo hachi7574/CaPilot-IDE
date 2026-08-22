@@ -35,6 +35,8 @@ export function getActivePathDrag(): { path: string; name: string } | null {
  * Resolve a path drop at screen coordinates.
  * - `[data-path-drop="composer"]` → composer
  * - `[data-path-drop="terminal"]` (optional `data-todo-drop-agent`) → terminal
+ * - `[data-path-drop="canvas"]` → workspace canvas
+ * - `[data-path-drop="files"]` → right-sidebar file tree
  */
 export function resolvePathDropTarget(
   clientX: number,
@@ -42,6 +44,8 @@ export function resolvePathDropTarget(
 ):
   | { kind: "composer" }
   | { kind: "terminal"; agentId: string | null }
+  | { kind: "canvas" }
+  | { kind: "files" }
   | null {
   const under = document.elementFromPoint(clientX, clientY);
   if (!under) return null;
@@ -49,6 +53,8 @@ export function resolvePathDropTarget(
   if (!el) return null;
   const kind = el.getAttribute("data-path-drop");
   if (kind === "composer") return { kind: "composer" };
+  if (kind === "canvas") return { kind: "canvas" };
+  if (kind === "files") return { kind: "files" };
   if (kind === "terminal") {
     return {
       kind: "terminal",
